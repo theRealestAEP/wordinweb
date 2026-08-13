@@ -330,6 +330,129 @@ function menuAnchorBottom(anchor: Element | null | undefined, rect: { bottom: nu
   return barBottom === undefined ? rect.bottom : Math.max(rect.bottom, barBottom);
 }
 
+/** The gap every anchored panel keeps between itself and the window edge. */
+const PANEL_MARGIN = 8;
+
+/** Which edge of the panel lines up with which edge of its anchor. */
+type PanelAlign = "start" | "center" | "end";
+
+interface AnchoredPanelPosition {
+  left: number;
+  top: number;
+  /** The panel's width, already narrowed to fit the window. */
+  width: number;
+  /** Room left over on the chosen side, for panels that scroll. */
+  maxHeight: number;
+}
+
+/**
+ * Where a panel anchored to a control has to sit for all of it to stay on
+ * screen.
+ *
+ * Pure, so the placement can be tested without a browser. It takes the
+ * measurements and returns coordinates; the hook below does the measuring.
+ *
+ * - Horizontally: the panel's left edge lines up with the anchor's left edge,
+ *   its right edge with the anchor's right edge (`align: "end"`), or its
+ *   centre under the anchor's centre (`align: "center"`, which is what a
+ *   tooltip wants). Either way both edges are then clamped inside the
+ *   viewport, so an anchor near the right edge of the window pulls the panel
+ *   back in rather than pushing it off (#148).
+ * - Vertically: the panel hangs below `barBottom`, flips above the anchor when
+ *   it does not fit below and there is more room above, and is shifted back up
+ *   if it still runs past the bottom. `maxHeight` reports the room on the
+ *   chosen side.
+ *
+ * A zero `panel.height` means "not measured yet" — the first layout pass, for
+ * one frame. It places below, which the measured pass then corrects.
+ */
+function anchoredPanelPosition(
+  anchor: { left: number; right: number; top: number },
+  barBottom: number,
+  panel: { width: number; height: number },
+  viewport: { width: number; height: number },
+  options: { align?: PanelAlign; maxHeight?: number } = {},
+): AnchoredPanelPosition {
+  const cap = options.maxHeight ?? Infinity;
+  const width = Math.min(panel.width, viewport.width - PANEL_MARGIN * 2);
+  const wanted = options.align === "end"
+    ? anchor.right - width
+    : options.align === "center"
+      ? (anchor.left + anchor.right) / 2 - width / 2
+      : anchor.left;
+  const left = Math.max(PANEL_MARGIN, Math.min(wanted, viewport.width - width - PANEL_MARGIN));
+
+  const below = viewport.height - barBottom - PANEL_MARGIN;
+  // Room above the anchor, but never more room than the window has: an
+  // expanded ribbon can be taller than a short window, which puts the control
+  // itself below the fold and would otherwise report hundreds of pixels of
+  // space that are not on screen.
+  const above = Math.min(anchor.top, viewport.height) - PANEL_MARGIN;
+  const placeAbove = panel.height > below && above > below;
+  const maxHeight = Math.max(96, Math.min(cap, placeAbove ? above : below));
+  const shown = Math.min(panel.height || maxHeight, maxHeight);
+  // Either way the last word is the window: the bottom edge stays on screen.
+  const bottomLimit = viewport.height - shown - PANEL_MARGIN;
+  const top = placeAbove
+    ? Math.max(PANEL_MARGIN, Math.min(anchor.top - shown - 4, bottomLimit))
+    : Math.max(PANEL_MARGIN, Math.min(barBottom + 4, bottomLimit));
+  return { left, top, width, maxHeight };
+}
+
+/**
+ * Keeps an open panel placed against its anchor and inside the window.
+ *
+ * The one implementation of this in the file, on purpose. Three controls had
+ * grown their own and drifted apart; two dozen more never grew any, and opened
+ * straight off the right edge of a narrow window (#148). Adding a second
+ * implementation is how that comes back.
+ *
+ * Callers own opening, closing and focus. This owns placement only, and
+ * returns coordinates for a `position: fixed` panel. Panels may stay inside
+ * their trigger's DOM subtree — `fixed` takes them out of flow, so an
+ * outside-click check that asks whether the click landed in that subtree keeps
+ * working.
+ */
+function useAnchoredPanel(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  panelRef: React.RefObject<HTMLElement | null>,
+  open: boolean,
+  options: { width?: number; align?: PanelAlign; maxHeight?: number; hangFromBar?: boolean } = {},
+): AnchoredPanelPosition {
+  const { width, align, maxHeight, hangFromBar = true } = options;
+  const [position, setPosition] = useState<AnchoredPanelPosition>({ left: PANEL_MARGIN, top: PANEL_MARGIN, width: width ?? 0, maxHeight: maxHeight ?? 320 });
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const panel = panelRef.current;
+      setPosition(anchoredPanelPosition(
+        rect,
+        // Menus clear the whole bar; a tooltip belongs under its own control.
+        hangFromBar ? menuAnchorBottom(anchor, rect) : rect.bottom + 2,
+        // The panel's own box once it has one: a declared width is not always
+        // the painted width, and the height is never known in advance.
+        { width: width ?? panel?.offsetWidth ?? 0, height: panel?.offsetHeight ?? 0 },
+        { width: window.innerWidth, height: window.innerHeight },
+        { align, maxHeight },
+      ));
+    };
+    update();
+    // Second pass once the panel is in the DOM and has a measurable box.
+    const frame = requestAnimationFrame(update);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open, anchorRef, panelRef, width, align, maxHeight, hangFromBar]);
+  return position;
+}
+
 /** CSS-overridable replacement for visible native selects. An inert,
  * transparent select is kept as an event bridge for existing integrations;
  * every user-facing part is a button/listbox rendered by us. */
@@ -355,40 +478,27 @@ export function ToolbarMenuSelect({
   // happens.
   const [openState, setOpen] = useState(false);
   const open = openState && !disabled;
-  const [position, setPosition] = useState({ left: 8, top: 8, width: menuWidth ?? 180, maxHeight: 320 });
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const keyboardOpen = useRef<"first" | "last" | null>(null);
   const id = useId();
   const selected = options.find((option) => option.value === value);
+  // The trigger's own width is the floor, so the menu is never narrower than
+  // the control it drops from; the widest option can push it wider.
+  const [intrinsicWidth, setIntrinsicWidth] = useState(menuWidth ?? 180);
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { width: intrinsicWidth, maxHeight: 320 });
 
   useLayoutEffect(() => {
     if (!open) return;
-    const update = () => {
-      const trigger = triggerRef.current;
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const bottom = menuAnchorBottom(trigger, rect);
-      const nextWidth = Math.min(
-        window.innerWidth - 16,
-        menuWidth ?? Math.max(rect.width, menuRef.current?.scrollWidth ?? 180),
-      );
-      const below = window.innerHeight - bottom - 8;
-      const above = rect.top - 8;
-      const placeAbove = below < 140 && above > below;
-      const maxHeight = Math.max(96, Math.min(320, placeAbove ? above : below));
-      const shownHeight = Math.min(menuRef.current?.scrollHeight ?? maxHeight, maxHeight);
-      setPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - nextWidth - 8)),
-        top: placeAbove ? Math.max(8, rect.top - shownHeight - 4) : bottom + 4,
-        width: nextWidth,
-        maxHeight,
-      });
+    const measure = () => {
+      if (menuWidth !== undefined) return setIntrinsicWidth(menuWidth);
+      const trigger = triggerRef.current?.getBoundingClientRect().width ?? 0;
+      setIntrinsicWidth(Math.max(trigger, menuRef.current?.scrollWidth ?? 180));
     };
-    update();
+    measure();
     const frame = requestAnimationFrame(() => {
-      update();
+      measure();
       if (!keyboardOpen.current) return;
       const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]');
       const item = keyboardOpen.current === "last" ? items?.[items.length - 1] : items?.[0];
@@ -406,14 +516,12 @@ export function ToolbarMenuSelect({
     };
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", measure);
     return () => {
       cancelAnimationFrame(frame);
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", measure);
     };
   }, [open, menuWidth]);
 
@@ -735,6 +843,10 @@ function ActionMenu({
 function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: string | null) => void }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  // One swatch per highlight plus the "no highlight" tile: 20px each, 4px
+  // apart, inside 8px of padding.
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: (HIGHLIGHTS.length + 1) * 24 + 12 });
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => {
@@ -757,8 +869,10 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
         <div
           onMouseDown={(e) => e.preventDefault()}
           style={{
-            position: "absolute", top: 28, left: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 6, boxShadow: T.popoverShadow,
+            width: position.width, boxSizing: "border-box",
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             padding: 8, display: "flex", gap: 4, alignItems: "center",
           }}
         >
@@ -815,27 +929,14 @@ function ColorMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [custom, setCustom] = useState(current);
-  const [position, setPosition] = useState({ left: 8, top: 8 });
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const valid = normalizedColor(custom);
+  const position = useAnchoredPanel(triggerRef, menuRef, open);
   useLayoutEffect(() => {
     if (!open) return;
     setCustom(current);
-    const update = () => {
-      const rect = triggerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const bottom = menuAnchorBottom(triggerRef.current, rect);
-      const width = Math.min(236, window.innerWidth - 16);
-      const menuHeight = menuRef.current?.offsetHeight ?? 188;
-      const top = window.innerHeight - bottom >= menuHeight + 8
-        ? bottom + 4
-        : Math.max(8, rect.top - menuHeight - 4);
-      setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), top });
-    };
-    update();
-    const frame = requestAnimationFrame(update);
     const close = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
     };
@@ -847,14 +948,9 @@ function ColorMenu({
     };
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
     return () => {
-      cancelAnimationFrame(frame);
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
     };
   }, [open, current]);
   const pick = (value: string) => {
@@ -998,6 +1094,8 @@ const TEXT_EFFECT_PRESETS: {
 function TextEffectsMenu({ apply }: { apply: (patch: Parameters<DocxViewApi["applyFormat"]>[0]) => void }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 216 });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -1012,7 +1110,7 @@ function TextEffectsMenu({ apply }: { apply: (patch: Parameters<DocxViewApi["app
         <span style={{ color: "#2e74b5", fontWeight: 700, fontSize: 14, WebkitTextStroke: "0.5px #1F4E79" }}>A</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 216, padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4 }}>
             {TEXT_EFFECT_PRESETS.map((preset) => (
               <button
@@ -1055,6 +1153,8 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -1079,9 +1179,10 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div
           style={{
-            position: "absolute", top: 28, left: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 10, width: 260, display: "flex", gap: 6, alignItems: "center",
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+            padding: 10, width: position.width, boxSizing: "border-box", display: "flex", gap: 6, alignItems: "center",
           }}
         >
           <input
@@ -1149,6 +1250,8 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
   const [text, setText] = useState("");
   const [hint, setHint] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -1177,9 +1280,10 @@ function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "
       {open && (
         <div
           style={{
-            position: "absolute", top: 28, right: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 10, width: 240,
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+            padding: 10, width: position.width, boxSizing: "border-box",
           }}
         >
           <textarea
@@ -1319,6 +1423,8 @@ const ENDNOTE_POS_OPTIONS = [["sectEnd", "End of section"], ["docEnd", "End of d
 function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 278, align: "end" });
   const [fn, setFn] = useState<FootnoteOpts>(() => api?.getFootnoteOptions() ?? { fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" });
   const [en, setEn] = useState<EndnoteOpts>(() => api?.getEndnoteOptions() ?? { fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" });
   useEffect(() => {
@@ -1342,7 +1448,7 @@ function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
         // boxes were narrower than the words above them. The gap between the
         // two halves is 14 and each is boxed, because a hairline alone left
         // eight fields reading as one unbroken column (#141).
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 278, padding: 10, display: "grid", gap: 14, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 14, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <NoteOptionsFields
             title="Footnotes"
             fieldPrefix="Footnote"
@@ -1373,6 +1479,8 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -1414,9 +1522,10 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
       {open && (
         <div
           style={{
-            position: "absolute", top: 28, right: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 10, width: 240,
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+            padding: 10, width: position.width, boxSizing: "border-box",
           }}
         >
           <textarea
@@ -1475,6 +1584,8 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -1505,7 +1616,7 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
         Bookmark
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 280, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 6, color: T.fg }}>Bookmark name</div>
           <input
               data-dxw-field=""
@@ -1532,6 +1643,8 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
   const [refType, setRefType] = useState<"bookmark" | "heading" | "caption" | "numberedItem">("bookmark");
   const [choice, setChoice] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 });
   const bookmarks = open && refType === "bookmark" ? api?.listBookmarks() ?? [] : [];
   const targets = open && refType !== "bookmark"
     ? (api?.listCrossRefTargets() ?? []).filter((target) => target.kind === refType)
@@ -1561,7 +1674,7 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
         Cross-reference
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 280, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 8 }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 8 }}>
           <ToolbarMenuSelect
             value={refType}
             ariaLabel="Reference type"
@@ -1612,6 +1725,8 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
   const [text, setText] = useState("");
   const [position, setPosition] = useState<"below" | "above">("below");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const panelPosition = useAnchoredPanel(rootRef, panelRef, open, { width: 250 });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -1626,7 +1741,7 @@ function CaptionMenu({ api }: { api: DocxViewApi | null }) {
         Caption
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 250, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 7 }}>
+        <div ref={panelRef} style={{ position: "fixed", top: panelPosition.top, left: panelPosition.left, zIndex: 100, width: panelPosition.width, maxHeight: panelPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 7 }}>
           <label style={dialogFieldRow}>
             <span>Label</span>
             <ToolbarMenuSelect
@@ -1711,7 +1826,9 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
   const [linear, setLinear] = useState("x={-b±√{b^2-4ac}}/{2a}");
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 340 });
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
@@ -1729,10 +1846,6 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
       setError("Place the caret in editable text and enter a valid equation.");
     }
   };
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const viewportWidth = typeof window === "undefined" ? 356 : window.innerWidth;
-  const popoverWidth = Math.min(340, viewportWidth - 16);
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert equation" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
@@ -1740,7 +1853,7 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ marginLeft: 5 }}>Equation</span>
       </button>
       {open && (
-        <div data-dxw-equation-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} data-dxw-equation-menu="" style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Structures</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 5, marginBottom: 8 }}>
             {EQUATION_STRUCTURES.map(([key, title, glyph, template]) => (
@@ -1855,6 +1968,8 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
   const [container, setContainer] = useState("");
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 380 });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -1944,18 +2059,13 @@ function CitationsMenu({ api }: { api: DocxViewApi | null }) {
     }
   };
 
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const viewportWidth = typeof window === "undefined" ? 396 : window.innerWidth;
-  const popoverWidth = Math.min(380, viewportWidth - 16);
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
-
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Citations and bibliography" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>
         Citations
       </button>
       {open && (
-        <div data-dxw-citations-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} data-dxw-citations-menu="" style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflow: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>Citations</strong>
           <label style={{ ...fieldLabelStyle, gridTemplateColumns: "auto 1fr", alignItems: "center", display: "grid", gap: 6 }}>
             <span>Style</span>
@@ -2067,6 +2177,8 @@ function QuickPartsMenu({ api }: { api: DocxViewApi | null }) {
   const [category, setCategory] = useState("");
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 320 });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2115,18 +2227,13 @@ function QuickPartsMenu({ api }: { api: DocxViewApi | null }) {
     byCategory.set(block.category, group);
   }
 
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const viewportWidth = typeof window === "undefined" ? 340 : window.innerWidth;
-  const popoverWidth = Math.min(320, viewportWidth - 16);
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
-
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Quick Parts: save and reuse content" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>
         Quick Parts
       </button>
       {open && (
-        <div data-dxw-quickparts-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} data-dxw-quickparts-menu="" style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflow: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>Quick Parts</strong>
           {!saving ? (
             <>
@@ -2183,6 +2290,8 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [custom, setCustom] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 264 });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2191,8 +2300,6 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, (typeof window === "undefined" ? 280 : window.innerWidth) - 272));
   const insertCustom = () => {
     if (api?.insertSymbol(custom)) {
       setCustom("");
@@ -2205,7 +2312,7 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ fontFamily: "serif", fontSize: 14 }}>Ω <span style={{ fontFamily: "system-ui, sans-serif", fontSize: 12 }}>Advanced Symbol</span></span>
       </button>
       {open && (
-        <div style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: 264, padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 32px)", gap: 5 }}>
             {SYMBOLS.map((symbol) => (
               <button key={symbol} title={`Insert ${symbol}`} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (api?.insertSymbol(symbol)) setOpen(false); }} style={{ width: 32, height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "17px 'Cambria Math', serif" }}>
@@ -2263,6 +2370,8 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
   const [widthPt, setWidthPt] = useState(1);
   const [spacePt, setSpacePt] = useState(1);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2293,7 +2402,7 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert or edit divider" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>Divider</button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 270, padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>Horizontal rule below the current paragraph</div>
           <div aria-hidden="true" style={{ height: 12, borderBottom: `${Math.max(widthPt, 1)}px ${previewStyle} ${color}` }} />
           <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
@@ -2343,6 +2452,8 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
   const [lineWidth, setLineWidth] = useState("1.33");
   const [lineDash, setLineDash] = useState<"solid" | "dashed" | "dotted">("solid");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 290, align: "end" });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2366,7 +2477,7 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ fontSize: 17 }}>◇</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 290, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input
               data-dxw-field=""
             aria-label="Shape text"
@@ -2458,6 +2569,8 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2476,7 +2589,7 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert text box" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Text Box</button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <label htmlFor="dxw-text-box-text" style={{ display: "block", color: T.muted, font: "11.5px system-ui, sans-serif", marginBottom: 4 }}>Initial text</label>
           <input
               data-dxw-field=""
@@ -2651,6 +2764,8 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
   const [text, setText] = useState("CONFIDENTIAL");
   const [diagonal, setDiagonal] = useState(true);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2668,7 +2783,7 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ color: "#9aa0a6", fontSize: 13, fontWeight: 700, letterSpacing: 0.5 }}>WM</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ display: "grid", gap: 6 }}>
             {WATERMARKS.map((preset) => (
               <button
@@ -2744,6 +2859,8 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
   const [text, setText] = useState("Your text here");
   const [styleIndex, setStyleIndex] = useState(0);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2758,7 +2875,7 @@ function WordArtMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ color: "#2e74b5", fontSize: 17, fontStyle: "italic", fontWeight: 700 }}>A</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 270, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input
               data-dxw-field=""
             aria-label="WordArt text"
@@ -2830,6 +2947,8 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   const [series, setSeries] = useState([{ name: "", values: ["", ""] }]);
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 440 });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -2900,10 +3019,6 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
     }
     setError("");
   };
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const viewportWidth = typeof window === "undefined" ? 456 : window.innerWidth;
-  const popoverWidth = Math.min(440, viewportWidth - 16);
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
   const tableHeaderStyle: React.CSSProperties = { padding: "0 3px 4px", textAlign: "left", verticalAlign: "bottom", color: T.muted, font: "600 11px system-ui, sans-serif" };
   const tableCellStyle: React.CSSProperties = { padding: 3, verticalAlign: "bottom" };
   const toggle = () => {
@@ -2941,7 +3056,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert or edit chart" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>{label}</button>
       {open && (
-        <div style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflow: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>{editing ? "Edit chart" : "Insert chart"}</strong>
           <fieldset style={{ minWidth: 0, margin: 0, padding: 0, border: 0 }}>
             <legend style={{ marginBottom: 4, color: T.muted, font: "11px system-ui, sans-serif" }}>Chart type</legend>
@@ -3209,6 +3324,8 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 300, align: "end" });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -3221,7 +3338,7 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert online video" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Media</button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 300, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input data-dxw-field="" aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={fieldStyle} />
           <button
             disabled={!url.trim()}
@@ -3301,6 +3418,9 @@ function formatBytes(n: number): string {
 
 function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
   const [status, setStatus] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLSpanElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, status !== "", { width: 210 });
   const capture = async () => {
     setStatus("Capturing screenshot…");
     const result = await api?.insertScreenshot();
@@ -3315,13 +3435,14 @@ function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
             : "Screenshot failed. Please try again.");
   };
   return (
-    <span style={{ position: "relative", display: "inline-flex" }}>
+    <span ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
       <Btn label="Screenshot" title="Capture and insert a screen, window, or tab" onClick={() => void capture()} />
       {status && (
         <span
           role={status === "Screenshot inserted." ? "status" : "alert"}
+          ref={panelRef}
           data-dxw-screenshot-status=""
-          style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 210, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+          style={{ position: "fixed", top: position.top, left: position.left, zIndex: 120, width: position.width, boxSizing: "border-box", padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
         >
           {status}
         </span>
@@ -3343,6 +3464,8 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
   const [author, setAuthor] = useState("");
   const [layout, setLayout] = useState<CoverPageLayout>("title");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 });
   useEffect(() => {
     if (!open) return;
     const close = (event: MouseEvent) => {
@@ -3372,7 +3495,7 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert cover page" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Cover page</button>
       {open && (
-        <div style={{ position: "absolute", top: 30, left: 0, zIndex: 100, width: 260, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div role="radiogroup" aria-label="Cover page design" style={{ display: "flex", gap: 4 }}>
             {COVER_PAGE_LAYOUT_LABELS.map(([value, label]) => (
               <button
@@ -3411,6 +3534,9 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const ROWS = 8, COLS = 10;
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: COLS * 18 + 16 });
 
   useEffect(() => {
     if (!open) return;
@@ -3421,7 +3547,6 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
 
-  const ROWS = 8, COLS = 10;
   const ops: [string, string][] = [
     ["rowAbove", "Insert row above"],
     ["rowBelow", "Insert row below"],
@@ -3454,16 +3579,20 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
       {open && (
         <div
           style={{
-            position: "absolute",
-            top: 28,
-            left: 0,
+            position: "fixed",
+            top: position.top,
+            left: position.left,
             zIndex: 100,
             background: T.popoverBg,
             border: `1px solid ${T.border}`,
             borderRadius: 6,
             boxShadow: T.popoverShadow,
+            maxHeight: position.maxHeight,
+            overflowY: "auto",
+            overscrollBehavior: "contain",
             padding: 8,
-            width: COLS * 18 + 16,
+            boxSizing: "border-box",
+            width: position.width,
           }}
           onMouseDown={(e) => e.preventDefault()}
         >
@@ -3557,22 +3686,9 @@ function useAnchoredPopover(
   rootRef: React.RefObject<HTMLElement | null>,
   width: number,
   onClose: () => void,
-): { left: number; top: number } {
-  const [position, setPosition] = useState({ left: 8, top: 8 });
+): AnchoredPanelPosition {
+  const position = useAnchoredPanel(anchorRef, rootRef, true, { width });
   useEffect(() => {
-    const place = () => {
-      const rect = anchorRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const w = Math.min(width, window.innerWidth - 16);
-      // Clamped against the popover's OWN height once it has one, so a tall
-      // form near the bottom of a short window still fits on screen.
-      const height = rootRef.current?.offsetHeight ?? 0;
-      const bottom = menuAnchorBottom(anchorRef.current, rect);
-      setPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - w - 8)),
-        top: Math.max(8, Math.min(bottom + 4, window.innerHeight - height - 8)),
-      });
-    };
     const outside = (event: MouseEvent) => {
       if (rootRef.current?.contains(event.target as Node)) return;
       if (anchorRef.current?.contains(event.target as Node)) return;
@@ -3581,16 +3697,13 @@ function useAnchoredPopover(
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    place();
     document.addEventListener("mousedown", outside);
     document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", place);
     return () => {
       document.removeEventListener("mousedown", outside);
       document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", place);
     };
-  }, [anchorRef, rootRef, onClose, width]);
+  }, [anchorRef, rootRef, onClose]);
   return position;
 }
 
@@ -3628,7 +3741,10 @@ function AnchoredDialog({
       onMouseDown={(event) => event.stopPropagation()}
       style={{
         position: "fixed", top: position.top, left: position.left, zIndex: 201,
-        width: `min(${width}px, calc(100vw - 16px))`, boxSizing: "border-box",
+        width: position.width, boxSizing: "border-box",
+        // A form taller than the window scrolls inside itself rather than
+        // running its Apply button off the bottom edge.
+        maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
         background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
         boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7, color: T.fg,
       }}
@@ -4806,7 +4922,8 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
           onMouseDown={(event) => event.stopPropagation()}
           style={{
             position: "fixed", top: position.top, left: position.left, zIndex: 201,
-            width: "min(300px, calc(100vw - 16px))", boxSizing: "border-box",
+            width: position.width, boxSizing: "border-box",
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
             boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7, color: T.fg,
           }}
@@ -5096,24 +5213,15 @@ function LayoutMenu({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const keyboardOpen = useRef<"first" | "last" | null>(null);
-  const [position, setPosition] = useState({ left: 8, top: 8, maxHeight: 480 });
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { maxHeight: 480 });
   const [portalTokens, setPortalTokens] = useState<React.CSSProperties>({});
   useLayoutEffect(() => {
     if (!open) return;
+    // The menu is portalled to the body, so it inherits none of the toolbar's
+    // custom properties. Copy the ones it paints with from the trigger.
     const update = () => {
       const trigger = triggerRef.current;
-      const menu = menuRef.current;
       if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const menuWidth = menu?.offsetWidth ?? 304;
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8));
-      const below = window.innerHeight - rect.bottom - 12;
-      const above = rect.top - 12;
-      const placeAbove = below < 180 && above > below;
-      const maxHeight = Math.max(120, Math.min(480, placeAbove ? above : below));
-      const shownHeight = Math.min(menu?.scrollHeight ?? maxHeight, maxHeight);
-      const top = placeAbove ? Math.max(8, rect.top - shownHeight - 4) : rect.bottom + 4;
-      setPosition({ left, top, maxHeight });
       const computed = getComputedStyle(trigger);
       const tokens: Record<string, string> = {};
       for (const property of [
@@ -5150,13 +5258,11 @@ function LayoutMenu({
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", keydown);
     window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
     return () => {
       cancelAnimationFrame(frame);
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", keydown);
       window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
     };
   }, [open]);
 
@@ -5287,33 +5393,21 @@ function MarginMenu({
   const [customOpen, setCustomOpen] = useState(false);
   const [values, setValues] = useState({ top: "1", bottom: "1", left: "1", right: "1" });
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 });
   useEffect(() => {
     if (!customOpen) return;
-    const positionDialog = () => {
-      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const width = Math.min(244, window.innerWidth - 16);
-      setDialogPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 294)),
-      });
-    };
     const close = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
     };
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setCustomOpen(false);
     };
-    positionDialog();
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", positionDialog);
     return () => {
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", positionDialog);
     };
   }, [customOpen]);
 
@@ -5385,12 +5479,14 @@ function MarginMenu({
       />
       {customOpen && (
         <div
+          ref={dialogRef}
           role="dialog"
           aria-label="Custom Margins"
           onMouseDown={(event) => event.stopPropagation()}
           style={{
             position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
-            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            width: dialogPosition.width, boxSizing: "border-box",
+            maxHeight: dialogPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
             boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7,
           }}
@@ -5427,33 +5523,21 @@ function PageSizeMenu({
   const [customOpen, setCustomOpen] = useState(false);
   const [values, setValues] = useState({ width: "8.5", height: "11" });
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 });
   useEffect(() => {
     if (!customOpen) return;
-    const positionDialog = () => {
-      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const width = Math.min(244, window.innerWidth - 16);
-      setDialogPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 210)),
-      });
-    };
     const close = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
     };
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setCustomOpen(false);
     };
-    positionDialog();
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", positionDialog);
     return () => {
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", positionDialog);
     };
   }, [customOpen]);
 
@@ -5517,11 +5601,13 @@ function PageSizeMenu({
       {customOpen && (
         <div
           role="dialog"
+          ref={dialogRef}
           aria-label="Custom Paper Size"
           onMouseDown={(event) => event.stopPropagation()}
           style={{
             position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
-            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            width: dialogPosition.width, boxSizing: "border-box",
+            maxHeight: dialogPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
             boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7,
           }}
@@ -5567,33 +5653,21 @@ function PageBorderMenu({
   const [color, setColor] = useState("#4472c4");
   const [widthPt, setWidthPt] = useState("1");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 236 });
   useEffect(() => {
     if (!customOpen) return;
-    const positionDialog = () => {
-      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const width = Math.min(244, window.innerWidth - 16);
-      setDialogPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 224)),
-      });
-    };
     const close = (event: MouseEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
     };
     const keydown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setCustomOpen(false);
     };
-    positionDialog();
     document.addEventListener("mousedown", close);
     document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", positionDialog);
     return () => {
       document.removeEventListener("mousedown", close);
       document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", positionDialog);
     };
   }, [customOpen]);
 
@@ -5636,11 +5710,13 @@ function PageBorderMenu({
       {customOpen && (
         <div
           role="dialog"
+          ref={dialogRef}
           aria-label="Custom Page Border"
           onMouseDown={(event) => event.stopPropagation()}
           style={{
             position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
-            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            width: dialogPosition.width, boxSizing: "border-box",
+            maxHeight: dialogPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
             boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 8,
           }}
@@ -5868,6 +5944,8 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
   const [gotoPage, setGotoPage] = useState("");
   const [status, setStatus] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240 });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -5911,7 +5989,7 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
         Find & replace
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 6 }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 6 }}>
           <input
               data-dxw-field=""
             ref={inputRef}
@@ -6435,8 +6513,13 @@ export function DocxToolbar({
   // Subtle delayed tooltips: controls declare `title`; on first hover the
   // title moves to data-tip (suppressing the OS tooltip) and a quiet custom
   // one fades in under the control after a beat.
-  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [tip, setTip] = useState<string | null>(null);
   const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The hovered control, so the tip is placed by the same clamping every
+  // popover uses. A tip that ran off the right edge was half of #148.
+  const tipAnchor = useRef<HTMLElement | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const tipPosition = useAnchoredPanel(tipAnchor, tipRef, tip !== null, { align: "center", hangFromBar: false });
   const onTipOver = useCallback((e: React.MouseEvent) => {
     const el = (e.target as HTMLElement).closest("[title], [data-tip]") as HTMLElement | null;
     if (!el) return;
@@ -6449,8 +6532,8 @@ export function DocxToolbar({
     if (!text) return;
     if (tipTimer.current) clearTimeout(tipTimer.current);
     tipTimer.current = setTimeout(() => {
-      const r = el.getBoundingClientRect();
-      setTip({ text, x: r.left + r.width / 2, y: r.bottom + 6 });
+      tipAnchor.current = el;
+      setTip(text);
     }, 550);
   }, []);
   const onTipOut = useCallback(() => {
@@ -6478,6 +6561,9 @@ export function DocxToolbar({
    * failure, and each of them says something.
    */
   const [imageStatus, setImageStatus] = useState("");
+  const imageStatusAnchor = useRef<HTMLSpanElement | null>(null);
+  const imageStatusRef = useRef<HTMLSpanElement | null>(null);
+  const imageStatusPosition = useAnchoredPanel(imageStatusAnchor, imageStatusRef, imageStatus !== "", { width: 230 });
   useEffect(() => {
     if (!imageStatus) return;
     const t = setTimeout(() => setImageStatus(""), 8000);
@@ -7153,25 +7239,29 @@ export function DocxToolbar({
         ...style,
       }}
     >
-      {tip && (
+      {tip !== null && (
         <div
+          ref={tipRef}
+          data-dxw-tooltip=""
           style={{
             position: "fixed",
-            left: tip.x,
-            top: tip.y,
-            transform: "translateX(-50%)",
+            left: tipPosition.left,
+            top: tipPosition.top,
+            // A long tip on a narrow window wraps rather than running off the
+            // edge; short ones still sit on one line.
+            maxWidth: "calc(100vw - 16px)",
+            boxSizing: "border-box",
             background: "rgba(32,33,36,.92)",
             color: T.accentFg,
             font: "11.5px system-ui, sans-serif",
             padding: "4px 8px",
             borderRadius: 4,
             pointerEvents: "none",
-            whiteSpace: "nowrap",
             zIndex: 1000,
             boxShadow: "0 2px 6px rgba(0,0,0,.2)",
           }}
         >
-          {tip.text}
+          {tip}
         </div>
       )}
       {mode === "advanced" && (
@@ -7408,13 +7498,14 @@ export function DocxToolbar({
               {on("coverPage") && <CoverPageMenu api={api} />}
               {on("table") && <TableMenu api={api} />}
               {on("image") && (
-                <span style={{ position: "relative", display: "inline-flex" }}>
+                <span ref={imageStatusAnchor} style={{ position: "relative", display: "inline-flex" }}>
                   <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
                   {imageStatus && (
                     <span
                       role="alert"
+                      ref={imageStatusRef}
                       data-dxw-image-status=""
-                      style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+                      style={{ position: "fixed", top: imageStatusPosition.top, left: imageStatusPosition.left, zIndex: 120, width: imageStatusPosition.width, boxSizing: "border-box", padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
                     >
                       {imageStatus}
                     </span>
