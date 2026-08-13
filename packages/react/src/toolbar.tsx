@@ -454,6 +454,25 @@ function anchoredPanelPosition(
  */
 const openPanels: { close: () => void }[] = [];
 
+/**
+ * Move the keyboard into a panel that has just opened, unless it is already
+ * there.
+ *
+ * The PANEL takes focus, not the first control in it. Focusing a control runs
+ * that control's own focus handling, and the table-size grid reads focus as
+ * the user choosing a size: it relabelled itself "1 x 1" the moment the panel
+ * opened, when nothing had been chosen at all. Tab from the container goes to
+ * the first control anyway, which is all the reported defect needed.
+ */
+function focusInside(panel: HTMLElement | null): void {
+  if (!panel || panel.contains(document.activeElement)) return;
+  // Programmatically focusable, still out of the tab order.
+  if (!panel.hasAttribute("tabindex")) panel.tabIndex = -1;
+  // preventScroll: the panel is already placed where it should be, and letting
+  // the browser scroll to it would move the document underneath.
+  panel.focus({ preventScroll: true });
+}
+
 /** The control to put focus back on when a panel closes from the keyboard. */
 function panelTrigger(anchor: HTMLElement | null): HTMLElement | null {
   if (!anchor) return null;
@@ -562,6 +581,19 @@ function useDismissablePanel(
     if (!open || !closeRef.current) return;
     const entry = { close: () => closeRef.current?.() };
     openPanels.push(entry);
+    // Put the keyboard where the panel is.
+    //
+    // Opening one with the MOUSE left focus on the editor's hidden textarea —
+    // the triggers preventDefault on mousedown so the caret and selection
+    // survive, which is deliberate and must stay — so Tab moved FORWARD from
+    // the document, away from the bar, and the open panel could not be reached
+    // by keyboard at all. Measured in Chromium: 35 of the 51 panels a mouse
+    // can open left activeElement on TEXTAREA (#157).
+    //
+    // A panel that wants a different target sets it in its own effect, which
+    // runs after this one and wins: the forms focus their first field, and a
+    // menu opened from the keyboard focuses the option it was asked for.
+    focusInside(panelRef.current);
     const landedInside = (target: Node | null) =>
       !!target && (!!panelRef.current?.contains(target) || !!anchorRef.current?.contains(target));
     const onMouseDown = (event: MouseEvent) => {
@@ -3739,8 +3771,16 @@ function useAnchoredPopover(
   rootRef: React.RefObject<HTMLElement | null>,
   width: number,
   onClose: () => void,
+  /**
+   * Whether the popover is on screen. AnchoredDialog renders only when it is
+   * open so it leaves this alone; the styles pane calls this hook from a
+   * component that is always mounted, and passing `true` there meant the
+   * effect ran once at mount — with no panel in the DOM to place, to dismiss,
+   * or to put the keyboard into — and never again.
+   */
+  open = true,
 ): AnchoredPanelPosition {
-  return useAnchoredPanel(anchorRef, rootRef, true, { width, onClose });
+  return useAnchoredPanel(anchorRef, rootRef, open, { width, onClose });
 }
 
 /**
@@ -4840,7 +4880,7 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
     setConfirmDelete(null);
     setError("");
   }, []);
-  const position = useAnchoredPopover(triggerRef, rootRef, 300, close);
+  const position = useAnchoredPopover(triggerRef, rootRef, 300, close, open);
 
   const entries = (open ? api?.listStyles?.() ?? [] : []).filter(
     (entry) => entry.type === "paragraph" || entry.type === "character",
