@@ -9893,6 +9893,12 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       break;
     case "grip":
       item.x += dx;
+      // x2 is the grip's far edge, in the same space as x. Leaving it behind
+      // moved a nested table's grips without moving their right-hand end, so
+      // a row grip came out with x2 BEHIND x — a negative width, which paints
+      // as nothing and can never be pressed, and a move grip whose bounds the
+      // editor uses for hit-testing pointed at the inner frame's coordinates.
+      if (item.x2 !== undefined) item.x2 += dx;
       item.y1 += dy;
       item.y2 += dy;
       break;

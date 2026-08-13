@@ -1034,7 +1034,18 @@ function renderPage(
         const item = binding.item;
         const overTable =
           x >= item.x && x <= (item.x2 ?? item.x) && y >= item.y1 && y <= item.y2;
-        if (overTable) hovered = binding;
+        // The handle's own square arms it too. Only the table did, and the
+        // handle sits OUTSIDE the table's top-left corner — so a pointer that
+        // arrived from the bar or the margin, rather than across the table,
+        // found a 22px square that was invisible, had pointer-events none,
+        // and therefore showed neither its move cursor nor its title. It
+        // advertised itself to anyone who had already hovered the table and
+        // to nobody else (#154).
+        const handleLeft = parseFloat(binding.el.style.left);
+        const handleTop = parseFloat(binding.el.style.top);
+        const overHandle =
+          x >= handleLeft && x <= handleLeft + 22 && y >= handleTop && y <= handleTop + 22;
+        if (overTable || overHandle) hovered = binding;
       }
       if (hovered) {
         armed = hovered;
