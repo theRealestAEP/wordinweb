@@ -5,23 +5,25 @@
  * near-identical style sources, while `ToolbarMenuSelect` sat in the same
  * file rendering a themed listbox for ten others.
  *
- * Two things are pinned here:
+ * Pinned here:
  *
  *  1. The Note options popover — the reported surface, and one that had no
  *     test of any kind before this — actually reaches the engine through the
  *     new control, by the path a user takes.
  *  2. `disabled`, which `ToolbarMenuSelect` did not support and three of the
  *     migrated selects needed.
+ *  3. That `ToolbarCheckbox` still behaves like the native checkbox it
+ *     replaced the paint of — the thing two older suites depend on.
  *
- * The third guard, that no bare `<select>` comes back anywhere in the file,
- * needs no DOM and lives in `toolbar-no-bare-selects.test.ts`.
+ * The source-wide guards, that no bare visible control comes back anywhere in
+ * the file, need no DOM and live in `toolbar-no-bare-selects.test.ts`.
  */
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
 import { zipSync, strToU8 } from "fflate";
 import { DocxView, type DocxViewApi } from "../src/index.js";
-import { DocxToolbar, ToolbarMenuSelect } from "../src/toolbar.js";
+import { DocxToolbar, ToolbarCheckbox, ToolbarMenuSelect } from "../src/toolbar.js";
 
 const FIXTURE = zipSync({
   "[Content_Types].xml": strToU8(
@@ -194,5 +196,68 @@ describe("#141: the toolbar's dropdowns are all the same control", () => {
 
     await act(async () => root.unmount());
     container.remove();
+  });
+});
+
+describe("#141: ToolbarCheckbox keeps the native element it repaints", () => {
+  async function mountBox(props: Partial<Parameters<typeof ToolbarCheckbox>[0]> = {}) {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const seen: boolean[] = [];
+    await act(async () => {
+      root.render(
+        createElement(ToolbarCheckbox, {
+          label: "Match case",
+          checked: false,
+          onChange: (next: boolean) => seen.push(next),
+          ...props,
+        }),
+      );
+    });
+    return {
+      container,
+      seen,
+      input: () => container.querySelector<HTMLInputElement>('input[type="checkbox"]')!,
+      cleanup: async () => {
+        await act(async () => root.unmount());
+        container.remove();
+      },
+    };
+  }
+
+  it("answers the queries the older suites use, and toggles when clicked", async () => {
+    // review-toolbar finds these by input[type=checkbox] and identifies them
+    // through the enclosing label's text, then clicks the INPUT. If a
+    // <div role="checkbox"> had replaced it, that suite would have had to be
+    // rewritten to accommodate a cosmetic change.
+    const t = await mountBox({ ariaLabel: "Match case" });
+    const box = t.input();
+    expect(box, "still a real input[type=checkbox]").toBeInstanceOf(HTMLInputElement);
+    expect(box.closest("label")?.textContent, "label text still identifies it").toContain("Match case");
+    // table-properties-toolbar reads the accessible name off the input.
+    expect(box.getAttribute("aria-label")).toBe("Match case");
+
+    await act(async () => {
+      box.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(t.seen, "clicking the input reports the new state").toEqual([true]);
+    await t.cleanup();
+  });
+
+  it("paints the tick from the checked prop, not from the browser", async () => {
+    const off = await mountBox({ checked: false });
+    expect(off.container.textContent).not.toContain("✓");
+    await off.cleanup();
+
+    const on = await mountBox({ checked: true });
+    expect(on.container.textContent, "our own tick, so it follows the theme").toContain("✓");
+    await on.cleanup();
+  });
+
+  it("disables the real input, so the browser refuses the click too", async () => {
+    const t = await mountBox({ disabled: true });
+    expect(t.input().disabled).toBe(true);
+    await t.cleanup();
   });
 });

@@ -128,6 +128,33 @@ const dialogInput: React.CSSProperties = {
   borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg,
 };
 
+/**
+ * Take the browser's spinner arrows off our number boxes.
+ *
+ * `appearance: textfield` is the usual inline answer and Chrome ignores it —
+ * measured, not assumed: on Chrome 150 a number input carrying it still
+ * paints both arrows on hover, identically to one without. The arrows are a
+ * `::-webkit-*-spin-button` pseudo-element, which no inline style can reach,
+ * so a rule is the only way. Idempotent injected <style> with an id, the same
+ * shape the engine already uses for `ensureDrawingCursorStyle`, and scoped to
+ * `[data-dxw-number]` so it touches only the fields this toolbar draws.
+ */
+function ensureNumberFieldStyle(): void {
+  if (typeof document === "undefined" || document.getElementById("dxw-number-field-style")) return;
+  const style = document.createElement("style");
+  style.id = "dxw-number-field-style";
+  style.textContent =
+    // The `appearance` half is for Firefox and Safari, which do honour it;
+    // the pseudo-element half is what Chrome needs. Both live in the rule so
+    // no call site has to carry either, and the six number boxes that keep
+    // bespoke widths keep them.
+    "[data-dxw-number]{-webkit-appearance:textfield;appearance:textfield}" +
+    "[data-dxw-number]::-webkit-inner-spin-button,[data-dxw-number]::-webkit-outer-spin-button" +
+    "{-webkit-appearance:none;appearance:none;margin:0}";
+  document.head.appendChild(style);
+}
+ensureNumberFieldStyle();
+
 /** The roomier variant, for the tall stacked-label popovers (Citations, Quick
  * Parts, Chart, Media). Those four each declared these three objects in their
  * own body, byte for byte the same, before #141 collapsed them. */
@@ -530,6 +557,92 @@ export function ToolbarMenuSelect({
         </div>
       )}
     </span>
+  );
+}
+
+export interface ToolbarCheckboxProps {
+  /** The visible text beside the box. */
+  label: React.ReactNode;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  /** Accessible name, when the visible label is not the whole story. */
+  ariaLabel?: string;
+  disabled?: boolean;
+  title?: string;
+  /** Call sites use 11.5 for the dense edge grids and 12 elsewhere. */
+  fontSize?: number;
+}
+
+/**
+ * CSS-overridable replacement for a visible native checkbox — the companion
+ * to ToolbarMenuSelect, built the same way and for the same reason (#141).
+ *
+ * The real `<input type="checkbox">` stays in the DOM, holding the checked
+ * state, the accessible name, focus and the keyboard. Only its PAINT is
+ * replaced. That is not fussiness: a native checkbox is drawn by the
+ * operating system and ignores the theme entirely, so seven of them sitting
+ * beside themed dropdowns would have looked more out of place, not less —
+ * but two suites find these boxes with `input[type="checkbox"]`, one clicking
+ * the input and one reading its `aria-label`, and a `<div role="checkbox">`
+ * would have broken both for a purely cosmetic gain.
+ */
+export function ToolbarCheckbox({ label, checked, onChange, ariaLabel, disabled, title, fontSize = 12 }: ToolbarCheckboxProps) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <label
+      title={title}
+      data-dxw-checkbox=""
+      style={{
+        position: "relative",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize,
+        color: T.fg,
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "default" : "pointer",
+      }}
+    >
+      <input
+        type="checkbox"
+        // Marks this as THE component's own input, the way the select keeps
+        // `data-dxw-native-bridge`. The regression guard has to tell the one
+        // legitimate native checkbox from a newly added bare one, and "it is
+        // the transparent one" would be a guess about styling.
+        data-dxw-checkbox-input=""
+        aria-label={ariaLabel}
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        // Sized and placed OVER the painted box rather than parked off-screen,
+        // so the browser's own focus and screen-reader rectangles land where
+        // the box is actually drawn.
+        style={{ position: "absolute", left: 0, width: 15, height: 15, margin: 0, opacity: 0, cursor: "inherit" }}
+      />
+      <span
+        aria-hidden="true"
+        style={{
+          flexShrink: 0,
+          width: 15,
+          height: 15,
+          boxSizing: "border-box",
+          borderRadius: 3,
+          border: `1px solid ${checked ? T.accent : T.border}`,
+          background: checked ? T.accent : T.popoverBg,
+          color: T.accentFg,
+          display: "grid",
+          placeItems: "center",
+          font: "700 10px system-ui, sans-serif",
+          lineHeight: 1,
+          boxShadow: focused ? `0 0 0 2px ${T.tabActiveBg}` : "none",
+        }}
+      >
+        {checked ? "✓" : ""}
+      </span>
+      {label}
+    </label>
   );
 }
 
@@ -1112,6 +1225,7 @@ function NoteOptionsFields({
           <input
             aria-label={`${fieldPrefix} start at`}
             type="number"
+              data-dxw-number=""
             min={0}
             value={values.start ?? ""}
             placeholder="1"
@@ -1120,9 +1234,7 @@ function NoteOptionsFields({
               const n = raw === "" ? null : parseInt(raw, 10);
               if (n === null || (Number.isInteger(n) && n >= 0)) onPatch({ start: n });
             }}
-            // The spinner arrows are the one part of a number box the browser
-            // draws for itself, and they do not follow the theme.
-            style={{ ...noteOptionsFieldStyle, appearance: "textfield", MozAppearance: "textfield" }}
+            style={noteOptionsFieldStyle}
           />
         </label>
       </div>
@@ -2154,11 +2266,11 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Width (pt)
-              <input aria-label="Divider width in points" type="number" min="0.25" step="0.25" value={widthPt} onChange={(event) => setWidthPt(Number(event.target.value))} style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 6px", color: T.fg, background: T.popoverBg }} />
+              <input aria-label="Divider width in points" type="number" data-dxw-number="" min="0.25" step="0.25" value={widthPt} onChange={(event) => setWidthPt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Gap (pt)
-              <input aria-label="Divider gap in points" type="number" min="0" step="1" value={spacePt} onChange={(event) => setSpacePt(Number(event.target.value))} style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 6px", color: T.fg, background: T.popoverBg }} />
+              <input aria-label="Divider gap in points" type="number" data-dxw-number="" min="0" step="1" value={spacePt} onChange={(event) => setSpacePt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
             </label>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
@@ -2227,11 +2339,12 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
               <input
                 aria-label="Line width in pixels"
                 type="number"
+              data-dxw-number=""
                 min="0.25"
                 step="0.25"
                 value={lineWidth}
                 onChange={(event) => setLineWidth(event.target.value)}
-                style={{ width: "100%", height: 28, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 5px", color: T.fg, background: T.popoverBg }}
+                style={{ ...dialogInput, height: 28, padding: "3px 5px" }}
               />
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "10.5px system-ui, sans-serif" }}>
@@ -2518,10 +2631,9 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
             onChange={(event) => setText(event.target.value)}
             style={{ width: "100%", boxSizing: "border-box", marginTop: 8, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
           />
-          <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8, font: "12px system-ui, sans-serif" }}>
-            <input type="checkbox" checked={diagonal} onChange={(event) => setDiagonal(event.target.checked)} />
-            Diagonal
-          </label>
+          <div style={{ marginTop: 8 }}>
+            <ToolbarCheckbox label="Diagonal" checked={diagonal} onChange={setDiagonal} />
+          </div>
           <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
             <button
               title="Stamp this text on every page"
@@ -2852,6 +2964,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                           <input
                             aria-label={`Chart slice ${index + 1} value`}
                             type="number"
+              data-dxw-number=""
                             min="0"
                             step="any"
                             value={series[0]?.values[index] ?? ""}
@@ -2910,6 +3023,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                             <input
                               aria-label={`Chart series ${seriesIndex + 1} value ${categoryIndex + 1}`}
                               type="number"
+              data-dxw-number=""
                               step="any"
                               value={entry.values[categoryIndex] ?? ""}
                               onChange={(event) => setSeries(series.map((seriesValue, itemIndex) => itemIndex === seriesIndex ? {
@@ -3656,6 +3770,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
       <input
         aria-label={`${label} cell margin (points)`}
         type="number"
+              data-dxw-number=""
         min="0"
         step="0.5"
         placeholder="—"
@@ -3706,6 +3821,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
               <input
                 aria-label="Table width"
                 type="number"
+              data-dxw-number=""
                 min="0"
                 step="1"
                 disabled={form.widthUnit === "auto"}
@@ -3720,6 +3836,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
             <input
               aria-label="Column width (points)"
               type="number"
+              data-dxw-number=""
               min="1"
               step="1"
               value={form.columnWidth}
@@ -3739,6 +3856,7 @@ function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; on
             <input
               aria-label="Repeating header rows"
               type="number"
+              data-dxw-number=""
               min="0"
               step="1"
               value={form.headerRows}
@@ -3908,21 +4026,18 @@ function CustomBorderDialog({
       <span style={{ fontSize: 12 }}>Edges</span>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
         {allowed.map((edge) => (
-          <label key={edge} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 11.5 }}>
-            <input
-              type="checkbox"
-              aria-label={EDGE_NAMES[edge]}
-              checked={chosen.includes(edge)}
-              onChange={(event) =>
-                setEdges((current) =>
-                  event.target.checked
-                    ? [...current, edge]
-                    : current.filter((other) => other !== edge),
-                )
-              }
-            />
-            {EDGE_NAMES[edge]}
-          </label>
+          <ToolbarCheckbox
+            key={edge}
+            label={EDGE_NAMES[edge]}
+            ariaLabel={EDGE_NAMES[edge]}
+            fontSize={11.5}
+            checked={chosen.includes(edge)}
+            onChange={(on) =>
+              setEdges((current) =>
+                on ? [...current, edge] : current.filter((other) => other !== edge),
+              )
+            }
+          />
         ))}
       </div>
     </AnchoredDialog>
@@ -3996,6 +4111,7 @@ function TabStopsDialog({
           <input
             aria-label={`Tab stop ${index + 1} position (points)`}
             type="number"
+              data-dxw-number=""
             min={0}
             max={1584}
             step={1}
@@ -4149,19 +4265,16 @@ function ParagraphBorderDialog({
       <span style={{ fontSize: 12 }}>Edges</span>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
         {(Object.keys(PARA_EDGE_NAMES) as (keyof typeof PARA_EDGE_NAMES)[]).map((edge) => (
-          <label key={edge} style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 11.5 }}>
-            <input
-              type="checkbox"
-              aria-label={PARA_EDGE_NAMES[edge]}
-              checked={edges.includes(edge)}
-              onChange={(event) =>
-                setEdges((list) =>
-                  event.target.checked ? [...list, edge] : list.filter((other) => other !== edge),
-                )
-              }
-            />
-            {PARA_EDGE_NAMES[edge]}
-          </label>
+          <ToolbarCheckbox
+            key={edge}
+            label={PARA_EDGE_NAMES[edge]}
+            ariaLabel={PARA_EDGE_NAMES[edge]}
+            fontSize={11.5}
+            checked={edges.includes(edge)}
+            onChange={(on) =>
+              setEdges((list) => (on ? [...list, edge] : list.filter((other) => other !== edge)))
+            }
+          />
         ))}
       </div>
       <span style={dialogFieldRow}>
@@ -4600,10 +4713,7 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
     value: boolean,
     onToggle: (next: boolean) => void,
   ) => (
-    <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
-      <input type="checkbox" aria-label={label} checked={value} onChange={(event) => onToggle(event.target.checked)} />
-      {label}
-    </label>
+    <ToolbarCheckbox label={label} ariaLabel={label} checked={value} onChange={onToggle} />
   );
 
   const form = editing?.form;
@@ -4740,6 +4850,7 @@ function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: ()
                 <input
                   aria-label="Style font size (points)"
                   type="number"
+              data-dxw-number=""
                   min="1"
                   step="1"
                   placeholder="—"
@@ -5165,6 +5276,7 @@ function MarginMenu({
       <input
         aria-label={`${label} margin (inches)`}
         type="number"
+              data-dxw-number=""
         min="0"
         step="0.05"
         required
@@ -5175,7 +5287,7 @@ function MarginMenu({
           if (event.key === "Escape") setCustomOpen(false);
           else if (event.key === "Enter") applyCustom();
         }}
-        style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px" }}
+        style={{ ...dialogInput, width: 92 }}
       />
     </label>
   );
@@ -5285,6 +5397,7 @@ function PageSizeMenu({
       <input
         aria-label={`Page ${side} (inches)`}
         type="number"
+              data-dxw-number=""
         min="0.1"
         step="0.05"
         required
@@ -5295,7 +5408,7 @@ function PageSizeMenu({
           if (event.key === "Escape") setCustomOpen(false);
           else if (event.key === "Enter") applyCustom();
         }}
-        style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px" }}
+        style={{ ...dialogInput, width: 92 }}
       />
     </label>
   );
@@ -5752,18 +5865,14 @@ function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
             {/* Wildcard matching is always case-sensitive and carries its own
                 word boundaries (< >), so the two flags grey out — Word's own
                 dialog behavior. */}
-            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12, opacity: wildcards ? 0.5 : 1 }}>
-              <input type="checkbox" disabled={wildcards} checked={matchCase} onChange={(e) => setMatchCase(e.target.checked)} />
-              Match case
-            </label>
-            <label style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12, opacity: wildcards ? 0.5 : 1 }}>
-              <input type="checkbox" disabled={wildcards} checked={wholeWord} onChange={(e) => setWholeWord(e.target.checked)} />
-              Whole word
-            </label>
-            <label title="Word's wildcard patterns: ? * [ ] [! ] @ < > \" style={{ display: "flex", gap: 5, alignItems: "center", fontSize: 12 }}>
-              <input type="checkbox" checked={wildcards} onChange={(e) => setWildcards(e.target.checked)} />
-              Wildcards
-            </label>
+            <ToolbarCheckbox label="Match case" disabled={wildcards} checked={matchCase} onChange={setMatchCase} />
+            <ToolbarCheckbox label="Whole word" disabled={wildcards} checked={wholeWord} onChange={setWholeWord} />
+            <ToolbarCheckbox
+              label="Wildcards"
+              title={"Word's wildcard patterns: ? * [ ] [! ] @ < > \\"}
+              checked={wildcards}
+              onChange={setWildcards}
+            />
           </div>
           {status && <div data-dxw-find-status="" style={{ color: T.muted, fontSize: 12 }}>{status}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
