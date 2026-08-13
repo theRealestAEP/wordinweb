@@ -3085,6 +3085,58 @@ export class DocxEditor {
     return adjustFloatingPosition(doc, src, dxClient / zoom, dyClient / zoom);
   }
 
+  /**
+   * Land a dragged object on the point the pointer released it.
+   *
+   * A page-relative write does not promise that on its own. The layout
+   * resolves a floating anchor from ITS OWN origins — an indented table
+   * cell's text area, the anchor paragraph's top — so an object living in a
+   * sidebar lands that far off on BOTH axes. Measured on a Word cover-letter
+   * template (#153), a 3D model in the sidebar cell answered a +60/0 drag by
+   * moving +138.8/+389.3: the drag plus the cell's origin (78.8) and the
+   * anchor paragraph's top (389.3), every drag, until the object had walked
+   * off the bottom of the window and the user could no longer reach it.
+   *
+   * So measure where it actually landed and correct once. One pass is exact:
+   * the residual is the anchor's fixed origin, and this drag does not
+   * re-anchor, so it does not move under the correction.
+   *
+   * The correction rides the wire as another absolute position, which is what
+   * keeps it replica-safe: every replica applies the same two writes and ends
+   * in the same place. Only the MEASUREMENT reads this window's layout, and
+   * it never leaves this window.
+   */
+  private correctFloatingPageResidual(
+    src: XmlElement,
+    target: { runId: number; objectIndex?: number },
+    wroteX: number,
+    wroteY: number,
+    want: { x: number; y: number },
+  ): void {
+    const zoom = this.host.zoom ?? 1;
+    const handle = this.host.getHandle();
+    // A header/footer object paints one instance per page from this src, so
+    // measure the one nearest the drop point — the first page's copy is whole
+    // pages away and "correcting" against it flings the object off the sheet.
+    const landed = nearestInstance(
+      [
+        ...(handle?.images ?? []).filter((b) => b.item.src === src),
+        ...(handle?.drawings ?? []).filter((b) => b.item.src === src),
+      ],
+      want,
+    );
+    if (!landed) return;
+    const r = landed.el.getBoundingClientRect();
+    const errX = (want.x - r.left) / zoom;
+    const errY = (want.y - r.top) / zoom;
+    if (Math.hypot(errX, errY) <= 1) return;
+    const x = Math.max(0, wroteX + errX);
+    const y = Math.max(0, wroteY + errY);
+    if (!setFloatingPagePosition(this.host.doc, src, x, y)) return;
+    this.host.onIntent?.({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
+    this.host.rerender();
+  }
+
   /** Layout-px x of a client point on its page surface, or null off-page. */
   private surfaceX(clientX: number, clientY: number): number | null {
     const pageEl = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)?.closest(".dxw-page");
@@ -4436,6 +4488,7 @@ export class DocxEditor {
               if (setFloatingPagePosition(this.host.doc, binding.item.src, x, y)) {
                 this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
                 this.host.rerender();
+                this.correctFloatingPageResidual(binding.item.src, target, x, y, want);
                 this.reselectImage(binding.item.src, want);
               } else {
                 this.reselectImage(binding.item.src, { x: rect0.left, y: rect0.top });
@@ -4646,10 +4699,12 @@ export class DocxEditor {
               setImageWrap(this.host.doc, src, "square");
               this.host.onIntent({ kind: "setImageWrap", ...target, mode: "square" });
             }
-            if (setFloatingPagePosition(this.host.doc, src, x, y)) {
+            const positioned = setFloatingPagePosition(this.host.doc, src, x, y);
+            if (positioned) {
               this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
             }
             this.host.rerender();
+            if (positioned) this.correctFloatingPageResidual(src, target, x, y, want);
             this.reselectImage(src, want);
             return;
           }
