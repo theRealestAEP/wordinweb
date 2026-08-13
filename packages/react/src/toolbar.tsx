@@ -354,6 +354,26 @@ function appliedRunFormat(patch: Parameters<DocxViewApi["applyFormat"]>[0]): Par
   return out;
 }
 
+/**
+ * The controls on a ribbon line, seeing through any `display: contents`
+ * grouping.
+ *
+ * Such a wrapper has NO box of its own — it measures 0x0 — so the layout
+ * engine skipped it as a zero-width child and came away with nothing to fit,
+ * while the controls it holds were promoted into the line by the browser and
+ * wrapped freely onto extra rows. Both contextual tabs group their controls
+ * that way, which is why the bar grew 26px the moment the caret entered a
+ * table and the document jumped under the pointer (#155).
+ */
+function ribbonControls(line: HTMLElement): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  for (const child of Array.from(line.children) as HTMLElement[]) {
+    if (getComputedStyle(child).display === "contents") out.push(...ribbonControls(child));
+    else out.push(child);
+  }
+  return out;
+}
+
 /** The gap every anchored panel keeps between itself and the window edge. */
 const PANEL_MARGIN = 8;
 
@@ -6677,10 +6697,14 @@ export function DocxToolbar({
     // full-width element, so leaving it in would both add a bogus control to
     // the measurement and make the single-child test below miscount.
     ribbon.querySelector("[data-dxw-ribbon-break]")?.remove();
-    const only = ribbon.children.length === 1 ? (ribbon.firstElementChild as HTMLElement) : null;
+    const topLevel = ribbonControls(ribbon);
+    const only = topLevel.length === 1 ? topLevel[0] : null;
     const nested = only && getComputedStyle(only).flexBasis === "100%" ? only : null;
+    // The flex container the controls actually lay out in. A `display:
+    // contents` wrapper is not one — its children belong to the ribbon — so
+    // the line break and the scroll flag still go on the ribbon itself.
     const line = nested ?? ribbon;
-    const children = Array.from(line.children) as HTMLElement[];
+    const children = nested ? ribbonControls(nested) : topLevel;
     for (const child of children) {
       if (child.dataset.dxwFolded === "1") {
         child.style.display = "";
