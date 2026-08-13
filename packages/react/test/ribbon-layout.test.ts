@@ -121,23 +121,49 @@ describe("the collapsed line", () => {
     expect(plan.hidden.some(Boolean)).toBe(false);
   });
 
-  it("offers no chevron for a line's worth of nothing, and spends the reserve on tools", () => {
-    // The reported bug, as arithmetic. A hair too narrow folds one or two of
-    // the least-used controls; expanding for them would spend a whole line of
-    // the window on a line that comes back nearly empty. So the bar keeps
-    // quiet — and since no chevron is coming, the width kept free for one
-    // goes back to the controls.
+  it("spends the reserve on tools rather than showing a chevron for nothing", () => {
+    // A hair too narrow: the ONLY reason anything folded is the width kept
+    // free for a chevron. Give that width back and every control fits, so the
+    // bar stays quiet — the "it does nothing except add a weird space" case.
     const total = HOME.reduce((sum, item) => sum + item.width, 0) + GAP * (HOME.length - 1);
-    const plan = collapsed(HOME, total - 20);
-    expect(plan.offerExpand, "no chevron for one control").toBe(false);
-    expect(plan.hiddenCount).toBeLessThan(MIN_REVEAL);
-    expect(plan.hiddenCount, "something did have to fold").toBeGreaterThan(0);
-    expect(visibleWidth(HOME, plan.hidden)).toBeLessThanOrEqual(total - 20);
+    const plan = collapsed(HOME, total - 5);
+    expect(plan.offerExpand, "a chevron hiding nothing is worse than no chevron").toBe(false);
+    expect(plan.hiddenCount, "and nothing was lost to earn it").toBe(0);
+    expect(visibleWidth(HOME, plan.hidden)).toBeLessThanOrEqual(total - 5);
     // The whole line is the budget: the bar keeps no seat for a chevron it is
     // not going to show, so it lands on the same line a bar with no chevron
     // at all would.
-    const noSeat = planRibbon(HOME, { gap: GAP, inlineAvailable: total - 20, reserve: 0 }, false);
+    const noSeat = planRibbon(HOME, { gap: GAP, inlineAvailable: total - 5, reserve: 0 }, false);
     expect(plan.hidden).toEqual(noSeat.hidden);
+  });
+
+  it("offers the chevron for even one folded control, because it is the only way back", () => {
+    // #158. This branch used to return the tight line with `offerExpand`
+    // false, reasoning that a whole line is too much to spend on one or two
+    // controls. The reasoning was about the COST of expanding and never asked
+    // what became of the controls: at 900px it hid Hyphenation on Layout and
+    // Compare Documents on Review with no chevron, no menu and no shortcut to
+    // reach them by. MIN_REVEAL may prefer fitting everything on one line; it
+    // may not lose a tool.
+    const total = HOME.reduce((sum, item) => sum + item.width, 0) + GAP * (HOME.length - 1);
+    const plan = collapsed(HOME, total - 60);
+    expect(plan.hiddenCount, "this width really does have to fold something").toBeGreaterThan(0);
+    expect(plan.hiddenCount, "and fewer than the threshold, which is the whole point")
+      .toBeLessThan(MIN_REVEAL);
+    expect(plan.offerExpand, "folded with no way back is the defect").toBe(true);
+    // Offering it means paying for it: the line keeps the chevron's seat.
+    expect(visibleWidth(HOME, plan.hidden)).toBeLessThanOrEqual(total - 60 - RESERVE);
+  });
+
+  it("never hides a control without offering the chevron, at any width", () => {
+    // The invariant the two cases above are instances of, swept across every
+    // width the bar is used at. A control may be folded only if there is a
+    // way to get it back.
+    for (const available of AVAILABLE) {
+      const plan = collapsed(HOME, available);
+      if (plan.hiddenCount === 0) continue;
+      expect(plan.offerExpand, `${available}px folds ${plan.hiddenCount} with no chevron`).toBe(true);
+    }
   });
 
   it("offers the chevron once a line's worth of tools is behind it", () => {

@@ -157,27 +157,40 @@ describe("the toolbar expand chevron", () => {
     await t.unmount();
   });
 
-  it("offers no chevron when expanding would spend a line on one or two controls", async () => {
-    // The reported bug: just below the width where everything fits, the bar
-    // folded a control or two and then advertised them — and clicking cost a
-    // whole line of the window to put two icons back. The affordance waits
-    // until it has a line's worth of tools to give.
+  it("stays silent only while it is hiding nothing", async () => {
+    // Two complaints, and one rule that answers both.
     //
-    // Swept rather than pinned to one width, so the promise holds everywhere:
-    // a chevron on the bar always means MIN_REVEAL controls behind it.
+    // The first was a chevron that cost a whole line of the window to put two
+    // icons back — "it does nothing except add a random weird space". The
+    // answer is the width reserved for the chevron: give it back to the
+    // controls and, just below the width where everything fits, everything
+    // still fits. That band is real and the sweep crosses it.
+    //
+    // The second (#158) was the overcorrection. Below that band the bar hid
+    // the overflow and stayed silent anyway, so at 900px Hyphenation and
+    // Compare Documents were gone with no chevron, no menu and no shortcut.
+    // So silence is allowed only while nothing is hidden: once a control
+    // folds, the chevron is the only route back to it and must be offered,
+    // however few are behind it.
     const t = await mountToolbar();
-    let sawTheQuietBand = false;
+    let sawSilentAndFull = false;
+    let sawChevronBelowThreshold = false;
     for (let width = 2000; width >= 700; width -= 20) {
       await resizeTo(t.container, width);
       const waiting = foldedControls(t.container);
       if (chevron(t.container)) {
-        expect(waiting, `chevron at ${width}px promises tools`).toBeGreaterThanOrEqual(MIN_REVEAL);
+        expect(waiting, `chevron at ${width}px promises nothing`).toBeGreaterThan(0);
+        if (waiting < MIN_REVEAL) sawChevronBelowThreshold = true;
       } else {
-        expect(waiting, `silent bar at ${width}px hides little`).toBeLessThan(MIN_REVEAL);
-        if (waiting > 0) sawTheQuietBand = true;
+        expect(waiting, `silent bar at ${width}px has hidden ${waiting} control(s)`).toBe(0);
+        sawSilentAndFull = true;
       }
     }
-    expect(sawTheQuietBand, "the sweep crossed the band the bug lived in").toBe(true);
+    expect(sawSilentAndFull, "the sweep never saw the bar silent").toBe(true);
+    // Without this, the rule above would also be satisfied by a bar that never
+    // folds fewer than MIN_REVEAL at any width — so the sweep would pass
+    // without ever entering the band #158 lived in.
+    expect(sawChevronBelowThreshold, "the sweep never crossed the band #158 lived in").toBe(true);
     await t.unmount();
   });
 });

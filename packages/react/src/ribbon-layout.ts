@@ -188,12 +188,21 @@ export function planRibbon(items: RibbonItem[], space: RibbonSpace, expanded: bo
   const folded = foldToFit(items, space.gap, space.inlineAvailable - space.reserve);
   const reveal = foldedControls(items, folded);
   if (reveal < MIN_REVEAL) {
-    // Too few to spend a line on: no chevron, and therefore no room kept for
-    // one, which puts some of those controls back on the bar. Widening the
-    // budget can only un-fold, never fold, so `reveal` cannot climb back over
-    // the threshold and the answer cannot flip between the two fits.
+    // Too few to spend a line on, so try to avoid the trade entirely: drop
+    // the chevron, give its reserved width back to the controls, and see
+    // whether they all fit. Widening the budget can only un-fold, never fold.
     const tight = foldToFit(items, space.gap, space.inlineAvailable);
-    return { ...idle, hidden: tight, hiddenCount: foldedControls(items, tight) };
+    if (foldedControls(items, tight) === 0) {
+      // Everything fits without the chevron. Nothing is lost, so nothing is
+      // offered — this is the "it does nothing except add a weird space" case.
+      return { ...idle, hidden: tight };
+    }
+    // Something stays folded. MIN_REVEAL is a preference about whether to
+    // spend a line, NEVER a licence to lose a control: this branch used to
+    // return `tight` with `offerExpand: false`, which hid Hyphenation on
+    // Layout and Compare Documents on Review at 900px with no way back to
+    // them — no chevron, no menu, no shortcut (#158). Falling through offers
+    // the chevron, and `folded` is the line that keeps room for it.
   }
   if (!expanded) {
     return { ...idle, hidden: folded, offerExpand: true, hiddenCount: reveal };
