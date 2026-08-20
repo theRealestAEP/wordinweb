@@ -1,6 +1,6 @@
 {
   "name": "@wordinweb/collab",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Transport-free collaborative-editing engine for wordinweb (intents, canonical transform, session state machine)",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,9 @@
       "import": "./dist/server.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "prepack": "npm run build && node ../../scripts/check-dts-selfcontained.mjs",
