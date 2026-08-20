@@ -41,14 +41,25 @@ command for that turn:
 npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"sync","wakeId":"<wakeId>"}'
 ```
 
-The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `chat`, and
-`close`. `wait` remains available for manual clients. Every edit includes the
-inspected revision. When the room advances, the package compares the edit's
-inspected targets with their current state. Unchanged targets proceed across
-the newer revision. Changed targets return `needs_sync`. The bridge places the
-agent's visible collaboration cursor after its latest edit. A successful turn
-ends with a `chat` command for the current `wakeId`. The bridge interrupts a
-turn after 60 seconds and reports the failure in the private document chat.
+The bridge supports `sync`, `capabilities`, `inspect`, `edit`, `project`,
+`patch`, `chat`, and `close`. `wait` remains available for manual clients. Every
+edit includes the inspected revision. When the room advances, the package
+compares the edit's inspected targets with their current state. Unchanged
+targets proceed across the newer revision. Changed targets return `needs_sync`.
+A `patch` against a stale window returns `needs_sync` the same way. In
+suggestion mode the bridge applies every patch as tracked changes. The bridge
+places the agent's visible collaboration cursor after its latest edit. A
+successful turn ends with a `chat` command for the current `wakeId`. The bridge
+interrupts a turn after 60 seconds and reports the failure in the private
+document chat.
+
+For a bulk prose rewrite, project the story once and send the changed lines
+back:
+
+```bash
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"project","wakeId":"<wakeId>","request":{"mode":"md"}}'
+npx -y --package='https://collab.word-in-web.com/wordinweb-agent.tgz?v=short-invite-6' wordinweb-agent session '<sessionId>' '{"command":"patch","wakeId":"<wakeId>","request":{"revision":"<projection revision>","mode":"md","edits":[{"startLine":4,"endLine":4,"newText":"Adopt the managed platform."}]}}'
+```
 
 Inspect the current wake state with a short status command:
 
@@ -139,9 +150,31 @@ const result = await document.compose({
 console.log(result.overview.outline, result.createdObjects);
 ```
 
-`AgentDocument.create()` starts a blank DOCX. `tools()` returns six portable
-tool objects for composition, capabilities, inspection, edits, asset reads,
-and DOCX saves.
+`AgentDocument.create()` starts a blank DOCX. `tools()` returns eight portable
+tool objects for composition, capabilities, inspection, edits, text projection,
+projection patches, asset reads, and DOCX saves.
+
+## Text projection
+
+`project` renders a story as deterministic text — plain paragraphs, structural
+markdown, or the outline — with an anchor map that carries every line back to
+its block, its runs, and their wire offsets. `patch` takes line-range hunks or
+a unified diff written against that projection and compiles them into the same
+intents an editor emits, so a bulk rewrite costs one window and one call.
+
+```ts
+const projection = agentDoc.project({ mode: "md" });
+await agentDoc.patch({
+  revision: projection.revision,
+  mode: "md",
+  edits: [{ startLine: 4, endLine: 4, newText: "Adopt the managed platform." }],
+});
+```
+
+Agents read the text and never see a wire offset: the anchor map is built in
+the same pass as the text and owns that translation. Projecting never changes
+the document. The projection contract, the atom placeholders, and the patch
+rules live in the skill's `references/interface.md`.
 
 ## Progressive inspection
 

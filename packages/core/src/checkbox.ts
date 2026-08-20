@@ -25,7 +25,12 @@ export function checkboxStateElement(
   run: Run | undefined,
   t: XmlElement | null | undefined,
 ): XmlElement | undefined {
-  if (!run) return undefined;
+  // The editor's caret-restore paths (history undo, encoded-caret decode,
+  // keyboard focus moves) mint an UNBOUND placeholder run ({}) that
+  // positionCaret rebinds on the next paint — but a keystroke can land
+  // first (fuzz G16: undo of type-over-selection, then typing, threw here).
+  // A placeholder holds no content and cannot be a checkbox glyph.
+  if (!run?.content) return undefined;
   for (const c of run.content) {
     if (t) {
       if (c.kind === "text" && c.srcT === t && c.checkbox) return c.checkbox;

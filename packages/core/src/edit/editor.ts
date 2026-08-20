@@ -1,16 +1,18 @@
 import { DocxDocument } from "../docx.js";
 import { Run, type Block, type RunContent } from "../model.js";
-import { XmlElement, attr, cloneXml, localName } from "../xml.js";
+import { XmlElement, attr, cloneXml, localName, serializeXml } from "../xml.js";
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
 import { DrawingBinding, GripBinding, ImageBinding, RenderHandle, TextBinding } from "../render/dom.js";
 import { TextItem } from "../layout/types.js";
 import { selectionToSegments } from "./selection.js";
-import { type EncodedCaret } from "./ids.js";
+import { runWireLength, wireOffsetOf, wireOffsetOfSeparator, type EncodedCaret } from "./ids.js";
 import { EditHistory } from "./history.js";
-import { advanceCell, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
+import { advanceCell, applyTableOp, isLastCellOfTable, cellRangeBetween, moveDrawingTo, moveTableTo, resizeDrawing, resizeTableColumn, resizeTableRow, setTableTextWrapping } from "./tables.js";
 import { pxToTwips } from "../units.js";
-import { listTypeAt, setListLevel, setListType } from "./lists.js";
+import { listLevelAt, listTypeAt, setListLevel, setListType } from "./lists.js";
 import { insertBreakAt } from "./sections.js";
+import { isApplePlatform, matchShortcut, type EditorCommand, type HostCommand } from "./shortcuts.js";
+import { documentOperationBody, operationBody, type RegisteredOperationBody } from "./registry.js";
 import { deleteMath, isLinearSafe, linearizeMath, mathLinearOf, moveMath, parseMathLinear, setMathLinear } from "./math.js";
 import {
   drawingFillColor,
@@ -21,15 +23,17 @@ import {
   isDrawingWordArt,
   setDrawingFill,
   setDrawingLineStyle,
+  setDrawingTextFit,
   setDrawingWordArtText,
   type DrawingTool,
 } from "./drawings.js";
 import { ensureParagraphAfterTerminalBlock, exactLineHeightAt, firstTextOf, insertImageAt, lastTextOf, mergeParagraphBackward, paragraphOf, siblingParagraph, topLevelBlockOf } from "./blocks.js";
-import { SelectionSegment, selectionTextLogical } from "./commands.js";
+import { applyRunFormat, SelectionSegment, selectionTextLogical } from "./commands.js";
 import {
   adjustFloatingPosition,
   drawingRotation,
   imageAltText,
+  imageCrop,
   isFloatingDrawing,
   replaceImageBlip,
   setDrawingOrder,
@@ -37,9 +41,11 @@ import {
   setFloatingPagePosition,
   setFloatingPosition,
   setImageAltText,
+  setImageCrop,
   setImageWrap,
+  type ImageCrop,
 } from "./images.js";
-import { deleteWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
+import { deleteWatermark, headerWatermarks, removeWatermark, setWordArtOpacity, setWordArtRotation, setWordArtText, wordArtOpacity, wordArtRotation, wordArtText } from "./watermark.js";
 import { requestColorDialog, requestLineStyleDialog, requestNumberPairDialog, requestTextInputDialog } from "./dialog.js";
 import { setModel3DRotation, type Model3DRotation } from "./objects.js";
 import {
@@ -74,11 +80,15 @@ export type SelectedObjectCommand =
   | "rotate"
   | "size"
   | "position"
+  | "crop"
   | "wrapInline"
   | "wrapSquare"
   | "wrapTopAndBottom"
   | "wrapFront"
   | "wrapBehind"
+  | "autofitNone"
+  | "autofitResizeShape"
+  | "autofitShrinkText"
   | "bringForward"
   | "sendBackward"
   | "reset3d"
@@ -109,8 +119,12 @@ export const SELECTED_OBJECT_COMMANDS: readonly SelectedObjectCommand[] = [
   "wrapTopAndBottom",
   "wrapFront",
   "wrapBehind",
+  "autofitNone",
+  "autofitResizeShape",
+  "autofitShrinkText",
   "size",
   "position",
+  "crop",
   "rotate",
   "bringForward",
   "sendBackward",
@@ -142,7 +156,15 @@ export function availableObjectCommands(
   if (kind === "line") commands.push("lineStyle");
   if (kind === "image" || kind === "model3d") commands.push("altText");
   commands.push("wrapInline", "wrapSquare", "wrapTopAndBottom", "wrapFront", "wrapBehind");
+  // bodyPr autofit is a property of a SHAPE's text body. Word offers it for
+  // every shape, whether or not one holds text yet; a picture, chart, SmartArt
+  // frame or connector has no text body to write it into.
+  if (kind === "shape") commands.push("autofitNone", "autofitResizeShape", "autofitShrinkText");
   commands.push("size", "position");
+  // Cropping selects part of a BITMAP. A shape, line, chart or SmartArt frame
+  // has no bitmap behind it, and a 3D model is re-projected rather than
+  // clipped, so none of them carry an a:srcRect to write.
+  if (kind === "image") commands.push("crop");
   // Rotation only exists for shape-geometry objects; SmartArt/chart graphic
   // frames have no rotatable xfrm, so rotate is not offered for them.
   if (kind === "shape" || kind === "line" || kind === "image" || kind === "model3d") commands.push("rotate");
@@ -156,13 +178,15 @@ export function availableObjectCommands(
 }
 import { graphemeStep } from "./grapheme.js";
 import { EditProvenance, defaultProvenance } from "./provenance.js";
-import { applyInsertText, applySplitParagraph, applyDeleteRange, MutationCtx } from "./mutations.js";
+import { applyDeleteSeparator, applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, MutationCtx } from "./mutations.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { resolveParagraphStyleChain } from "../parse/styles.js";
 import {
   clipboardBlocksHtml,
   htmlClipboardBlocks,
+  inlinePasteSpans,
   selectionClipboardBlocks,
+  type InlinePasteSpan,
 } from "./clipboard.js";
 import {
   insertSuggestedText,
@@ -176,8 +200,31 @@ import {
   acceptAllRevisions,
   rejectAllRevisions,
   RevisionMeta,
+  RevisionKind,
   RevisionRef,
 } from "./suggest.js";
+
+/**
+ * What the accept/reject card calls each kind of tracked change, and the ink
+ * it wears. Insertion green and deletion red match the markup renderer, which
+ * underlines and strikes those. A FORMATTING change has no ink there — the
+ * renderer paints it as the new formatting, the way Word does — so its card
+ * takes the editor's accent rather than claim text was added or removed, and
+ * names WHAT was reformatted, which is the only clue the reviewer gets.
+ */
+const REVISION_LABEL: Record<RevisionKind, { text: string; ink: string }> = {
+  insertion: { text: "Suggested insertion", ink: "#188038" },
+  markInsertion: { text: "Suggested paragraph split", ink: "#188038" },
+  deletion: { text: "Suggested deletion", ink: "#D93025" },
+  markDeletion: { text: "Suggested paragraph merge", ink: "#D93025" },
+  rowInsertion: { text: "Suggested row insertion", ink: "#188038" },
+  rowDeletion: { text: "Suggested row deletion", ink: "#D93025" },
+  runFormat: { text: "Suggested text formatting", ink: "#1a73e8" },
+  paragraphFormat: { text: "Suggested paragraph formatting", ink: "#1a73e8" },
+  tableFormat: { text: "Suggested table formatting", ink: "#1a73e8" },
+  rowFormat: { text: "Suggested row formatting", ink: "#1a73e8" },
+  cellFormat: { text: "Suggested cell formatting", ink: "#1a73e8" },
+};
 
 function drawingCursor(kind: "pen" | "highlighter" | "eraser" | "lasso"): string {
   const svg = {
@@ -221,10 +268,10 @@ export interface EditorHost {
   onFormatShortcut?: (kind: "bold" | "italic" | "underline") => void;
   /** Cmd/Ctrl+Alt+1..6 / 0 handler: apply Heading N / Normal (null). */
   onStyleShortcut?: (styleId: string | null) => void;
-  /** Text-context and keyboard commands implemented by the public editor API. */
-  onTextCommand?: (
-    command: "link" | "comment" | "alignLeft" | "alignCenter" | "alignRight" | "justify" | "bullet" | "number",
-  ) => void;
+  /** Text-context and keyboard commands implemented by the public editor API.
+   * The host runs each one through the same call the toolbar button makes, so
+   * a shortcut and its button emit the same collaboration intent. */
+  onTextCommand?: (command: HostCommand) => void;
   /**
    * Collaboration hook (plan doc 06): called after a local edit that maps to a
    * replicable intent, with the intent's kind, its position(s) as stable ids
@@ -242,6 +289,16 @@ export interface EditorHost {
    * honest no-op in collab, never a local mutation.
    */
   onCollabUndo?: () => void;
+  /**
+   * Single-process session marker (LocalDocumentSession). The session emits
+   * intents (onIntent is set, stable ids are on) but has NO peers, so the
+   * fork-the-room argument behind the collab undo gate does not apply: the
+   * local history stack is authoritative and undo/redo replay it. The hook
+   * fires after each applied undo/redo so the session can bump its revision
+   * (its agent-facing caches key on it). A REAL room must leave this unset —
+   * there undo routes to onCollabUndo (or declines).
+   */
+  onLocalHistory?: () => void;
   /** Collaboration presence hook: called when the local caret moves, with its
    * stable-id address (null when the caret leaves id-tracked content). The
    * host forwards it to the collab connection's setPresence so remote
@@ -260,16 +317,22 @@ export interface EditorHost {
 /** A local edit expressed as a replicable intent, emitted by the editor for
  * the collab layer. Positions are stable ids; the connection adds wire
  * bookkeeping (clientId/clientSeq/base). Mirrors the @wordinweb/collab intent
- * shapes without a dependency on that package. */
+ * shapes without a dependency on that package — except for the registered
+ * operations, whose single declaration in registry.ts feeds BOTH this type
+ * and the collab intent union, so there is nothing left to mirror. */
 export type EditorIntent =
+  | RegisteredOperationBody
   | { kind: "insertText"; at: { blockId: number; runId: number; offset: number }; text: string; suggest?: { author: string; date: string } }
+  | { kind: "insertSeparator"; at: { blockId: number; runId: number; offset: number }; separator: "br" | "tab"; suggest?: { author: string; date: string } }
+  | { kind: "deleteSeparator"; at: { blockId: number; runId: number; offset: number }; suggest?: { author: string; date: string } }
   | { kind: "deleteText"; blockId: number; runId: number; start: number; end: number }
   | { kind: "splitParagraph"; at: { blockId: number; runId: number; offset: number }; newBlockId: number; newRunId: number; suggest?: { author: string; date: string } }
   | { kind: "formatRun"; blockId: number; runId: number; patch: Record<string, unknown> }
   | { kind: "formatRange"; blockId: number; runId: number; start: number; end: number; patch: Record<string, unknown>; beforeId?: number; middleId: number; afterId?: number }
   | { kind: "formatParagraph"; blockId: number; align?: "left" | "center" | "right" | "justify"; styleId?: string | null }
-  | { kind: "setListType"; blockId: number; listKind: "bullet" | "number" | null }
   | { kind: "mergeParagraph"; blockId: number }
+  | { kind: "setListLevel"; blockId: number; delta: 1 | -1 }
+  | { kind: "pasteBlocks"; afterBlockId: number; blocksXml: string; nodeIds: number[] }
   | {
       kind: "suggestRevision";
       ranges?: { blockId: number; runId: number; start: number; end: number }[];
@@ -278,8 +341,8 @@ export type EditorIntent =
     }
   | { kind: "acceptRevision"; index: number }
   | { kind: "rejectRevision"; index: number }
-  | { kind: "acceptAllRevisions" }
-  | { kind: "rejectAllRevisions" }
+  | { kind: "acceptAllRevisions"; author?: string }
+  | { kind: "rejectAllRevisions"; author?: string }
   | { kind: "setImageWrap"; runId: number; objectIndex?: number; mode: "inline" | "square" | "topAndBottom" | "none" | "behind" }
   | { kind: "setFloatingPagePosition"; runId: number; objectIndex?: number; xPx: number; yPx: number }
   | { kind: "resizeDrawing"; runId: number; objectIndex?: number; widthPx: number; heightPx: number }
@@ -293,13 +356,12 @@ export type EditorIntent =
   | { kind: "setDrawingWordArtText"; runId: number; objectIndex?: number; text: string }
   | { kind: "insertBreak"; runId: number; breakKind: "page" | "column"; nodeIds: number[] }
   | { kind: "resizeTableColumn"; cellParagraphId: number; boundary: number; deltaPx: number; renderedWidths?: number[] }
-  | { kind: "resizeTableRow"; cellParagraphId: number; rowIdx: number; heightPx: number }
   | { kind: "moveTable"; cellParagraphId: number; xPx: number; yPx: number; preservePageStart: boolean; pageDelta: number }
-  | { kind: "tableOp"; cellParagraphId: number; op: { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
+  | { kind: "tableOp"; cellParagraphId: number; op: "deleteTable" | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number } }
   | { kind: "removeDrawing"; runId: number; objectIndex?: number }
-  | { kind: "setMathLinear"; blockId: number; mathText: string }
-  | { kind: "deleteMath"; blockId: number }
-  | { kind: "moveMath"; blockId: number; at: { blockId: number; runId: number; offset: number }; nodeIds: number[] }
+  | { kind: "setMathLinear"; blockId: number; mathIndex: number; mathText: string }
+  | { kind: "deleteMath"; blockId: number; mathIndex: number }
+  | { kind: "moveMath"; blockId: number; mathIndex: number; at: { blockId: number; runId: number; offset: number }; nodeIds: number[] }
   | { kind: "ensureHeaderFooter"; hfKind: "header" | "footer"; nodeIds: number[] };
 
 interface Caret {
@@ -329,6 +391,26 @@ function deepTextNode(el: HTMLElement): Node | null {
   return n;
 }
 
+/** How many nodes in a subtree carry a stable id (p/tbl/r) — the number of
+ * carried ids a node-creating intent has to allocate. Written as a reducer so
+ * a block LIST folds in one call. Must stay in step with the apply path's
+ * walk, which is what consumes the ids. */
+function trackedNodeCount(total: number, el: XmlElement): number {
+  const ln = localName(el.name);
+  return el.children.reduce(trackedNodeCount, total + (ln === "p" || ln === "tbl" || ln === "r" ? 1 : 0));
+}
+
+/** First w:p under `el` in document order (the wire address a tableOp needs:
+ * a paragraph inside the target table's first cell). */
+function firstParagraphIn(el: XmlElement): XmlElement | null {
+  if (localName(el.name) === "p") return el;
+  for (const c of el.children) {
+    const p = firstParagraphIn(c);
+    if (p) return p;
+  }
+  return null;
+}
+
 function textElements(el: XmlElement): XmlElement[] {
   const out: XmlElement[] = [];
   const walk = (node: XmlElement): void => {
@@ -339,16 +421,12 @@ function textElements(el: XmlElement): XmlElement[] {
   return out;
 }
 
-/** The first m:oMath in document order under `el`. Must stay identical to the
- * collab apply's helper of the same name: it is what decides whether an
- * equation edit is addressable on the wire (see mathIntentBlockId). */
-function firstMathIn(el: XmlElement): XmlElement | null {
-  if (localName(el.name) === "oMath") return el;
-  for (const c of el.children) {
-    const found = firstMathIn(c);
-    if (found) return found;
-  }
-  return null;
+/** Every m:oMath under `el`, in document order. Must stay identical to the
+ * collab apply's helper of the same name: the position in this list is how an
+ * equation edit names its target on the wire (see mathIntentTarget). */
+function mathsIn(el: XmlElement): XmlElement[] {
+  if (localName(el.name) === "oMath") return [el];
+  return el.children.flatMap(mathsIn);
 }
 
 function clearListParagraphFormatting(doc: DocxDocument, paragraph: XmlElement): boolean {
@@ -486,12 +564,25 @@ export class DocxEditor {
   private imeOverlay: HTMLSpanElement | null = null;
   private composing = false;
 
+  /** Word's pending format: Cmd+B/I/U at a COLLAPSED caret queues a toggle
+   * that applies to the next typed text. Members are toggle keys (pressing
+   * the same shortcut twice cancels). Consumed by insertText; cleared by any
+   * other gesture (caret movement, clicks, deletes — Word's behavior). */
+  private pendingFormat: Set<"bold" | "italic" | "underline"> | null = null;
+
   /** Suggesting mode: edits record as OOXML revisions (w:ins/w:del) instead of
    * mutating text directly. Toggled via setSuggesting; forces markup view so a
    * pending suggestion shows live (underlined/struck) as you type. */
   private suggesting = false;
   private revisionAuthor = "You";
-  /** Revision view active before suggesting mode forced markup; restored on off. */
+  /**
+   * The view the reader chose, held from the moment suggesting first forces
+   * markup until the restore is actually made. It survives a suggesting
+   * session that ends with changes still pending, because that restore is
+   * only deferred — re-reading the view at the start of the next session
+   * would capture the forced "markup" and owe the reader their own view back
+   * forever.
+   */
   private viewBeforeSuggesting: "final" | "markup" | null = null;
   /** Accept/reject popover for a clicked suggestion. */
   private suggestionPopover: HTMLElement | null = null;
@@ -682,6 +773,45 @@ export class DocxEditor {
     return false;
   }
 
+  /**
+   * The effective run formatting AT THE CARET, as a zero-width segment.
+   *
+   * A collapsed caret covers no text, so it produces no selection segments and
+   * the toolbar had nothing to summarize: click into a paragraph and the font
+   * box, the size box and every toggle went blank until you selected a range.
+   * Word fills them the moment the caret lands, because what they report is
+   * the formatting the next typed character would take.
+   *
+   * The props come from the LAID-OUT item rather than the run's own rPr, so
+   * what the boxes show is the font actually in force — resolved through the
+   * style chain and docDefaults — not just whatever direct formatting the run
+   * happens to carry (usually none, which is why a blank document could never
+   * have named its own font).
+   *
+   * A caret at a span boundary takes the PRECEDING span's formatting, which is
+   * both Word's rule and the one the bindings scan gives for free: bindings
+   * are in paint order, so the span ENDING at the offset is met first.
+   */
+  caretFormatSegment(): SelectionSegment | null {
+    const caret = this.caret;
+    const handle = this.host.getHandle();
+    if (!caret || !handle) return null;
+    for (const binding of handle.bindings) {
+      const src = binding.item.src;
+      if (!src?.t || src.t !== caret.t) continue;
+      const start = src.offset;
+      if (caret.offset < start || caret.offset > start + binding.item.text.length) continue;
+      return {
+        run: src.run,
+        t: src.t,
+        start: caret.offset,
+        end: caret.offset,
+        props: binding.item.props,
+      };
+    }
+    return null;
+  }
+
   /** Segments covered by the owned selection, in document paint order. */
   getSelectionSegments(): SelectionSegment[] {
     const sel = this.selection;
@@ -754,6 +884,16 @@ export class DocxEditor {
     if (this.selection) return this.selection.anchor;
     if (this.caret) return { t: this.caret.t, offset: this.caret.offset };
     return null;
+  }
+
+  /** The owned selection's anchor and focus in paint order (a keyboard
+   * selection extended leftward has its focus before its anchor). Falls back
+   * to anchor-then-focus when either point cannot be ranked (unpainted). */
+  private orderedSelectionPoints(): [SelPoint, SelPoint] {
+    const sel = this.selection!;
+    const a = this.pointIndex(sel.anchor);
+    const f = this.pointIndex(sel.focus);
+    return a !== null && f !== null && f < a ? [sel.focus, sel.anchor] : [sel.anchor, sel.focus];
   }
 
   /** Step a point by one character across item boundaries in paint order. */
@@ -960,6 +1100,20 @@ export class DocxEditor {
       anchor: { t: first.t, offset: first.start },
       focus: { t: last.t, offset: last.end },
     };
+    // Rebind the (hidden) caret into the post-edit tree. A format over a
+    // selection SPLITS the caret's run (applyRunFormat), detaching the old
+    // caret element — and every later history checkpoint records the caret
+    // as a structural path, so a stale element made checkpoints fall back to
+    // a path from the PRE-split tree shape. Undo then resolved that path to
+    // a different element (an rPr), and the next Enter split the paragraph
+    // around it, stranding a properties-only w:r (conformance G17, fuzz
+    // seeds 6+7). The formatted range's start is the caret's honest home.
+    const binding = this.host.getHandle()?.bindings.find((b) => b.item.src?.t === first.t);
+    this.caret = {
+      t: first.t,
+      run: binding?.item.src?.run ?? this.caret?.run ?? ({} as Caret["run"]),
+      offset: first.start,
+    };
     this.paintSelection();
     this.notifySelection();
   }
@@ -1021,7 +1175,9 @@ export class DocxEditor {
       const b = bindings[i];
       const item = b.item;
       const src = item.src;
-      if (!src?.t) continue;
+      // A line the text box hides has no glyphs on screen; painting its rect
+      // would put a selection block below the box's bottom edge.
+      if (!src?.t || item.hidden) continue;
       let x0 = item.x;
       let x1 = item.x + item.width;
       const surface = b.el.parentElement;
@@ -1424,6 +1580,28 @@ export class DocxEditor {
       reselect();
       return true;
     }
+    if (command.startsWith("autofit")) {
+      const mode = command === "autofitResizeShape" ? "resizeShape"
+        : command === "autofitShrinkText" ? "shrinkText" : "none";
+      this.host.history?.checkpoint();
+      // The scale is left off: it is a:normAutofit's cache and Word neither
+      // computes nor applies one (probe-shapefit).
+      if (!setDrawingTextFit(this.host.doc, src, mode)) return false;
+      if (collabTarget !== null) this.host.onIntent?.({ kind: "setDrawingTextFit", ...collabTarget, mode });
+      // resizeShape changes the frame height, which reflows wrapped body text.
+      this.host.rerender(undefined, "global");
+      reselect();
+      return true;
+    }
+    if (command === "crop") {
+      // A toggle: pressing Crop again leaves the mode with whatever the
+      // handle drags already committed.
+      if (this.cropSession) {
+        this.exitCropMode();
+        return true;
+      }
+      return this.enterCropMode();
+    }
     if (command === "size") {
       void requestNumberPairDialog(this.host.container, {
         title: "Exact size",
@@ -1469,11 +1647,8 @@ export class DocxEditor {
             setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
           }
         }
-        if (setFloatingPagePosition(this.host.doc, src, next.first, next.second)) {
-          if (collabTarget !== null) {
-            this.host.onIntent?.({ kind: "setFloatingPagePosition", ...collabTarget, xPx: next.first, yPx: next.second });
-          }
-          this.host.rerender();
+        const r = el.getBoundingClientRect();
+        if (this.placeFloatingOnPage(src, collabTarget, next.first, next.second, { x: r.left, y: r.top })) {
           reselect();
         }
       });
@@ -1584,10 +1759,17 @@ export class DocxEditor {
     }
     if (command === "reset3d") {
       if (context.kind !== "model3d") return false;
-      // 3D rotation has no wire form; honest no-op in collab.
-      if (inCollab) return false;
+      const rotation = { x: 0, y: 0, z: 0 };
       this.host.history?.checkpoint();
-      if (!setModel3DRotation(this.host.doc, src, { x: 0, y: 0, z: 0 })) return false;
+      if (!setModel3DRotation(this.host.doc, src, rotation)) return false;
+      if (collabTarget !== null) {
+        this.host.onIntent!(
+          operationBody("setModel3DRotation", collabTarget.runId, {
+            ...(collabTarget.objectIndex !== undefined ? { objectIndex: collabTarget.objectIndex } : {}),
+            rotation,
+          }),
+        );
+      }
       this.host.rerender(undefined, "local");
       reselect();
       return true;
@@ -1672,10 +1854,7 @@ export class DocxEditor {
           setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
         }
       }
-      changed = setFloatingPagePosition(this.host.doc, src, targetX, targetY);
-      if (changed && collabTarget !== null) {
-        this.host.onIntent?.({ kind: "setFloatingPagePosition", ...collabTarget, xPx: targetX, yPx: targetY });
-      }
+      changed = this.placeFloatingOnPage(src, collabTarget, targetX, targetY, near);
     } else if (action === "rotateLeft" || action === "rotateRight") {
       const degrees = drawingRotation(src) + (action === "rotateRight" ? 90 : -90);
       changed = setDrawingRotation(this.host.doc, src, degrees);
@@ -1760,26 +1939,40 @@ export class DocxEditor {
 
   /** Insert clipboard text at the caret. Newlines split into paragraph breaks;
    * both text and the new marks route through the suggesting-aware cores so
-   * paste in suggesting mode records w:ins. One checkpoint + one commit. */
+   * paste in suggesting mode records w:ins. One checkpoint + one commit —
+   * except in a room, where each line is its own wire edit (see below). */
   private pasteText(text: string): void {
     const hadSelection = this.hasSelection();
+    const chunks = text.replace(/\r\n?/g, "\n").split("\n");
+    if (this.host.onIntent && this.host.doc.stableIds) {
+      // Collab: plain-text paste reached the document through the NON-emitting
+      // cores below (insertPlainTextParagraphs splices the paragraphs by hand;
+      // insertTextCore is the core insert without its intent), so every
+      // Cmd+V of plain text forked the room. It now runs on the same emitting
+      // primitives typing and Enter use. That is one commit per line rather
+      // than one for the paste — the cost of a wire edit per created
+      // paragraph, and the same shape as click-and-type's collab path.
+      // SUGGESTING rides the same loop: insertText records the tracked w:ins
+      // exactly like typing, and splitParagraphNoHistory emits the tracked
+      // paragraph split — the multiline expansion handles the paragraph parts.
+      // (Suggesting paste used to be refused outright in a session.)
+      this.host.history?.checkpoint();
+      if (hadSelection) this.removeSelectedText();
+      if (!this.caret) return;
+      for (let i = 0; i < chunks.length; i++) {
+        if (i > 0) this.splitParagraphNoHistory();
+        if (!this.caret) break;
+        if (chunks[i]) this.insertText(chunks[i]);
+      }
+      return;
+    }
     this.host.history?.checkpoint();
     if (hadSelection) this.removeSelectedText();
     if (!this.caret) return;
-    const chunks = text.replace(/\r\n?/g, "\n").split("\n");
     const large = text.length > 50_000 || chunks.length > 200;
     if (!this.suggesting && chunks.length > 1) {
       this.insertPlainTextParagraphs(chunks);
       this.commit(false, large ? "background" : "global");
-      return;
-    }
-    if (this.suggesting && this.host.onIntent) {
-      // Collab gate (narrow): paste in suggesting mode routes through
-      // insertTextCore/splitParagraphCore DIRECTLY (no emission), so in a
-      // live session it would mutate locally with no peer ever seeing it —
-      // refused per the standing audit rule (no mutation branch without an
-      // emission). Suggesting TYPING emits fine; suggesting PASTE is the
-      // tracked follow-on. Local mode is unaffected.
       return;
     }
     for (let i = 0; i < chunks.length; i++) {
@@ -1857,24 +2050,235 @@ export class DocxEditor {
     this.caret = { t: last.text, run: caret.run, offset: chunks[chunks.length - 1].length, bias: "end" };
   }
 
+  /** The stable id of the paragraph a paste would split, read BEFORE the paste
+   * touches anything so an unaddressable target can decline cleanly. */
+  private pasteAnchorId(): number | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids) return null;
+    const t = this.caret?.t ?? this.getSelectionSegments().find((seg) => seg.t)?.t;
+    const paragraph = t ? paragraphOf(this.host.doc, t) : null;
+    return (paragraph ? ids.idOf(paragraph) : undefined) ?? null;
+  }
+
+  /**
+   * Paste rich blocks at the caret with Word's FRAGMENT semantics: a leading
+   * simple-text paragraph fragment joins the caret paragraph inline, middle
+   * blocks stand alone between the split halves, and a trailing fragment
+   * joins the moved tail — so a one-paragraph paste lands entirely inline
+   * (no split, no stranded empty paragraph), which is what Word does.
+   * Fragments an inline insert cannot express (tables, breaks, drawings)
+   * keep the block-level splice.
+   *
+   * Collab: rich paste was a LOCAL-ONLY mutation — the whole fragment landed
+   * on the pasting replica and nothing rode the wire, so one paste forked the
+   * room permanently. Every part of the paste now emits: the delete of any
+   * replaced selection (removeSelectedText), insertText/formatRun/formatRange
+   * for the inline fragments (see insertInlineSpans), the split, and a
+   * pasteBlocks carrying the same XML this replica just spliced plus carried
+   * ids for every p/tbl/r in it, so every replica ends with the same tree AND
+   * the same id table. Honest no-op: when the target paragraph has no stable
+   * id, the caret is not id-addressable, or the split does not happen, the
+   * paste does nothing rather than mutating this replica alone.
+   */
   private pasteBlocks(blocks: XmlElement[], background: boolean): void {
+    const doc = this.host.doc;
+    const ids = doc.stableIds;
+    const inCollab = !!(this.host.onIntent && ids);
+    if (inCollab && this.pasteAnchorId() === null) return;
     this.host.history?.checkpoint();
     if (this.hasSelection()) this.removeSelectedText();
     if (!this.caret) return;
-    this.splitParagraphCore();
-    if (!this.caret) return;
-    const tail = paragraphOf(this.host.doc, this.caret.t);
-    const parent = tail ? this.host.doc.findParentOf(tail) : undefined;
+
+    const destProps = this.caret.run?.props ?? {};
+    const head = inlinePasteSpans(blocks[0], destProps);
+    if (blocks.length === 1 && head) {
+      // Single-paragraph fragment: entirely inline at the caret.
+      this.insertInlineSpans(head);
+      this.commit(false, background ? "background" : "global");
+      return;
+    }
+    const tailSpans = blocks.length > 1 ? inlinePasteSpans(blocks[blocks.length - 1], destProps) : null;
+    const middles = blocks.slice(head ? 1 : 0, blocks.length - (tailSpans ? 1 : 0));
+
+    const splitPos = inCollab ? this.encodeCaretForIntent() : null;
+    if (inCollab && !splitPos) return;
+    const headT = this.caret.t;
+    const headOffset = this.caret.offset;
+    const split = this.splitParagraphCore();
+    if (!this.caret || (inCollab && !split)) return;
+    if (ids && split && splitPos && this.host.onIntent) {
+      // Carried ids for the new paragraph and its moved-tail run, exactly as
+      // Enter's emitting split does — the allocation MUST come from the
+      // connection's disjoint block, or two clients mint the same id.
+      const alloc = this.host.allocIds?.(2) ?? [];
+      const newBlockId = ids.assign(split.after, alloc[0]);
+      const newRunEl = split.after.children.find((c) => localName(c.name) === "r");
+      this.host.onIntent({
+        kind: "splitParagraph",
+        at: splitPos,
+        newBlockId,
+        newRunId: newRunEl ? ids.assign(newRunEl, alloc[1]) : newBlockId,
+      });
+    }
+    if (split && head) {
+      // First fragment: its runs join the caret paragraph at the split point.
+      this.caret = { t: headT, run: this.caret.run, offset: headOffset, bias: "end" };
+      this.insertInlineSpans(head);
+    }
+    const tail = split ? split.after : paragraphOf(doc, this.caret.t);
+    const parent = tail ? doc.findParentOf(tail) : undefined;
     if (!tail || !parent) return;
-    const copies = blocks.map(cloneXml);
-    parent.children.splice(parent.children.indexOf(tail), 0, ...copies);
-    for (let i = copies.length - 1; i >= 0; i--) {
-      const t = lastTextOf(copies[i]);
-      if (!t) continue;
-      this.caret = { t, run: this.caret.run, offset: t.text.length, bias: "end" };
-      break;
+    const afterBlockId = ids && split ? ids.idOf(split.before) : undefined;
+    if (inCollab && afterBlockId === undefined) return;
+    const spliced = split ? middles : blocks;
+    const copies = spliced.map(cloneXml);
+    if (copies.length) {
+      const tracked = inCollab ? this.trackedNodeSet() : null;
+      parent.children.splice(parent.children.indexOf(tail), 0, ...copies);
+      if (tracked && afterBlockId !== undefined && this.host.onIntent) {
+        const nodeIds = this.host.allocIds?.(copies.reduce(trackedNodeCount, 0)) ?? [];
+        this.assignFreshTrackedIds(tracked, nodeIds);
+        this.host.onIntent({
+          kind: "pasteBlocks",
+          afterBlockId,
+          blocksXml: copies.map((block) => serializeXml(block)).join(""),
+          nodeIds,
+        });
+      }
+    }
+    if (split && tailSpans) {
+      // Last fragment: its runs join the tail the split moved down.
+      const tailT = firstTextOf(split.after);
+      if (tailT) {
+        this.caret = { t: tailT, run: this.caret.run, offset: 0 };
+        this.insertInlineSpans(tailSpans);
+      }
+    } else {
+      for (let i = copies.length - 1; i >= 0; i--) {
+        const t = lastTextOf(copies[i]);
+        if (!t) continue;
+        this.caret = { t, run: this.caret.run, offset: t.text.length, bias: "end" };
+        break;
+      }
     }
     this.commit(false, background ? "background" : "global");
+  }
+
+  /**
+   * Insert simple-text spans inline at the caret, each span carrying the run
+   * patch that reproduces its source character formatting (null = the
+   * destination formatting already matches). One text splice, then one
+   * run-format per formatted span — applied through the SAME core mutations
+   * the collab apply path runs (applyInsertText, applyRunFormat) and emitted
+   * as the matching insertText / formatRun / formatRange intents with carried
+   * piece ids, so a replica replaying the emission converges byte-for-byte
+   * with this one. Caller owns history and commit.
+   */
+  private insertInlineSpans(spans: InlinePasteSpan[]): void {
+    const caret = this.caret;
+    if (!caret || checkboxStateElement(caret.run, caret.t)) return;
+    const whole = spans.map((span) => span.text).join("");
+    if (!whole) return;
+    const doc = this.host.doc;
+    const ids = doc.stableIds;
+    const inCollab = !!(this.host.onIntent && ids);
+    const at = inCollab ? this.encodeCaretForIntent() : null;
+    if (inCollab && !at) return; // honest no-op: caret not id-addressable
+    const insT = caret.t;
+    const insStart = caret.offset;
+    this.insertTextCore(whole);
+    if (at) this.host.onIntent?.({ kind: "insertText", at, text: whole });
+    // Chain the formatted spans through the run splits applyRunFormat makes:
+    // `cur` is the (w:t, local offset) where the REMAINING inserted text
+    // begins. Every patch was computed against the destination formatting the
+    // whole insertion inherited, so unformatted spans just stay in place.
+    let cur = { t: insT, offset: insStart };
+    for (const span of spans) {
+      if (!span.text) continue;
+      const end = cur.offset + span.text.length;
+      if (!span.patch) {
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const rEl = doc.findParentOf(cur.t);
+      const pEl = rEl ? doc.findParentOf(rEl) : undefined;
+      if (!rEl || localName(rEl.name) !== "r" || !pEl || localName(pEl.name) !== "p") {
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const runLen = runWireLength(rEl);
+      const wireStart = wireOffsetOf(rEl, cur.t, cur.offset);
+      const blockId = ids?.idOf(pEl);
+      const runId = ids?.idOf(rEl);
+      if (wireStart === null || (inCollab && (blockId === undefined || runId === undefined))) {
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const wireEnd = wireStart + span.text.length;
+      const patch = span.patch as Record<string, unknown>;
+      const seg: SelectionSegment = {
+        run: { type: "run", props: {}, content: [], src: rEl, srcParent: pEl } as Run,
+        t: cur.t,
+        start: cur.offset,
+        end,
+        props: {},
+      };
+      const soleT = rEl.children.filter((c) => localName(c.name) === "t").length === 1;
+      if (wireStart === 0 && wireEnd === runLen && soleT) {
+        // The span covers the whole run: format it in place (no split, run id
+        // preserved) — the same decision applyRunFormat takes, mirrored so
+        // the emission matches the local mutation exactly.
+        applyRunFormat(doc, [seg], span.patch);
+        if (inCollab) this.host.onIntent?.({ kind: "formatRun", blockId: blockId!, runId: runId!, patch });
+        cur = { t: cur.t, offset: end };
+        continue;
+      }
+      const hasBefore = wireStart > 0;
+      const hasAfter = wireEnd < runLen;
+      const alloc = inCollab ? this.host.allocIds?.((hasBefore ? 1 : 0) + 1 + (hasAfter ? 1 : 0)) ?? [] : [];
+      let k = 0;
+      const beforeId = hasBefore ? alloc[k++] : undefined;
+      const middleId = alloc[k++];
+      const afterId = hasAfter ? alloc[k++] : undefined;
+      const formatted = applyRunFormat(doc, [seg], span.patch);
+      const middleT = formatted[0]?.t;
+      const middleRun = middleT ? doc.findParentOf(middleT) : undefined;
+      const container = middleRun ? doc.findParentOf(middleRun) : undefined;
+      if (!middleT || !middleRun || !container) break; // text landed; stop formatting
+      const mIdx = container.children.indexOf(middleRun);
+      if (inCollab && ids && middleId !== undefined) {
+        // Re-key the local pieces to the carried ids — the same walk the
+        // canonical apply performs, so every replica addresses them alike.
+        const isRun = (el: XmlElement | undefined): boolean => !!el && localName(el.name) === "r";
+        ids.reassign(middleRun, middleId);
+        if (hasBefore && beforeId !== undefined && isRun(container.children[mIdx - 1])) {
+          ids.reassign(container.children[mIdx - 1], beforeId);
+        }
+        if (hasAfter && afterId !== undefined && isRun(container.children[mIdx + 1])) {
+          ids.reassign(container.children[mIdx + 1], afterId);
+        }
+        this.host.onIntent?.({
+          kind: "formatRange",
+          blockId: blockId!,
+          runId: runId!,
+          start: wireStart,
+          end: wireEnd,
+          patch,
+          beforeId,
+          middleId,
+          afterId,
+        });
+      }
+      if (hasAfter) {
+        const afterRun = container.children[mIdx + 1];
+        const afterT = afterRun?.children.find((c) => localName(c.name) === "t");
+        if (!afterT) break;
+        cur = { t: afterT, offset: 0 };
+      } else {
+        cur = { t: middleT, offset: middleT.text.length };
+      }
+    }
+    this.caret = { t: cur.t, run: caret.run, offset: cur.offset, bias: "end" };
   }
 
   // ---------- table drag-move and resize ----------
@@ -2160,7 +2564,7 @@ export class DocxEditor {
                 ? { kind: "moveTable", cellParagraphId, xPx: targetX, yPx: targetY, preservePageStart, pageDelta }
                 : isCol
                   ? { kind: "resizeTableColumn", cellParagraphId, boundary: grip.item.boundary, deltaPx: dx, renderedWidths: grip.item.renderedWidths }
-                  : { kind: "resizeTableRow", cellParagraphId, rowIdx: grip.item.boundary, heightPx: rowHeightPx },
+                  : operationBody("resizeTableRow", cellParagraphId, { rowIdx: grip.item.boundary, heightPx: rowHeightPx }),
             );
           }
           this.host.rerender(undefined, isMove ? "global" : "local");
@@ -2345,6 +2749,14 @@ export class DocxEditor {
       document.removeEventListener("mouseup", onUp);
       this.suppressNextMouseUp = false;
       if (erased.size === 0) return;
+      // Erasing rides no wire form. deleteSelectedImage emits removeDrawing
+      // for ONE addressed drawing; a stroke sweep removes several at once,
+      // and each removal shifts the content indices of any later stroke in
+      // the same run, so the addresses would have to be recomputed between
+      // emissions. Honest no-op until that exists. The Draw ribbon is gated
+      // off in a room, but setDrawingTool is public api — which is exactly
+      // how the model3D/onlineVideo/embeddedObject forks were reachable.
+      if (this.host.onIntent && this.host.doc.stableIds) return;
       this.host.history?.checkpoint();
       let changed = false;
       for (const src of erased) changed = removeDrawingRun(this.host.doc, src) || changed;
@@ -2362,6 +2774,7 @@ export class DocxEditor {
   /** Track a potential drag-selection from a text mousedown. */
   private beginSelectionDrag(e: MouseEvent): void {
     if (e.button !== 0) return;
+    this.pendingFormat = null; // clicking moves the caret: pending format dies
     const anchor = this.caretFromPoint(e.clientX, e.clientY) ?? this.nearestCaret(e.clientX, e.clientY);
     if (!anchor) return;
     // Respect the header/footer gate for selection too, in both directions:
@@ -2705,6 +3118,79 @@ export class DocxEditor {
     return adjustFloatingPosition(doc, src, dxClient / zoom, dyClient / zoom);
   }
 
+  /**
+   * Put a floating object AT (xPx, yPx) on its page surface — the coordinate
+   * space its own CSS position is reported in, and the space every caller
+   * here is working in. Renders, and reports whether the object was moved.
+   *
+   * setFloatingPagePosition alone does not deliver that, and the gap is a
+   * read/write asymmetry rather than a rounding error. Callers READ a
+   * page-surface number (`el.style.left`, `binding.item.x`) and it WRITES
+   * that number as relativeFrom="page" — but the layout resolves a floating
+   * anchor from ITS OWN origins: an indented table cell's text area, the
+   * anchor paragraph's top. So the object lands displaced by the anchor
+   * origin, and `landed = requested + anchorOrigin`.
+   *
+   * Measured on the Word cover-letter template this was reported against
+   * (#153), whose 3D model lives in the sidebar cell: asking Position for
+   * (0,0) put the object at (78.800, 389.279) — exactly its anchor origin —
+   * and (100,200) put it at (178.800, 589.279). Constant, non-compounding,
+   * identical on both routes, and identical whether the number came from the
+   * dialog or from a drag. A picture anchored in ordinary body text has
+   * origins that coincide with the page's, which is why it lands exactly and
+   * hid this.
+   *
+   * So write, then measure where it landed and correct once. One pass is
+   * exact: the residual is the anchor's fixed origin, and none of these
+   * callers re-anchors, so it does not move under the correction.
+   *
+   * The correction rides the wire as another absolute position, which is what
+   * keeps it replica-safe: every replica applies the same two writes and ends
+   * in the same place. Only the MEASUREMENT reads this window's layout, and it
+   * never leaves this window.
+   *
+   * `near` picks the instance to measure: a header/footer object paints one
+   * per page from this src, and the first page's copy is whole pages away —
+   * "correcting" against it would fling the object off every sheet.
+   */
+  private placeFloatingOnPage(
+    src: XmlElement,
+    target: { runId: number; objectIndex?: number } | null,
+    xPx: number,
+    yPx: number,
+    near?: { x: number; y: number },
+  ): boolean {
+    if (!setFloatingPagePosition(this.host.doc, src, xPx, yPx)) return false;
+    if (target) this.host.onIntent?.({ kind: "setFloatingPagePosition", ...target, xPx, yPx });
+    this.host.rerender();
+    const handle = this.host.getHandle();
+    const landed = nearestInstance(
+      [
+        ...(handle?.images ?? []).filter((b) => b.item.src === src),
+        ...(handle?.drawings ?? []).filter((b) => b.item.src === src),
+      ],
+      near,
+    );
+    if (!landed) return true;
+    const errX = xPx - (parseFloat(landed.el.style.left) || 0);
+    const errY = yPx - (parseFloat(landed.el.style.top) || 0);
+    // Half a pixel is under anything anyone can see, and well over the write's
+    // own rounding: a position is stored in EMU (1px = 9525), so a round trip
+    // costs about three thousandths of a pixel.
+    if (Math.hypot(errX, errY) <= 0.5) return true;
+    // Deliberately NOT clamped at zero. The corrected number is an offset from
+    // the anchor's origin, so any page position left of or above that origin
+    // is a negative offset, and clamping would strand the object ON the origin
+    // — which is the bug. Keeping the object on the sheet is the caller's job,
+    // and the callers already clamp the point they ask for.
+    if (!setFloatingPagePosition(this.host.doc, src, xPx + errX, yPx + errY)) return true;
+    if (target) {
+      this.host.onIntent?.({ kind: "setFloatingPagePosition", ...target, xPx: xPx + errX, yPx: yPx + errY });
+    }
+    this.host.rerender();
+    return true;
+  }
+
   /** Layout-px x of a client point on its page surface, or null off-page. */
   private surfaceX(clientX: number, clientY: number): number | null {
     const pageEl = (document.elementFromPoint(clientX, clientY) as HTMLElement | null)?.closest(".dxw-page");
@@ -2774,6 +3260,9 @@ export class DocxEditor {
   private deleteSelectedInkGroup(): void {
     const selected = this.selectedInkGroup;
     if (!selected) return;
+    // Several drawings in one gesture, with no wire form — same reasoning as
+    // the eraser above.
+    if (this.host.onIntent && this.host.doc.stableIds) return;
     this.host.history?.checkpoint();
     this.deselectInkGroup();
     let changed = false;
@@ -2843,14 +3332,29 @@ export class DocxEditor {
   private wordArtTextEditor: { input: HTMLInputElement; finish: (commit: boolean, reselect: boolean) => void } | null = null;
   private smartArtTextEditor: { input: HTMLInputElement; finish: (commit: boolean, reselect: boolean) => void } | null = null;
 
+  /**
+   * The model under an event, resolved from the OBJECT FRAME rather than from
+   * the `<model-viewer>` inside it.
+   *
+   * It used to look for `[data-dxw-model3d-viewer]`, and that broke both
+   * gestures at once the moment the viewer became `pointer-events: none`
+   * (#147). A `pointer-events: none` element is never an event target, and the
+   * frame is the viewer's PARENT, so walking up from the real target could
+   * never reach it: selection died, and rotation died with it because the
+   * rotate puck is the viewer's SIBLING and was never inside it either.
+   *
+   * The frame is the right anchor regardless — it is the binding element, and
+   * it is what every part of the object is inside.
+   */
   private model3DBinding(target: EventTarget | null): ImageBinding | undefined {
-    const viewer = (target as HTMLElement | null)?.closest?.("[data-dxw-model3d-viewer]");
-    return viewer
-      ? this.host.getHandle()?.images.find((binding) => binding.el.contains(viewer))
+    const frame = (target as HTMLElement | null)?.closest?.("[data-dxw-model3d]");
+    return frame
+      ? this.host.getHandle()?.images.find((binding) => binding.el === frame || binding.el.contains(frame))
       : undefined;
   }
 
-  /** First press selects a model; subsequent drags belong to its 3D viewport. */
+  /** First press selects a model; later presses fall through, so a drag on the
+   * body moves the object and the centre puck rotates it. */
   private onModel3DPointerDown = (event: PointerEvent): void => {
     const binding = this.model3DBinding(event.target);
     const src = binding?.item.src;
@@ -2867,13 +3371,25 @@ export class DocxEditor {
     const detail = (event as CustomEvent<Model3DRotation>).detail;
     if (!binding || !src || !detail || ![detail.x, detail.y, detail.z].every(Number.isFinite)) return;
     event.stopPropagation();
+    // The model3D toolbar flag only hides INSERTION, so a model already in an
+    // opened file is draggable in a room. Address it and emit.
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    const collabTarget = inCollab ? this.drawingIntentTarget(src) : null;
+    if (inCollab && collabTarget === null) return; // unaddressable: honest no-op
     const rect = binding.el.getBoundingClientRect();
     const near = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     this.host.history?.checkpoint();
-    if (setModel3DRotation(this.host.doc, src, detail)) {
-      this.host.rerender(undefined, "local");
-      this.reselectImage(src, near);
+    if (!setModel3DRotation(this.host.doc, src, detail)) return;
+    if (collabTarget !== null) {
+      this.host.onIntent!(
+        operationBody("setModel3DRotation", collabTarget.runId, {
+          ...(collabTarget.objectIndex !== undefined ? { objectIndex: collabTarget.objectIndex } : {}),
+          rotation: detail,
+        }),
+      );
     }
+    this.host.rerender(undefined, "local");
+    this.reselectImage(src, near);
   };
 
   /** First click selects a text box as an object; the second click edits only
@@ -2908,6 +3424,7 @@ export class DocxEditor {
 
   private deselectImage(): void {
     const changed = this.selectedImage !== null;
+    this.exitCropMode();
     this.wordArtTextEditor?.finish(true, false);
     this.smartArtTextEditor?.finish(true, false);
     this.imageOverlay?.remove();
@@ -3119,6 +3636,9 @@ export class DocxEditor {
     if (context?.kind === "image" || context?.kind === "model3d") {
       extra("Alt", "Alternative text", () => { this.runSelectedObjectCommand("altText"); });
     }
+    if (context?.kind === "image") {
+      extra("Crop", "Crop to part of the picture", () => { this.runSelectedObjectCommand("crop"); });
+    }
     extra("Size", "Exact size (px)", () => { this.runSelectedObjectCommand("size"); });
     extra("Position", "Exact page position (px)", () => { this.runSelectedObjectCommand("position"); });
     const drawingBinding = kind === "drawing"
@@ -3194,6 +3714,205 @@ export class DocxEditor {
     this.focusText();
   }
 
+  // ---------- crop mode ----------
+
+  /**
+   * Crop mode: the picture's whole bitmap is drawn DIMMED behind a bright
+   * frame showing the part that survives, and the eight handles move that
+   * frame's edges instead of the object's size. This is Word's crop idiom.
+   *
+   * Every measurement here is unzoomed page px in the SURFACE's coordinate
+   * space, the same space the renderer positions image elements in.
+   */
+  private cropSession: {
+    src: XmlElement;
+    el: HTMLElement;
+    overlay: HTMLDivElement;
+    frame: HTMLDivElement;
+    kept: HTMLImageElement;
+    handles: { el: HTMLDivElement; fx: number; fy: number }[];
+    /** The whole bitmap's drawn size at the current scale. */
+    full: { w: number; h: number };
+    /** The surviving region, relative to the bitmap's top-left. */
+    keep: { x: number; y: number; w: number; h: number };
+  } | null = null;
+
+  private enterCropMode(): boolean {
+    const selected = this.selectedImage;
+    if (!selected || selected.kind !== "image") return false;
+    const { el, src } = selected;
+    // A cropped image renders as an overflow:hidden viewport wrapping an
+    // oversized <img>; an uncropped one renders as the <img> itself.
+    const source = el instanceof HTMLImageElement ? el : el.querySelector("img");
+    const surface = el.parentElement;
+    if (!source || !surface) return false;
+    const boxW = parseFloat(el.style.width) || 0;
+    const boxH = parseFloat(el.style.height) || 0;
+    if (boxW <= 0 || boxH <= 0) return false;
+
+    const crop = imageCrop(src);
+    const full = {
+      w: boxW / Math.max(1 - crop.l - crop.r, 0.01),
+      h: boxH / Math.max(1 - crop.t - crop.b, 0.01),
+    };
+    const keep = { x: full.w * crop.l, y: full.h * crop.t, w: boxW, h: boxH };
+
+    const overlay = document.createElement("div");
+    overlay.dataset.dxwCropOverlay = "1";
+    overlay.style.cssText =
+      `position:absolute;left:${(parseFloat(el.style.left) || 0) - keep.x}px;` +
+      `top:${(parseFloat(el.style.top) || 0) - keep.y}px;width:${full.w}px;height:${full.h}px;` +
+      "pointer-events:none;z-index:2147483647;";
+    if (el.style.transform) {
+      // The overlay's box starts at the bitmap's corner rather than the
+      // picture's, so the rotation centre has to move by the same offset to
+      // stay on the same point of the page.
+      const origin = /^([\d.-]+)px\s+([\d.-]+)px$/.exec(el.style.transformOrigin);
+      const ox = origin ? parseFloat(origin[1]) : boxW / 2;
+      const oy = origin ? parseFloat(origin[2]) : boxH / 2;
+      overlay.style.transform = el.style.transform;
+      overlay.style.transformOrigin = `${keep.x + ox}px ${keep.y + oy}px`;
+    }
+
+    const ghost = source.cloneNode() as HTMLImageElement;
+    ghost.style.cssText = `position:absolute;left:0;top:0;width:${full.w}px;height:${full.h}px;opacity:.35;`;
+    overlay.appendChild(ghost);
+
+    const frame = document.createElement("div");
+    frame.style.cssText = "position:absolute;overflow:hidden;box-sizing:border-box;border:1.5px solid #1a73e8;";
+    const kept = source.cloneNode() as HTMLImageElement;
+    kept.style.cssText = `position:absolute;width:${full.w}px;height:${full.h}px;`;
+    frame.appendChild(kept);
+    overlay.appendChild(frame);
+
+    // The handles sit OUTSIDE the frame: the frame clips to the kept region,
+    // and a handle drawn inside it would lose its outer half to that clip.
+    const handles = DocxEditor.HANDLE_DIRS.map(([dir, fx, fy]) => {
+      const handle = document.createElement("div");
+      handle.style.cssText =
+        `position:absolute;width:${DocxEditor.HANDLE_PX}px;height:${DocxEditor.HANDLE_PX}px;` +
+        "background:#fff;border:1.5px solid #1a73e8;box-sizing:border-box;border-radius:2px;" +
+        `pointer-events:auto;cursor:${DocxEditor.handleCursor(dir)};box-shadow:0 1px 2px rgba(0,0,0,.25);`;
+      handle.dataset.dxwCropHandle = dir;
+      overlay.appendChild(handle);
+      return { el: handle, fx, fy };
+    });
+
+    surface.appendChild(overlay);
+    // The document's own picture would show through the dimmed ghost.
+    el.style.visibility = "hidden";
+    if (this.imageOverlay) this.imageOverlay.style.display = "none";
+    this.cropSession = { src, el, overlay, frame, kept, handles, full, keep };
+    this.paintCrop();
+    return true;
+  }
+
+  /** Move the crop chrome to the session's current keep rect. */
+  private paintCrop(): void {
+    const session = this.cropSession;
+    if (!session) return;
+    const { x, y, w, h } = session.keep;
+    session.frame.style.left = `${x}px`;
+    session.frame.style.top = `${y}px`;
+    session.frame.style.width = `${w}px`;
+    session.frame.style.height = `${h}px`;
+    session.kept.style.left = `${-x}px`;
+    session.kept.style.top = `${-y}px`;
+    const half = DocxEditor.HANDLE_PX / 2;
+    for (const handle of session.handles) {
+      handle.el.style.left = `${x + w * handle.fx - half}px`;
+      handle.el.style.top = `${y + h * handle.fy - half}px`;
+    }
+  }
+
+  private exitCropMode(): void {
+    const session = this.cropSession;
+    if (!session) return;
+    this.cropSession = null;
+    session.overlay.remove();
+    session.el.style.visibility = "";
+    if (this.imageOverlay) this.imageOverlay.style.display = "";
+  }
+
+  /** Whether the picture is in crop mode (the toolbar toggles on this). */
+  isCropping(): boolean {
+    return this.cropSession !== null;
+  }
+
+  /**
+   * Write the dragged frame as a:srcRect AND shrink the picture's frame to the
+   * kept region, then re-enter crop mode on the re-rendered picture so the next
+   * edge can be dragged without a round trip through the toolbar. `start` is
+   * the frame the drag began from.
+   *
+   * The frame shrink is what makes this read as a crop rather than a zoom: it
+   * is Word's behaviour, and it keeps the surviving content at the scale it was
+   * drawn at instead of blowing it up to refill the old box. The gesture
+   * therefore carries two intents — setCrop plus resizeDrawing, and for a
+   * floating picture whose west or north edge moved, setFloatingPagePosition so
+   * the edge that did NOT move stays put. One history checkpoint brackets them
+   * all, so undo restores the srcRect and the extent together.
+   */
+  private commitCrop(start: { x: number; y: number; w: number; h: number }): void {
+    const session = this.cropSession;
+    if (!session) return;
+    const { keep, full, src, el } = session;
+    const moved = (["x", "y", "w", "h"] as const).some((k) => Math.abs(keep[k] - start[k]) > 0.5);
+    if (!moved) return;
+    const near = { x: el.getBoundingClientRect().left, y: el.getBoundingClientRect().top };
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    const collabTarget = inCollab ? this.drawingIntentTarget(src) : null;
+    if (inCollab && collabTarget === null) {
+      // Unaddressable in a room: an honest no-op rather than a local-only fork.
+      this.exitCropMode();
+      this.reselectImage(src, near);
+      return;
+    }
+    const crop: ImageCrop = {
+      l: keep.x / full.w,
+      t: keep.y / full.h,
+      r: (full.w - keep.x - keep.w) / full.w,
+      b: (full.h - keep.y - keep.h) / full.h,
+    };
+    this.host.history?.checkpoint();
+    if (!setImageCrop(this.host.doc, src, crop)) {
+      // Nothing was written (a picture with no a:blipFill — a VML shape drawn
+      // as an image). Put the frame back where the drag started.
+      session.keep = start;
+      this.paintCrop();
+      return;
+    }
+    if (collabTarget) {
+      const { runId, objectIndex } = collabTarget;
+      this.host.onIntent?.(
+        operationBody("setCrop", runId, objectIndex === undefined ? { crop } : { objectIndex, crop }),
+      );
+    }
+    // The kept region is already drawn at the picture's scale, so its frame
+    // size IS the new extent — no separate kept-fraction math.
+    if (resizeDrawing(this.host.doc, src, keep.w, keep.h)) {
+      if (collabTarget) {
+        this.host.onIntent?.({ kind: "resizeDrawing", ...collabTarget, widthPx: keep.w, heightPx: keep.h });
+      }
+      // Only a west/north drag moves the surviving region's own corner; an
+      // east/south one trims the far edge and leaves the anchor alone. An
+      // inline picture has no anchor to move.
+      const dx = keep.x - start.x;
+      const dy = keep.y - start.y;
+      if (isFloatingDrawing(src) && (dx !== 0 || dy !== 0)) {
+        const x = (parseFloat(el.style.left) || 0) + dx;
+        const y = (parseFloat(el.style.top) || 0) + dy;
+        if (setFloatingPagePosition(this.host.doc, src, x, y) && collabTarget) {
+          this.host.onIntent?.({ kind: "setFloatingPagePosition", ...collabTarget, xPx: x, yPx: y });
+        }
+      }
+    }
+    this.exitCropMode();
+    this.host.rerender();
+    this.reselectImage(src, near);
+    this.enterCropMode();
+  }
+
   private deleteSelectedImage(): void {
     if (!this.selectedImage) return;
     const src = this.selectedImage.src;
@@ -3243,6 +3962,11 @@ export class DocxEditor {
    * directly too — a checkbox's checked state is form data, not tracked
    * prose, and Word does not record it as a w:ins/w:del revision. Returns true
    * if consumed.
+   *
+   * Collab: the toggle must ride the wire — it was a silent LOCAL-ONLY
+   * mutation, so a human clicking a checkbox flipped their replica alone and
+   * the room diverged for good (the agent path always emitted the intent). A
+   * run with no stable id is an honest no-op instead of a fork.
    */
   private startCheckboxInteraction(e: MouseEvent, target: HTMLElement): boolean {
     if (e.button !== 0) return false;
@@ -3253,12 +3977,16 @@ export class DocxEditor {
     const src = binding?.item.src;
     const cbEl = checkboxStateElement(src?.run, src?.t);
     if (!cbEl) return false;
+    const ids = this.host.onIntent ? this.host.doc.stableIds : undefined;
+    const runId = (src?.run.src && ids?.idOf(src.run.src)) ?? null;
+    if (ids && runId === null) return false;
     e.preventDefault();
     e.stopPropagation();
     this.suppressNextMouseUp = true;
     this.hideCaret();
     this.host.history?.checkpoint();
     toggleCheckbox(this.host.doc, cbEl);
+    if (runId !== null) this.host.onIntent?.(operationBody("toggleCheckbox", runId, {}));
     this.host.doc.refresh();
     this.host.rerender();
     // Keep the editor focused so keyboard shortcuts (undo/redo) still land.
@@ -3328,7 +4056,17 @@ export class DocxEditor {
     if (rot) bar.style.transform = `rotate(${-rot}deg)`;
     bar.style.transformOrigin = "0 100%";
 
-    const button = (label: string, title: string, fn: () => void): void => {
+    // WHAT THE OVERLAY OFFERS IN A ROOM. Editing a watermark's text, opacity
+    // or rotation rewrites VML attributes on a shape inside a header part.
+    // Header parts replicate, so applying that locally forks the document —
+    // and the shape carries no stable id, so there is no wire form to route
+    // it through either. Those three are ABSENT in collab rather than present
+    // and inert. Removal survives: removeWatermark is document-scoped, so it
+    // needs no address.
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+
+    const button = (label: string, title: string, fn: () => void, localOnly = false): void => {
+      if (localOnly && inCollab) return;
       const b = document.createElement("button");
       b.textContent = label;
       b.title = title;
@@ -3345,6 +4083,12 @@ export class DocxEditor {
       });
       bar.appendChild(b);
     };
+    const sep = (): void => {
+      if (inCollab) return;
+      const line = document.createElement("span");
+      line.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
+      bar.appendChild(line);
+    };
 
     button("Edit text", "Edit watermark text", () => {
       const cur = wordArtText(src);
@@ -3359,15 +4103,11 @@ export class DocxEditor {
           this.reselectWordArt(src);
         }
       });
-    });
-    const sep1 = document.createElement("span");
-    sep1.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
-    bar.appendChild(sep1);
-    button("−", "Less opaque", () => this.bumpWordArtOpacity(src, -0.1));
-    button("+", "More opaque", () => this.bumpWordArtOpacity(src, +0.1));
-    const sep2 = document.createElement("span");
-    sep2.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
-    bar.appendChild(sep2);
+    }, true);
+    sep();
+    button("−", "Less opaque", () => this.bumpWordArtOpacity(src, -0.1), true);
+    button("+", "More opaque", () => this.bumpWordArtOpacity(src, +0.1), true);
+    sep();
     button("Rotate", "Set rotation (degrees)", () => {
       const cur = wordArtRotation(src);
       void requestTextInputDialog(this.host.container, {
@@ -3386,13 +4126,11 @@ export class DocxEditor {
           this.reselectWordArt(src);
         }
       });
-    });
-    const sep3 = document.createElement("span");
-    sep3.style.cssText = "width:1px;background:#dadce0;margin:2px 2px;";
-    bar.appendChild(sep3);
+    }, true);
+    sep();
     button("Delete", "Delete watermark", () => {
       this.host.history?.checkpoint();
-      if (deleteWatermark(this.host.doc, src)) this.host.rerender();
+      if (this.removeSelectedWatermark(src)) this.host.rerender();
       this.deselectWordArt();
     });
 
@@ -3413,11 +4151,30 @@ export class DocxEditor {
     }
   }
 
+  /**
+   * Remove the selected WordArt, by the only route the room has.
+   *
+   * In collab that route is the document-scoped removeWatermark, which takes
+   * the stamp off EVERY header part — Word's own Remove Watermark does the
+   * same, and it is the only form with no address to resolve. A WordArt
+   * anchored in the BODY is decorative art rather than a watermark: it is not
+   * what removeWatermark removes and it has no wire form of its own, so in a
+   * room it is an honest no-op instead of a local-only deletion.
+   */
+  private removeSelectedWatermark(src: XmlElement): boolean {
+    const inCollab = !!(this.host.onIntent && this.host.doc.stableIds);
+    if (!inCollab) return deleteWatermark(this.host.doc, src);
+    if (!headerWatermarks(this.host.doc).includes(src)) return false;
+    if (!removeWatermark(this.host.doc)) return false;
+    this.host.onIntent!(documentOperationBody("removeWatermark", {}));
+    return true;
+  }
+
   private deleteSelectedWordArt(): void {
     if (!this.selectedWordArt) return;
     const src = this.selectedWordArt.src;
     this.host.history?.checkpoint();
-    if (deleteWatermark(this.host.doc, src)) this.host.rerender();
+    if (this.removeSelectedWatermark(src)) this.host.rerender();
     this.deselectWordArt();
   }
 
@@ -3447,6 +4204,46 @@ export class DocxEditor {
     // The live 3D viewport owns drags once selected; its pointer handler
     // updates the native model orientation instead of moving the picture box.
     if (target.closest?.("[data-dxw-model3d-viewer]")) return true;
+
+    // Crop handles move one edge of the surviving region. Same shape as the
+    // resize drag below — preview in the DOM, write once on release — except
+    // that the frame is bounded by the bitmap rather than by the page.
+    if (target.dataset.dxwCropHandle && this.cropSession) {
+      e.preventDefault();
+      e.stopPropagation();
+      const session = this.cropSession;
+      const dir = target.dataset.dxwCropHandle;
+      const start = { ...session.keep };
+      const startX = e.clientX;
+      const startY = e.clientY;
+      // Leave a grabbable strip on each axis, capped at what is there now so
+      // an already-narrow crop is never forcibly widened (see MIN_DRAG_SIZE_PX).
+      const floorW = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, start.w);
+      const floorH = Math.min(DocxEditor.MIN_DRAG_SIZE_PX, start.h);
+      const onMove = (me: MouseEvent) => {
+        const dx = (me.clientX - startX) / zoom;
+        const dy = (me.clientY - startY) / zoom;
+        let left = start.x;
+        let top = start.y;
+        let right = start.x + start.w;
+        let bottom = start.y + start.h;
+        if (dir.includes("w")) left = Math.min(Math.max(0, start.x + dx), right - floorW);
+        if (dir.includes("e")) right = Math.max(Math.min(session.full.w, right + dx), left + floorW);
+        if (dir.includes("n")) top = Math.min(Math.max(0, start.y + dy), bottom - floorH);
+        if (dir.includes("s")) bottom = Math.max(Math.min(session.full.h, bottom + dy), top + floorH);
+        session.keep = { x: left, y: top, w: right - left, h: bottom - top };
+        this.paintCrop();
+      };
+      const onUp = () => {
+        document.removeEventListener("mousemove", onMove);
+        document.removeEventListener("mouseup", onUp);
+        this.suppressNextMouseUp = true;
+        this.commitCrop(start);
+      };
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+      return true;
+    }
 
     // Resize handles: corners aspect-locked, edges free-stretch (Word).
     // The element previews live; the model updates once on release, and the
@@ -3588,16 +4385,16 @@ export class DocxEditor {
           if (this.host.onIntent && this.host.doc.stableIds) {
             // Collab: the drop position rides as a wire caret and the equation
             // as its block, both encoded BEFORE the move detaches anything.
-            const blockId = this.mathIntentBlockId(oMathEl);
+            const target = this.mathIntentTarget(oMathEl);
             const at = this.encodeTextPos(dest.t, dest.offset);
-            if (blockId !== null && at) {
+            if (target && at) {
               const nodeIds = this.host.allocIds?.(4) ?? [];
               const before = this.trackedNodeSet();
               if (moveMath(this.host.doc, oMathEl, dest.t, dest.offset)) {
                 // A mid-text drop splits the destination run; the tail takes a
                 // carried id (same walk the remote apply performs).
                 this.assignFreshTrackedIds(before, nodeIds);
-                this.host.onIntent({ kind: "moveMath", blockId, at, nodeIds });
+                this.host.onIntent({ kind: "moveMath", ...target, at, nodeIds });
                 this.host.rerender();
               }
             }
@@ -3742,9 +4539,7 @@ export class DocxEditor {
               const objH = rect0.height / zoom;
               const x = Math.max(0, Math.min(left0 + dxClient / zoom, pageW - objW));
               const y = Math.max(0, Math.min(top0 + dyClient / zoom, pageH - objH));
-              if (setFloatingPagePosition(this.host.doc, binding.item.src, x, y)) {
-                this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
-                this.host.rerender();
+              if (this.placeFloatingOnPage(binding.item.src, target, x, y, want)) {
                 this.reselectImage(binding.item.src, want);
               } else {
                 this.reselectImage(binding.item.src, { x: rect0.left, y: rect0.top });
@@ -3785,10 +4580,9 @@ export class DocxEditor {
               const y = binding.item.y + (me.clientY - startY) / zoom;
               setImageWrap(this.host.doc, binding.item.src, "square");
               this.host.onIntent({ kind: "setImageWrap", ...target, mode: "square" });
-              if (setFloatingPagePosition(this.host.doc, binding.item.src, x, y)) {
-                this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
-              }
-              this.host.rerender();
+              const want = { x: rect0.left + me.clientX - startX, y: rect0.top + me.clientY - startY };
+              // Renders either way: the wrap change above still has to paint.
+              if (!this.placeFloatingOnPage(binding.item.src, target, x, y, want)) this.host.rerender();
               return;
             }
           }
@@ -3818,6 +4612,18 @@ export class DocxEditor {
       // participant whose bytes never arrive could not remove the box at all.
       // Matching on the media-state marker covers BOTH skeleton states:
       // "fetching" (still coming) and "unavailable" (nobody online has it).
+      //
+      // A 3D MODEL DELIBERATELY DOES NOT MATCH HERE. It paints as a
+      // <model-viewer> in a frame div and has no <img>, so it has never been
+      // draggable — before or after d618708. Adding it is one clause, and it
+      // was tried: the object then lands in the wrong place. Measured on
+      // coverletter-anon, a +100px horizontal drag moved it +178.8px
+      // horizontally and +389.3px VERTICALLY, from a drag with no vertical
+      // component at all; the same drag moves a plain floating image exactly
+      // +100/0. So the move path needs work of its own before a model can use
+      // it, and shipping the clause alone would trade "cannot move" for
+      // "moves somewhere else". Tracked separately; rotation and selection
+      // work.
       const handle = this.host.getHandle();
       const el = target.tagName === "IMG" ? target : target.closest<HTMLElement>("[data-dxw-media-state]")!;
       imageBinding = handle?.images.find((b) => b.el === el || b.el.contains(el));
@@ -3844,6 +4650,17 @@ export class DocxEditor {
       if ((this.regionOf(binding.item.src) === "hf") !== this.inHeaderFooter) return false;
       e.preventDefault();
       e.stopPropagation();
+      // ARMED HERE, NOT ON RELEASE. The container's own mouseup runs BEFORE
+      // this gesture's document-level one — the container is an ancestor of
+      // the object and the document an ancestor of the container — so a flag
+      // set on release arrives one handler too late and the caret path has
+      // already run. It ran to the end: a picture is not a glyph, so
+      // caretFromPoint finds nothing, the press is read as a click in empty
+      // space, and click-and-type SPLIT A PARAGRAPH and re-rendered. That
+      // cost a paragraph of the user's document (emitted to every peer in a
+      // room) on a click that was only ever asking to select the object, and
+      // the re-render replaced the object's node underneath this gesture.
+      this.suppressNextMouseUp = true;
       const startX = e.clientX;
       const startY = e.clientY;
       const floating = isFloatingDrawing(binding.item.src!);
@@ -3905,9 +4722,14 @@ export class DocxEditor {
         document.removeEventListener("mouseup", onUp);
         ghost?.remove();
         this.hideDropIndicator();
-        this.suppressNextMouseUp = true;
         if (!moved) {
-          this.selectImage(el, binding.item.src!, binding.item);
+          // By SRC, not by the element captured on press. A re-render between
+          // press and release replaces the object's node, and selecting a
+          // detached one appends the whole selection overlay — box, handles,
+          // wrap bar — to a dead subtree, so the object reads as unselectable.
+          // In a room the re-render need not be local at all: a peer's edit
+          // arriving mid-gesture is enough.
+          this.reselectImage(binding.item.src!, { x: rect0.left, y: rect0.top });
           return;
         }
         this.host.history?.checkpoint();
@@ -3943,10 +4765,9 @@ export class DocxEditor {
               setImageWrap(this.host.doc, src, "square");
               this.host.onIntent({ kind: "setImageWrap", ...target, mode: "square" });
             }
-            if (setFloatingPagePosition(this.host.doc, src, x, y)) {
-              this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
-            }
-            this.host.rerender();
+            // Renders either way: the setImageWrap above still has to paint
+            // when the object has no anchor to position.
+            if (!this.placeFloatingOnPage(src, target, x, y, want)) this.host.rerender();
             this.reselectImage(src, want);
             return;
           }
@@ -4027,8 +4848,7 @@ export class DocxEditor {
           el.style.left = `${left0}px`;
           el.style.top = `${top0}px`;
           setImageWrap(this.host.doc, src, "square", { x: 0, y: 0 });
-          if (setFloatingPagePosition(this.host.doc, src, binding.item.x + dx, binding.item.y + dy)) {
-            this.host.rerender();
+          if (this.placeFloatingOnPage(src, null, binding.item.x + dx, binding.item.y + dy, want)) {
             this.reselectImage(src, want);
           }
         } else {
@@ -4202,6 +5022,7 @@ export class DocxEditor {
     }
     this.pendingClickTypeCheckpoint = false;
     this.clickTypeCheckpointUntil = 0;
+    this.pendingFormat = null; // clicking moves the caret: pending format dies
     if (this.dragSelecting) {
       // Finalize a drag-selection: keep it, don't collapse to a caret.
       this.dragSelecting = false;
@@ -4214,6 +5035,7 @@ export class DocxEditor {
     // the button and the browser never composes its click (the second wrap
     // change in a row silently did nothing).
     if (this.imageOverlay?.contains(e.target as Node) || this.imageToolbar?.contains(e.target as Node)) return;
+    if (this.cropSession?.overlay.contains(e.target as Node)) return;
     if (this.wordArtOverlay?.contains(e.target as Node)) return;
     if (this.wordArtTextEditor?.input.contains(e.target as Node)) return;
     if (this.smartArtTextEditor?.input.contains(e.target as Node)) return;
@@ -4391,8 +5213,12 @@ export class DocxEditor {
    * revision-ink kind chip, and a primary/secondary pill button pair. */
   private showSuggestionPopover(ref: RevisionRef, clientX: number, clientY: number): void {
     this.dismissSuggestionPopover();
-    const isIns = ref.kind === "insertion" || ref.kind === "markInsertion";
-    const ink = isIns ? "#188038" : "#D93025"; // matches the markup renderer's revision colors
+    const label = REVISION_LABEL[ref.kind];
+    // Insertion green and deletion red match the markup renderer's revision
+    // colors. A FORMATTING change gets neither: the renderer paints it as the
+    // new formatting, with no ink of its own, so the card takes the editor's
+    // accent rather than claim text was added or removed.
+    const ink = label.ink;
     // Author + date come off the revision element (w:author / w:date). Word
     // stamps these on every w:ins/w:del; show them so a reviewer sees WHO
     // suggested the change and WHEN, like Google Docs' suggestion card.
@@ -4437,7 +5263,7 @@ export class DocxEditor {
     nameEl.textContent = author;
     const sub = document.createElement("div");
     sub.style.cssText = `font-size:11px;color:${ink};`;
-    sub.textContent = (isIns ? "Suggested insertion" : "Suggested deletion") + (dateText ? ` · ${dateText}` : "");
+    sub.textContent = label.text + (dateText ? ` · ${dateText}` : "");
     who.append(nameEl, sub);
     head.append(avatar, who);
     box.appendChild(head);
@@ -4495,17 +5321,16 @@ export class DocxEditor {
   private mathEditorEl: HTMLDivElement | null = null;
 
   /**
-   * The block id an equation edit rides on, or null when the equation has no
-   * wire address. The math intents are BLOCK-addressed and the remote apply
-   * resolves the target as "the first m:oMath under this block"
-   * (collab apply.ts firstMathIn), so a second equation in the same paragraph
-   * is deliberately unaddressable — better an honest no-op than an intent that
-   * rewrites the wrong equation on every peer.
+   * The wire address of an equation edit, or null when the equation has none.
+   * The math intents are BLOCK-addressed and a block may hold several
+   * equations, so the address is the block plus the equation's position in
+   * document order under it — the same order the remote apply counts in
+   * (collab apply.ts mathIn).
    *
    * Must be called BEFORE the mutation: setMathLinear/deleteMath refresh the
    * document, and deleteMath detaches the subtree the walk starts from.
    */
-  private mathIntentBlockId(oMathEl: XmlElement): number | null {
+  private mathIntentTarget(oMathEl: XmlElement): { blockId: number; mathIndex: number } | null {
     const ids = this.host.doc.stableIds;
     if (!ids) return null;
     let blockEl: XmlElement | null = null;
@@ -4516,8 +5341,10 @@ export class DocxEditor {
         break;
       }
     }
-    if (!blockEl || firstMathIn(blockEl) !== oMathEl) return null;
-    return ids.idOf(blockEl) ?? null;
+    const blockId = blockEl ? ids.idOf(blockEl) : undefined;
+    if (!blockEl || blockId === undefined) return null;
+    const mathIndex = mathsIn(blockEl).indexOf(oMathEl);
+    return mathIndex < 0 ? null : { blockId, mathIndex };
   }
 
   /**
@@ -4563,9 +5390,9 @@ export class DocxEditor {
         // canonical intent function with the same args, then emit. An
         // unaddressable equation is an honest no-op — never a local-only
         // delete, which is what silently forked the room.
-        const blockId = this.mathIntentBlockId(oMathEl);
-        if (blockId !== null && deleteMath(this.host.doc, oMathEl)) {
-          this.host.onIntent({ kind: "deleteMath", blockId });
+        const target = this.mathIntentTarget(oMathEl);
+        if (target && deleteMath(this.host.doc, oMathEl)) {
+          this.host.onIntent({ kind: "deleteMath", ...target });
           this.host.rerender();
         }
       } else if (deleteMath(this.host.doc, oMathEl)) {
@@ -4637,9 +5464,9 @@ export class DocxEditor {
           // Collab (A17): same canonical function, same args, emitted — this
           // popover was the last equation edit that mutated locally and never
           // rode the wire (user repro: a fraction added here reached nobody).
-          const blockId = this.mathIntentBlockId(oMathEl);
-          if (blockId !== null && setMathLinear(this.host.doc, oMathEl, val)) {
-            this.host.onIntent({ kind: "setMathLinear", blockId, mathText: val });
+          const target = this.mathIntentTarget(oMathEl);
+          if (target && setMathLinear(this.host.doc, oMathEl, val)) {
+            this.host.onIntent({ kind: "setMathLinear", ...target, mathText: val });
             this.host.rerender();
           }
         } else if (setMathLinear(this.host.doc, oMathEl, val)) {
@@ -5471,6 +6298,16 @@ export class DocxEditor {
       this.pendingClickTypeCheckpoint = false;
       this.clickTypeCheckpointUntil = 0;
     }
+    // Pending caret format (Cmd+B/I/U with no selection) survives only until
+    // the next gesture: a plain typed character consumes it (insertText), the
+    // format shortcuts themselves stack/toggle it, and everything else — any
+    // caret movement, delete, Enter, shortcut — clears it, like Word.
+    if (this.pendingFormat) {
+      const mod = e.metaKey || e.ctrlKey;
+      const isFormatKey = mod && !e.altKey && ["b", "i", "u"].includes(e.key.toLowerCase());
+      const isPlainChar = e.key.length === 1 && !mod && !e.altKey;
+      if (!isFormatKey && !isPlainChar) this.pendingFormat = null;
+    }
     if (this.textContextMenu) {
       if (e.key === "Escape") e.preventDefault();
       this.dismissTextContextMenu();
@@ -5528,6 +6365,13 @@ export class DocxEditor {
       this.deleteSelectedImage(); // collab-aware: emits removeDrawing
       return;
     }
+    // Escape leaves crop mode first, keeping the picture selected — one press
+    // per layer of chrome, as with the drawing tool and the textbox story.
+    if (this.cropSession && e.key === "Escape") {
+      e.preventDefault();
+      this.exitCropMode();
+      return;
+    }
     if (this.selectedImage && e.key === "Escape") {
       e.preventDefault();
       this.deselectImage();
@@ -5579,11 +6423,8 @@ export class DocxEditor {
         if (target !== null) {
           const x = (parseFloat(this.selectedImage.el.style.left) || 0) + dx;
           const y = (parseFloat(this.selectedImage.el.style.top) || 0) + dy;
-          if (setFloatingPagePosition(this.host.doc, src, x, y)) {
-            this.host.onIntent({ kind: "setFloatingPagePosition", ...target, xPx: x, yPx: y });
-            this.host.rerender();
-            this.reselectImage(src);
-          }
+          const r = this.selectedImage.el.getBoundingClientRect();
+          if (this.placeFloatingOnPage(src, target, x, y, { x: r.left, y: r.top })) this.reselectImage(src);
           return;
         }
       }
@@ -5593,54 +6434,14 @@ export class DocxEditor {
       }
       return;
     }
-    if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && this.caret) {
-      // Word: Cmd/Ctrl+Enter inserts a page break; adding Shift inserts a
-      // column break.
+    // Every modifier shortcut comes from the one declared table (shortcuts.ts),
+    // which the help sheet renders — so what the sheet promises and what the
+    // keys do cannot drift apart. Tab and the plain editing keys stay below:
+    // their meaning depends on where the caret is, so they name no command.
+    const shortcut = matchShortcut(e, isApplePlatform());
+    if (shortcut) {
       e.preventDefault();
-      this.host.history?.checkpoint();
-      const breakKind: "page" | "column" = e.shiftKey ? "column" : "page";
-      // Collab: this was a silent LOCAL-ONLY mutation (user repro: Cmd+Enter
-      // didn't create the page for anyone else). Apply the CANONICAL form —
-      // the break at the END of the caret run's first w:t, the exact shape
-      // the remote insertBreak apply produces — with carried ids, then emit.
-      if (this.host.onIntent && this.host.doc.stableIds) {
-        const enc = this.encodeCaretForIntent();
-        let runEl: XmlElement | null = null;
-        for (let cur: XmlElement | null = this.caret.t; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
-          if (localName(cur.name) === "r") {
-            runEl = cur;
-            break;
-          }
-        }
-        const firstT = runEl ? firstTextOf(runEl) : null;
-        if (enc && runEl && firstT) {
-          const nodeIds = this.host.allocIds?.(8) ?? [];
-          const before = this.trackedNodeSet();
-          const destination = insertBreakAt(this.host.doc, firstT, firstT.text.length, breakKind);
-          if (destination) {
-            this.assignFreshTrackedIds(before, nodeIds);
-            this.host.onIntent({ kind: "insertBreak", runId: enc.runId, breakKind, nodeIds });
-            this.caret = { ...this.caret, ...destination };
-            this.commit();
-          }
-        }
-        return;
-      }
-      const destination = insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, breakKind);
-      if (destination) {
-        this.caret = { ...this.caret, ...destination };
-        this.commit();
-      }
-      return;
-    }
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
-      e.preventDefault();
-      this.applyHistory(e.shiftKey ? "redo" : "undo");
-      return;
-    }
-    if (e.ctrlKey && e.key.toLowerCase() === "y") {
-      e.preventDefault();
-      this.applyHistory("redo");
+      this.runShortcut(shortcut, e);
       return;
     }
     // Tab inside a table moves to the next cell (Shift+Tab previous), wrapping
@@ -5648,6 +6449,21 @@ export class DocxEditor {
     // over list-indent and never inserts a literal tab character. Checked
     // before the list handler because a list can live inside a table cell.
     if (e.key === "Tab" && !e.metaKey && !e.ctrlKey && !e.altKey && this.caret) {
+      // Word: Tab in the last cell adds a row. That row is a structural change
+      // with a wire form, so it goes through the host's table operation — the
+      // same call the toolbar's Insert row below makes. advanceCell would
+      // otherwise append it privately, and in a room only this replica got it.
+      if (!e.shiftKey && this.host.onTextCommand && isLastCellOfTable(this.host.doc, this.caret.t)) {
+        e.preventDefault();
+        this.host.onTextCommand("tableRowBelow");
+        const appended = advanceCell(this.host.doc, this.caret.t, 1);
+        if (appended) {
+          this.clearSelection();
+          this.caret = { t: appended.t, run: this.caret.run, offset: 0 };
+          this.commit();
+        }
+        return;
+      }
       const dest = advanceCell(this.host.doc, this.caret.t, e.shiftKey ? -1 : 1);
       if (dest) {
         e.preventDefault();
@@ -5663,81 +6479,40 @@ export class DocxEditor {
       if (listTypeAt(this.host.doc, this.caret.t)) {
         e.preventDefault();
         this.host.history?.checkpoint();
+        // Word: Shift+Tab on a LEVEL-0 item promotes it OUT of the list into
+        // a body paragraph — the same canonical unbullet Backspace-at-start
+        // takes (setListType(null) + intent; tracked pPrChange in suggesting).
+        if (e.shiftKey && listLevelAt(this.host.doc, this.caret.t) === 0) {
+          if (this.suggesting && this.suggestUnbulletAtCaret()) return;
+          this.clearListAtCaret();
+          return;
+        }
+        const levelBlockId = this.host.onIntent && this.host.doc.stableIds
+          ? this.host.doc.stableIds.idOf(paragraphOf(this.host.doc, this.caret.t) ?? this.caret.t)
+          : undefined;
         if (setListLevel(this.host.doc, [this.caret.t], e.shiftKey ? -1 : 1)) {
+          // Replicate the step (this was a silent local-only mutation: Tab
+          // list indent never rode the wire).
+          if (levelBlockId !== undefined) {
+            this.host.onIntent?.({ kind: "setListLevel", blockId: levelBlockId, delta: e.shiftKey ? -1 : 1 });
+          }
           this.commit();
         }
         return;
       }
+      // G3 — Tab in a plain body paragraph inserts a tab character (Word; at
+      // the exact paragraph start Word instead steps the first-line indent —
+      // the tab character is the implemented approximation, recorded in the
+      // conformance notes). Shift+Tab stays a no-op outside tables and lists.
+      if (!e.shiftKey) {
+        e.preventDefault();
+        this.insertSeparatorAtCaret("tab");
+        return;
+      }
     }
-    const meta = e.metaKey || e.ctrlKey;
-    // Word: Ctrl+Alt+M (Windows) / Cmd+Option+A (Mac) adds a comment.
-    const isApplePlatform = /Mac|iPhone|iPad/.test(navigator.platform);
-    if (
-      isApplePlatform
-        ? e.metaKey && e.altKey && e.key.toLowerCase() === "a"
-        : e.ctrlKey && e.altKey && e.key.toLowerCase() === "m"
-    ) {
-      e.preventDefault();
-      if (this.hasSelection()) this.host.onTextCommand?.("comment");
-      return;
-    }
-    // Word parity: Ctrl/Cmd+Alt+1..6 apply Heading 1..6; +0 back to Normal.
-    if (meta && e.altKey && /^[0-6]$/.test(e.key)) {
-      e.preventDefault();
-      this.host.onStyleShortcut?.(e.key === "0" ? null : `Heading${e.key}`);
-      return;
-    }
-    if (meta && !e.altKey) {
-      const k = e.key.toLowerCase();
-      if (k === "a") {
-        e.preventDefault();
-        this.selectAll();
-        return;
-      }
-      if (k === "b" || k === "i" || k === "u") {
-        if (this.hasSelection()) {
-          e.preventDefault();
-          this.host.onFormatShortcut?.(k === "b" ? "bold" : k === "i" ? "italic" : "underline");
-        }
-        return;
-      }
-      if (!e.shiftKey && k === "k") {
-        e.preventDefault();
-        if (this.hasSelection()) this.host.onTextCommand?.("link");
-        return;
-      }
-      if (e.shiftKey && (k === "l" || k === "8")) {
-        e.preventDefault();
-        this.host.onTextCommand?.("bullet");
-        return;
-      }
-      if (e.shiftKey && k === "7") {
-        e.preventDefault();
-        this.host.onTextCommand?.("number");
-        return;
-      }
-      if (!e.shiftKey && (k === "l" || k === "e" || k === "r" || k === "j")) {
-        e.preventDefault();
-        this.host.onTextCommand?.(
-          k === "l" ? "alignLeft" : k === "e" ? "alignCenter" : k === "r" ? "alignRight" : "justify",
-        );
-        return;
-      }
-      // Cmd+Left/Right = line edge; Cmd+Up/Down = adjacent paragraph start.
-      if (e.key.startsWith("Arrow")) {
-        e.preventDefault();
-        const extend = e.shiftKey;
-        if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
-          this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "ArrowLeft" ? "start" : "end"), extend);
-        } else {
-          this.moveFocus((pt) => this.paragraphPoint(pt, e.key === "ArrowUp" ? -1 : 1), extend);
-        }
-        this.revealCaret();
-        return;
-      }
-      return; // other shortcuts pass through (undo handled above, copy/cut above)
-    }
-    if (e.altKey) return;
+    // Any other modifier combo belongs to the browser or the host app
+    // (copy/cut/paste, the desktop menus) — never to typing.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const hasRange = this.hasSelection();
     if (!this.caret && !hasRange) return;
 
@@ -5754,24 +6529,29 @@ export class DocxEditor {
       this.revealCaret();
     } else if (e.key === "Enter") {
       e.preventDefault();
-      this.splitParagraph();
+      // Word: Shift+Enter is a SOFT line break (w:br) inside the paragraph —
+      // one paragraph, one list item, one style — never a split.
+      if (e.shiftKey) this.insertSeparatorAtCaret("br");
+      else this.splitParagraph();
     } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
       e.preventDefault();
       const delta = e.key === "ArrowLeft" ? -1 : 1;
       if (e.shiftKey) this.moveFocus((pt) => this.stepPoint(pt, delta), true);
       else if (this.hasSelection()) {
-        // Collapse to the corresponding edge, like every editor.
-        const segs = this.getSelectionSegments();
-        const edge = delta === -1 ? segs[0] : segs[segs.length - 1];
-        if (edge?.t) {
-          this.clearSelection();
-          this.caret = {
-            t: edge.t as XmlElement,
-            run: this.caret?.run ?? ({} as Caret["run"]),
-            offset: delta === -1 ? edge.start : edge.end,
-          };
-          this.positionCaret();
-        }
+        // Collapse to the corresponding edge, like every editor. Derived from
+        // the selection POINTS, not the character segments: a selection whose
+        // focus sits in an empty paragraph covers no characters (G15, the
+        // wedge), and collapsing must still land a caret.
+        const [startPt, endPt] = this.orderedSelectionPoints();
+        const edge = delta === -1 ? startPt : endPt;
+        this.clearSelection();
+        this.caret = {
+          t: edge.t,
+          run: this.caret?.run ?? ({} as Caret["run"]),
+          offset: edge.offset,
+          bias: edge.bias,
+        };
+        this.positionCaret();
       } else if (this.caret) this.moveCaret(delta);
     } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       e.preventDefault();
@@ -5783,6 +6563,180 @@ export class DocxEditor {
       this.moveFocus((pt) => this.lineEdgePoint(pt, e.key === "Home" ? "start" : "end"), e.shiftKey);
     }
   };
+
+  /**
+   * Carry out one command from the shortcut table.
+   *
+   * Commands the editor owns (caret movement, history, the pending caret
+   * format) run here; everything else goes to the host, which runs the same
+   * public API call its toolbar button runs — so a shortcut and its button
+   * emit the same collaboration intent and record the same tracked change.
+   */
+  private runShortcut(command: EditorCommand, e: KeyboardEvent): void {
+    switch (command) {
+      case "bold":
+      case "italic":
+      case "underline": {
+        if (this.hasSelection()) {
+          this.host.onFormatShortcut?.(command);
+        } else if (this.caret) {
+          // Word's pending format: with no selection the shortcut queues a
+          // toggle for the NEXT typed text (consumed by insertText; the same
+          // shortcut again cancels it).
+          const pending = (this.pendingFormat ??= new Set());
+          if (pending.has(command)) pending.delete(command);
+          else pending.add(command);
+        }
+        return;
+      }
+      case "selectAll":
+        this.selectAll();
+        return;
+      case "undo":
+      case "redo":
+        this.applyHistory(command);
+        return;
+      case "pageBreak":
+        this.insertBreakAtCaret("page");
+        return;
+      case "columnBreak":
+        this.insertBreakAtCaret("column");
+        return;
+      case "bodyText":
+        this.host.onStyleShortcut?.(null);
+        return;
+      case "heading1":
+      case "heading2":
+      case "heading3":
+      case "heading4":
+      case "heading5":
+      case "heading6":
+        this.host.onStyleShortcut?.(`Heading${command.slice(-1)}`);
+        return;
+      case "lineStart":
+      case "lineEnd":
+        this.moveFocus((pt) => this.lineEdgePoint(pt, command === "lineStart" ? "start" : "end"), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "paragraphUp":
+      case "paragraphDown":
+        this.moveFocus((pt) => this.paragraphPoint(pt, command === "paragraphUp" ? -1 : 1), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "documentStart":
+      case "documentEnd":
+        this.moveFocus(() => this.documentEdgePoint(command === "documentStart" ? "start" : "end"), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "pageUp":
+      case "pageDown":
+        this.moveFocus((pt) => this.pageStartPoint(pt, command === "pageUp" ? -1 : 1), e.shiftKey);
+        this.revealCaret();
+        return;
+      case "link":
+      case "comment":
+        // Both open a dialog about the selected text; without a selection
+        // there is nothing to link or annotate.
+        if (this.hasSelection()) this.host.onTextCommand?.(command);
+        return;
+      default:
+        this.host.onTextCommand?.(command);
+    }
+  }
+
+  /** Cmd/Ctrl+Enter (page) and Shift+Cmd/Ctrl+Enter (column). */
+  private insertBreakAtCaret(breakKind: "page" | "column"): void {
+    if (!this.caret) return;
+    this.host.history?.checkpoint();
+    // Collab: this was a silent LOCAL-ONLY mutation (user repro: Cmd+Enter
+    // didn't create the page for anyone else). Apply the CANONICAL form —
+    // the break at the END of the caret run's first w:t, the exact shape
+    // the remote insertBreak apply produces — with carried ids, then emit.
+    if (this.host.onIntent && this.host.doc.stableIds) {
+      const enc = this.encodeCaretForIntent();
+      let runEl: XmlElement | null = null;
+      for (let cur: XmlElement | null = this.caret.t; cur; cur = this.host.doc.findParentOf(cur) ?? null) {
+        if (localName(cur.name) === "r") {
+          runEl = cur;
+          break;
+        }
+      }
+      const firstT = runEl ? firstTextOf(runEl) : null;
+      if (enc && runEl && firstT) {
+        const nodeIds = this.host.allocIds?.(8) ?? [];
+        const before = this.trackedNodeSet();
+        const destination = insertBreakAt(this.host.doc, firstT, firstT.text.length, breakKind);
+        if (destination) {
+          this.assignFreshTrackedIds(before, nodeIds);
+          this.host.onIntent({ kind: "insertBreak", runId: enc.runId, breakKind, nodeIds });
+          this.caret = { ...this.caret, ...destination };
+          this.commit();
+        }
+      }
+      return;
+    }
+    const destination = insertBreakAt(this.host.doc, this.caret.t, this.caret.offset, breakKind);
+    if (destination) {
+      this.caret = { ...this.caret, ...destination };
+      this.commit();
+    }
+  }
+
+  /** First/last point of the story being edited (body, header/footer, or the
+   * text-box being typed in) — the same span Select All covers. */
+  private documentEdgePoint(edge: "start" | "end"): SelPoint | null {
+    const items = this.activeTextItems();
+    if (items.length === 0) return null;
+    if (edge === "start") {
+      const src = items[0].src!;
+      return { t: src.t as XmlElement, offset: src.offset };
+    }
+    const last = items[items.length - 1];
+    return { t: last.src!.t as XmlElement, offset: last.src!.offset + last.text.length, bias: "end" };
+  }
+
+  /**
+   * Start of the previous/next laid-out page, for Page Up / Page Down.
+   *
+   * A screenful and a page are the same unit in a paginated editor, and the
+   * page boundary is the one the layout already knows — no viewport
+   * arithmetic, and it lands somewhere the reader recognizes. Past the last
+   * page (or before the first) it settles on the story edge, like Word.
+   */
+  private pageStartPoint(pt: SelPoint, dir: -1 | 1): SelPoint | null {
+    const handle = this.host.getHandle();
+    if (!handle?._pages) return null;
+    const firsts: (SelPoint | null)[] = [];
+    let current = -1;
+    for (let page = 0; page < handle._pages.length; page++) {
+      let first: SelPoint | null = null;
+      for (const item of handle._pages[page].page.items) {
+        if (item.kind !== "text" || !item.src?.t) continue;
+        if (!this.inActiveRegion(item.src.t as XmlElement)) continue;
+        if (
+          item.src.t === pt.t &&
+          pt.offset >= item.src.offset &&
+          pt.offset <= item.src.offset + item.text.length
+        ) {
+          current = page;
+        }
+        first ??= { t: item.src.t as XmlElement, offset: item.src.offset };
+      }
+      firsts.push(first);
+    }
+    if (current === -1) return null;
+    for (let page = current + dir; page >= 0 && page < firsts.length; page += dir) {
+      const first = firsts[page];
+      if (!first) continue;
+      const target = handle._pages[page];
+      if (!target.mounted) {
+        target.el.scrollIntoView({ block: "center", behavior: "instant" });
+        handle.updateViewport?.();
+      }
+      return first;
+    }
+    return this.documentEdgePoint(dir === -1 ? "start" : "end");
+  }
 
   /** Move to the visually adjacent line, keeping the horizontal position.
    * Structural, not probe-based: a caret in a trailing table row or before a
@@ -5905,12 +6859,31 @@ export class DocxEditor {
     // SEQUENCED action as an ordinary intent; with no hook wired, decline
     // rather than mutate — the A18 rule that a collab-mode command is an
     // honest no-op before it is a local edit.
-    if (this.host.onIntent && this.host.doc.stableIds) {
+    //
+    // EXCEPTION: a single-process session (onLocalHistory set) has no peers
+    // to fork — its local stack is the ONLY history, so replaying it is
+    // exactly right and gives paste/typing full undo AND redo.
+    if (this.host.onIntent && this.host.doc.stableIds && !this.host.onLocalHistory) {
       if (kind === "undo") this.host.onCollabUndo?.();
       return;
     }
     const changed = kind === "undo" ? h.undo() : h.redo();
     if (!changed) return;
+    this.host.onLocalHistory?.();
+    // A history install replaces subtrees, so an active selection now
+    // references detached elements — clear it (Word collapses the selection
+    // on undo). And when the entry restored no caret (its checkpoint was
+    // taken mid-selection, before any caret location was ever banked) or the
+    // caret's element left the tree, land the caret at the document start:
+    // editing must never go dead after Cmd+Z (fuzz I3; seeds 3/4/6 found the
+    // stale-selection and no-caret variants once the wedge family stopped
+    // being an allowed violation).
+    if (this.hasSelection()) this.clearSelection();
+    if (!this.caret || !paragraphOf(this.host.doc, this.caret.t)) {
+      const home = firstTextOf(this.host.doc.editableRoots()[0]);
+      if (home) this.caret = { t: home, run: this.caret?.run ?? ({} as Caret["run"]), offset: 0 };
+      else this.caret = null;
+    }
     const textChanges = h.lastTextChanges;
     if (textChanges) {
       const blocks = new Set<XmlElement>();
@@ -5947,22 +6920,37 @@ export class DocxEditor {
   // ---------- suggesting mode (tracked changes editing) ----------
 
   /** Turn suggesting mode on/off. When on, every edit records as an OOXML
-   * revision and the view switches to markup so the suggestion shows live;
-   * turning off restores the prior revision view. `author` stamps w:author. */
+   * revision and the view switches to markup so the suggestion shows live.
+   * Turning off restores the prior view, but ONLY once nothing is left to
+   * review — see below. `author` stamps w:author. */
   setSuggesting(on: boolean, author?: string): void {
     if (author) this.revisionAuthor = author;
     if (on === this.suggesting) return;
     this.suggesting = on;
     this.dismissSuggestionPopover();
     if (on) {
-      this.viewBeforeSuggesting = this.host.doc.revisionView;
+      // Only when no restore is already owed — see viewBeforeSuggesting.
+      if (this.viewBeforeSuggesting === null) this.viewBeforeSuggesting = this.host.doc.revisionView;
       if (this.host.doc.revisionView !== "markup") {
         this.host.doc.setRevisionView("markup");
         this.host.rerender();
         this.positionCaret();
       }
-    } else if (this.viewBeforeSuggesting && this.viewBeforeSuggesting !== this.host.doc.revisionView) {
-      this.host.doc.setRevisionView(this.viewBeforeSuggesting);
+      return;
+    }
+    // Whether changes are RECORDED and whether they are SHOWN are two
+    // questions, and restoring the view answered the second with the first.
+    // The AI panel turns suggesting on for its turn and off again at the end,
+    // so a suggestion appeared, then the view snapped back to "final" and the
+    // tracked-change styling vanished a moment later — the edit read as
+    // already applied, with nothing to accept or reject. Word keeps markup on
+    // screen while changes are pending, and so does this: the prior view comes
+    // back only when there is nothing left to hide.
+    if (this.viewBeforeSuggesting === null || this.revisionCount() > 0) return;
+    const restore = this.viewBeforeSuggesting;
+    this.viewBeforeSuggesting = null;
+    if (restore !== this.host.doc.revisionView) {
+      this.host.doc.setRevisionView(restore);
       this.host.rerender();
       this.positionCaret();
     }
@@ -5970,6 +6958,19 @@ export class DocxEditor {
 
   isSuggesting(): boolean {
     return this.suggesting;
+  }
+
+  /**
+   * Author + date for a tracked change the HOST applies — a toolbar formatting
+   * command, which never routes through the editor. Undefined when suggesting
+   * mode is off, which every suggest-aware mutation reads as "apply directly".
+   * The host must put the SAME values in its local mutation and its emitted
+   * intent (doc 05 rule a), so it draws this once per gesture.
+   */
+  suggestionMeta(): { author: string; date: string } | undefined {
+    if (!this.suggesting) return undefined;
+    const { author, date } = this.frozenRevMeta();
+    return { author, date };
   }
 
   private revMeta(): RevisionMeta {
@@ -6013,26 +7014,27 @@ export class DocxEditor {
     return ref?.kind === "deletion" && ref.author === this.revisionAuthor;
   }
 
-  /** The revision (run-level ins/del, or the caret paragraph's mark) at the
-   * caret, for accept/reject. */
+  /** The revision at the caret, for accept/reject: a run-level ins/del, the
+   * caret paragraph's mark, or a formatting change on an enclosing run,
+   * paragraph, cell, row or table (see revisionForText for the order). */
   revisionAtCaret(): RevisionRef | null {
     const caret = this.caret;
-    if (!caret) return null;
-    const run = revisionForText(this.host.doc, caret.t);
-    if (run) return run;
-    // A paragraph-mark revision when the caret sits at the end of its line.
-    const pEl = paragraphOf(this.host.doc, caret.t);
-    if (pEl) {
-      const insMark = paragraphGlyphRevision(pEl, "ins");
-      if (insMark) return { el: insMark, kind: "markInsertion", paragraph: pEl };
-      const delMark = paragraphGlyphRevision(pEl, "del");
-      if (delMark) return { el: delMark, kind: "markDeletion", paragraph: pEl };
-    }
-    return null;
+    return caret ? revisionForText(this.host.doc, caret.t) : null;
   }
 
   /** Accept (keep insertion / drop deletion) the given revision, or the one at
-   * the caret. Re-renders and returns whether anything changed. */
+   * the caret. Re-renders and returns whether anything changed.
+   *
+   * The index is the revision's ADDRESS on the wire, so it is only computed in
+   * a room, and a room refuses what it cannot address: applying a revision
+   * with no index would change this replica and reach no other, which is the
+   * fork this whole class of gate exists to prevent. The two enumerations
+   * agree today — revisionForText walks up from the caret and collectRevisions
+   * walks down from doc.revisionRoots(), over the same body, header/footer and
+   * note trees, and over the same kinds — so `index < 0` should be
+   * unreachable. It stays as the cheap guard on that assumption rather than as
+   * a known gap. DELIBERATE divergence: do not "align" it by dropping the
+   * guard. */
   acceptRevisionRef(ref?: RevisionRef): boolean {
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
@@ -6051,7 +7053,8 @@ export class DocxEditor {
   }
 
   /** Reject (drop insertion / restore deletion) the given revision, or the one
-   * at the caret. */
+   * at the caret. The `index < 0` refusal is deliberate — see
+   * acceptRevisionRef. */
   rejectRevisionRef(ref?: RevisionRef): boolean {
     const target = ref ?? this.revisionAtCaret();
     if (!target) return false;
@@ -6075,11 +7078,13 @@ export class DocxEditor {
   }
 
   /** Accept every tracked change (one undo step). Returns how many applied. */
-  acceptAllRevisions(): number {
+  acceptAllRevisions(author?: string): number {
     this.host.history?.checkpoint();
-    const n = acceptAllRevisions(this.host.doc);
+    const n = acceptAllRevisions(this.host.doc, author);
     if (n === 0) return 0;
-    this.host.onIntent?.({ kind: "acceptAllRevisions" });
+    // The author travels with the intent: a replica that swept everything while
+    // this one swept one author's changes would diverge.
+    this.host.onIntent?.({ kind: "acceptAllRevisions", ...(author !== undefined ? { author } : {}) });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();
@@ -6088,11 +7093,11 @@ export class DocxEditor {
   }
 
   /** Reject every tracked change (one undo step). Returns how many applied. */
-  rejectAllRevisions(): number {
+  rejectAllRevisions(author?: string): number {
     this.host.history?.checkpoint();
-    const n = rejectAllRevisions(this.host.doc);
+    const n = rejectAllRevisions(this.host.doc, author);
     if (n === 0) return 0;
-    this.host.onIntent?.({ kind: "rejectAllRevisions" });
+    this.host.onIntent?.({ kind: "rejectAllRevisions", ...(author !== undefined ? { author } : {}) });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();
@@ -6121,6 +7126,8 @@ export class DocxEditor {
     const suggestEmit = this.suggesting && !!this.caret && !!this.host.onIntent;
     const frozen = suggestEmit ? this.frozenRevMeta() : null;
     const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent && this.caret ? this.encodeCaretForIntent() : null;
+    const pending = this.pendingFormat;
+    this.pendingFormat = null;
     this.insertTextCore(text, frozen ?? undefined);
     this.commit(textOnly);
     if (emitPos) {
@@ -6130,7 +7137,35 @@ export class DocxEditor {
           : { kind: "insertText", at: emitPos, text },
       );
     }
+    // Pending caret format (Cmd+B/I/U before typing): format the just-typed
+    // range through the host's shortcut path — the same canonical mutation +
+    // intents (formatRun/formatRange, suggest-aware) the toolbar and the
+    // selection shortcut use — then collapse back to a trailing caret.
+    if (pending && pending.size > 0) this.applyPendingFormat(pending, text.length);
     return true;
+  }
+
+  /** Apply queued Cmd+B/I/U toggles to the last `len` typed characters. The
+   * typed text inherited the caret run's format, so toggling it through the
+   * selection-format path lands exactly the queued state; the caret then sits
+   * inside the formatted run and further typing continues in that format. */
+  private applyPendingFormat(kinds: Set<"bold" | "italic" | "underline">, len: number): void {
+    const caret = this.caret;
+    if (!caret || len <= 0 || !this.host.onFormatShortcut) return;
+    const end = caret.offset;
+    const start = end - len;
+    if (start < 0) return;
+    this.selectRanges([{ t: caret.t, start, end }]);
+    // onFormatShortcut re-selects the formatted range (selectRanges), so the
+    // next toggle operates on the same — possibly re-split — text.
+    for (const kind of kinds) this.host.onFormatShortcut(kind);
+    const focus = this.selection?.focus;
+    this.clearSelection();
+    if (focus) {
+      this.caret = { t: focus.t, run: this.caret?.run ?? caret.run, offset: focus.offset, bias: "end" };
+      this.positionCaret();
+    }
+    this.focusText();
   }
 
   /** Stable id of the run carrying a drawing. The
@@ -6289,13 +7324,17 @@ export class DocxEditor {
     if (direction === undefined) {
       const selectedAll = this.selectedAll;
       this.host.history?.checkpoint();
-      this.removeSelectedText();
-      this.commit(false, selectedAll ? "global" : "local");
+      const merged = this.removeSelectedText();
+      this.commit(false, selectedAll || merged ? "global" : "local");
       return;
     }
     const caret = this.caret;
     if (!caret) return;
     this.host.history?.checkpoint("deleting");
+    // Separator-aware Backspace/Delete (both modes): a soft line break or a
+    // tab character adjacent to the caret deletes ITSELF — the
+    // insertSeparator machinery's inverse — instead of being stepped past.
+    if (this.deleteAdjacentSeparator(direction)) return;
     if (this.suggesting) {
       this.suggestDelete(direction);
       return;
@@ -6304,11 +7343,17 @@ export class DocxEditor {
       if (caret.offset === 0) {
         const pEl = paragraphOf(this.host.doc, caret.t);
         if (pEl && firstTextOf(pEl) === caret.t) {
+          this.host.history?.checkpoint();
+          // Word: the FIRST press at the start of a list item removes the
+          // numbering — the item becomes a plain paragraph, marker gone,
+          // text kept — and only the NEXT press merges. Also the only
+          // escape for a list item at the very start of a document or
+          // cell, where there is no previous paragraph to merge into.
+          if (this.clearListAtCaret()) return;
           // Start of paragraph: merge into the previous paragraph.
           const prev = siblingParagraph(this.host.doc, pEl, -1);
           if (!prev) return;
           const junction = lastTextOf(prev);
-          this.host.history?.checkpoint();
           // Collab: capture the merged paragraph's stable id BEFORE the merge
           // retires it, and emit the intent so every replica merges too (this
           // was a silent local-only mutation — Backspace across a paragraph
@@ -6355,7 +7400,15 @@ export class DocxEditor {
             : undefined;
           if (mergeParagraphBackward(this.host.doc, next)) {
             if (mergeNextId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeNextId });
-            invalidateParagraphSignature(pEl);
+            // When THIS paragraph was empty, the merge drops it whole and the
+            // NEXT paragraph survives (Word keeps the surviving text's style).
+            // The caret's w:t left the tree with it — rebind to the surviving
+            // paragraph's first text or every later gesture dangles detached.
+            if (!paragraphOf(this.host.doc, caret.t)) {
+              const t = firstTextOf(next);
+              if (t) this.caret = { t, run: caret.run, offset: 0 };
+            }
+            invalidateParagraphSignature(paragraphOf(this.host.doc, this.caret?.t ?? caret.t) ?? pEl);
             this.commit(false, "local", true);
           }
           return;
@@ -6397,6 +7450,11 @@ export class DocxEditor {
       if (caret.offset === 0) {
         const pEl = paragraphOf(doc, caret.t);
         if (pEl && firstTextOf(pEl) === caret.t) {
+          // Word: the first press at the start of a list item removes the
+          // numbering, recorded as a TRACKED format change (w:pPrChange) —
+          // the same shape the toolbar toggle suggests. Later presses
+          // suggest the merge below.
+          if (this.suggestUnbulletAtCaret()) return;
           // Start of paragraph: suggest deleting the PREVIOUS paragraph's mark
           // (a merge). Don't actually join — Word keeps both until accepted.
           const prev = siblingParagraph(doc, pEl, -1);
@@ -6460,8 +7518,10 @@ export class DocxEditor {
     this.commit();
   }
 
-  /** Delete the owned selection's text from the XML; caret → start. */
-  private removeSelectedText(): void {
+  /** Delete the owned selection's text from the XML; caret → start.
+   * Returns true when the delete also merged paragraphs (a selection that
+   * spanned paragraph marks), so callers repaint structurally. */
+  private removeSelectedText(): boolean {
     // Collab: selection deletes were a silent LOCAL-ONLY mutation — nothing
     // rode the wire (review finding), so any select+Backspace/type-over
     // desynced the room. The generic branch below now emits a deleteText per
@@ -6486,10 +7546,44 @@ export class DocxEditor {
           run: { type: "run", props: {}, content: [] },
           offset: 0,
         };
-        return;
+        return true;
       }
     }
-    const segments = this.getSelectionSegments();
+    // G12 — Word's cell-selection model: a selection whose endpoints sit in
+    // DIFFERENT cells of the same table selects WHOLE cells (the rectangular
+    // grid range between the endpoint cells), and a delete CLEARS those
+    // cells' contents while the table structure survives. The segments simply
+    // expand to the covered cells' full text; everything downstream is the
+    // ordinary machinery — per-range deletes (+ deleteText intents), then
+    // in-cell paragraph merges (the merge primitive refuses cross-cell
+    // joins, so each cell collapses to one empty paragraph independently).
+    const cellRange = this.selectedCellRange();
+    const segments = cellRange ? this.wholeCellSegments(cellRange) : this.getSelectionSegments();
+    // G15 (the wedge): a keyboard selection can cover ONLY a paragraph
+    // boundary — Shift+ArrowRight from a paragraph end into an EMPTY
+    // paragraph selects the paragraph mark and nothing else, so no character
+    // segment exists. The mark is still selected content (Word deletes it:
+    // the paragraphs merge), so derive the covered paragraphs and the caret
+    // home from the selection's endpoints instead of wedging dead.
+    let boundaryParagraphs: XmlElement[] = [];
+    let boundaryCaret: Caret | null = null;
+    if (segments.length === 0 && this.selection) {
+      const [startPt, endPt] = this.orderedSelectionPoints();
+      const pa = paragraphOf(this.host.doc, startPt.t);
+      const pb = paragraphOf(this.host.doc, endPt.t);
+      // Only endpoints still IN the tree count: a stale selection (its
+      // elements replaced by a history install) must not donate a detached
+      // caret home — dropping the selection and keeping the current caret is
+      // the honest outcome there.
+      if (pa && pb) {
+        boundaryParagraphs = this.paragraphSpan(pa === pb ? [pa] : [pa, pb]);
+        boundaryCaret = {
+          t: startPt.t,
+          run: this.caret?.run ?? ({} as Caret["run"]),
+          offset: startPt.offset,
+        };
+      }
+    }
     if (this.suggesting) {
       const ranges = segments
         .filter((s) => s.t)
@@ -6508,15 +7602,34 @@ export class DocxEditor {
         })
         .filter((r): r is NonNullable<typeof r> => r !== null);
       const c = deleteSuggestedRange(this.host.doc, ranges, meta);
-      this.emitSuggestRevision(meta, wireRanges);
+      // Word strikes the paragraph MARKS inside the selection too — the same
+      // "del" glyph a caret paragraph-merge suggests — so a fully-selected
+      // list item reads as deleted, marker included, until accept/reject.
+      const marks: { blockId: number; glyph: "ins" | "del" }[] = [];
+      // Cell-granular (G12): no cross-cell merge exists to suggest, so strike
+      // paragraph marks only WITHIN each covered cell (all but the cell's
+      // last — the pilcrows that would merge away on accept). Otherwise the
+      // spanned list's all-but-last are the marks the delete would remove.
+      const suggestSpanned = segments.length > 0 ? this.spannedParagraphs(segments) : boundaryParagraphs;
+      const markParagraphs = cellRange
+        ? cellRange.flatMap((tc) => tc.children.filter((c) => localName(c.name) === "p").slice(0, -1))
+        : suggestSpanned.slice(0, -1);
+      for (const pEl of markParagraphs) {
+        if (paragraphGlyphRevision(pEl, "del")) continue;
+        markParagraphGlyph(pEl, "del", meta);
+        const blockId = this.host.doc.stableIds?.idOf(pEl);
+        if (blockId !== undefined) marks.push({ blockId, glyph: "del" });
+      }
+      this.emitSuggestRevision(meta, wireRanges, marks.length > 0 ? marks : undefined);
       this.clearSelection();
       const run = segments[0]?.run;
       if (c && run) this.caret = { t: c.t, run, offset: c.offset };
-      return;
+      else if (boundaryCaret) this.caret = boundaryCaret;
+      return false;
     }
     // Group ranges per w:t, delete from the end so offsets stay valid.
     const byT = new Map<XmlElement, { start: number; end: number }[]>();
-    let first: Caret | null = null;
+    let first: Caret | null = boundaryCaret;
     for (const seg of segments) {
       if (!seg.t) continue;
       const t = seg.t as XmlElement;
@@ -6545,23 +7658,32 @@ export class DocxEditor {
       return texts.length > 0 && texts.every((text) => fullySelected.has(text));
     });
     const fullySelectedTables = new Set<XmlElement>();
-    if (!collabEmit) {
+    // Cell-granular (G12): Word CLEARS the covered cells and never removes
+    // structure or list formatting, so the whole-table/unbullet fast paths
+    // stay out of the cell path.
+    if (!cellRange) {
       for (const paragraph of fullySelectedParagraphs) {
-        const paragraphProperties = paragraph.children.find(
-          (child) => localName(child.name) === "pPr",
-        );
-        const paragraphTexts = textElements(paragraph).filter((text) => text.text.length > 0);
-        const style = paragraphProperties?.children.find((child) => localName(child.name) === "pStyle");
-        const styleNumbering = resolveParagraphStyleChain(
-          this.host.doc.styles,
-          attr(style, "val"),
-          false,
-        ).pPr.numbering;
-        const isList = paragraphTexts.some((text) => listTypeAt(this.host.doc, text)) || !!styleNumbering;
-        if (paragraphProperties && isList) {
-          paragraphProperties.children = paragraphProperties.children.filter(
-            (child) => localName(child.name) !== "numPr" && localName(child.name) !== "pStyle",
+        // The list-formatting strip is a local-only mutation with no wire
+        // form — collab mounts skip it (the delete degrades to text-only,
+        // identically everywhere). A fully selected TABLE, by contrast, now
+        // has a canonical block removal (tableOp deleteTable) in both modes.
+        if (!collabEmit) {
+          const paragraphProperties = paragraph.children.find(
+            (child) => localName(child.name) === "pPr",
           );
+          const paragraphTexts = textElements(paragraph).filter((text) => text.text.length > 0);
+          const style = paragraphProperties?.children.find((child) => localName(child.name) === "pStyle");
+          const styleNumbering = resolveParagraphStyleChain(
+            this.host.doc.styles,
+            attr(style, "val"),
+            false,
+          ).pPr.numbering;
+          const isList = paragraphTexts.some((text) => listTypeAt(this.host.doc, text)) || !!styleNumbering;
+          if (paragraphProperties && isList) {
+            paragraphProperties.children = paragraphProperties.children.filter(
+              (child) => localName(child.name) !== "numPr" && localName(child.name) !== "pStyle",
+            );
+          }
         }
         let ancestor = this.host.doc.findParentOf(paragraph);
         while (ancestor && localName(ancestor.name) !== "tbl") {
@@ -6598,14 +7720,145 @@ export class DocxEditor {
     for (const table of fullySelectedTables) {
       const parent = this.host.doc.findParentOf(table);
       if (!parent) continue;
+      if (collabEmit) {
+        // G7 residual: a fully selected table deletes AS A BLOCK in collab
+        // too — the canonical tableOp("deleteTable") mutation + intent
+        // (transform identity; the apply prunes the retired ids), so every
+        // replica splices out the same element. Address and caret-rescue
+        // target are captured BEFORE the splice retires them.
+        const cellP = firstParagraphIn(table);
+        const cellParagraphId = cellP ? this.host.doc.stableIds!.idOf(cellP) : undefined;
+        if (!cellP || cellParagraphId === undefined) continue; // unaddressable: degrade to text-only
+        let rescueT: XmlElement | null = null;
+        if (first && textElements(table).includes(first.t)) {
+          const idx = parent.children.indexOf(table);
+          const following = parent.children.slice(idx + 1).find((c) => localName(c.name) === "p");
+          const preceding = [...parent.children.slice(0, idx)].reverse().find((c) => localName(c.name) === "p");
+          rescueT = (following && firstTextOf(following)) ?? (preceding && lastTextOf(preceding)) ?? null;
+        }
+        if (!applyTableOp(this.host.doc, textElements(cellP)[0] ?? cellP, "deleteTable")) continue;
+        this.host.onIntent?.({ kind: "tableOp", cellParagraphId, op: "deleteTable" });
+        if (rescueT && first) first = { t: rescueT, run: first.run, offset: 0 };
+        continue;
+      }
       const empty = emptyParagraphLike(table);
       parent.children.splice(parent.children.indexOf(table), 1, empty.paragraph);
       if (first && textElements(table).includes(first.t)) {
         first = { t: empty.text, run: first.run, offset: 0 };
       }
     }
+    // Word: a selection that spans paragraph boundaries deletes the paragraph
+    // MARKS inside it too — every spanned paragraph after the first merges
+    // into its predecessor. Fully-selected list items disappear WITH their
+    // bullet markers (they used to survive as empty marker-only paragraphs)
+    // and the two boundary paragraphs join. Same mutation + intent as caret
+    // Backspace at a paragraph start, so every replica converges.
+    const spanned = segments.length > 0 ? this.spannedParagraphs(segments) : boundaryParagraphs;
+    let merged = false;
+    for (let i = 1; i < spanned.length; i++) {
+      const pEl = spanned[i];
+      if (!this.host.doc.findParentOf(pEl)) continue; // inside a removed table
+      const mergeId = collabEmit ? this.host.doc.stableIds!.idOf(pEl) : undefined;
+      if (mergeParagraphBackward(this.host.doc, pEl)) {
+        if (mergeId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeId });
+        merged = true;
+      }
+    }
+    if (merged) {
+      for (const pEl of spanned) {
+        if (this.host.doc.findParentOf(pEl)) invalidateParagraphSignature(pEl);
+      }
+      // The caret home may have ridden a paragraph the merge dropped whole
+      // (the empty-previous branch discards its children); land on the first
+      // surviving spanned paragraph instead.
+      if (first && !paragraphOf(this.host.doc, first.t)) {
+        for (const pEl of spanned) {
+          const t = this.host.doc.findParentOf(pEl) ? firstTextOf(pEl) : null;
+          if (t) {
+            first = { t, run: first.run, offset: 0 };
+            break;
+          }
+        }
+      }
+    }
     this.clearSelection();
     if (first) this.caret = first;
+    // A cell-granular clear repaints structurally like a merge: several cells
+    // (possibly several rows) changed, not one caret paragraph.
+    return merged || cellRange !== null;
+  }
+
+  /** G12 — the covered cells when the current selection is cell-granular
+   * (endpoints in different cells of one table), else null. */
+  private selectedCellRange(): XmlElement[] | null {
+    if (!this.selection || this.selectedAll) return null;
+    const [startPt, endPt] = this.orderedSelectionPoints();
+    return cellRangeBetween(this.host.doc, startPt.t, endPt.t);
+  }
+
+  /** Whole-cell selection segments: every painted text item of the covered
+   * cells, merged per w:t — the same builder shape the selected-all segments
+   * use. */
+  private wholeCellSegments(cells: XmlElement[]): SelectionSegment[] {
+    const covered = new Set<XmlElement>();
+    for (const tc of cells) for (const t of textElements(tc)) covered.add(t);
+    const segments: SelectionSegment[] = [];
+    for (const item of this.activeTextItems()) {
+      const src = item.src!;
+      if (item.text.length === 0 || !covered.has(src.t as XmlElement)) continue;
+      const segment: SelectionSegment = {
+        run: src.run,
+        t: src.t,
+        start: src.offset,
+        end: src.offset + item.text.length,
+        props: item.props,
+      };
+      const previous = segments[segments.length - 1];
+      if (previous && previous.t === segment.t && segment.start <= previous.end + 1) {
+        previous.end = Math.max(previous.end, segment.end);
+      } else {
+        segments.push(segment);
+      }
+    }
+    return segments;
+  }
+
+  /** Paragraphs the selection touches, in document order, INCLUDING
+   * marker-only paragraphs between them: an empty list item paints no text
+   * bindings, so it never appears in the segments — but a selection whose
+   * ends bracket it still covers it (the user's page of undeletable empty
+   * bullets). Sibling gaps are filled only under a shared parent; a
+   * cross-container selection (table cells) keeps just the segment
+   * paragraphs, and the merge primitive refuses cross-parent joins anyway. */
+  private spannedParagraphs(segments: SelectionSegment[]): XmlElement[] {
+    const doc = this.host.doc;
+    const touched: XmlElement[] = [];
+    for (const seg of segments) {
+      if (!seg.t) continue;
+      const pEl = paragraphOf(doc, seg.t as XmlElement);
+      if (pEl && !touched.includes(pEl)) touched.push(pEl);
+    }
+    return this.paragraphSpan(touched);
+  }
+
+  /** Fill sibling gaps between consecutive touched paragraphs (see
+   * spannedParagraphs; also used for a zero-segment boundary selection). */
+  private paragraphSpan(touched: XmlElement[]): XmlElement[] {
+    const doc = this.host.doc;
+    const out: XmlElement[] = [];
+    for (let i = 0; i < touched.length; i++) {
+      out.push(touched[i]);
+      const next = touched[i + 1];
+      if (!next) break;
+      const parent = doc.findParentOf(touched[i]);
+      if (!parent || doc.findParentOf(next) !== parent) continue;
+      const a = parent.children.indexOf(touched[i]);
+      const b = parent.children.indexOf(next);
+      for (let k = a + 1; k < b; k++) {
+        if (localName(parent.children[k].name) === "p") out.push(parent.children[k]);
+      }
+    }
+    return out;
   }
 
   private moveCaret(delta: -1 | 1): void {
@@ -6655,62 +7908,239 @@ export class DocxEditor {
     return true;
   }
 
+  /** Suggesting-mode unbullet: remove the caret paragraph's numbering as a
+   * TRACKED format change (w:pPrChange) — the same shape the toolbar toggle
+   * suggests — and emit the suggestable setListType(null) intent. Shared by
+   * suggesting Backspace at a list-item start and suggesting Shift+Tab on a
+   * level-0 item. Returns true when a tracked unbullet was recorded. */
+  private suggestUnbulletAtCaret(): boolean {
+    const caret = this.caret;
+    if (!caret) return false;
+    const doc = this.host.doc;
+    if (listTypeAt(doc, caret.t) === null) return false;
+    const pEl = paragraphOf(doc, caret.t);
+    if (!pEl) return false;
+    const meta = this.frozenRevMeta();
+    const blockId = doc.stableIds?.idOf(pEl);
+    if (!setListType(doc, [caret.t], null, meta)) return false;
+    if (blockId !== undefined && this.host.onIntent) {
+      this.host.onIntent(operationBody("setListType", blockId, {
+        listKind: null,
+        suggest: { author: meta.author, date: meta.date },
+      }));
+    }
+    this.commit(false, "global");
+    return true;
+  }
+
+  /** Word's "unbullet" step: remove the caret paragraph's list formatting so
+   * it becomes a plain paragraph (marker gone, text kept). Backspace at the
+   * start of a list item does this on its FIRST press, and Enter on an empty
+   * list item exits the list through it. Returns true when numbering was
+   * removed. Collab mounts take the CANONICAL setListType(null) mutation +
+   * intent (clearListParagraphFormatting is editor-local and was never
+   * replicated — a local-only exit desynced the doc). */
+  private clearListAtCaret(): boolean {
+    const caret = this.caret;
+    if (!caret) return false;
+    const paragraph = paragraphOf(this.host.doc, caret.t);
+    if (!paragraph) return false;
+    if (this.host.onIntent && this.host.doc.stableIds && listTypeAt(this.host.doc, caret.t) !== null) {
+      const blockId = this.host.doc.stableIds.idOf(paragraph);
+      if (blockId !== undefined && setListType(this.host.doc, [caret.t], null)) {
+        this.host.onIntent(operationBody("setListType", blockId, { listKind: null }));
+        this.commit(false, "global");
+        this.focusText();
+        return true;
+      }
+    }
+    if (!clearListParagraphFormatting(this.host.doc, paragraph)) return false;
+    const reparsed = this.host.doc.reparseBodyParagraph(paragraph);
+    if (reparsed) {
+      for (const child of reparsed.children) {
+        const runs = child.type === "run" ? [child] : child.runs;
+        const run = runs.find((candidate) =>
+          candidate.content.some((content) => content.kind === "text" && content.srcT === caret.t),
+        );
+        if (run) {
+          caret.run = run;
+          break;
+        }
+      }
+      invalidateParagraphSignature(paragraph);
+    }
+    this.commit(false, "local", !!reparsed);
+    this.focusText();
+    return true;
+  }
+
+  /** Shift+Enter (soft line break, w:br) and Tab in a body paragraph
+   * (w:tab): insert an inline separator at the caret via the canonical
+   * mutation, emitting the insertSeparator intent. Plain mode keeps the
+   * caret's run (in-run w:t split — a one-unit wire insert); suggesting mode
+   * records the separator as a w:ins the same shape a typed suggestion has. */
+  private insertSeparatorAtCaret(separator: "br" | "tab"): void {
+    this.host.history?.checkpoint();
+    // Like Enter and typing: an active selection is deleted first, and the
+    // separator is encoded against the post-delete state.
+    if (this.hasSelection()) this.removeSelectedText();
+    const caret = this.caret;
+    if (!caret) return;
+    const suggestEmit = this.suggesting && !!this.host.onIntent;
+    const frozen = suggestEmit ? this.frozenRevMeta() : null;
+    const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent ? this.encodeCaretForIntent() : null;
+    const ctx = frozen ? { suggesting: true, revMeta: () => frozen } : this.mutationCtx();
+    const next = applyInsertSeparator(this.host.doc, caret, separator, ctx);
+    if (!next) return;
+    this.caret = next;
+    const pEl = paragraphOf(this.host.doc, next.t);
+    const reparsed = pEl ? this.host.doc.reparseBodyParagraph(pEl) : null;
+    if (pEl && reparsed) invalidateParagraphSignature(pEl);
+    this.commit(false, "local", !!reparsed);
+    if (emitPos) {
+      this.host.onIntent?.(
+        frozen
+          ? { kind: "insertSeparator", at: emitPos, separator, suggest: { author: frozen.author, date: frozen.date } }
+          : { kind: "insertSeparator", at: emitPos, separator },
+      );
+    }
+    this.focusText();
+  }
+
+  /** The inline separator (w:br / w:tab / w:cr) immediately adjacent to the
+   * caret in the caret paragraph's content order, or null. direction -1 =
+   * the atom before a caret at its w:t's start (Backspace), +1 = the atom
+   * after a caret at its w:t's end (Delete). Atoms are w:t and w:delText
+   * (struck text blocks adjacency) plus the separators themselves, crossing
+   * run boundaries — a separator at the end of the previous run is adjacent
+   * too. */
+  private adjacentSeparator(direction: -1 | 1): XmlElement | null {
+    const caret = this.caret;
+    if (!caret) return null;
+    if (direction === -1 && caret.offset !== 0) return null;
+    if (direction === 1 && caret.offset < caret.t.text.length) return null;
+    const pEl = paragraphOf(this.host.doc, caret.t);
+    if (!pEl) return null;
+    const atoms: XmlElement[] = [];
+    const collect = (e: XmlElement): void => {
+      for (const c of e.children) {
+        const n = localName(c.name);
+        if (n === "pPr" || n === "rPr") continue;
+        if (n === "t" || n === "delText" || n === "br" || n === "tab" || n === "cr") atoms.push(c);
+        else collect(c);
+      }
+    };
+    collect(pEl);
+    const i = atoms.indexOf(caret.t);
+    if (i === -1) return null;
+    const neighbor = atoms[i + direction];
+    if (!neighbor) return null;
+    const n = localName(neighbor.name);
+    return n === "br" || n === "tab" || n === "cr" ? neighbor : null;
+  }
+
+  /** True when `el` sits anywhere inside a w:del — already-deleted content
+   * a separator delete must not touch again. */
+  private insideDeletion(el: XmlElement): boolean {
+    for (let cur = this.host.doc.findParentOf(el); cur; cur = this.host.doc.findParentOf(cur)) {
+      if (localName(cur.name) === "del") return true;
+    }
+    return false;
+  }
+
+  /** Wire address of a separator element: its run's ids plus the ONE wire
+   * unit [offset, offset+1) the separator occupies. Null off the wire. */
+  private encodeSeparatorForIntent(sepEl: XmlElement): { blockId: number; runId: number; offset: number } | null {
+    const ids = this.host.doc.stableIds;
+    if (!ids || !this.host.onIntent) return null;
+    let runEl = this.host.doc.findParentOf(sepEl);
+    while (runEl && localName(runEl.name) !== "r") runEl = this.host.doc.findParentOf(runEl);
+    if (!runEl) return null;
+    const runId = ids.idOf(runEl);
+    let blockEl = this.host.doc.findParentOf(runEl);
+    while (blockEl && localName(blockEl.name) !== "p" && localName(blockEl.name) !== "tbl") {
+      blockEl = this.host.doc.findParentOf(blockEl);
+    }
+    const blockId = blockEl ? ids.idOf(blockEl) : undefined;
+    if (runId === undefined || blockId === undefined) return null;
+    const offset = wireOffsetOfSeparator(runEl, sepEl);
+    return offset === null ? null : { blockId, runId, offset };
+  }
+
+  /** Backspace/Delete beside an inline separator: remove the separator
+   * itself via the canonical mutation (applyDeleteSeparator — the
+   * insertSeparator machinery's inverse), emitting the deleteSeparator
+   * intent. Suggesting mode records it as a tracked deletion (w:del around
+   * the separator's run slice). Returns true when the gesture was handled. */
+  private deleteAdjacentSeparator(direction: -1 | 1): boolean {
+    const caret = this.caret;
+    if (!caret) return false;
+    const sepEl = this.adjacentSeparator(direction);
+    if (!sepEl) return false;
+    // A separator already inside a w:del is deleted content — step past it
+    // like the text paths do.
+    if (this.insideDeletion(sepEl)) return false;
+    this.host.history?.checkpoint();
+    const suggestEmit = this.suggesting && !!this.host.onIntent;
+    const frozen = suggestEmit ? this.frozenRevMeta() : null;
+    const emitPos = (!this.suggesting || suggestEmit) && this.host.onIntent ? this.encodeSeparatorForIntent(sepEl) : null;
+    const ctx = frozen ? { suggesting: true, revMeta: () => frozen } : this.mutationCtx();
+    const res = applyDeleteSeparator(this.host.doc, sepEl, ctx);
+    if (!res) return false;
+    if (res.caret) {
+      this.caret = { t: res.caret.t, run: caret.run, offset: res.caret.offset, bias: "end" };
+    } else if (!paragraphOf(this.host.doc, caret.t)) {
+      // No neighboring text and the old caret element left the tree: land at
+      // the document start rather than dangling detached.
+      const home = firstTextOf(this.host.doc.editableRoots()[0]);
+      if (home) this.caret = { t: home, run: caret.run, offset: 0 };
+    }
+    const pEl = paragraphOf(this.host.doc, this.caret?.t ?? caret.t);
+    const reparsed = pEl ? this.host.doc.reparseBodyParagraph(pEl) : null;
+    if (pEl && reparsed) invalidateParagraphSignature(pEl);
+    this.commit(false, "local", !!reparsed);
+    if (emitPos) {
+      this.host.onIntent?.(
+        frozen
+          ? { kind: "deleteSeparator", at: emitPos, suggest: { author: frozen.author, date: frozen.date } }
+          : { kind: "deleteSeparator", at: emitPos },
+      );
+    }
+    return true;
+  }
+
   /** Enter: split the paragraph at the caret into two w:p elements. */
   private splitParagraph(): void {
     this.host.history?.checkpoint();
+    // Word: Enter over an active selection deletes the selection FIRST, then
+    // splits at the collapse point — the same composition typing over a
+    // selection uses (insertText), so the delete emits its own canonical
+    // intents and the split below is encoded against the post-delete state.
+    // Suggesting mode composes the same way: strike, then suggested split.
+    if (this.hasSelection()) this.removeSelectedText();
     this.splitParagraphNoHistory();
   }
 
   private splitParagraphNoHistory(): void {
-    if (this.caret && this.host.onIntent && this.host.doc.stableIds) {
-      // Collab: Enter on an empty list item exits the list via the CANONICAL
-      // setListType(null) mutation + intent (clearListParagraphFormatting is
-      // editor-local and was never replicated — the exit desynced the doc).
-      const paragraph = paragraphOf(this.host.doc, this.caret.t);
-      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && listTypeAt(this.host.doc, this.caret.t) !== null) {
-        const blockId = this.host.doc.stableIds.idOf(paragraph);
-        if (blockId !== undefined && setListType(this.host.doc, [this.caret.t], null)) {
-          this.host.onIntent({ kind: "setListType", blockId, listKind: null });
-          this.commit(false, "global");
-          this.focusText();
-          return;
-        }
-      }
-    }
     if (this.caret) {
+      // Enter on an EMPTY list item exits the list (Word) instead of adding
+      // another bullet — the same unbullet step Backspace takes first.
       const paragraph = paragraphOf(this.host.doc, this.caret.t);
-      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && clearListParagraphFormatting(this.host.doc, paragraph)) {
-        const reparsed = this.host.doc.reparseBodyParagraph(paragraph);
-        if (reparsed) {
-          for (const child of reparsed.children) {
-            const runs = child.type === "run" ? [child] : child.runs;
-            const run = runs.find((candidate) =>
-              candidate.content.some((content) => content.kind === "text" && content.srcT === this.caret!.t),
-            );
-            if (run) {
-              this.caret.run = run;
-              break;
-            }
-          }
-          invalidateParagraphSignature(paragraph);
-        }
-        this.commit(false, "local", !!reparsed);
-        this.focusText();
-        return;
-      }
+      if (paragraph && textElements(paragraph).every((text) => text.text.length === 0) && this.clearListAtCaret()) return;
     }
     const insertedBefore = this.host.onIntent ? null : this.insertBlankParagraphBeforeAtStart();
     if (insertedBefore) {
       const reparsed = this.host.doc.insertDirectBodyParagraphBefore(insertedBefore.reference, insertedBefore.blank);
-      if (reparsed) {
-        const run = reparsed.children
-          .flatMap((child) => child.type === "run" ? [child] : child.runs)
-          .find((candidate) =>
-            candidate.content.some((content) => content.kind === "text" && content.srcT === insertedBefore.text),
-          );
-        if (run) this.caret = { t: insertedBefore.text, run, offset: 0 };
-        invalidateParagraphSignature(insertedBefore.blank);
-      }
+      // The caret STAYS on the original paragraph, which the blank has just
+      // pushed down a line. This path used to move it into the blank instead,
+      // so the caret held the y it already had and the content slid out from
+      // under it: Enter at a paragraph start left the caret above the text it
+      // was in front of, and Enter on an EMPTY paragraph — every Enter after
+      // the first — did not appear to move at all while empty paragraphs piled
+      // up below. Reported as "when I hit enter the cursor doesnt follow".
+      // Leaving it put also matches the general split path, which hands the
+      // caret to whichever paragraph carries the text it was in front of.
+      if (reparsed) invalidateParagraphSignature(insertedBefore.blank);
       this.commit(false, "local", !!reparsed);
       this.focusText();
       return;

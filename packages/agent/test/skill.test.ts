@@ -45,7 +45,7 @@ describe("wordinweb-documents skill", () => {
 
   it("documents every runtime tool, inspection mode, and reference family", () => {
     for (const tool of AgentDocument.create().tools()) expect(interfaceReference).toContain(`\`${tool.name}\``);
-    for (const kind of ["context", "overview", "read", "search", "object", "spatial"]) expect(interfaceReference).toContain(`\"kind\": \"${kind}`);
+    for (const kind of ["context", "overview", "read", "search", "object", "spatial", "fit"]) expect(interfaceReference).toContain(`\"kind\": \"${kind}`);
     for (const prefix of ["block:*", "run:*", "object:*", "asset:*", "spatial:*", "view:*"]) expect(interfaceReference).toContain(`\`${prefix}\``);
   });
 

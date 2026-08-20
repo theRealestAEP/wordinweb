@@ -29,6 +29,13 @@ const arg = (name, dflt) => {
 const PARAS = arg("paras", 3000);
 const KEYS = arg("keys", 30);
 const CLICK_EVERY = arg("clickEvery", 0); // 0 = click once, then type straight
+// Characters per paragraph. The default is one short sentence, which is the
+// novel/report shape. A real user document turned up at 245 paragraphs across
+// 794,298 characters — 3,240 each, more than a page of text per paragraph —
+// and that shape stresses a different edge entirely: the incremental path
+// re-lays the EDITED PARAGRAPH, so its cost is per-paragraph size, not per
+// document. Reach for --charsPerPara to reproduce it.
+const CHARS_PER_PARA = arg("charsPerPara", 0);
 // Bookmark every paragraph (the TOC-heading shape). Pre-fix, typing in a
 // bookmarked paragraph fell out of the reparse fast path into a full
 // doc.refresh() + whole-document relayout per keystroke.
@@ -82,10 +89,20 @@ if (!window.ResizeObserver) {
 }
 
 /* ------------------------------ doc bytes ------------------------------- */
+const SENTENCE = "the quick brown fox jumps over the lazy dog while the committee deliberates at length. ";
+/** One paragraph's text: a sentence, or CHARS_PER_PARA characters of them. */
+function paraText(i) {
+  const head = `Paragraph ${i}: `;
+  if (CHARS_PER_PARA <= 0) return head + SENTENCE;
+  let text = head;
+  while (text.length < CHARS_PER_PARA) text += SENTENCE;
+  return text.slice(0, CHARS_PER_PARA);
+}
+
 function docBytes(paras) {
   const para = (i) =>
     `<w:p>${BOOKMARKS ? `<w:bookmarkStart w:id="${i}" w:name="_Toc${1000 + i}"/>` : ""}` +
-    `<w:r><w:t xml:space="preserve">Paragraph ${i}: the quick brown fox jumps over the lazy dog while the committee deliberates at length. </w:t></w:r>` +
+    `<w:r><w:t xml:space="preserve">${paraText(i)}</w:t></w:r>` +
     `${BOOKMARKS ? `<w:bookmarkEnd w:id="${i}"/>` : ""}</w:p>`;
   let body = "";
   for (let i = 0; i < paras; i++) body += para(i);

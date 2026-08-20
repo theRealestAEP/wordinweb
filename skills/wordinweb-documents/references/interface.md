@@ -5,6 +5,8 @@
 - [Execution surfaces](#execution-surfaces)
 - [Tool contracts](#tool-contracts)
 - [Inspection types](#inspection-types)
+- [Text projection](#text-projection)
+- [Patching a projection](#patching-a-projection)
 - [References](#references)
 - [Editing](#editing)
 - [Compose generic primitives](#compose-generic-primitives)
@@ -63,8 +65,8 @@ type AgentComposeBlock =
   | { type: "chart"; chart: ChartData; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "smartArt"; smartArt: SmartArtData; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "image"; assetRef: string; widthPx: number; heightPx: number; alt?: string; align?: "left" | "center" | "right"; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; position?: { xPx: number; yPx: number } }
-  | { type: "shape"; preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox"; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" } | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
-  | { type: "wordArt"; text: string; preset: "plain" | "archUp" | "archDown" | "wave" | "chevron"; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; rotation?: number; fill?: string; opacity?: number; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
+  | { type: "shape"; preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox" | string; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" } | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
+  | { type: "wordArt"; text: string; preset: "plain" | "archUp" | "archDown" | "wave" | "chevron" | "circle" | "button" | "chevronDown"; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; rotation?: number; fill?: string; opacity?: number; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
   | { type: "pageNumber"; fieldKind: "page" | "pageOfTotal"; align?: "left" | "center" | "right"; color?: string; fontSizePt?: number; fontFamily?: string; bold?: boolean }
   | { type: "pageBreak" };
 
@@ -136,7 +138,35 @@ Inspect document content progressively.
 { "kind": "search", "query": "revenue", "maxResults": 50 }
 { "kind": "object", "ref": "object reference" }
 { "kind": "spatial", "pages": { "start": 1, "count": 10 }, "includeOverlaps": true }
+{ "kind": "fit", "pages": { "start": 1, "count": 10 } }
 ```
+
+`fit` reports rendered output for text-bearing drawings, so a drawing that was
+just inserted or resized can be checked instead of guessed at:
+
+```json
+{
+  "revision": "17",
+  "layout": { "quality": "approximate", "profile": "headless-approx" },
+  "totalPages": 3,
+  "pages": [{ "page": 1, "contentBottomPx": 812.4, "pageBottomPx": 960 }],
+  "drawings": [
+    {
+      "objectRef": "object:12:0",
+      "page": 1,
+      "boxPx": { "w": 192, "h": 96 },
+      "textPx": { "w": 172.8, "h": 148.5 },
+      "overflow": true,
+      "clippedLines": 4,
+      "autofit": "none"
+    }
+  ]
+}
+```
+
+`autofit` is the shape's bodyPr mode. Only `resizeShape` resolves an overflow
+on its own; Word paints `shrinkText` at full size and clips it, exactly like
+`none`. Use `setDrawingTextFit` to change the mode.
 
 Limits:
 
@@ -148,6 +178,7 @@ Limits:
 - `search.query`: 1–1,000 characters
 - `search.maxResults`: 1–500
 - `spatial.pages.count`: 1–100
+- `fit.pages.count`: 1–100
 
 ### `word_document_edit`
 
@@ -163,6 +194,56 @@ Apply one transaction against an inspected revision.
 ```
 
 A transaction accepts 1–100 operations. The tool schema contains the closed schema for every operation and nested value. Runtime validation applies the same contract before mutation.
+
+### `word_document_project`
+
+Render one story as deterministic text plus a line anchor map. Read-only.
+
+```json
+{ "mode": "md" }
+{ "mode": "text", "story": "body", "maxBlocks": 200, "maxCharacters": 24000 }
+{ "mode": "md", "cursor": { "value": "returned cursor" } }
+{ "mode": "outline" }
+```
+
+Limits:
+
+- `mode`: `text`, `md`, or `outline`. Default `md`.
+- `story`: a story ID from `overview`. Default `body`.
+- `maxBlocks`: 1–2,000 top-level blocks per window
+- `maxCharacters`: 1–200,000 per window
+
+The result carries the projected `text`, the `revision` it belongs to, and one
+`anchors` entry per line. See [Text projection](#text-projection).
+
+### `word_document_patch`
+
+Rewrite lines of a projection window. One transaction, all or nothing.
+
+```json
+{
+  "revision": "17",
+  "mode": "md",
+  "edits": [{ "startLine": 4, "endLine": 4, "newText": "Adopt the managed platform." }]
+}
+```
+
+```json
+{
+  "revision": "17",
+  "mode": "md",
+  "diff": "@@ -4,1 +4,2 @@\n-Adopt the platform.\n+Adopt the platform.\n+Name an owner.\n"
+}
+```
+
+Send `edits` or `diff`, never both. Repeat the `story`, `mode`, and `cursor`
+of the projection the lines came from. Set `suggest: true` to record the patch
+as tracked changes. A patch accepts 1–100 hunks and compiles to at most 100
+operations.
+
+The result contains the new `revision`, the applied operation kinds, and the
+refreshed `projection` of the same window, so a second call to re-anchor is
+unnecessary. See [Patching a projection](#patching-a-projection).
 
 ### `word_document_asset`
 
@@ -391,6 +472,179 @@ interface AgentSpatialResult {
 
 Browser layout uses canvas metrics. Headless layout uses deterministic approximate text metrics. The same polygon intersection computes overlaps in both modes.
 
+## Text projection
+
+`word_document_project` renders a story as text. The same revision always
+produces byte-identical output. Read the text, edit the text, send the changed
+lines back through `word_document_patch`.
+
+The projection hides the two offset spaces. Inspection offsets count rendered
+characters and edit offsets count wire units. The anchor map is built in the
+same pass as the text and holds both, so a patch never asks for a wire offset.
+
+### Modes
+
+| Mode | Content |
+| --- | --- |
+| `text` | Every paragraph of the story, one per line, including table cell paragraphs. No markup. |
+| `md` | Headings, lists, GFM tables with cell content, and rich atom forms. Table cell paragraphs appear inside their table rows. |
+| `outline` | Heading paragraphs only, as markdown headings. |
+
+### Example
+
+A brief with a heading, a mixed-formatting paragraph, a bullet list, a table,
+an equation, and a closing section projects in `md` mode as:
+
+```
+# Findings
+Decision: adopt the managed platform.
+- Latency
+- Cost
+
+| Option | Score |
+| --- | --- |
+| Managed | 9 |
+
+$E=mc^(2)$
+## Next steps
+Schedule the review.
+```
+
+The same document in `text` mode:
+
+```
+Findings
+Decision: adopt the managed platform.
+Latency
+Cost
+Option
+Score
+Managed
+9
+␏
+Next steps
+Schedule the review.
+```
+
+### Atom placeholders
+
+Inline content with no editable text becomes one character in `text` mode, so
+a projection column always names one whole atom.
+
+| Content | `text` mode | `md` mode |
+| --- | --- | --- |
+| tab, positioned tab | `␉` U+2409 | `␉` |
+| line break | `␊` U+240A | `␊` |
+| page or column break | `␌` U+240C | `␌` |
+| field | `␎` U+240E | `{{PAGE}}` from the instruction name |
+| equation | `␏` U+240F | `$E=mc^(2)$` in linear math text |
+| footnote or endnote reference | `␅` U+2405 | `[^3]` |
+| image, chart, SmartArt, shape | `￼` U+FFFC | `![alt](object:12:3)` |
+| ruby annotation | the base text | the base text |
+
+The `object:*` target inside an `md` image form is a live reference. Pass it to
+`word_document_inspect` with `"kind": "object"` for the full detail, or to a
+drawing operation to edit it.
+
+### Escaped lines
+
+Plain paragraphs really do open with `3. ` or `- `. In `md` mode a paragraph
+that carries no heading or list of its own, but whose text would read as a
+marker, is written with a leading backslash:
+
+```
+\3. TERM AND TERMINATION
+\- not a bullet
+- Real bullet
+```
+
+The backslash is structure, not text. Keep it when you rewrite the line. Drop
+it to turn the paragraph into a real list item. `text` mode carries no markdown
+and no escapes.
+
+Apart from that leading escape, `md` mode does not escape markdown characters
+inside document text, and it does not emit inline emphasis. The projection is a
+structural view for editing, not a markdown document to round-trip.
+
+### Anchors
+
+`anchors` holds one entry per projected line, in order.
+
+```ts
+interface AgentAnchorLine {
+  line: number;                                   // 1-based within this window
+  role: "paragraph" | "table" | "structure";
+  blockRef?: string;
+  marker: number;                                 // leading markdown structure characters
+  editable: boolean;
+  segments: AgentAnchorSegment[];
+}
+
+interface AgentAnchorSegment {
+  start: number;                                  // columns in the line
+  end: number;
+  runRef: string;
+  wireStart: number;                              // offsets in the run
+  wireEnd: number;
+  editable: boolean;                              // backed by one w:t
+}
+```
+
+Only `paragraph` lines accept patches. A `table` line is the GFM rendering of a
+whole table and a `structure` line is a blank separator; both carry context,
+not edit targets. Patch table cells through `text` mode, which gives every cell
+paragraph its own editable line.
+
+The map is machine-facing. Read the text, not the anchors.
+
+### Windows
+
+A projection covers whole top-level blocks. When a window fills its budget the
+result sets `truncated` and returns `next`; pass it back as `cursor` for the
+following window. A cursor belongs to one revision and is rejected after any
+edit. Every window carries the `revision` it was taken from.
+
+## Patching a projection
+
+A hunk replaces projection lines `startLine` through `endLine`, inclusive, with
+the lines of `newText`. Line numbers are relative to the window, so repeat the
+`story`, `mode`, and `cursor` that produced it. The refreshed projection in the
+result covers that same window.
+
+| Old lines | New lines | Result |
+| --- | --- | --- |
+| 1 | 1 | The differing span of the paragraph is rewritten. |
+| 1 | many | The paragraph splits. Later lines inherit its style and list. |
+| many | 1 | The paragraphs merge into the first, then the text is rewritten. |
+| many | fewer | The extra paragraphs merge away. |
+
+Delete a paragraph by covering it together with the line before it and
+supplying only that line's text.
+
+Rules:
+
+- Every line a paragraph splits into repeats the first line's marker. Changing
+  a marker on a split line is not supported.
+- Changing the marker on a rewritten line changes the paragraph: `## ` sets the
+  heading style, no marker clears it, and `- ` or `1. ` sets or clears the list.
+  Changing a list indent is not supported.
+- A hunk may not rewrite across an atom placeholder. Edit the atom with the
+  operation that owns it.
+- Hunks may not overlap.
+- Text that replaces a span takes the formatting of the run where the span
+  starts, the rule Word applies when you type over a mixed selection. Runs
+  outside the changed span keep their own formatting.
+- With `suggest: true` a hunk may add text or remove text, not both. Send a
+  replacement as two patches.
+- With `suggest: true` a hunk may remove a paragraph break or rewrite the text
+  it joins, not both. A tracked merge only strikes the paragraph mark, so both
+  paragraphs stay in place until the reviewer accepts and a rewrite across the
+  break has no single address. Send the merge and the rewrite as two patches.
+
+Only the blocks a hunk touches must be unchanged. A patch written against an
+older revision still applies when someone else edited a different part of the
+document; it is rejected as stale once its own blocks move.
+
 ## References
 
 - `block:*`: editable paragraph or table identity
@@ -449,9 +703,11 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
 | `insertText` | Insert text at a position | `at`, `text`; optional: `suggest` |
+| `insertSeparator` | Insert a soft line break (`br`) or a tab character (`tab`) at a position | `at`, `separator`; optional: `suggest` |
+| `deleteSeparator` | Delete the inline separator occupying one wire unit at a position | `at`; optional: `suggest` |
 | `deleteText` | Delete one run range | `blockRef`, `runRef`, `start`, `end` |
-| `formatRun` | Format a complete run | `blockRef`, `runRef`, `patch` |
-| `formatRange` | Format one run range | `blockRef`, `runRef`, `start`, `end`, `patch` |
+| `formatRun` | Format a complete run | `blockRef`, `runRef`, `patch`; optional: `suggest` |
+| `formatRange` | Format one run range | `blockRef`, `runRef`, `start`, `end`, `patch`; optional: `suggest` |
 | `setLink` | Add a safe hyperlink | `runRef`, `url` |
 | `removeLink` | Remove a hyperlink | `runRef` |
 | `toggleCheckbox` | Toggle a checkbox control | `runRef` |
@@ -461,14 +717,18 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
 | `splitParagraph` | Split at a text position | `at`; optional: `suggest` |
-| `mergeParagraph` | Merge into the previous paragraph | `blockRef` |
-| `formatParagraph` | Set alignment or style | `blockRef`; optional: `align`, `styleId` |
-| `setListType` | Set bullet, number, or normal paragraph | `blockRef`, `listKind` |
+| `mergeParagraph` | Merge into the previous paragraph | `blockRef`; optional: `suggest` |
+| `formatParagraph` | Set alignment or style | `blockRef`; optional: `align`, `styleId`, `suggest` |
+| `setListType` | Set bullet, number, or normal paragraph | `blockRef`, `listKind`; optional: `suggest` |
 | `setListLevel` | Change list nesting | `blockRef`, `delta` |
-| `adjustIndent` | Change indent by one step | `blockRef`, `direction` |
-| `setSpacing` | Set line and paragraph spacing | `blockRef`, `patch` |
+| `adjustIndent` | Change indent by one step | `blockRef`, `direction`; optional: `suggest` |
+| `setSpacing` | Set line and paragraph spacing | `blockRef`, `patch`; optional: `suggest` |
 | `setDropCap` | Set or clear a drop cap | `blockRef`, `mode` |
 | `setDivider` | Set or clear a paragraph divider | `blockRef`, `divider` |
+| `setNumberingLevel` | Change a list level's number format, label text, or indent | `blockRef`, `ilvl`, `patch` |
+| `setNumberingRestart` | Restart list numbering here, or continue the preceding list | `blockRef`, `start` |
+| `setTabStops` | Replace the paragraph's tab stops (position, alignment, leader); an empty list removes them | `blockRef`, `stops`; optional: `suggest` |
+| `setParagraphBorders` | Set or clear the paragraph's border edges and shading fill | `blockRef`, `patch`; optional: `suggest` |
 
 ### Review
 
@@ -476,7 +736,9 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | --- | --- | --- |
 | `commentRun` | Add a comment to a run | `runRef`, `text`; optional: `initials` |
 | `replyComment` | Reply to a comment | `parentId`, `text`; optional: `initials` |
-| `deleteComment` | Delete a comment thread | `commentId` |
+| `deleteComment` | Delete a comment (a thread-parent id deletes the whole thread; a reply id deletes just that reply) | `commentId` |
+| `resolveComment` | Resolve or reopen a comment thread | `commentId`, `resolved` |
+| `editComment` | Replace a comment's text | `commentId`, `text` |
 | `suggestRevision` | Suggest text or paragraph deletion | optional: `ranges`, `marks` |
 | `acceptRevision` | Accept one revision | `index` |
 | `rejectRevision` | Reject one revision | `index` |
@@ -491,27 +753,41 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertImage` | Insert a registered image | `runRef`, `assetRef`, `widthPx`, `heightPx` |
 | `insertBreak` | Insert a page or column break | `runRef`, `breakKind` |
 | `insertMath` | Insert native Word math | `runRef`, `mathText` |
-| `insertShape` | Insert a shape or text box | `runRef`, `preset`; optional: `text` |
+| `insertShape` | Insert a shape or text box. `preset` is a legacy name (`line`, `verticalLine`, `rectangle`, `roundedRectangle`, `ellipse`, `diamond`, `textBox`) or any DrawingML ST_ShapeType name from the shape gallery (e.g. "heart", "star5", "rightArrow", "flowChartDecision", "cloudCallout") | `runRef`, `preset`; optional: `text` |
 | `insertPageField` | Insert PAGE or PAGE/NUMPAGES | `runRef`, `fieldKind` |
 | `insertFootnote` | Insert a footnote | `runRef`, `text` |
+| `insertEndnote` | Insert an endnote | `runRef`, `text` |
 | `insertBookmark` | Insert a bookmark at a run | `runRef`, `name` |
 | `insertBookmarkRange` | Bookmark a run range | `runRef`, `name`, `start`, `end` |
 | `insertBlankPage` | Insert a blank page | `runRef` |
 | `insertSectionBreak` | Insert a section boundary | `runRef`, `breakType` |
 | `insertCrossRef` | Insert a bookmark reference | `runRef`, `bookmark`, `refKind` |
-| `insertCoverPage` | Insert a native cover page | `content` |
-| `insertWordArt` | Insert decorative WordArt | `runRef`, `text`, `preset` |
+| `insertCoverPage` | Insert a native cover page; `content.layout` picks the design (title / banner / sidebar), default "title" | `content` |
+| `insertWordArt` | Insert decorative WordArt. `preset` is a transform (`plain`, `archUp`, `archDown`, `wave`, `chevron`, `circle`, `button`, `chevronDown`); optional `style` is a gallery style `{ fill: "RRGGBB", outline?: { color: "RRGGBB", widthPt }, shadow?: boolean }` | `runRef`, `text`, `preset`; optional: `style` |
 | `insertChart` | Insert a chart and workbook | `runRef`, `chart` |
 | `insertSmartArt` | Insert a SmartArt diagram | `runRef`, `smartArt` |
 | `insertDateTimeField` | Insert a DATE or TIME field | `runRef`, `dtKind`, `picture` |
 | `insertField` | Insert an allowlisted Word field | `runRef`, `instruction`; optional: `cachedResult` |
-| `insertTable` | Insert a table | `runRef`, `rows`, `cols` |
+| `insertMergeField` | Insert a mail-merge placeholder field («Name») | `runRef`, `name` |
+| `insertCitation` | Insert a citation to a bibliography source the document already has | `runRef`, `tag` |
+| `insertBibliography` | Insert a bibliography built from the document's citation sources | `runRef`, `entryCount` |
+| `insertBuildingBlock` | Insert a named Quick Part (building block) at a position, cloning its stored content from the glossary part; `blockCount` is the id budget (from buildingBlockNodeCount) | `runRef`, `name`, `blockCount` |
+| `insertTable` | Insert a table, with its whole content (cell texts, header row) authored in the same operation | `runRef`, `rows`, `cols`; optional: `cells`, `headerRow` |
+| `insertToc` | Insert a table of contents built from the document's headings, or a table of figures from a caption label | `runRef`, `entryCount`; optional: `levels`, `leader`, `captionLabel` |
+| `insertIndexEntry` | Mark an index entry: an invisible XE field; a colon makes a subentry ("Widgets:assembly") | `runRef`, `entry` |
+| `insertIndex` | Insert an alphabetized index built from the document's XE entry marks; `entryCount` is the id budget (from indexEntryCount) | `runRef`, `entryCount` |
+| `insertCaption` | Insert a caption ("Figure 1", "Table 2", …) below or above the addressed paragraph or its table | `blockRef`, `label`; optional: `text`, `position` |
+| `ensureRefBookmark` | Wrap the addressed paragraph in a hidden _Ref bookmark for cross-referencing | `blockRef`, `name` |
+| `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
+| `insertPictureWatermark` | Stamp a picture watermark across every page, in the document's header parts. Carries the blob's ADDRESS, never its bytes, so it needs a blob the host has already prepared — an `asset:*` reference is not enough on its own | `blobSha`, `bytesLen`, `ext`, `naturalWidthPx`, `naturalHeightPx`, `headerCount`; optional: `iv`, `washout` |
+| `removeWatermark` | Remove the watermark, text or picture, from every page | — |
 
 ### Drawing
 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
 | `setDrawingRotation` | Rotate a drawing | `objectRef`, `degrees` |
+| `setModel3DRotation` | Set a 3D model's X/Y/Z orientation, in degrees | `objectRef`, `rotation` |
 | `setDrawingFill` | Set or clear fill | `objectRef`, `color` |
 | `setDrawingLineStyle` | Set or clear shape outline or line style | `objectRef`, `color`; optional: `widthPx`, `dash` |
 | `setDrawingOrder` | Move to front or back | `objectRef`, `order` |
@@ -519,7 +795,9 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `resizeDrawing` | Set drawing dimensions | `objectRef`, `widthPx`, `heightPx` |
 | `removeDrawing` | Remove a drawing | `objectRef` |
 | `setImageAltText` | Set image accessibility text | `objectRef`, `alt` |
+| `setCrop` | Crop an image to part of its bitmap | `objectRef`, `crop` |
 | `setImageWrap` | Set inline or floating wrapping | `objectRef`, `mode` |
+| `setDrawingTextFit` | Set a shape's autofit mode | `objectRef`, `mode`; optional: `fontScalePct` |
 | `setDrawingWordArtText` | Replace WordArt text | `objectRef`, `text` |
 | `setDrawingWordArtStyle` | Set WordArt glyph color and opacity | `objectRef`, `color`, `opacity` |
 | `setChartData` | Replace chart data | `objectRef`, `chart` |
@@ -531,30 +809,120 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 `widthPx` and `dash` when `color` contains an RGB value.
 
+`setDrawingTextFit.mode` is `resizeShape` (grow the box to its text),
+`shrinkText` (cache a smaller font scale), or `none` (clip). Use
+`resizeShape` to resolve an overflow that `kind: "fit"` reported: Word grows
+that box, but it paints `shrinkText` at full size and clips it just like
+`none`. `fontScalePct` (1–100) is `shrinkText`'s cached percentage and is
+rejected with any other mode.
+
 ### Table
 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
-| `tableOp` | Add, delete, or format table parts | `cellRef`, `op` |
+| `tableOp` | Add, delete, or format table parts | `cellRef`, `op`; optional: `suggest` |
 | `resizeTableColumn` | Move a column boundary | `cellRef`, `boundary`, `deltaPx`; optional: `renderedWidths` |
 | `resizeTableRow` | Set row height | `cellRef`, `rowIdx`, `heightPx` |
 | `moveTable` | Float and position a table | `cellRef`, `xPx`, `yPx`, `preservePageStart`, `pageDelta` |
+| `setTableBorders` | Set or clear borders, per edge | `cellRef`, `scope`, `edges`, `border`; optional: `suggest` |
+| `setTableStyle` | Apply a named table style | `cellRef`, `styleId`; optional: `suggest` |
+| `setTableLook` | Toggle which style options apply | `cellRef`, `look`; optional: `suggest` |
+| `setTableWidth` | Set the table's preferred width | `cellRef`, `unit`; optional: `value`, `suggest` |
+| `setTableColumnWidth` | Set one column to an exact width | `cellRef`, `colIdx`, `widthPt`; optional: `suggest` |
+| `setTableLayout` | Switch between fixed and autofit | `cellRef`, `layout`; optional: `renderedWidths`, `suggest` |
+| `setTableCellMargins` | Set cell padding | `cellRef`, `scope`, `margins`; optional: `suggest` |
+| `setTableHeaderRows` | Repeat the first N rows on every page | `cellRef`, `count`; optional: `suggest` |
+| `sortTableRows` | Sort body rows by one column (text or number, asc or desc) | `cellRef`, `colIdx`, `order`, `compare`; optional: `hasHeader` |
+| `insertTableFormula` | Insert a table formula field (`=SUM(ABOVE)`, `=A1+B2`) in the addressed cell, with an optional `\#` number format | `cellRef`, `formula`; optional: `numFmt` |
+| `convertTextToTable` | Convert a paragraph into a table (rows split on a separator) | `blockRef`, `separator`, `cellCount` |
+| `convertTableToText` | Convert a table into paragraphs, one per row | `cellRef`, `separator`, `rowCount` |
+
+`setTableBorders` takes `scope: "cell" | "table"`. Table scope accepts the
+edges `top`, `bottom`, `left`, `right`, `insideH`, `insideV`; cell scope
+accepts `top`, `bottom`, `left`, `right` and the diagonals `tl2br`, `tr2bl`.
+A `border` of `null` REMOVES those edges, so they inherit from the table or
+its style again; a `border` of `{ "style": "none" }` instead draws no rule and
+stops the inheritance. That is Word's difference between clearing a border and
+setting No Border.
+
+`setTableWidth` needs `value` unless `unit` is `"auto"`; `value` is points for
+`"pt"` and 0-100 for `"pct"`.
+
+`setTableLayout` with `layout: "fixed"` freezes the columns. Pass
+`renderedWidths` (the measured column widths in px) so the frozen widths match
+what is on screen — an autofit table's grid often says something else.
+`layout: "autofit"` drops the per-cell widths and the width target so the
+columns are measured from content again.
+
+`setTableStyle` applies a style the document's `styles.xml` already defines;
+an unknown id applies nothing. Combine it with `setTableLook` to choose which
+of the style's conditional formats are used.
 
 ### Math
 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
-| `setMathLinear` | Replace an equation | `blockRef`, `mathText` |
-| `deleteMath` | Delete an equation | `blockRef` |
-| `moveMath` | Move an equation | `blockRef`, `at` |
+| `setMathLinear` | Replace an equation | `blockRef`, `mathText`, `mathIndex` |
+| `deleteMath` | Delete an equation | `blockRef`, `mathIndex` |
+| `moveMath` | Move an equation | `blockRef`, `at`, `mathIndex` |
+
+A block can hold more than one equation. `mathIndex` picks which one, counting
+from 0 in document order; omit it for the first. Inspection lists a block's
+equations in that same order, so the nth equation you read is the nth you can
+edit. An index past the last equation changes nothing.
+
+`mathText` is a linear form of the equation. Scripts are `x^2` and `a_i`, a
+fraction is `{a+b}/{2c}`, a root is `√{x}` or `√[3]{x}` with an index, and
+braces group whatever the next operator applies to. Beyond those:
+
+| Construct | Written as | Example |
+| --- | --- | --- |
+| matrix | rows in brackets, `&` between cells, `;` between rows | `[a&b;c&d]` |
+| one-cell matrix | marked, so it reads as a matrix and not a bracket group | `■[a]` |
+| equation array | rows in brackets, marked | `█[x=1;y=2]` |
+| cases (piecewise) | a brace group closed by `┤` | `{█[x;-x]}┤` |
+| accent | the combining mark after its base | `x̂`, `{a+b}⃗` |
+| over/under brace | the group character before its argument | `⏞{a+b}` |
+| limit above or below | `┬` above, `┴` below | `{lim}┴{n→∞}f` |
+| a literal `(`, `/`, `^`, … | a backslash before it | `\(x\)`, `-1\/2` |
+
+Formatting the text does not mention — run fonts, an n-ary's limit placement, a
+matrix's column widths — survives an edit untouched, so replacing one cell of a
+matrix changes only that cell.
+
+Equations built from OMML this form cannot name — Word's `m:func` (a typeset
+function name) and `m:sSubSup` (one base carrying both scripts) — are read-only.
+They still render and project; `setMathLinear` refuses them rather than rewrite
+the equation into something else.
 
 ### Document
 
 | Kind | Purpose | Fields |
 | --- | --- | --- |
 | `setPageLayout` | Set margins, page size, columns, or borders | `patch` |
-| `setLineNumbering` | Configure margin line numbers | `patch` |
+| `setLineNumbering` | Configure margin line numbers. Counts every real line (each wrapped continuation, each blank paragraph); table content is skipped entirely (not counted, not numbered). A fixed count of numbered lines per page (a numbered ruled-paper layout) requires exact, evenly spaced lines — pair this with `setSpacing` (`exactLinePt` at the desired pitch, `beforePt`/`afterPt: 0`) on the affected paragraphs, since auto/single spacing lets far more real lines fit a page than a fixed-pitch grid does | `patch` |
 | `ensureHeaderFooter` | Create a header or footer story | `hfKind` |
+| `setTitlePage` | Toggle different-first-page headers and footers; enabling creates the empty first-page parts | `enabled` |
+| `setEvenOddHeaders` | Toggle different odd & even page headers and footers; enabling creates the empty even-page parts | `enabled` |
+| `setPageNumberFormat` | Set the page-number format (decimal, roman, letter) and/or the start-at value | optional: `fmt`, `start` |
+| `insertPageNumberPosition` | Insert a page number into the header (top) or footer (bottom), aligned left/center/right — the page-number position gallery | `position`, `align` |
+| `removePageNumbers` | Remove page-number fields from every header and footer part | (none) |
+| `insertHeaderFooterPreset` | Replace a header or footer's content with a preset layout: blank, centered title, title + date, or three-column | `hfKind`, `preset` |
+| `setHyphenation` | Set automatic-hyphenation settings: on/off, the hyphenation zone in points (null clears), keep-CAPS-whole. Round-trip state for Word's rendering; this engine's layout does not hyphenate | optional: `auto`, `zonePt`, `noCaps` |
+| `setFootnoteOptions` | Set footnote number format, restart rule (continuous/eachSect/eachPage — eachPage round-trips but is not laid out), start-at, and position (round-trips; layout always places footnotes at the page bottom) | optional: `fmt`, `start`, `restart`, `pos` |
+| `setEndnoteOptions` | Same as `setFootnoteOptions`, for endnotes; position vocabulary is sectEnd/docEnd | optional: `fmt`, `start`, `restart`, `pos` |
+| `updateFields` | Write recomputed cached results into the document's fields, one per field in document order | `results` |
+| `createStyle` | Create a paragraph, character, table, or numbering style definition | `style` |
+| `modifyStyle` | Change an existing style definition | `styleId`, `patch` |
+| `deleteStyle` | Delete a style definition; content using it falls back to the style it was based on | `styleId` |
+| `refreshBibliography` | Regenerate every bibliography from the document's citation sources; `entryCount` is the id budget (sources × bibliography fields) | `entryCount` |
+| `refreshIndex` | Rebuild every index from the document's XE entry marks; `entryCount` is the id budget (index entries × index fields) | `entryCount` |
+| `createCitationSource` | Add a bibliography source (book, article, website, report), creating the sources part when the document has none | `source` |
+| `editCitationSource` | Change a bibliography source's fields, by tag; run `updateFields` afterwards to refresh citation text | `tag`, `patch` |
+| `deleteCitationSource` | Delete a bibliography source; refused while a CITATION field still cites it | `tag` |
+| `setCitationStyle` | Select the citation style (APA or MLA) for citations and the bibliography | `style` |
+| `createBuildingBlock` | Save the current selection as a named Quick Part (building block), creating the glossary part when the document has none | `name`, `blocksXml`; optional: `category` |
+| `deleteBuildingBlock` | Delete a Quick Part (building block) from the glossary part, by name | `name` |
 
 ## Nested value shapes
 
@@ -577,9 +945,135 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
   fontSizePt?: number;
   fontFamily?: string;
   verticalAlign?: "superscript" | "subscript" | null;
+  characterStyleId?: string | null; // w:rStyle — a character style the document defines
   clear?: boolean;
 }
 ```
+
+Applying a character style is a run-patch property rather than an operation of
+its own, so it splits the run at a partial range exactly as the other
+properties do.
+
+### Table of contents (`insertToc`)
+
+```ts
+{
+  runRef: string;       // a run in the paragraph the TOC goes after
+  entryCount: number;   // 1-10000; how many entries the TOC will have
+  levels?: [number, number];   // outline levels, default [1, 3]
+  leader?: "dot" | "hyphen" | "underscore" | "none";   // default "dot"
+}
+```
+
+`entryCount` is an ID BUDGET, not an instruction. A TOC's size comes from the
+document — one entry per qualifying heading — while every other insert's size
+comes from its own arguments, so the operation cannot size its carried id
+allocation without being told. Send `tocEntryCount(doc, options)`; the mutation
+still builds its entries from the document's own headings. Too large is
+harmless, too small leaves the last entries without replicated ids.
+
+Page numbers land as placeholders. They come from a layout, and a layout
+depends on the host's font metrics, so they are the value `updateFields`
+exists to carry rather than recompute — run the update pass to fill them in.
+
+### Citation source spec (`createCitationSource.source`)
+
+```ts
+{
+  tag: string;                // [A-Za-z0-9_-], up to 64 chars — what a CITATION cites
+  type: "book" | "article" | "website" | "report";
+  authors?: { last: string; first?: string }[];   // up to 20; or use corporate
+  corporate?: string;         // corporate author — mutually exclusive with authors
+  title?: string;
+  year?: string;
+  publisher?: string;         // books and reports
+  journal?: string;           // articles
+  url?: string;               // websites
+}
+```
+
+`editCitationSource.patch` is the same shape without `tag`; every field is
+optional, an omitted one is left alone, and an empty string clears the field.
+The sources live in the package's own b:Sources custom XML part, which
+`createCitationSource` creates on first use. After editing a source or
+switching the citation style, run `updateFields` so every CITATION field's
+display text is recomputed; `insertBibliography` entries regenerate the same
+way. `deleteCitationSource` is refused while any CITATION field still cites
+the tag — remove the citations first.
+
+### Style spec (`createStyle.style`)
+
+```ts
+{
+  styleId: string;            // [A-Za-z0-9-_], up to 253 chars
+  type: "paragraph" | "character" | "table" | "numbering";
+  name: string;               // the display name a gallery shows
+  basedOn?: string | null;    // defaults per type to what Word writes:
+                              // Normal, DefaultParagraphFont, TableNormal, none
+  next?: string | null;       // paragraph styles only
+  quickStyle?: boolean;       // w:qFormat — show in the quick-style gallery
+  uiPriority?: number;        // 0–99, gallery sort order
+  paragraph?: StyleParagraphPatch;   // paragraph and table styles
+  run?: StyleRunPatch;        // the run format patch without `clear`
+  linked?: boolean;           // paragraph styles only — see below
+  table?: {                   // table styles only
+    borders?: {               // top, bottom, left, right, insideH, insideV
+      [edge: string]: TableBorderSpec;
+    };
+  };
+  numbering?: { numId: number };  // numbering styles only, and required there
+}
+```
+
+`modifyStyle.patch` is the same shape without `styleId` and `type`; every field
+is optional and an omitted one is left alone.
+
+`linked: true` also writes the linked character companion Word pairs with a
+paragraph style: id `<styleId>Char`, name `<name> Char`, the same run
+properties, and `w:link` in both directions. The operation is REFUSED when
+`<styleId>Char` is already taken — the companion's id is derived, never
+searched for, so every replica reaches the same verdict. A later `modifyStyle`
+carrying `run` on either half applies it to both.
+
+A numbering style is a NAME for a list definition: it needs `numbering.numId`
+and carries no formatting of its own. A table style's `paragraph` and `run` are
+the defaults for every paragraph and run in the table; conditional formats
+(`w:tblStylePr` — banded rows, header row) are not expressible yet.
+
+### Style paragraph patch
+
+```ts
+{
+  alignment?: "left" | "center" | "right" | "both" | null;
+  spacingBeforePt?: number | null;
+  spacingAfterPt?: number | null;
+  lineMultiple?: number | null;   // 1.5 → w:line="360" lineRule="auto"
+  indentLeftPt?: number | null;
+  indentFirstLinePt?: number | null;
+  keepNext?: boolean | null;
+  outlineLevel?: number | null;   // 0–8; what makes a style a TOC heading level
+}
+```
+
+### Numbering level patch (`setNumberingLevel.patch`)
+
+```ts
+{
+  format?: "decimal" | "decimalZero" | "upperRoman" | "lowerRoman"
+    | "upperLetter" | "lowerLetter" | "ordinal" | "bullet" | "none";
+  text?: string;          // "%1." or "%1.%2."; the glyph when format is "bullet"
+  start?: number;
+  alignment?: "left" | "center" | "right";
+  indentLeftPt?: number;
+  hangingPt?: number;
+}
+```
+
+`setNumberingLevel` patches the ABSTRACT definition, so every list built on it
+re-labels. `ilvl` null means the addressed paragraph's own level.
+`setNumberingRestart` splits the list into a fresh instance from the addressed
+paragraph down, because a `w:startOverride` restarts an instance at its first
+paragraph rather than at yours.
 
 ### Paragraph spacing patch
 
@@ -591,6 +1085,22 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
   afterPt?: number | null;
 }
 ```
+
+### Image crop (`setCrop.crop`)
+
+```ts
+{
+  l: number; // fraction of the bitmap trimmed off the left edge, 0 to 0.99
+  t: number;
+  r: number;
+  b: number;
+}
+```
+
+All four are required. `l + r` and `t + b` must each stay below 1, or the crop
+would leave no picture to show. A crop of all zeros removes the crop. The
+picture keeps the box it already occupies, so the surviving region is scaled up
+to fill it; resize the drawing as well to hold the content at its old scale.
 
 ### Paragraph divider
 
@@ -627,14 +1137,18 @@ Set `setDrawingLineStyle.color` to `null` to clear an outline. Supply
 
 ```ts
 {
-  type: "column" | "bar" | "line" | "pie";
+  type: "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
   title?: string;
   categories: string[];
   series: Array<{ name: string; values: number[] }>;
+  grouping?: "clustered" | "stacked" | "percentStacked"; // bar, column, area
 }
 ```
 
-Each series must contain the same number of values as `categories`.
+Each series must contain the same number of values as `categories`. A pie or
+doughnut chart uses the first series only. A scatter chart reads `categories`
+as its numeric X values (a non-numeric category falls back to its 1-based
+position).
 
 ### SmartArt data
 
@@ -672,6 +1186,7 @@ Each series must contain the same number of values as `categories`.
 type TableOperation =
   | "deleteRow" | "deleteCol" | "deleteTable"
   | "rowAbove" | "rowBelow" | "colLeft" | "colRight"
+  | "mergeRight" | "mergeDown" | "splitCell"
   | { kind: "cellShading"; fill: "RRGGBB" | null }
   | { kind: "cellVAlign"; v: "top" | "center" | "bottom" }
   | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number };
@@ -686,13 +1201,33 @@ type TableOperation =
 }
 ```
 
-Set `suggest: true` on `insertText` or `splitParagraph` to create a tracked insertion. The interface adds the configured author and date.
+Set `suggest: true` to record an operation as a tracked change instead of applying it outright. The interface adds the configured author and date.
+
+| Operation | Tracked form | Accept | Reject |
+| --- | --- | --- | --- |
+| `insertText` | `w:ins` around the new run | the text stays | the text goes |
+| `splitParagraph` | `w:ins` on the new paragraph mark | the split stays | the paragraphs rejoin |
+| `mergeParagraph` | `w:del` on the previous paragraph mark | the paragraphs join | they stay split |
+| `formatRun`, `formatRange` | `w:rPrChange` holding the previous run properties | the new formatting stays | the previous properties come back |
+| `formatParagraph`, `setListType`, `adjustIndent`, `setSpacing` | `w:pPrChange` holding the previous paragraph properties | the new formatting stays | the previous properties come back |
+| `setTableStyle`, `setTableLook`, `setTableWidth`, table-scoped `setTableBorders` and `setTableCellMargins` | `w:tblPrChange` holding the previous table properties | the new formatting stays | the previous properties come back |
+| `setTableHeaderRows` | `w:trPrChange` on each row whose header membership moves | the new band stays | the previous rows come back |
+| Cell-scoped `setTableBorders` and `setTableCellMargins`, `tableOp` with `cellShading` or `cellVAlign` | `w:tcPrChange` holding the previous cell properties | the new formatting stays | the previous properties come back |
+| `setTableColumnWidth`, `setTableLayout` | `w:tblPrChange`, plus a `w:tblGridChange` and a `w:tcPrChange` per restamped cell | the new widths stay | the grid, the total and every cell width come back |
+
+A tracked formatting change reads as the NEW formatting everywhere, which is what Word shows: the properties in force live where they always live, and only the ones they replaced move into the change record.
+
+A column width lives in three places at once — the grid, the table's total width, and a width on every cell — so a tracked width change writes a record for each. Accepting or rejecting the table's record carries the grid record with it, because `w:tblGridChange` carries no author of its own.
+
+`tableOp` is only partly suggestible. Cell shading, cell vertical alignment and table text wrapping change PROPERTIES and are tracked. Every row and column insert and delete, the whole-table delete, and cell merge and split are STRUCTURAL, have no tracked form here, and are refused in suggestion mode — ask the inviter for editing mode instead. `sortTableRows`, `convertTextToTable` and `convertTableToText` are structural in the same way and equally refused.
 
 ### Fields
 
 `insertField` accepts these field types as the first instruction token:
 
-`PAGE`, `NUMPAGES`, `SECTIONPAGES`, `SECTION`, `DATE`, `TIME`, `CREATEDATE`, `SAVEDATE`, `PRINTDATE`, `AUTHOR`, `TITLE`, `SUBJECT`, `KEYWORDS`, `COMMENTS`, `FILENAME`, `NUMWORDS`, `NUMCHARS`, `PAGEREF`, `REF`, `SEQ`, `STYLEREF`, `TOC`, `INDEX`, `LISTNUM`, and `QUOTE`.
+`PAGE`, `NUMPAGES`, `SECTIONPAGES`, `SECTION`, `DATE`, `TIME`, `CREATEDATE`, `SAVEDATE`, `PRINTDATE`, `AUTHOR`, `TITLE`, `SUBJECT`, `KEYWORDS`, `COMMENTS`, `FILENAME`, `NUMWORDS`, `NUMCHARS`, `PAGEREF`, `REF`, `SEQ`, `STYLEREF`, `TOC`, `INDEX`, `LISTNUM`, `QUOTE`, `MERGEFIELD`, and `CITATION`.
+
+A `MERGEFIELD` with no attached data source displays its `«Name»` placeholder — prefer `insertMergeField`, which writes the placeholder for you. A `CITATION` must name a source tag in the document's bibliography sources part — prefer `insertCitation`, which resolves the display text ("(Author, Year)" in the document's citation style) and is a clean no-op for an unknown tag.
 
 ## JavaScript API
 

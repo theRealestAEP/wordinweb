@@ -273,10 +273,6 @@ export function normalizeSmartArtData(data: SmartArtData): SmartArtData {
   return { layout: data.layout, items: items.length ? items : [""] };
 }
 
-function line(modelId: string, x1: number, y1: number, x2: number, y2: number): DiagramShape {
-  return { modelId, x: x1, y: y1, width: x2 - x1, height: y2 - y1, geometry: "line" };
-}
-
 function diagramShapes(data: SmartArtData): DiagramShape[] {
   const n = data.items.length;
   const gap = 95_250;
@@ -289,6 +285,9 @@ function diagramShapes(data: SmartArtData): DiagramShape[] {
     }));
   }
   if (data.layout === "hierarchy") {
+    // No connectors: the composite layoutDef declares none, so Word draws
+    // none, and the cache must agree (the cycle campaign's one-sided-drop
+    // lesson, #94).
     const rootW = Math.min(WIDTH_EMU * 0.42, 1_600_000);
     const rootH = 560_000;
     const rootX = (WIDTH_EMU - rootW) / 2;
@@ -300,38 +299,53 @@ function diagramShapes(data: SmartArtData): DiagramShape[] {
     const shapes: DiagramShape[] = [{ modelId: "1", x: rootX, y: gap, width: rootW, height: rootH, text: data.items[0], geometry: "roundRect", color: COLORS[0] }];
     data.items.slice(1).forEach((text, index) => {
       const x = gap + index * (childW + gap);
-      shapes.push(line(String(n + index + 2), WIDTH_EMU / 2, gap + rootH, x + childW / 2, childY));
       shapes.push({ modelId: String(index + 2), x, y: childY, width: childW, height: childH, text, geometry: "roundRect", color: COLORS[(index + 1) % COLORS.length] });
     });
     return shapes;
   }
   if (data.layout === "cycle") {
-    const shapeW = Math.min(1_100_000, WIDTH_EMU / Math.max(n, 3));
-    const shapeH = 500_000;
-    const cx = WIDTH_EMU / 2;
-    const cy = HEIGHT_EMU / 2;
-    const rx = Math.max((WIDTH_EMU - shapeW) / 2 - gap, 0);
-    const ry = Math.max((HEIGHT_EMU - shapeH) / 2 - gap, 0);
-    const nodes = data.items.map((text, index) => {
-      const angle = -Math.PI / 2 + (index / n) * Math.PI * 2;
-      return { modelId: String(index + 1), x: cx + Math.cos(angle) * rx - shapeW / 2, y: cy + Math.sin(angle) * ry - shapeH / 2, width: shapeW, height: shapeH, text, geometry: "ellipse" as const, color: COLORS[index % COLORS.length] };
+    // Mirrors Word's evaluation of the cycle layoutDef in
+    // buildSmartArtLayoutXml: children of w = 0.25*W and h = 0.3*H on a circle
+    // of diameter 0.6*H, first child at twelve o'clock, clockwise, and the
+    // arrangement's bounding box centered in the canvas (Word centers the
+    // bounding box, not the circle center). No connectors: the layoutDef
+    // declares none and the data model carries no transition points, so Word
+    // draws none. Calibrated against desktop Word exports of
+    // word-interop-smartart-only in wordinweb-parity.
+    const shapeW = WIDTH_EMU * 0.25;
+    const shapeH = HEIGHT_EMU * 0.3;
+    const r = (HEIGHT_EMU * 0.6) / 2;
+    const centers = data.items.map((_, index) => {
+      const angle = (index / n) * Math.PI * 2;
+      return { x: Math.sin(angle) * r, y: -Math.cos(angle) * r };
     });
-    const connectors = nodes.map((node, index) => {
-      const next = nodes[(index + 1) % nodes.length];
-      return line(String(n + index + 1), node.x + node.width / 2, node.y + node.height / 2, next.x + next.width / 2, next.y + next.height / 2);
-    });
-    return [...connectors, ...nodes];
+    const minX = Math.min(...centers.map((c) => c.x)) - shapeW / 2;
+    const maxX = Math.max(...centers.map((c) => c.x)) + shapeW / 2;
+    const minY = Math.min(...centers.map((c) => c.y)) - shapeH / 2;
+    const maxY = Math.max(...centers.map((c) => c.y)) + shapeH / 2;
+    const offsetX = (WIDTH_EMU - (maxX - minX)) / 2 - minX;
+    const offsetY = (HEIGHT_EMU - (maxY - minY)) / 2 - minY;
+    return data.items.map((text, index) => ({
+      modelId: String(index + 1),
+      x: centers[index].x + offsetX - shapeW / 2,
+      y: centers[index].y + offsetY - shapeH / 2,
+      width: shapeW,
+      height: shapeH,
+      text,
+      geometry: "ellipse" as const,
+      color: COLORS[index % COLORS.length],
+    }));
   }
   const width = Math.max((WIDTH_EMU - gap * (n + 1)) / n, 260_000);
   const height = 850_000;
   const y = (HEIGHT_EMU - height) / 2;
-  const nodes = data.items.map((text, index) => ({
+  // No connectors between process steps: the composite layoutDef declares
+  // none, so Word draws none, and the cache must agree (#94).
+  return data.items.map((text, index) => ({
     modelId: String(index + 1),
     x: gap + index * (width + gap), y, width, height, text,
     geometry: "roundRect" as const, color: COLORS[index % COLORS.length],
   }));
-  const connectors = nodes.slice(0, -1).map((node, index) => line(String(n + index + 2), node.x + node.width, y + height / 2, nodes[index + 1].x, y + height / 2));
-  return [...connectors, ...nodes];
 }
 
 function drawingShapeXml(shape: DiagramShape, index: number): string {
@@ -347,7 +361,7 @@ function drawingShapeXml(shape: DiagramShape, index: number): string {
     `<a:prstGeom prst="${geometry}"><a:avLst/></a:prstGeom>` +
     (lineShape
       ? `<a:noFill/><a:ln w="19050"><a:solidFill><a:srgbClr val="7F8C8D"/></a:solidFill></a:ln>`
-      : `<a:solidFill><a:srgbClr val="${shape.color ?? COLORS[0]}"/></a:solidFill><a:ln w="12700"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln>`) +
+      : `<a:solidFill><a:srgbClr val="${shape.color ?? COLORS[0]}"/></a:solidFill><a:ln w="19050"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill></a:ln>`) +
     `<a:effectLst/></dsp:spPr>` +
     (shape.text === undefined ? "" : `<dsp:txBody><a:bodyPr anchor="ctr"/><a:lstStyle/><a:p><a:pPr algn="ctr"/>` +
       `<a:r><a:rPr lang="en-US" sz="1200" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>` +
@@ -367,9 +381,13 @@ export function buildSmartArtDrawingXml(input: SmartArtData): string {
 /** Build the editable SmartArt node model related to the cached drawing. */
 export function buildSmartArtDataXml(input: SmartArtData, drawingRelId: string): string {
   const data = normalizeSmartArtData(input);
+  // The run properties pin the same text the cached drawing paints
+  // (12pt bold white Calibri), so Word's re-evaluation reproduces it instead
+  // of substituting its own theme font and autofit size.
   const points = data.items.map((text, index) =>
     `<dgm:pt modelId="${index + 1}"><dgm:prSet/><dgm:spPr/><dgm:t><a:bodyPr/><a:lstStyle/><a:p>` +
-    `<a:r><a:rPr lang="en-US"/><a:t>${escapeXml(text)}</a:t></a:r></a:p></dgm:t></dgm:pt>`,
+    `<a:r><a:rPr lang="en-US" sz="1200" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>` +
+    `<a:latin typeface="Calibri"/></a:rPr><a:t>${escapeXml(text)}</a:t></a:r></a:p></dgm:t></dgm:pt>`,
   ).join("");
   const connections = data.items.map((_, index) =>
     `<dgm:cxn modelId="${data.items.length + index + 1}" type="parOf" srcId="0" destId="${index + 1}" ` +
@@ -388,22 +406,76 @@ export function buildSmartArtDataXml(input: SmartArtData, drawingRelId: string):
 
 export function buildSmartArtLayoutXml(input: SmartArtData): string {
   const data = normalizeSmartArtData(input);
+  if (data.layout === "cycle") {
+    // Self-consistent with diagramShapes' cycle branch: Word's re-evaluation
+    // of this layoutDef must reproduce the cached drawing. Sizes and the
+    // cycle diameter are pinned as constraints, the font is pinned (no
+    // autofit rule), and no connector layoutNodes exist.
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<dgm:layoutDef xmlns:dgm="${NS_DGM}" xmlns:a="${NS_A}" uniqueId="urn:wordinweb:smartart:cycle">` +
+      `<dgm:title val="cycle"/><dgm:desc val="WordInWeb cycle diagram"/>` +
+      `<dgm:catLst><dgm:cat type="cycle" pri="1000"/></dgm:catLst>` +
+      `<dgm:layoutNode name="diagram">` +
+      `<dgm:alg type="cycle"><dgm:param type="stAng" val="0"/><dgm:param type="spanAng" val="360"/></dgm:alg>` +
+      `<dgm:shape/><dgm:presOf/>` +
+      `<dgm:constrLst><dgm:constr type="w" for="ch" forName="node" refType="w" fact="0.25"/>` +
+      `<dgm:constr type="h" for="ch" forName="node" refType="h" fact="0.3"/>` +
+      `<dgm:constr type="diam" refType="h" fact="0.6"/>` +
+      `<dgm:constr type="sibSp" val="0"/>` +
+      `<dgm:constr type="primFontSz" for="ch" forName="node" val="12"/></dgm:constrLst><dgm:ruleLst/>` +
+      `<dgm:forEach axis="ch" ptType="node"><dgm:layoutNode name="node" styleLbl="node0">` +
+      `<dgm:varLst><dgm:bulletEnabled val="true"/></dgm:varLst><dgm:alg type="tx"/>` +
+      `<dgm:shape type="ellipse"/><dgm:presOf axis="desOrSelf" ptType="node"/>` +
+      `<dgm:constrLst><dgm:constr type="tMarg" refType="primFontSz" fact="0.3"/>` +
+      `<dgm:constr type="bMarg" refType="primFontSz" fact="0.3"/><dgm:constr type="lMarg" refType="primFontSz" fact="0.3"/>` +
+      `<dgm:constr type="rMarg" refType="primFontSz" fact="0.3"/></dgm:constrLst>` +
+      `<dgm:ruleLst/>` +
+      `</dgm:layoutNode></dgm:forEach></dgm:layoutNode></dgm:layoutDef>`;
+  }
+  // list / process / hierarchy: a COMPOSITE layoutDef whose per-node l/t/w/h
+  // constraints are computed from the SAME diagramShapes() the cached
+  // dsp:drawing is built from, as refType="w"/"h" fractions of the canvas.
+  // buildSmartArtLayoutXml is regenerated with the data on every insert and
+  // edit, so the node count is known and the two descriptions of the art
+  // agree by construction — the property #94's cycle campaign established
+  // Word honors exactly (refType fractions reproduced to 0.01pt). The font
+  // is pinned (primFontSz, no autofit rule), matching the explicit 12pt bold
+  // white rPr the data model carries.
+  const shapes = diagramShapes(data);
+  const frac = (v: number) => (Math.round((v / WIDTH_EMU) * 100000) / 100000).toString();
+  const fracH = (v: number) => (Math.round((v / HEIGHT_EMU) * 100000) / 100000).toString();
+  const constraints = shapes
+    .map(
+      (s, i) =>
+        `<dgm:constr type="l" for="ch" forName="node${i + 1}" refType="w" fact="${frac(s.x)}"/>` +
+        `<dgm:constr type="t" for="ch" forName="node${i + 1}" refType="h" fact="${fracH(s.y)}"/>` +
+        `<dgm:constr type="w" for="ch" forName="node${i + 1}" refType="w" fact="${frac(s.width)}"/>` +
+        `<dgm:constr type="h" for="ch" forName="node${i + 1}" refType="h" fact="${fracH(s.height)}"/>`,
+    )
+    .join("");
+  const nodes = shapes
+    .map(
+      (s, i) =>
+        `<dgm:forEach axis="ch" ptType="node" st="${i + 1}" cnt="1">` +
+        `<dgm:layoutNode name="node${i + 1}" styleLbl="node0">` +
+        `<dgm:varLst><dgm:bulletEnabled val="true"/></dgm:varLst><dgm:alg type="tx"/>` +
+        `<dgm:shape type="${s.geometry ?? "roundRect"}"/><dgm:presOf axis="desOrSelf" ptType="node"/>` +
+        `<dgm:constrLst><dgm:constr type="primFontSz" val="12"/>` +
+        `<dgm:constr type="tMarg" refType="primFontSz" fact="0.3"/>` +
+        `<dgm:constr type="bMarg" refType="primFontSz" fact="0.3"/><dgm:constr type="lMarg" refType="primFontSz" fact="0.3"/>` +
+        `<dgm:constr type="rMarg" refType="primFontSz" fact="0.3"/></dgm:constrLst>` +
+        `<dgm:ruleLst/>` +
+        `</dgm:layoutNode></dgm:forEach>`,
+    )
+    .join("");
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
     `<dgm:layoutDef xmlns:dgm="${NS_DGM}" xmlns:a="${NS_A}" uniqueId="urn:wordinweb:smartart:${data.layout}">` +
     `<dgm:title val="${data.layout}"/><dgm:desc val="WordInWeb ${data.layout} diagram"/>` +
     `<dgm:catLst><dgm:cat type="${data.layout}" pri="1000"/></dgm:catLst>` +
-    `<dgm:layoutNode name="diagram"><dgm:alg type="lin"/><dgm:shape/><dgm:presOf/>` +
-    `<dgm:constrLst><dgm:constr type="w" for="ch" forName="node" refType="w"/>` +
-    `<dgm:constr op="equ" type="h" for="ch" forName="node"/>` +
-    `<dgm:constr op="equ" type="primFontSz" for="ch" forName="node" val="65"/></dgm:constrLst><dgm:ruleLst/>` +
-    `<dgm:forEach axis="ch" ptType="node"><dgm:layoutNode name="node" styleLbl="node0">` +
-    `<dgm:varLst><dgm:bulletEnabled val="true"/></dgm:varLst><dgm:alg type="tx"/>` +
-    `<dgm:shape type="roundRect"/><dgm:presOf axis="desOrSelf" ptType="node"/>` +
-    `<dgm:constrLst><dgm:constr type="tMarg" refType="primFontSz" fact="0.3"/>` +
-    `<dgm:constr type="bMarg" refType="primFontSz" fact="0.3"/><dgm:constr type="lMarg" refType="primFontSz" fact="0.3"/>` +
-    `<dgm:constr type="rMarg" refType="primFontSz" fact="0.3"/></dgm:constrLst>` +
-    `<dgm:ruleLst><dgm:rule type="primFontSz" val="5"/></dgm:ruleLst>` +
-    `</dgm:layoutNode></dgm:forEach></dgm:layoutNode></dgm:layoutDef>`;
+    `<dgm:layoutNode name="diagram"><dgm:alg type="composite"/><dgm:shape/><dgm:presOf/>` +
+    `<dgm:constrLst>${constraints}</dgm:constrLst><dgm:ruleLst/>` +
+    nodes +
+    `</dgm:layoutNode></dgm:layoutDef>`;
 }
 
 export function buildSmartArtStyleXml(): string {
@@ -426,10 +498,14 @@ export function buildSmartArtColorsXml(): string {
     `<dgm:colorsDef xmlns:dgm="${NS_DGM}" xmlns:a="${NS_A}" uniqueId="urn:wordinweb:smartart:colors">` +
     `<dgm:title val="WordInWeb"/><dgm:desc val="WordInWeb diagram colors"/>` +
     `<dgm:catLst><dgm:cat type="accent1" pri="1000"/></dgm:catLst><dgm:styleLbl name="node0">` +
-    `<dgm:fillClrLst meth="repeat"><a:schemeClr val="accent1"/></dgm:fillClrLst>` +
-    `<dgm:linClrLst meth="repeat"><a:schemeClr val="lt1"/></dgm:linClrLst>` +
+    // Explicit srgbClr values, cycled per node: Word's re-evaluation must
+    // paint the same colors the cached drawing stores (the generated package
+    // has no theme part, so a schemeClr here would resolve to whatever theme
+    // the host application defaults to).
+    `<dgm:fillClrLst meth="repeat">${COLORS.map((color) => `<a:srgbClr val="${color}"/>`).join("")}</dgm:fillClrLst>` +
+    `<dgm:linClrLst meth="repeat"><a:srgbClr val="FFFFFF"/></dgm:linClrLst>` +
     `<dgm:effectClrLst/><dgm:txLinClrLst/>` +
-    `<dgm:txFillClrLst meth="repeat"><a:schemeClr val="lt1"/></dgm:txFillClrLst>` +
+    `<dgm:txFillClrLst meth="repeat"><a:srgbClr val="FFFFFF"/></dgm:txFillClrLst>` +
     `<dgm:txEffectClrLst/></dgm:styleLbl></dgm:colorsDef>`;
 }
 

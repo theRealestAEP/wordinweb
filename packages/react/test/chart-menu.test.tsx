@@ -131,13 +131,13 @@ describe("chart creation menu", () => {
     await setInput(menu.container, "Chart slice 2 value", "2");
     await click(button(menu.container, "Insert chart"));
     expect(menu.insertChart).not.toHaveBeenCalled();
-    expect(menu.container.querySelector('[role="alert"]')?.textContent).toBe("Pie chart values must be zero or greater.");
+    expect(menu.container.querySelector('[role="alert"]')?.textContent).toBe("Slice values must be zero or greater.");
 
     await setInput(menu.container, "Chart slice 1 value", "0");
     await setInput(menu.container, "Chart slice 2 value", "0");
     await click(button(menu.container, "Insert chart"));
     expect(menu.insertChart).not.toHaveBeenCalled();
-    expect(menu.container.querySelector('[role="alert"]')?.textContent).toBe("Enter at least one pie chart value greater than zero.");
+    expect(menu.container.querySelector('[role="alert"]')?.textContent).toBe("Enter at least one slice value greater than zero.");
 
     await setInput(menu.container, "Chart slice 2 value", "2");
     await click(button(menu.container, "Insert chart"));

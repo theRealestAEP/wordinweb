@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import { invalidateParagraphSignature } from "../layout/inline.js";
 import { XmlElement, attr, localName } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
+import { RevisionMeta, recordParagraphFormatChange } from "./suggest.js";
 
 /**
  * List edit commands: turn paragraphs into bulleted/numbered list items and
@@ -82,6 +83,19 @@ function createListNum(doc: DocxDocument, kind: ListKind): number | null {
   return numId;
 }
 
+/** The direct-numPr list level (0..8) of the paragraph containing `target`,
+ * or null when it is not a direct list item. */
+export function listLevelAt(doc: DocxDocument, target: XmlElement): number | null {
+  const pEl = paragraphOf(doc, target);
+  if (!pEl) return null;
+  const pPr = pEl.children.find((c) => localName(c.name) === "pPr");
+  const numPr = pPr?.children.find((c) => localName(c.name) === "numPr");
+  if (!numPr) return null;
+  const ilvl = numPr.children.find((c) => localName(c.name) === "ilvl");
+  if (!ilvl) return 0;
+  return parseInt(attr(ilvl, "val") ?? "0", 10) || 0;
+}
+
 /** Step the list level of the target paragraphs (Tab / Shift-Tab), 0..8. */
 export function setListLevel(doc: DocxDocument, targets: XmlElement[], delta: 1 | -1): boolean {
   const paragraphs = new Set<XmlElement>();
@@ -114,8 +128,15 @@ export function setListLevel(doc: DocxDocument, targets: XmlElement[], delta: 1 
 /**
  * Make the paragraphs containing `targets` list items of the given kind, or
  * plain paragraphs again with kind=null. Returns false when nothing changed.
+ * With `meta` the change is SUGGESTED: numbering rides w:pPr, so the paragraph
+ * records the properties it had in a w:pPrChange first.
  */
-export function setListType(doc: DocxDocument, targets: XmlElement[], kind: ListKind | null): boolean {
+export function setListType(
+  doc: DocxDocument,
+  targets: XmlElement[],
+  kind: ListKind | null,
+  meta?: RevisionMeta,
+): boolean {
   const paragraphs = new Set<XmlElement>();
   for (const t of targets) {
     const p = paragraphOf(doc, t);
@@ -129,14 +150,17 @@ export function setListType(doc: DocxDocument, targets: XmlElement[], kind: List
   let touched = false;
   for (const pEl of paragraphs) {
     const w = prefixOf(pEl);
-    let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
     if (kind === null) {
-      if (!pPr) continue;
-      const before = pPr.children.length;
-      pPr.children = pPr.children.filter((c) => localName(c.name) !== "numPr");
-      touched = touched || pPr.children.length !== before;
+      const existing = pEl.children.find((c) => localName(c.name) === "pPr");
+      if (!existing?.children.some((c) => localName(c.name) === "numPr")) continue;
+      if (meta) recordParagraphFormatChange(pEl, meta);
+      existing.children = existing.children.filter((c) => localName(c.name) !== "numPr");
+      touched = true;
       continue;
     }
+    // Recording ensures the pPr, so look it up afterwards.
+    if (meta) recordParagraphFormatChange(pEl, meta);
+    let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
     if (!pPr) {
       pPr = el(`${w}pPr`);
       pEl.children.unshift(pPr);

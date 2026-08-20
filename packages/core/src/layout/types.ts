@@ -97,6 +97,11 @@ export interface TextItem {
   href?: string;
   /** Present for editable text (absent on numbering labels etc.). */
   src?: TextSource;
+  /** This line is one a fixed-size text box hides past its bottom edge (see
+   * LaidOutPage.hiddenText). It mounts unpainted so a caret can bind to it, so
+   * anything that draws from item geometry — selection, comment highlights —
+   * must skip it or it paints a block where there is no text. */
+  hidden?: true;
   /** Source drawing when this text belongs to an independently editable
    * text-box story. */
   textboxStory?: XmlElement;
@@ -202,6 +207,30 @@ export interface ChartItem {
   data: ChartData;
 }
 
+/** bodyPr autofit mode: how a shape reconciles its text with its box.
+ * "resizeShape" is a:spAutoFit (grow the box), "shrinkText" is a:normAutofit
+ * (scale the text down), "none" is a:noAutofit or no bodyPr autofit at all. */
+export type ShapeAutofit = "none" | "resizeShape" | "shrinkText";
+
+/** What a text-bearing shape's laid-out text measured, beside the frame that
+ * holds it. The layout already measures the text to place it; recording the
+ * measurement here is what lets an agent see whether the text fits without
+ * re-measuring anything. */
+export interface DrawingTextFit {
+  /** Widest laid line, px (the text extent, not the box). It can exceed the
+   * box's inset width by a trailing space or an unbreakable token. */
+  textW: number;
+  /** Full laid text height, px. */
+  textH: number;
+  /** The text is taller than the box's insets leave room for. Overflow is a
+   * vertical question: the text is wrapped to the box width by construction,
+   * and a token too wide to wrap spends its excess on extra LINES. */
+  overflow: boolean;
+  /** Lines the box hides because they fall past its bottom. */
+  clippedLines: number;
+  autofit: ShapeAutofit;
+}
+
 /** Interactive resize zone over a table boundary (column or row). */
 export interface DrawingHitItem {
   kind: "drawingHit";
@@ -229,6 +258,9 @@ export interface DrawingHitItem {
   behind?: boolean;
   /** The drawing owns an independently editable text-box story. */
   textboxStory?: boolean;
+  /** Measured text extent for a text-bearing shape (agent fit inspection).
+   * Absent on drawings that flow no text: pictures, lines, charts, WordArt. */
+  textFit?: DrawingTextFit;
   rotate?: { deg: number; ox: number; oy: number };
   z?: number;
 }
@@ -299,6 +331,10 @@ export interface WarpTextItem {
   fill: string;
   /** WordArt glyph alpha, 0..1. */
   opacity?: number;
+  /** w14:textOutline glyph stroke. */
+  outline?: { color: string; width: number };
+  /** w14:shadow / w:shadow offset glyph shadow. */
+  shadow?: boolean;
   /** Preset name (textArchUp, textWave1, textChevron, textCirclePour, …). */
   warp: string;
   rotate?: { deg: number; ox: number; oy: number };
@@ -335,6 +371,26 @@ export interface LaidOutPage {
   /** Column geometry for editor hit-testing. A page can contain more than one
    * band when a continuous section changes the column layout mid-page. */
   columnBands: Array<{ top: number; colXs: number[]; colWidths: number[] }>;
+  /** Lines a fixed-size text box (a:noAutofit) hides past its bottom edge.
+   * Held apart from `items` so nothing that paints, measures, or reads the
+   * page picks them up: they exist only so a caret that lands in the hidden
+   * part of a text-box story still has a place to be. */
+  hiddenText?: TextItem[];
+}
+
+/** Internal page-model window used by the DOM virtualizer. */
+export interface LayoutWindow {
+  /** Ensure that each requested page has a complete positioned item model. */
+  materialize(pageIndexes: Iterable<number>): void;
+  /** Release positioned items outside the requested page window. */
+  releaseExcept(pageIndexes: Iterable<number>): void;
+  /** Return the pages whose positioned items are retained. */
+  retainedPages(): Set<number>;
+}
+
+export interface LayoutFontSample {
+  font: FontSpec;
+  text: string;
 }
 
 export interface LayoutResult {
@@ -354,4 +410,10 @@ export interface LayoutResult {
   /** Opaque page state used to refresh headers/footers without repaginating
    * the body when their measured geometry is unchanged. */
   _hf?: unknown;
+  /** Internal positioned-model window. */
+  _window?: LayoutWindow;
+  /** Font samples collected before offscreen page items were released. */
+  _fontSamples?: LayoutFontSample[];
+  /** True when any page contains a 3D model item. */
+  _hasModel3D?: boolean;
 }

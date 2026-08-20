@@ -45,17 +45,18 @@ export interface EncodedCaret {
 }
 
 /** Inline content items of a run in document order: its w:t elements and
- * the separators (tab/br/cr) between them. The run's wire-offset domain. */
-export function runContentItems(el: XmlElement): { t: XmlElement | null; sep: boolean }[] {
-  const out: { t: XmlElement | null; sep: boolean }[] = [];
+ * the separators (tab/br/cr) between them. The run's wire-offset domain.
+ * `el` is the concrete element either way (the w:t, or the separator). */
+export function runContentItems(el: XmlElement): { t: XmlElement | null; sep: boolean; el: XmlElement }[] {
+  const out: { t: XmlElement | null; sep: boolean; el: XmlElement }[] = [];
   const walk = (cur: XmlElement): void => {
     const ln = localName(cur.name);
     if (ln === "t") {
-      out.push({ t: cur, sep: false });
+      out.push({ t: cur, sep: false, el: cur });
       return;
     }
     if (ln === "tab" || ln === "br" || ln === "cr") {
-      out.push({ t: null, sep: true });
+      out.push({ t: null, sep: true, el: cur });
       return;
     }
     for (const c of cur.children) walk(c);
@@ -64,6 +65,34 @@ export function runContentItems(el: XmlElement): { t: XmlElement | null; sep: bo
   // shadow its content.
   for (const c of el.children) walk(c);
   return out;
+}
+
+/** Wire offset of an inline separator element within its run — the ONE unit
+ * it occupies is [offset, offset+1). Null when `sepEl` isn't in the run. */
+export function wireOffsetOfSeparator(runEl: XmlElement, sepEl: XmlElement): number | null {
+  let acc = 0;
+  for (const item of runContentItems(runEl)) {
+    if (item.el === sepEl) return acc;
+    acc += item.sep ? 1 : item.t!.text.length;
+  }
+  return null;
+}
+
+/** The separator element occupying wire unit [offset, offset+1) of the run —
+ * the decoder half of wireOffsetOfSeparator. Null when that unit is not a
+ * separator (a concurrent edit moved it: the caller no-ops cleanly). */
+export function separatorAtWireOffset(runEl: XmlElement, offset: number): XmlElement | null {
+  let acc = 0;
+  for (const item of runContentItems(runEl)) {
+    if (item.sep) {
+      if (acc === offset) return item.el;
+      acc += 1;
+    } else {
+      acc += item.t!.text.length;
+    }
+    if (acc > offset) return null;
+  }
+  return null;
 }
 
 /** All w:t elements under `el` in document order (a run may hold several,
@@ -119,6 +148,31 @@ export function resolveRunOffset(runEl: XmlElement, offset: number): { t: XmlEle
     last = { t, offset: len };
   }
   return last;
+}
+
+/** Resolve a wire span [start, end) of a run to the per-w:t local ranges it
+ * covers, in document order — the decoder for a stable-addressed RANGE, the
+ * way resolveRunOffset decodes a stable-addressed caret. Separator units
+ * inside the span contribute no range (they hold no selectable text). */
+export function resolveWireRange(
+  runEl: XmlElement,
+  start: number,
+  end: number,
+): { t: XmlElement; start: number; end: number }[] {
+  const out: { t: XmlElement; start: number; end: number }[] = [];
+  let acc = 0;
+  for (const item of runContentItems(runEl)) {
+    if (item.sep) {
+      acc += 1;
+      continue;
+    }
+    const t = item.t!;
+    const s = Math.max(start, acc);
+    const e = Math.min(end, acc + t.text.length);
+    if (e > s) out.push({ t, start: s - acc, end: e - acc });
+    acc += t.text.length;
+  }
+  return out;
 }
 
 export class StableIds {
@@ -196,6 +250,19 @@ export class StableIds {
     this.byEl.set(el, id);
     this.byId.set(id, el);
     if (id >= this.next) this.next = id + 1;
+  }
+
+  /** Drop an element's mapping entirely; its id retires (never reused —
+   * `next` stays monotonic). Used before carried-id assignment: a refresh
+   * inside a mutation auto-assigns sequential ids to the nodes it created,
+   * and one of those autos can equal a LATER id of the same carried batch,
+   * which would make reassign throw on a perfectly good intent. No-op for an
+   * unmapped element. */
+  unassign(el: XmlElement): void {
+    const id = this.byEl.get(el);
+    if (id === undefined) return;
+    this.byEl.delete(el);
+    this.byId.delete(id);
   }
 
   private install(el: XmlElement, id: StableId): void {

@@ -91,8 +91,68 @@ export interface SealedCheckpoint {
  *       e11 peer rejects this canonical intent while an e12 peer applies it.
  *   e13 drawing line edits accept a null color to clear an outline. An e12
  *       peer rejects the canonical clear while an e13 peer applies it.
+ *   e14 setListType can carry moreBlockIds: a multi-paragraph toggle is ONE
+ *       intent whose single apply mints ONE shared numbering definition
+ *       (Word's continuity semantics). An e13 peer ignores the field and
+ *       formats only the addressed paragraph, so mixed clients diverge on
+ *       the first multi-paragraph list toggle.
+ *   e15 keyboard-contract + editor-residual waves: new intents
+ *       insertSeparator (Shift+Enter / body Tab; the keyboard-contracts
+ *       wave shipped it without this bump — covered here) and
+ *       deleteSeparator (separator-aware Backspace/Delete), plus new
+ *       editor emissions an e14 peer never produces or applies: cross-cell
+ *       deletes clear whole cells, and a fully selected table rides
+ *       tableOp("deleteTable") from the selection-delete path. An e14 peer
+ *       rejects the very intents an e15 peer applies — fork on the first
+ *       soft-break delete.
+ *   e16 cell merge/split on the wire: tableOp now carries mergeRight/
+ *       mergeDown/splitCell (they existed only as local mutations, a silent
+ *       local-only divergence in shared documents), plus new registered
+ *       operations sortTableRows, convertTextToTable and convertTableToText.
+ *       An e15 peer rejects the very intents an e16 peer applies — fork on
+ *       the first merged cell, row sort, or conversion.
+ *   e17 paragraph/references depth wave: new registered operations
+ *       setTabStops (direct w:tabs editing), setParagraphBorders (per-edge
+ *       w:pBdr + w:shd fill), insertCaption (SEQ caption paragraph), and
+ *       ensureRefBookmark (hidden _Ref bookmark for heading/caption
+ *       cross-references); insertToc additionally accepts captionLabel
+ *       (table of figures, `TOC \c`), which an e16 peer would silently
+ *       ignore and build a HEADING table instead — byte divergence, not
+ *       just rejection. An e16 peer rejects (or misapplies) the very
+ *       intents an e17 peer applies.
+ *   e18 drawing depth wave: insertShape's preset vocabulary grows from the
+ *       7 named presets to the whole core preset-geometry table (165
+ *       ST_ShapeType names — Word's shape gallery), and insertChart /
+ *       setChartData additionally carry doughnut/area/scatter types plus a
+ *       grouping field (stacked / percentStacked bar, column and area);
+ *       insertWordArt gains three transform presets (circle, button,
+ *       chevronDown) and an optional gallery style (fill / outline /
+ *       shadow run effects). An e17 peer rejects ("bad preset" /
+ *       "bad type") the very intents an e18 peer applies — fork on the
+ *       first heart insert, stacked chart, or styled WordArt.
+ *       Also in e18, the fields/find/index depth wave: new registered operations
+ *       insertTableFormula (`=SUM(ABOVE)` field in a cell, result derived
+ *       per replica from the table's cell texts), insertIndexEntry (XE
+ *       mark), insertIndex, and refreshIndex (index built/rebuilt from XE
+ *       marks, deterministic per replica; page numbers ride in updateFields
+ *       results), and setHyphenation (settings.xml w:autoHyphenation
+ *       cluster); field-instruction validation additionally accepts formula
+ *       instructions and XE. Also: assignFreshTracked now drops mid-apply
+ *       auto ids before a carried batch lands, so a second large registered
+ *       insert no longer risks a spurious "apply failed" rejection. An e17
+ *       peer rejects the very intents an e18 peer applies.
+ *   e19 tool-depth wave 4: new registered operations setFootnoteOptions and
+ *       setEndnoteOptions (w:footnotePr/w:endnotePr number format, restart
+ *       rule, start-at, position). An e18 peer rejects ("not a registered
+ *       operation") the very intents an e19 peer applies. Also, formatRun /
+ *       formatRange's patch gains textEffect (w14:textOutline/w14:shadow run
+ *       effects on an ordinary run — the WordArt gallery's vocabulary,
+ *       previously WordArt-only). This is NOT a clean rejection: an e18
+ *       peer's setRunProps has no branch for the new property, so it
+ *       silently drops it and writes the run without the effect — byte
+ *       divergence, not a rejection, on the first text-effect preset.
  */
-export const ENGINE_VERSION = "e13";
+export const ENGINE_VERSION = "e19";
 
 /**
  * Wire protocol between a collab client and the server host. Transport-

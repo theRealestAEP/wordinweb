@@ -89,14 +89,11 @@ describe("suggest lifecycle (doc 14 §3 L2)", () => {
       kind: "insertText", clientId: "a", clientSeq: 1, base: 0,
       at: { blockId: 1, runId: 2, offset: 5 }, text: " BRAVE", suggest: SUG,
     } as never);
-    // The suggested insert SPLIT the paragraph's runs — old run ids retire
-    // and fresh ones are assigned deterministically (identical walk +
-    // counter on every replica). The editor always encodes against its
-    // CURRENT doc, so a sequential gesture addresses the new id — mirror
-    // that here by resolving "hello"'s run id from the live table. (A
-    // truly-concurrent stale-id strike no-ops identically everywhere —
-    // the documented OT-lite degradation, same class as formatRange.)
-    const helloRunId = [3, 4, 5].find((id) => {
+    // The suggested insert truncates the addressed run IN PLACE — "hello"
+    // keeps its original run id (held refs survive a suggested insert), and
+    // only the inserted and tail runs get fresh ids. Resolve from the live
+    // table so the test states the contract, not a counter value.
+    const helloRunId = [2, 3, 4, 5].find((id) => {
       const el = a.ids.elOf(id);
       return el?.children.some((c) => c.text === "hello");
     })!;

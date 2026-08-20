@@ -26,7 +26,14 @@ Use the smallest detailed request when required:
 { "kind": "search", "query": "revenue", "maxResults": 50 }
 { "kind": "object", "ref": "object:12:0" }
 { "kind": "spatial", "pages": { "start": 1, "count": 5 }, "includeOverlaps": true }
+{ "kind": "fit", "pages": { "start": 1, "count": 5 } }
 ```
+
+After inserting or resizing a drawing, check `fit`. It reports each
+text-bearing drawing's box against the extent its text laid into, whether the
+text overflows, how many lines the box hides, and the shape's autofit mode,
+plus how full each page is. Resolve an overflow with `setDrawingTextFit`
+(`resizeShape`) or by resizing the drawing.
 
 `overview` returns story counts, section geometry, the outline, component
 counts, and semantic `objectCounts`. `read` returns formatting, hyperlinks,
@@ -40,6 +47,32 @@ fact. WordArt details include its text, fill, opacity, story, and geometry.
 Use cursors for large stories. Reuse only a cursor from the same revision.
 Headless spatial inspection reports deterministic approximate metrics.
 Browser spatial inspection reports canvas-based exact metrics.
+
+## Bulk text work
+
+For a task that is mostly "change this prose", project the story as text with
+`word_document_project` and send the changed lines back through
+`word_document_patch`:
+
+```json
+{ "mode": "md" }
+```
+
+```json
+{
+  "revision": "17",
+  "mode": "md",
+  "edits": [{ "startLine": 4, "endLine": 4, "newText": "Adopt the managed platform." }]
+}
+```
+
+One projection window plus one patch replaces dozens of structured calls for
+rewrites, insertions, paragraph splits, and merges. Keep the structured
+operations for formatting, tables, drawings, equations, review data, and page
+layout.
+
+The projection contract, the atom placeholders, and the patch rules are in
+[interface.md](interface.md#text-projection).
 
 ## References
 

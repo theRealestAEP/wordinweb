@@ -83,6 +83,19 @@ export interface ConnectionCallbacks {
    */
   onSubmitDropped?: (reason: "not-ready") => void;
   /**
+   * The QUEUED-UNDO count changed (encrypted connection only — see
+   * EncryptedCollabConnection.undoLast). An undo pressed while this client's
+   * own edits are still in flight is held until they are confirmed, so
+   * `queued` is how many presses are waiting; it drops back as they run.
+   *
+   * `expired` means the wait ran out and the held presses were DROPPED — the
+   * connection is not carrying edits to confirmation any more, and executing
+   * the undo against a stale mirror would reverse the wrong action. The
+   * consumer must show something: a press that produces nothing and says
+   * nothing is the failure this whole gate exists to remove.
+   */
+  onUndoQueue?: (state: { queued: number; expired: boolean }) => void;
+  /**
    * Something threw on an async path that has nowhere to return an error —
    * a seal, a transport send, a persistence write. These used to die in a
    * serial chain's `.catch(() => {})`, which is how B13's lost edits and a
@@ -181,6 +194,46 @@ function base64ToBytes(b64: string): Uint8Array {
  * ClientReplica (optimistic apply + reconciliation), and relays presence.
  * The editor layer submits local intents and reads `replica.doc`.
  */
+/**
+ * The connection surface every caller actually depends on.
+ *
+ * DERIVED from CollabConnection with Pick rather than hand-written, so it
+ * cannot drift from the plaintext implementation — adding a member here is a
+ * compile error until the real class has it.
+ *
+ * It exists because EncryptedCollabConnection extends nothing: the two classes
+ * are unrelated types that happen to offer the same members, and callers
+ * bridged that with `as unknown as CollabConnection` — a claim nothing checked.
+ * Pick also drops the private fields, which are what made the two nominally
+ * incompatible in the first place.
+ */
+export type CollabConnectionLike = Pick<
+  CollabConnection,
+  | "join"
+  | "resume"
+  | "submit"
+  | "submitPreApplied"
+  | "ready"
+  | "pendingCount"
+  | "doc"
+  | "takeRenderScope"
+  | "setPresence"
+  | "setProfile"
+  | "uploadMedia"
+  | "exportBundle"
+  | "exportBundleAsync"
+  | "admin"
+  | "activity"
+  | "registerAgentInvite"
+  | "revokeAgentInvite"
+  | "sendAgentChat"
+  | "mediaMaxBlobBytes"
+  | "docEpoch"
+  | "docVersion"
+  | "genesisId"
+  | "allocIds"
+>;
+
 export class CollabConnection {
   private replica: ClientReplica | null = null;
   private clientSeq = 0;

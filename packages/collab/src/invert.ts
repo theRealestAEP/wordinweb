@@ -66,7 +66,12 @@ export function invertIntent(doc: DocxDocument, ids: StableIds, intent: Intent):
     }
     // Formatting / table / comment / merge inverses need prior-state capture
     // (was-bold?, the merged paragraph's structure, …) — a documented
-    // extension; not undoable yet.
+    // extension; not undoable yet. That includes pasteBlocks: a rich paste in
+    // a ROOM is not undoable (its inverse — remove N spliced blocks plus
+    // re-merge the split — has no wire form yet), so Cmd+Z after a room paste
+    // stops at it as a cannot-undo marker (see submitUndoNow). The
+    // single-process session is unaffected: it replays local history
+    // (EditorHost.onLocalHistory) and undoes a paste as one step.
     default:
       return null;
   }

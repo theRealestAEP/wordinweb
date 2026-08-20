@@ -140,6 +140,9 @@ async function mountCollab() {
  * audit is about EMISSION, not about what each command produces. */
 const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertTable: (api) => api.insertTable(2, 2),
+  // The caret sits in a body paragraph, not a table cell, so this declines —
+  // the honest no-op branch of the fork rule, audited on purpose.
+  insertTableFormula: (api) => api.insertTableFormula("SUM(ABOVE)"),
   insertImage: (api) => api.insertImage(new Blob([PNG], { type: "image/png" })),
   insertScreenshot: (api) => api.insertScreenshot(),
   insertModel3D: (api) => api.insertModel3D(new Blob([GLB]), new Blob([PNG], { type: "image/png" })),
@@ -152,14 +155,38 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertEquation: (api) => api.insertEquation("a+b"),
   insertSymbol: (api) => api.insertSymbol("§"),
   insertPageNumber: (api) => api.insertPageNumber("page"),
+  insertPageNumberPosition: (api) => api.insertPageNumberPosition("top", "center"),
   insertField: (api) => api.insertField("AUTHOR", "me"),
+  insertToc: (api) => api.insertToc(),
+  // An explicit entry, because the blank mount has no selection to mark.
+  addIndexEntry: (api) => api.addIndexEntry("Widgets:assembly"),
+  insertIndex: (api) => api.insertIndex(),
+  // A blank room has no sources part, so the citation is the honest no-op
+  // path in collab (emits nothing, mutates nothing) — allowed by the rule.
+  insertCitation: (api) => api.insertCitation("Doe03"),
+  insertBibliography: (api) => api.insertBibliography(),
+  // A blank room has no glossary part, so this is the honest no-op path in
+  // collab too (emits nothing, mutates nothing) — allowed by the rule.
+  insertBuildingBlock: (api) => api.insertBuildingBlock("Signature Block"),
   insertDateTime: (api) => api.insertDateTime("date"),
   insertCrossReference: (api) => api.insertCrossReference("Anchor1", "page"),
+  // A blank document lists no headings/captions, so this declines — the
+  // honest no-op branch of the fork rule, audited on purpose.
+  insertCrossRefToTarget: (api) => { api.listCrossRefTargets(); return api.insertCrossRefToTarget("0", "page"); },
+  insertCaption: (api) => api.insertCaption("Figure", "audit", "below"),
   insertBreak: (api) => api.insertBreak("page"),
   insertBlankPage: (api) => api.insertBlankPage(),
   insertCoverPage: (api) => api.insertCoverPage({ title: "T", subtitle: "S", author: "A", date: "2026" } as never),
+  insertWatermark: (api) => api.insertWatermark({ text: "DRAFT" }),
+  // The collab mount publishes no media relay, so this takes the "no-relay"
+  // branch. The branch ORDER is what the audit pins: the upload runs before
+  // the document is touched, so a room with no relay is never left holding a
+  // header part made for a watermark that never arrives.
+  insertPictureWatermark: (api) => api.insertPictureWatermark(new Blob([PNG], { type: "image/png" })),
+  insertHeaderFooterPreset: (api) => api.insertHeaderFooterPreset("header", "blank"),
   addComment: (api) => api.addComment("note"),
   addFootnote: (api) => api.addFootnote("note"),
+  addEndnote: (api) => api.addEndnote("note"),
   addBookmark: (api) => api.addBookmark("Anchor1"),
 };
 
@@ -279,7 +306,7 @@ describe("INVARIANT C — insert commands in collab either EMIT or are ABSENT", 
     // Without this, every command silently no-opping would pass the fork rule
     // and the audit would prove nothing. These are the ones a caret alone is
     // enough for, so they must genuinely ride the wire.
-    const mustEmit = ["insertTable", "insertEquation", "insertShape", "insertChart", "insertSmartArt", "insertBreak", "insertBlankPage", "insertPageNumber"];
+    const mustEmit = ["insertTable", "insertEquation", "insertShape", "insertChart", "insertSmartArt", "insertBreak", "insertBlankPage", "insertPageNumber", "insertToc"];
     const silent = mustEmit.filter((c) => !emittedBy.includes(c));
     expect(silent, `these should have emitted an intent but did not: ${silent.join(", ")}`).toEqual([]);
   });

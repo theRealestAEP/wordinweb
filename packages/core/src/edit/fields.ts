@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, localName } from "../xml.js";
+import { isValidFormulaInstruction } from "./formula.js";
 
 /** Field insertion as `w:fldSimple`, which the parser resolves at layout time. */
 
@@ -11,7 +12,10 @@ function cloneDeep(e: XmlElement): XmlElement {
   return { name: e.name, attrs: { ...e.attrs }, children: e.children.map(cloneDeep), text: e.text };
 }
 
-function insertElementsAt(
+/** Splice run-level elements into a paragraph at a text position, preserving
+ * the surrounding run's formatting on both halves of a mid-text split. Also
+ * the entry point index-field.ts uses to place an XE field's runs. */
+export function insertElementsAt(
   doc: DocxDocument,
   t: XmlElement,
   offset: number,
@@ -59,6 +63,61 @@ function insertElementsAt(
   return true;
 }
 
+/**
+ * Field instructions this engine will INSERT, by keyword.
+ *
+ * An arbitrary instruction is an injection surface, not a feature: Word's
+ * INCLUDETEXT and INCLUDEPICTURE read a path or URL the document names,
+ * DDE/DDEAUTO/LINK open a channel to another application, and MACROBUTTON
+ * names code to run. A document that ARRIVES holding one still renders — the
+ * parser keeps every instruction and unsupported ones paint their cached
+ * result — but nothing this editor writes may create one. Same posture
+ * validatePastedOoxml takes toward pasted markup.
+ *
+ * The list is the field types that read nothing outside the document: what the
+ * engine evaluates itself (layout/inline.ts resolveField, edit/update-fields.ts)
+ * plus the document-property fields, which are inert text.
+ *
+ * MERGEFIELD and CITATION qualify: a MERGEFIELD instruction names a data
+ * column, never a resource (the data-source connection lives in settings.xml
+ * w:mailMerge, which this editor never writes), and a CITATION reads the
+ * package's own sources part.
+ */
+const INSERTABLE_FIELD_KEYWORDS = new Set([
+  "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
+  "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
+  "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
+  "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "XE", "LISTNUM", "QUOTE",
+  "MERGEFIELD", "CITATION",
+]);
+
+/** Longest instruction this engine writes. Real ones are far shorter; the cap
+ * bounds what a remote intent can push through the wire into a w:instrText. */
+export const MAX_FIELD_INSTRUCTION = 200;
+
+/**
+ * Whether `instruction` may be inserted.
+ *
+ * The collaborative sequencer validates inbound intents with this same
+ * predicate, so the local path and the wire path allow exactly the same set —
+ * two lists that drifted would mean an instruction one host writes and another
+ * refuses.
+ */
+export function isInsertableFieldInstruction(instruction: string): boolean {
+  if (typeof instruction !== "string") return false;
+  if (instruction.length === 0 || instruction.length > MAX_FIELD_INSTRUCTION) return false;
+  // Printable ASCII only. A control or format character inside a w:instrText
+  // can split one instruction into two when Word re-reads it, smuggling a
+  // second keyword past the check above.
+  if (!/^[\x20-\x7e]+$/.test(instruction)) return false;
+  // A table formula (`=SUM(ABOVE)`, §17.16.5.22) has no keyword; it is
+  // insertable exactly when the formula grammar accepts it, which reads
+  // nothing outside the containing table.
+  if (instruction.trim().startsWith("=")) return isValidFormulaInstruction(instruction);
+  const keyword = instruction.trim().split(/\s+/)[0]?.toUpperCase();
+  return !!keyword && INSERTABLE_FIELD_KEYWORDS.has(keyword);
+}
+
 /** Insert a field instruction at a text position, preserving surrounding run formatting. */
 export function insertField(
   doc: DocxDocument,
@@ -67,8 +126,8 @@ export function insertField(
   instruction: string,
   cachedResult = "",
 ): boolean {
+  if (!isInsertableFieldInstruction(instruction)) return false;
   const clean = instruction.trim();
-  if (!clean) return false;
   const rEl = doc.findParentOf(t);
   if (!rEl || localName(rEl.name) !== "r") return false;
   const w = rEl.name.includes(":") ? rEl.name.slice(0, rEl.name.indexOf(":") + 1) : "";
@@ -106,6 +165,55 @@ export function insertPageField(
   const inserted: XmlElement[] =
     kind === "page" ? [fld("PAGE")] : [textRun("Page "), fld("PAGE"), textRun(" of "), fld("NUMPAGES")];
   return insertElementsAt(doc, t, offset, inserted);
+}
+
+/** A merge-field NAME an insert accepts: printable ASCII with no quote or
+ * backslash, so the name cannot smuggle a switch or a second instruction into
+ * the w:instrText it is spliced into. */
+export function isValidMergeFieldName(name: string): boolean {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    name.length <= 64 &&
+    name.trim().length > 0 &&
+    /^[\x20-\x7e]+$/.test(name) &&
+    !/["\\]/.test(name)
+  );
+}
+
+/**
+ * Insert a MERGEFIELD at a text position. With no data source attached the
+ * field displays its «Name» placeholder, exactly what Word inserts, so that
+ * placeholder is written as the cached result.
+ */
+export function insertMergeField(doc: DocxDocument, t: XmlElement, offset: number, name: string): boolean {
+  if (!isValidMergeFieldName(name)) return false;
+  const quoted = /\s/.test(name) ? `"${name}"` : name;
+  return insertField(doc, t, offset, `MERGEFIELD ${quoted} \\* MERGEFORMAT`, `«${name}»`);
+}
+
+/** A citation source TAG an insert accepts: the alphanumeric shape Word's own
+ * Source Manager creates (plus _ and -), so the tag splices into a
+ * w:instrText verbatim. */
+export function isValidCitationTag(tag: string): boolean {
+  return typeof tag === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(tag);
+}
+
+/**
+ * Insert a CITATION at a text position. `cachedResult` is the display text
+ * the caller resolved from the document's sources part (src/citations.ts);
+ * the instruction carries Word's `\l 1033` locale switch, which its own
+ * inserts write.
+ */
+export function insertCitationField(
+  doc: DocxDocument,
+  t: XmlElement,
+  offset: number,
+  tag: string,
+  cachedResult: string,
+): boolean {
+  if (!isValidCitationTag(tag)) return false;
+  return insertField(doc, t, offset, `CITATION ${tag} \\l 1033`, cachedResult);
 }
 
 /** Insert a live DATE or TIME field using Word's date-picture syntax. */

@@ -13,6 +13,13 @@
  * broadcasting the canonical form (doc 03).
  */
 
+import {
+  REGISTERED_OPERATION_KINDS,
+  isRegisteredOperationKind,
+  type RegisteredOperationBody,
+  type RegisteredOperationKind,
+} from "@wordinweb/core";
+
 export type StableId = number;
 
 /** A caret/endpoint position within a run. */
@@ -48,7 +55,14 @@ export interface SuggestRevisionIntent extends IntentBase {
   kind: "suggestRevision";
   ranges?: { blockId: StableId; runId: StableId; start: number; end: number }[];
   marks?: { blockId: StableId; glyph: "ins" | "del" }[];
-  suggest: { author: string; date: string };
+  suggest: SuggestMeta;
+}
+
+/** Author + date of a tracked change, generated once by the originating
+ * client so every replica writes the same w:author/w:date (rule a above). */
+export interface SuggestMeta {
+  author: string;
+  date: string;
 }
 
 /** Insert `text` at a position. With `suggest`, the insertion is recorded as
@@ -60,6 +74,39 @@ export interface InsertTextIntent extends IntentBase {
   text: string;
   /** Tracked-change (suggesting) metadata; omit for a plain insert. */
   suggest?: { author: string; date: string };
+}
+
+/**
+ * Insert an inline separator — a soft line break (w:br, Shift+Enter) or a
+ * tab character (w:tab, Tab in a body paragraph) — at a position. The
+ * mutation splits the addressed run's w:t IN PLACE (no new run, every stable
+ * id preserved), and a separator counts ONE unit in the run's wire-offset
+ * basis (core runWireLength), so the transform is exactly an insertText of
+ * length one. With `suggest` the separator is recorded as a w:ins sibling
+ * (insertSuggestedSeparator) like a typed suggestion.
+ */
+export interface InsertSeparatorIntent extends IntentBase {
+  kind: "insertSeparator";
+  at: Position;
+  separator: "br" | "tab";
+  suggest?: SuggestMeta;
+}
+
+/**
+ * Delete the inline separator (w:br / w:tab / w:cr) occupying wire unit
+ * [at.offset, at.offset+1) of the addressed run — insertSeparator's inverse
+ * (a separator-aware Backspace/Delete). The plain mutation removes the
+ * separator element and joins the two w:t halves its insert split, so the
+ * transform is exactly a deleteText of length one in the separator-counting
+ * wire basis. With `suggest` the separator is recorded as a tracked deletion
+ * instead (deleteSuggestedSeparator: a w:del around the separator's own run
+ * slice, the host run splitting like a text strike). A unit that no longer
+ * holds a separator (concurrent edit) is a clean no-op on every replica.
+ */
+export interface DeleteSeparatorIntent extends IntentBase {
+  kind: "deleteSeparator";
+  at: Position;
+  suggest?: SuggestMeta;
 }
 
 /** Delete `[start, end)` characters within a single run. */
@@ -102,6 +149,9 @@ export interface FormatRunIntent extends IntentBase {
   /** RunFormatPatch (bold/italic/underline/strike/color/…). Structural shape
    * mirrors @wordinweb/core's RunFormatPatch; carried verbatim. */
   patch: Record<string, unknown>;
+  /** Tracked-change (suggesting) metadata: the run records the properties it
+   * had in a w:rPrChange instead of losing them. Omit for a direct format. */
+  suggest?: SuggestMeta;
 }
 
 /**
@@ -115,18 +165,27 @@ export interface FormatParagraphIntent extends IntentBase {
   align?: "left" | "center" | "right" | "justify";
   /** Paragraph style id; null clears to Normal. Omit to leave unchanged. */
   styleId?: string | null;
+  /** Tracked-change (suggesting) metadata: the paragraph records the
+   * properties it had in a w:pPrChange. Omit for a direct format. */
+  suggest?: SuggestMeta;
 }
 
 /**
  * Turn a paragraph into a bullet/numbered list item, or clear its list
  * formatting (kind null). Block-level: mutates w:pPr/numbering, preserves the
  * block id, moves no text — transform identity.
+ *
+ * A multi-paragraph selection rides in ONE intent (optional `moreBlockIds`
+ * beyond the addressed paragraph): the single apply mints ONE numbering
+ * definition shared by every target, which is both Word's semantics (one
+ * continuous list) and the only convergent shape — per-paragraph intents
+ * each minted a fresh definition at apply, diverging from the originator's
+ * single shared-definition local mutation.
+ *
+ * REGISTERED: shape and wiring come from the core operation registry (see
+ * RegisteredIntent below). The alias keeps the published type name.
  */
-export interface SetListTypeIntent extends IntentBase {
-  kind: "setListType";
-  blockId: StableId;
-  listKind: "bullet" | "number" | null;
-}
+export type SetListTypeIntent = RegisteredIntentOf<"setListType">;
 
 /**
  * Format a character sub-range of a single run (plan doc 03 F3). The run is
@@ -148,14 +207,18 @@ export interface FormatRangeIntent extends IntentBase {
   beforeId?: StableId;
   middleId: StableId;
   afterId?: StableId;
+  /** Tracked-change (suggesting) metadata: the middle piece records the
+   * properties it had in a w:rPrChange. Omit for a direct format. */
+  suggest?: SuggestMeta;
 }
 
 /**
- * A table operation that does NOT create new tracked nodes (so no carried ids
- * are needed and the transform is identity): delete row/column/table, cell
- * shading, cell vertical align. The target cell is addressed by the stable id
- * of a paragraph inside it. Row/column INSERTION (which creates cells with new
- * paragraphs and runs needing carried ids) is a documented harder extension.
+ * A table operation addressed by the stable id of a paragraph inside the
+ * target cell. Every op is position-stable (no surviving run's offsets move),
+ * so the transform is identity; concurrent edits into removed cells fail
+ * cleanly at apply (retired ids). Ops that create tracked nodes (the inserts,
+ * mergeDown's fresh continuation paragraph, splitCell's new cells) take their
+ * ids from `nodeIds`; ops that remove content prune the retired ids at apply.
  */
 export interface TableOpIntent extends IntentBase {
   /** Stable id of a paragraph inside the target cell. */
@@ -169,13 +232,24 @@ export interface TableOpIntent extends IntentBase {
     | "rowBelow"
     | "colLeft"
     | "colRight"
+    | "mergeRight"
+    | "mergeDown"
+    | "splitCell"
     | { kind: "cellShading"; fill: string | null }
     | { kind: "cellVAlign"; v: "top" | "center" | "bottom" }
     | { kind: "textWrapping"; wrapping: "none" | "around"; xPx: number; yPx: number };
-  /** For INSERT ops (rowAbove/rowBelow/colLeft/colRight): carried ids for the
-   * new tracked nodes (p / r) in document order, so replicas address them
-   * alike. */
+  /** For ops that create tracked nodes (rowAbove/rowBelow/colLeft/colRight,
+   * mergeDown, splitCell): carried ids for the new nodes (p / r) in document
+   * order, so replicas address them alike. */
   nodeIds?: StableId[];
+  /**
+   * Tracked-change (suggesting) metadata; see FormatParagraphIntent. Only the
+   * three FORMATTING ops honour it — cellShading and cellVAlign record a
+   * w:tcPrChange, textWrapping a w:tblPrChange. The structural ops have no
+   * tracked form and ignore it, so the surfaces that enforce suggesting mode
+   * refuse those outright rather than send one.
+   */
+  suggest?: SuggestMeta;
 }
 
 /**
@@ -188,6 +262,14 @@ export interface MergeParagraphIntent extends IntentBase {
   kind: "mergeParagraph";
   /** The paragraph to merge into the one before it. */
   blockId: StableId;
+  /**
+   * Tracked-change (suggesting) metadata. Word tracks a merge as a DELETED
+   * PARAGRAPH MARK: the pilcrow that separates the two paragraphs — the
+   * PREVIOUS paragraph's mark — gets a w:del in its pPr/rPr, and both
+   * paragraphs stay in place until the reviewer accepts. Omit for a direct
+   * merge.
+   */
+  suggest?: SuggestMeta;
 }
 
 /**
@@ -289,11 +371,14 @@ export interface InsertMathIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
-/** Insert a shape/textbox drawing at the end of a run (sibling — identity). */
+/** Insert a shape/textbox drawing at the end of a run (sibling — identity).
+ * `preset` is a legacy named preset (line/verticalLine/rectangle/
+ * roundedRectangle/ellipse/diamond/textBox) or any ST_ShapeType name core's
+ * preset-geometry table knows; validated with isValidShapePreset. */
 export interface InsertShapeIntent extends IntentBase {
   kind: "insertShape";
   runId: StableId;
-  preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
+  preset: string;
   text?: string;
   nodeIds: StableId[];
 }
@@ -321,6 +406,8 @@ export interface AdjustIndentIntent extends IntentBase {
   kind: "adjustIndent";
   blockId: StableId;
   direction: 1 | -1;
+  /** Tracked-change (suggesting) metadata; see FormatParagraphIntent. */
+  suggest?: SuggestMeta;
 }
 
 /** Set paragraph line/before/after spacing. Block-level, identity. */
@@ -329,6 +416,8 @@ export interface SetSpacingIntent extends IntentBase {
   blockId: StableId;
   /** ParagraphSpacingPatch (before/after/line/lineRule) — carried verbatim. */
   patch: Record<string, unknown>;
+  /** Tracked-change (suggesting) metadata; see FormatParagraphIntent. */
+  suggest?: SuggestMeta;
 }
 
 /** Insert a page-number field at the end of a run (sibling insertion,
@@ -379,8 +468,35 @@ export interface InsertBookmarkIntent extends IntentBase {
   name: string;
 }
 
+/**
+ * Intents whose wire shape comes from the core operation registry. One
+ * declaration in @wordinweb/core's edit/registry.ts produces the payload, the
+ * apply, the validation, the carried-id budget, and the agent capability row;
+ * here it just picks up the wire bookkeeping every intent carries.
+ *
+ * The registry admits only id-addressed, position-stable operations with no
+ * wire inverse, so every registered intent's transform is identity and
+ * collaborative undo skips it — see the registry's module comment.
+ */
+export type RegisteredIntent = RegisteredOperationBody & IntentBase;
+
+/** One registered intent, by kind. */
+export type RegisteredIntentOf<Kind extends RegisteredOperationKind> = Extract<
+  RegisteredIntent,
+  { kind: Kind }
+>;
+
+/** True when the intent's wiring lives in the registry rather than in this
+ * file's hand-written cases. Narrowing with it keeps every downstream switch
+ * exhaustive over the intents that are still hand-written. */
+export function isRegisteredIntent(intent: Intent): intent is RegisteredIntent {
+  return isRegisteredOperationKind(intent.kind);
+}
+
 export type Intent =
   | InsertTextIntent
+  | InsertSeparatorIntent
+  | DeleteSeparatorIntent
   | DeleteTextIntent
   | SplitParagraphIntent
   | FormatRunIntent
@@ -434,7 +550,6 @@ export type Intent =
   | SetFloatingPagePositionIntent
   | ResizeDrawingIntent
   | ResizeTableColumnIntent
-  | ResizeTableRowIntent
   | MoveTableIntent
   | RemoveDrawingIntent
   | SetMathLinearIntent
@@ -442,29 +557,41 @@ export type Intent =
   | MoveMathIntent
   | EnsureHeaderFooterIntent
   | DeleteCommentIntent
+  | ResolveCommentIntent
+  | EditCommentIntent
   | InsertBookmarkRangeIntent
-  | ToggleCheckboxIntent
   | AcceptRevisionIntent
   | RejectRevisionIntent
   | AcceptAllRevisionsIntent
   | RejectAllRevisionsIntent
-  | InsertTableIntent;
+  // Every registered operation, in one member rather than one per kind: the
+  // whole point of the registry is that a new operation costs no edit here.
+  // The named aliases above (SetListTypeIntent, InsertTableIntent, ...) stay
+  // as the public names for the kinds that had them before.
+  | RegisteredIntent;
 
 /**
- * Complete runtime list of canonical edit operations.
+ * Every canonical edit operation that is NOT declared in the core operation
+ * registry.
  *
- * The typed map is a coverage gate: a new Intent variant must be added here
- * before TypeScript will build. Other surfaces, including the agent API and
- * browser convergence tests, consume this list instead of maintaining a
- * second list that can silently drift.
+ * The typed map is a coverage gate, and it still is: a new hand-written Intent
+ * variant must be added here before TypeScript will build. Registered
+ * operations are excluded because their kinds already come from a single
+ * declaration — listing them again is the duplication the registry removes,
+ * and Exclude keeps the gate total (a variant that is neither registered nor
+ * listed here breaks the build, exactly as before).
  */
-const INTENT_KIND_MAP: Record<Intent["kind"], true> = {
+const HAND_WRITTEN_INTENT_KIND_MAP: Record<
+  Exclude<Intent["kind"], RegisteredOperationKind>,
+  true
+> = {
   insertText: true,
+  insertSeparator: true,
+  deleteSeparator: true,
   deleteText: true,
   splitParagraph: true,
   formatRun: true,
   formatParagraph: true,
-  setListType: true,
   formatRange: true,
   tableOp: true,
   mergeParagraph: true,
@@ -513,7 +640,6 @@ const INTENT_KIND_MAP: Record<Intent["kind"], true> = {
   setFloatingPagePosition: true,
   resizeDrawing: true,
   resizeTableColumn: true,
-  resizeTableRow: true,
   moveTable: true,
   removeDrawing: true,
   setMathLinear: true,
@@ -521,16 +647,23 @@ const INTENT_KIND_MAP: Record<Intent["kind"], true> = {
   moveMath: true,
   ensureHeaderFooter: true,
   deleteComment: true,
+  resolveComment: true,
+  editComment: true,
   insertBookmarkRange: true,
-  toggleCheckbox: true,
   acceptRevision: true,
   rejectRevision: true,
   acceptAllRevisions: true,
   rejectAllRevisions: true,
-  insertTable: true,
 };
 
-export const INTENT_KINDS = Object.freeze(Object.keys(INTENT_KIND_MAP) as Intent["kind"][]);
+/** Complete runtime list of canonical edit operations: the hand-written ones
+ * plus everything the core operation registry declares. Other surfaces (the
+ * agent API, browser convergence tests) consume this instead of maintaining a
+ * second list that can silently drift. */
+export const INTENT_KINDS = Object.freeze([
+  ...(Object.keys(HAND_WRITTEN_INTENT_KIND_MAP) as Intent["kind"][]),
+  ...REGISTERED_OPERATION_KINDS,
+] as Intent["kind"][]);
 
 /** Insert a blank page at the end of a run. */
 export interface InsertBlankPageIntent extends IntentBase {
@@ -585,20 +718,24 @@ export interface InsertWordArtIntent extends IntentBase {
   kind: "insertWordArt";
   runId: StableId;
   text: string;
-  preset: "plain" | "archUp" | "archDown" | "wave" | "chevron";
+  preset: "plain" | "archUp" | "archDown" | "wave" | "chevron" | "circle" | "button" | "chevronDown";
+  /** Gallery style: glyph fill plus optional outline and shadow. */
+  style?: { fill: string; outline?: { color: string; widthPt: number }; shadow?: boolean };
   nodeIds: StableId[];
 }
 
-/** Insert a data chart (column/bar/line/pie) at the end of a run. The chart
- * data is carried verbatim; the workbook part is generated deterministically. */
+/** Insert a data chart at the end of a run. The chart data is carried
+ * verbatim; the workbook part is generated deterministically. */
 export interface InsertChartIntent extends IntentBase {
   kind: "insertChart";
   runId: StableId;
   chart: {
-    type: "column" | "bar" | "line" | "pie";
+    type: "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
     title?: string;
     categories: string[];
     series: { name: string; values: number[] }[];
+    /** How bar/column/area series group; absent = clustered. */
+    grouping?: "clustered" | "stacked" | "percentStacked";
   };
   nodeIds: StableId[];
 }
@@ -669,12 +806,7 @@ export interface SetDrawingFillIntent extends IntentBase, DrawingTarget {
 export interface SetChartDataIntent extends IntentBase, DrawingTarget {
   kind: "setChartData";
   runId: StableId;
-  chart: {
-    type: "column" | "bar" | "line" | "pie";
-    title?: string;
-    categories: string[];
-    series: { name: string; values: number[] }[];
-  };
+  chart: InsertChartIntent["chart"];
 }
 
 /** Set the text of one node of the SmartArt diagram carried by a run. */
@@ -797,13 +929,8 @@ export interface ResizeTableColumnIntent extends IntentBase {
   renderedWidths?: number[];
 }
 
-/** Drag-resize a table row's height (trHeight atLeast). */
-export interface ResizeTableRowIntent extends IntentBase {
-  kind: "resizeTableRow";
-  cellParagraphId: StableId;
-  rowIdx: number;
-  heightPx: number;
-}
+/** Drag-resize a table row's height (trHeight atLeast). REGISTERED. */
+export type ResizeTableRowIntent = RegisteredIntentOf<"resizeTableRow">;
 
 /** Position a table at page coordinates (converts inline to float). */
 export interface MoveTableIntent extends IntentBase {
@@ -821,27 +948,35 @@ export interface RemoveDrawingIntent extends IntentBase, DrawingTarget {
   runId: StableId;
 }
 
-/** Replace the equation of the math object in a paragraph (linear syntax).
- * Math (m:oMath) lives at paragraph level, so this is block-addressed. */
-export interface SetMathLinearIntent extends IntentBase {
-  kind: "setMathLinear";
+/**
+ * Which equation inside a block a math intent means: its position among the
+ * block's m:oMath elements in document order. Absent means the first one, so
+ * an intent recorded before a block could hold more than one addressable
+ * equation still names what it always named.
+ */
+interface MathTarget {
   blockId: StableId;
+  mathIndex?: number;
+}
+
+/** Replace the equation of a math object in a paragraph (linear syntax).
+ * Math (m:oMath) lives at paragraph level, so this is block-addressed. */
+export interface SetMathLinearIntent extends IntentBase, MathTarget {
+  kind: "setMathLinear";
   mathText: string;
 }
 
-/** Delete the math object in a paragraph. */
-export interface DeleteMathIntent extends IntentBase {
+/** Delete a math object in a paragraph. */
+export interface DeleteMathIntent extends IntentBase, MathTarget {
   kind: "deleteMath";
-  blockId: StableId;
 }
 
 /** Drag-move the equation out of `blockId` to the text position `at`. The
- * equation is addressed like the other math intents (block + firstMathIn); the
+ * equation is addressed like the other math intents (block + mathIndex); the
  * destination is an ordinary wire caret. Dropping mid-text splits the
  * destination run, so the split-off tail run takes a carried id. */
-export interface MoveMathIntent extends IntentBase {
+export interface MoveMathIntent extends IntentBase, MathTarget {
   kind: "moveMath";
-  blockId: StableId;
   at: Position;
   nodeIds: StableId[];
 }
@@ -859,10 +994,37 @@ export interface EnsureHeaderFooterIntent extends IntentBase {
   nodeIds: StableId[];
 }
 
-/** Delete a comment (and its reply thread) by id. */
+/** Delete a comment (and its reply thread) by id. Addressed with a reply's
+ * id it deletes just that reply — the thread/reply distinction is the id. */
 export interface DeleteCommentIntent extends IntentBase {
   kind: "deleteComment";
   commentId: string;
+}
+
+/**
+ * Resolve (true) or reopen (false) a comment thread. Addressed like
+ * deleteComment, by the comment's deterministic string id (a reply id
+ * resolves its thread's parent). The mutation writes w15:done on the thread
+ * parent's commentsExtended entry; when the parent's body paragraph carries
+ * no w14:paraId yet, the carried `paraId` candidate is consumed to mint one
+ * (provenance rule a — generated once by the originator, identical XML on
+ * every replica). No document run's text moves — identity transform.
+ */
+export interface ResolveCommentIntent extends IntentBase {
+  kind: "resolveComment";
+  commentId: string;
+  resolved: boolean;
+  /** paraId candidate, consumed only when the thread parent lacks one. */
+  paraId: string;
+}
+
+/** Replace a comment's body text (Word's edit-my-comment). Author, date, id,
+ * anchors and threading stay; deterministic given the carried text — identity
+ * transform, clean no-op for an unknown id or unchanged text. */
+export interface EditCommentIntent extends IntentBase {
+  kind: "editComment";
+  commentId: string;
+  text: string;
 }
 
 /** Wrap a sub-range of a run's text in a named bookmark. */
@@ -874,11 +1036,8 @@ export interface InsertBookmarkRangeIntent extends IntentBase {
   end: number;
 }
 
-/** Toggle the checkbox content control carried by a run. */
-export interface ToggleCheckboxIntent extends IntentBase {
-  kind: "toggleCheckbox";
-  runId: StableId;
-}
+/** Toggle the checkbox content control carried by a run. REGISTERED. */
+export type ToggleCheckboxIntent = RegisteredIntentOf<"toggleCheckbox">;
 
 /** Accept one tracked change, addressed by its position in document order
  * (collectRevisions order — deterministic across replicas). */
@@ -893,24 +1052,28 @@ export interface RejectRevisionIntent extends IntentBase {
   index: number;
 }
 
-/** Accept every tracked change in the document. */
+/** Accept every tracked change in the document, or only one author's when
+ * `author` is given — a surface that owns some of the revisions must not
+ * resolve the rest. Absent means all, which is what older clients send. */
 export interface AcceptAllRevisionsIntent extends IntentBase {
   kind: "acceptAllRevisions";
+  author?: string;
 }
 
-/** Reject every tracked change in the document. */
+/** Reject every tracked change, or only one author's. See AcceptAll. */
 export interface RejectAllRevisionsIntent extends IntentBase {
   kind: "rejectAllRevisions";
+  author?: string;
 }
 
-/** Insert a rows×cols table after the paragraph containing the anchor run. */
-export interface InsertTableIntent extends IntentBase {
-  kind: "insertTable";
-  runId: StableId;
-  rows: number;
-  cols: number;
-  nodeIds: StableId[];
-}
+/** Insert a rows×cols table after the paragraph containing the anchor run.
+ * REGISTERED. */
+export type InsertTableIntent = RegisteredIntentOf<"insertTable">;
+
+/** Write recomputed cached results into every field, in document order.
+ * REGISTERED, and the first DOCUMENT-SCOPED registered operation: it carries no
+ * stable id, so its result count is what makes a stale replica reject. */
+export type UpdateFieldsIntent = RegisteredIntentOf<"updateFields">;
 
 /** A sequenced log entry: an applied intent with its assigned seq, or a
  * rejection no-op (doc 03) that still occupies a position in the total order

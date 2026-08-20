@@ -1,4 +1,4 @@
-import { localName, runWireLength, type DocxDocument, type StableIds } from "@wordinweb/core";
+import { localName, registeredOperation, runWireLength, type DocxDocument, type StableIds } from "@wordinweb/core";
 import { sha256Hex, type Intent, type IntentBody } from "@wordinweb/collab/client";
 import { validateIntent } from "@wordinweb/collab/server";
 import { AGENT_EDIT_CAPABILITIES, validateAgentOperationShape } from "./capabilities.js";
@@ -12,6 +12,49 @@ interface CompileContext {
   provenance: Required<AgentProvenance>;
   asset(ref: string): AgentAsset;
   prepareMedia(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string }>;
+}
+
+/**
+ * Operations whose agent-facing `suggest: true` compiles to carried
+ * author/date. Each one has a tracked OOXML form: w:ins for an insertion or a
+ * split mark, a `*PrChange` for a formatting change (w:rPrChange, w:pPrChange,
+ * and the table's w:tblPrChange, w:trPrChange and w:tcPrChange), a struck
+ * paragraph mark for a merge.
+ *
+ * The set is READ from the capability map rather than written out again. That
+ * map is where an operation declares the fields it takes, so a declaration
+ * that offers `suggest` and a compiler that then drops the flag is a
+ * contradiction this file can no longer hold — the drift that left
+ * setParagraphBorders and setTabStops advertising the flag and failing on it.
+ * Every caller that has to know which kinds track — the CLI's suggesting
+ * mode, the LikeOffice AI panel — reads the same one declaration.
+ */
+const SUGGESTABLE_KINDS = new Set<Intent["kind"]>(
+  (Object.keys(AGENT_EDIT_CAPABILITIES) as Intent["kind"][])
+    .filter((kind) => AGENT_EDIT_CAPABILITIES[kind].optional?.includes("suggest")),
+);
+
+/** Whether `suggest: true` on this kind records a revision. A kind outside the
+ * set applies outright, so the flag is dropped rather than promised. */
+export function isSuggestable(kind: unknown): boolean {
+  return typeof kind === "string" && SUGGESTABLE_KINDS.has(kind as Intent["kind"]);
+}
+
+/**
+ * The tableOp operations that carry a tracked form: the three that change
+ * PROPERTIES. The rest — every row and column insert and delete, the
+ * whole-table delete, a merge and a split — are STRUCTURAL. Word records those
+ * on the row (w:trPr/w:ins, w:trPr/w:del, with the cell content marked too)
+ * and this engine writes none of it, so suggestion mode refuses them rather
+ * than restructure a table behind the reviewer's back.
+ */
+const SUGGESTABLE_TABLE_OPS = new Set(["cellShading", "cellVAlign", "textWrapping"]);
+
+/** Whether a tableOp's `op` has a tracked form, so it may run while
+ * suggesting. The structural ops are plain strings and never qualify. */
+export function isSuggestableTableOp(op: unknown): boolean {
+  if (!op || typeof op !== "object" || Array.isArray(op)) return false;
+  return SUGGESTABLE_TABLE_OPS.has(String((op as { kind?: unknown }).kind));
 }
 
 const INTERNAL_FIELDS = ["clientId", "clientSeq", "base", "nodeIds", "newBlockId", "newRunId", "beforeId", "middleId", "afterId", "blockId", "runId", "objectIndex", "cellParagraphId", "afterBlockId"];
@@ -38,6 +81,10 @@ function paraId(context: CompileContext): string {
 }
 
 function idsForOperation(kind: Intent["kind"], operation: Record<string, unknown>): number {
+  // A registered operation declares its own carried-id budget, so the editor,
+  // the React host, and this compiler all size the allocation the same way.
+  const registered = registeredOperation(kind);
+  if (registered) return registered.nodeIds ? registered.nodeIds(operation as never) : 0;
   switch (kind) {
     case "pasteBlocks": {
       const xml = String(operation.blocksXml ?? "");
@@ -63,11 +110,6 @@ function idsForOperation(kind: Intent["kind"], operation: Record<string, unknown
     case "insertCoverPage":
     case "insertChart":
     case "insertSmartArt": return 24;
-    case "insertTable": {
-      const rows = Number(operation.rows);
-      const cols = Number(operation.cols);
-      return Number.isInteger(rows) && Number.isInteger(cols) && rows > 0 && cols > 0 ? rows * cols * 2 + 8 : 8;
-    }
     default: return 0;
   }
 }
@@ -85,7 +127,41 @@ function imageExtension(mediaType: string): string {
   return extension;
 }
 
-export async function compileAgentOperation(input: AgentOperation, context: CompileContext): Promise<IntentBody> {
+/**
+ * Expand an insertText whose text contains newlines into the intent sequence
+ * that creates real paragraphs: one splitParagraph per "\n" (each with carried
+ * ids, all at the original caret, so no split addresses a run an insertion
+ * created), then one insertText per non-empty line into a run known ahead of
+ * time. Front-to-back splits at one point stack the new paragraphs directly
+ * after the addressed one, with the original tail in the paragraph the FIRST
+ * split created — so line k lands in the paragraph from split n-k.
+ */
+function expandInsertText(operation: Record<string, unknown>, context: CompileContext): Array<Record<string, unknown>> {
+  const text = String(operation.text).replace(/\r\n?/g, "\n");
+  if (/[\v\f]/.test(text)) {
+    throw new Error('insertText text may not contain vertical-tab or form-feed characters. Use "\\n" to start a new paragraph.');
+  }
+  if (!text.includes("\n")) return [{ ...operation, text }];
+  const at = operation.at as { blockId: number; runId: number; offset: number };
+  const suggest = operation.suggest;
+  const lines = text.split("\n");
+  const intents: Array<Record<string, unknown>> = [];
+  const created: Array<{ blockId: number; runId: number }> = [];
+  for (let index = 0; index < lines.length - 1; index++) {
+    const [newBlockId, newRunId] = context.allocateIds(2);
+    intents.push({ kind: "splitParagraph", at: { ...at }, newBlockId, newRunId, ...(suggest ? { suggest } : {}) });
+    created.push({ blockId: newBlockId, runId: newRunId });
+  }
+  if (lines[0]) intents.push({ kind: "insertText", at: { ...at }, text: lines[0], ...(suggest ? { suggest } : {}) });
+  for (let index = 1; index < lines.length; index++) {
+    if (!lines[index]) continue;
+    const target = created[lines.length - 1 - index];
+    intents.push({ kind: "insertText", at: { blockId: target.blockId, runId: target.runId, offset: 0 }, text: lines[index], ...(suggest ? { suggest } : {}) });
+  }
+  return intents;
+}
+
+export async function compileAgentOperation(input: AgentOperation, context: CompileContext): Promise<IntentBody[]> {
   const operation = cloneOperation(input);
   const kind = operation.kind;
   if (typeof kind !== "string" || !(kind in AGENT_EDIT_CAPABILITIES)) throw new Error("Unknown edit operation");
@@ -94,6 +170,16 @@ export async function compileAgentOperation(input: AgentOperation, context: Comp
   const shapeError = validateAgentOperationShape(input);
   if (shapeError) throw new Error(shapeError);
   requireFields(operation, AGENT_EDIT_CAPABILITIES[typedKind].required);
+
+  // The agent schema admits "#RRGGBB" for cell shading; the wire wants bare
+  // hex. Normalize here so the one agent-only spelling cannot be rejected
+  // after it passed the schema.
+  if (typedKind === "tableOp") {
+    const op = operation.op as { kind?: unknown; fill?: unknown } | string | undefined;
+    if (op && typeof op === "object" && op.kind === "cellShading" && typeof op.fill === "string") {
+      op.fill = op.fill.replace(/^#/, "");
+    }
+  }
 
   if ("blockRef" in operation) {
     operation.blockId = resolveParagraphRef(context.ids, operation.blockRef);
@@ -164,9 +250,14 @@ export async function compileAgentOperation(input: AgentOperation, context: Comp
     operation.author ??= context.provenance.author;
     operation.date ??= context.provenance.now();
     operation.paraIds ??= [paraId(context), paraId(context)];
+  } else if (typedKind === "resolveComment") {
+    // Consumed only when the thread parent's paragraph lacks a w14:paraId.
+    operation.paraId ??= paraId(context);
   } else if (typedKind === "suggestRevision") {
     operation.suggest ??= { author: context.provenance.author, date: context.provenance.now() };
-  } else if (typedKind === "insertText" || typedKind === "splitParagraph") {
+  } else if (SUGGESTABLE_KINDS.has(typedKind)) {
+    // Agents ask for a tracked change with a boolean; the author and date the
+    // replicas need are stamped here, once, like every other provenance value.
     if (operation.suggest === true) operation.suggest = { author: context.provenance.author, date: context.provenance.now() };
     else delete operation.suggest;
   }
@@ -183,11 +274,13 @@ export async function compileAgentOperation(input: AgentOperation, context: Comp
     if (prepared.iv) operation.iv = prepared.iv;
   }
 
-  const body = operation as unknown as IntentBody;
-  const full = { ...body, clientId: "agent-validation", clientSeq: 0, base: 0 } as Intent;
-  const error = validateIntent(full);
-  if (error) throw new Error(error);
-  return body;
+  const bodies = (typedKind === "insertText" ? expandInsertText(operation, context) : [operation]) as unknown as IntentBody[];
+  for (const body of bodies) {
+    const full = { ...body, clientId: "agent-validation", clientSeq: 0, base: 0 } as Intent;
+    const error = validateIntent(full);
+    if (error) throw new Error(error);
+  }
+  return bodies;
 }
 
 export async function localMedia(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number }> {

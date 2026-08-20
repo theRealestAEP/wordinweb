@@ -46,6 +46,12 @@ describe("DocumentSession insertShape", () => {
     const s = new DocumentSession(makeDoc("x"));
     expect(s.submit({ kind: "insertShape", clientId: "a", clientSeq: 1, base: 0, runId: rid(s).runId, preset: "evil" as never, nodeIds: [500] }).kind).toBe("rejected");
   });
+  it("accepts gallery presets from the preset-geometry table (e18)", () => {
+    const s = new DocumentSession(makeDoc("shape: "));
+    const e = s.submit({ kind: "insertShape", clientId: "a", clientSeq: 1, base: 0, runId: rid(s).runId, preset: "star5", nodeIds: [500, 501] });
+    expect(e.kind).toBe("applied");
+    expect(serializeXml(s.doc.docRoot)).toContain('prst="star5"');
+  });
   it("a concurrent text edit survives a shape insertion (identity transform)", () => {
     const s = new DocumentSession(makeDoc("abc"));
     const { blockId, runId } = rid(s);

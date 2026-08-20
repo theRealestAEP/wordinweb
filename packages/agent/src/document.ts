@@ -1,11 +1,13 @@
 import { DocxDocument, localName, runWireLength, serializeXml, type Block, type Paragraph, type Run, type StableIds, type XmlElement } from "@wordinweb/core";
 import { INTENT_KINDS, applyIntentScoped, resyncScope, type Intent, type IntentBody, type PresencePosition } from "@wordinweb/collab/client";
-import { agentCapabilities, agentOperationSchema, type AgentEditCapability } from "./capabilities.js";
+import { agentCapabilities, agentOperationSchema, hoistRepeatedSubschemas, type AgentEditCapability } from "./capabilities.js";
 import { AGENT_COMPOSE_SCHEMA, composeDocxBytes } from "./compose.js";
 import { compileAgentOperation, localMedia } from "./edit.js";
 import { SemanticInspector } from "./inspect.js";
+import { hunksFromUnifiedDiff, patchOperations } from "./patch.js";
+import { projectStory, projectedLines } from "./project.js";
 import { blockRef, objectRef, runRef } from "./refs.js";
-import { spatialInspect } from "./spatial.js";
+import { fitInspect, spatialInspect } from "./spatial.js";
 import type {
   AgentAsset,
   AgentCollaborativeTarget,
@@ -17,6 +19,10 @@ import type {
   AgentInspectRequest,
   AgentInspectResult,
   AgentOperation,
+  AgentPatchRequest,
+  AgentPatchResult,
+  AgentProjectRequest,
+  AgentProjectResult,
   AgentProvenance,
   AgentTool,
 } from "./types.js";
@@ -261,87 +267,64 @@ function presenceAfterOperation(doc: DocxDocument, operation: IntentBody, hint: 
   return null;
 }
 
+function projectionKey(story: string, mode: string, cursor: string | null, revision: string): string {
+  return [revision, story, mode, cursor ?? ""].join("\u0000");
+}
+
 function asObject(input: unknown): Record<string, unknown> {
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Tool input must be an object");
   return input as Record<string, unknown>;
 }
 
+// The Anthropic Messages API rejects anyOf/oneOf/allOf at the top level of a
+// tool's input_schema, so the kind-discriminated union is flattened into one
+// object schema. Which fields go with which kind is stated on the fields and
+// enforced by the handler, which reports a violation as a normal tool error.
 const inspectToolSchema: Record<string, unknown> = {
-  anyOf: [
-    {
-      type: "object",
-      properties: { kind: { const: "overview" } },
-      required: ["kind"],
-      additionalProperties: false,
+  type: "object",
+  properties: {
+    kind: {
+      enum: ["overview", "context", "read", "search", "object", "spatial", "fit"],
+      description:
+        "overview: whole-document shape. context: bulk text for stories. read: one story range. search: find text (requires query). object: one object (requires ref). spatial: page geometry. fit: per-drawing text fit plus page fill — check it after inserting or resizing a drawing, to see whether the drawing's text still fits its box.",
     },
-    {
+    stories: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1 }, description: "context only" },
+    maxBlocks: { type: "integer", minimum: 1, maximum: 200, description: "context or read" },
+    maxCharacters: { type: "integer", minimum: 1, maximum: 100000, description: "context or read" },
+    include: { type: "array", uniqueItems: true, items: { enum: ["bookmarks", "objects"] }, description: "context only" },
+    includeEmpty: { type: "boolean", description: "context only" },
+    story: { type: "string", minLength: 1, description: "read only" },
+    cursor: {
       type: "object",
-      properties: {
-        kind: { const: "context" },
-        stories: { type: "array", minItems: 1, maxItems: 100, uniqueItems: true, items: { type: "string", minLength: 1 } },
-        maxBlocks: { type: "integer", minimum: 1, maximum: 200 },
-        maxCharacters: { type: "integer", minimum: 1, maximum: 100000 },
-        include: { type: "array", uniqueItems: true, items: { enum: ["bookmarks", "objects"] } },
-        includeEmpty: { type: "boolean" },
-      },
-      required: ["kind"],
+      properties: { value: { type: "string", minLength: 1 } },
+      required: ["value"],
       additionalProperties: false,
+      description: "read only",
     },
-    {
-      type: "object",
-      properties: {
-        kind: { const: "read" },
-        story: { type: "string", minLength: 1 },
-        cursor: {
-          type: "object",
-          properties: { value: { type: "string", minLength: 1 } },
-          required: ["value"],
-          additionalProperties: false,
-        },
-        maxBlocks: { type: "integer", minimum: 1, maximum: 200 },
-        maxCharacters: { type: "integer", minimum: 1, maximum: 100000 },
-      },
-      required: ["kind"],
-      additionalProperties: false,
-    },
-    {
+    query: { type: "string", minLength: 1, maxLength: 1000, description: "search only, required" },
+    maxResults: { type: "integer", minimum: 1, maximum: 500, description: "search only" },
+    ref: { type: "string", pattern: "^(object|view):", description: "object only, required" },
+    pages: {
       type: "object",
       properties: {
-        kind: { const: "search" },
-        query: { type: "string", minLength: 1, maxLength: 1000 },
-        maxResults: { type: "integer", minimum: 1, maximum: 500 },
+        start: { type: "integer", minimum: 1 },
+        count: { type: "integer", minimum: 1, maximum: 100 },
       },
-      required: ["kind", "query"],
+      required: ["start", "count"],
       additionalProperties: false,
+      description: "spatial or fit",
     },
-    {
-      type: "object",
-      properties: { kind: { const: "object" }, ref: { type: "string", pattern: "^(object|view):" } },
-      required: ["kind", "ref"],
-      additionalProperties: false,
-    },
-    {
-      type: "object",
-      properties: {
-        kind: { const: "spatial" },
-        pages: {
-          type: "object",
-          properties: {
-            start: { type: "integer", minimum: 1 },
-            count: { type: "integer", minimum: 1, maximum: 100 },
-          },
-          required: ["start", "count"],
-          additionalProperties: false,
-        },
-        includeOverlaps: { type: "boolean" },
-      },
-      required: ["kind"],
-      additionalProperties: false,
-    },
-  ],
+    includeOverlaps: { type: "boolean", description: "spatial only" },
+  },
+  required: ["kind"],
+  additionalProperties: false,
 };
 
-const editToolSchema: Record<string, unknown> = {
+// The operations union is by far the largest thing the panel sends, and it
+// ships on every request of every round. hoistRepeatedSubschemas collapses the
+// shapes it spells out more than once into one $defs entry each; the schema a
+// reader resolves is unchanged.
+const editToolSchema: Record<string, unknown> = hoistRepeatedSubschemas({
   type: "object",
   properties: {
     revision: { type: "string", minLength: 1 },
@@ -353,6 +336,52 @@ const editToolSchema: Record<string, unknown> = {
     },
   },
   required: ["revision", "operations"],
+  additionalProperties: false,
+});
+
+const projectionWindowSchema: Record<string, Record<string, unknown>> = {
+  story: { type: "string", minLength: 1 },
+  mode: { enum: ["text", "md", "outline"] },
+  cursor: {
+    type: "object",
+    properties: { value: { type: "string", minLength: 1 } },
+    required: ["value"],
+    additionalProperties: false,
+  },
+  maxBlocks: { type: "integer", minimum: 1, maximum: 2000 },
+  maxCharacters: { type: "integer", minimum: 1, maximum: 200000 },
+};
+
+const projectToolSchema: Record<string, unknown> = {
+  type: "object",
+  properties: { ...projectionWindowSchema },
+  additionalProperties: false,
+};
+
+const patchToolSchema: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    revision: { type: "string", minLength: 1 },
+    ...projectionWindowSchema,
+    edits: {
+      type: "array",
+      minItems: 1,
+      maxItems: 100,
+      items: {
+        type: "object",
+        properties: {
+          startLine: { type: "integer", minimum: 1 },
+          endLine: { type: "integer", minimum: 1 },
+          newText: { type: "string", maxLength: 100000 },
+        },
+        required: ["startLine", "endLine", "newText"],
+        additionalProperties: false,
+      },
+    },
+    diff: { type: "string", minLength: 1, maxLength: 1000000 },
+    suggest: { type: "boolean" },
+  },
+  required: ["revision"],
   additionalProperties: false,
 };
 
@@ -490,6 +519,43 @@ function componentBlock(block: AgentComposeBlock): boolean {
   return ["equation", "chart", "smartArt", "image", "shape", "wordArt", "pageNumber"].includes(block.type);
 }
 
+/** An operation compiled but the engine could not place it. Name the usual
+ * cause and the working alternative, so the model is never stranded. The
+ * sentence about what survived belongs to the rollback wrapper below, which
+ * every write path shares. */
+function applyFailure(kind: string): Error {
+  const paragraphHint = kind === "splitParagraph"
+    ? ' To create paragraphs, one insertText whose text contains "\\n" between paragraphs also works, in one operation.'
+    : "";
+  return new Error(
+    `${kind} could not apply to the referenced document state. `
+    + `A reference or offset is likely stale: an earlier operation in this transaction can restructure the runs it touched.${paragraphHint}`,
+  );
+}
+
+// Every write path here applies to a trial clone and adopts it only once the
+// whole request succeeds, so a throw leaves the document byte-for-byte as it
+// was. An error has to say so: a caller told to "send the rest" resumes from a
+// state that never existed and inserts the earlier operations a second time.
+const EDIT_ROLLBACK =
+  "NOTHING was applied. The transaction is all or nothing, so the document is unchanged "
+  + "and no earlier operation in this transaction landed either. "
+  + "Re-inspect the document, then send every operation again.";
+
+const PATCH_ROLLBACK =
+  "NOTHING was applied. The patch is all or nothing, so the document is unchanged "
+  + "and no earlier hunk in this patch landed either. "
+  + "Re-project the story, then send every edit again.";
+
+const COMPOSE_ROLLBACK =
+  "NOTHING was created. Compose is all or nothing, so the document is unchanged. "
+  + "Send the whole compose request again.";
+
+function rolledBack(error: unknown, resolution: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(`${message} ${resolution}`);
+}
+
 export class AgentDocument {
   private localDoc: DocxDocument | null;
   private localRevision = 0;
@@ -500,6 +566,7 @@ export class AgentDocument {
   private composeAvailable: boolean;
   private readonly listeners = new Set<(document: DocxDocument, revision: string) => void>();
   private readonly inspectedTargets = new Map<string, Map<string, string>>();
+  private readonly projections = new Map<string, AgentProjectResult>();
 
   private constructor(doc: DocxDocument | null, target: AgentCollaborativeTarget | null, provenance?: AgentProvenance, composeAvailable = false) {
     this.localDoc = doc;
@@ -549,12 +616,48 @@ export class AgentDocument {
     return new SemanticInspector(doc, doc.enableStableIds(), revision);
   }
 
+  /**
+   * Read the document the way its READER reads it, whatever is on screen.
+   *
+   * The model these reads walk is derived per revision view, and markup view
+   * keeps deleted runs in it so a reviewer can see the strike-through. Right
+   * for a screen, wrong for an agent: the AI panel turns suggesting on for its
+   * turn, which forces markup, so a SECOND suggestion projected the pending
+   * insertion and the pending deletion interleaved — "The quick brown fox
+   * leajumps over the lazy dog" for a document that reads "leaps". The model
+   * then either rewrote a string no human had ever seen, or, because deleted
+   * runs are not editable text, got "cannot be rewritten across a non-text
+   * atom" and could not stack a second change at all.
+   *
+   * So every model-derived read runs in final view: insertions are text,
+   * deletions are gone — the document as it will read once the suggestions are
+   * accepted. Only the READS move. The operations they produce address runs by
+   * stable id, at offsets within a run's own text; both are properties of the
+   * XML and mean the same thing in either view, so applying them needs no
+   * switch and the view on screen never flickers.
+   */
+  private inFinalView<T>(read: () => T): T {
+    const doc = this.document;
+    const shown = doc.revisionView;
+    if (shown === "final") return read();
+    doc.setRevisionView("final");
+    try {
+      return read();
+    } finally {
+      doc.setRevisionView(shown);
+    }
+  }
+
   asset(ref: string): AgentAsset {
     return this.addedAssets.get(ref) ?? this.inspector().asset(ref);
   }
 
   inspect(request: AgentInspectRequest): AgentInspectResult {
     if (!request || typeof request !== "object") throw new Error("Inspection request is required");
+    return this.inFinalView(() => this.inspectFinal(request));
+  }
+
+  private inspectFinal(request: AgentInspectRequest): AgentInspectResult {
     const inspector = this.inspector();
     let result: AgentInspectResult;
     switch (request.kind) {
@@ -564,42 +667,139 @@ export class AgentDocument {
       case "search": result = inspector.search(request.query, request.maxResults); break;
       case "object": result = inspector.object(request.ref); break;
       case "spatial": result = spatialInspect(this.document, this.document.enableStableIds(), this.revision, inspector, request.pages, request.includeOverlaps); break;
+      case "fit": result = fitInspect(this.document, this.document.enableStableIds(), this.revision, inspector, request.pages); break;
       default: {
         const exhaustive: never = request;
         return exhaustive;
       }
     }
-    if (this.target) this.recordInspection(result, inspector);
+    if (this.target) this.recordInspection(result, result.revision, inspector);
     return result;
   }
 
-  private recordInspection(result: AgentInspectResult, inspector: SemanticInspector): void {
-    const fingerprints = this.inspectedTargets.get(result.revision) ?? new Map<string, string>();
+  private recordInspection(value: unknown, revision: string, inspector: SemanticInspector): void {
+    const fingerprints = this.inspectedTargets.get(revision) ?? new Map<string, string>();
     const xmlByScope = new WeakMap<XmlElement, string>();
-    for (const ref of inspectionReferences(result)) {
+    for (const ref of inspectionReferences(value)) {
       const fingerprint = referenceFingerprint(this.document, inspector, ref, xmlByScope);
       if (fingerprint !== null) fingerprints.set(ref, fingerprint);
     }
-    if (!this.inspectedTargets.has(result.revision)) {
-      this.inspectedTargets.set(result.revision, fingerprints);
+    if (!this.inspectedTargets.has(revision)) {
+      this.inspectedTargets.set(revision, fingerprints);
       while (this.inspectedTargets.size > 8) this.inspectedTargets.delete(this.inspectedTargets.keys().next().value!);
     }
+  }
+
+  /** Fingerprints are recorded during a final-view read, so they have to be
+   * re-taken in one: compared across views, every block holding a tracked
+   * change reads as concurrently edited and the patch dies as "stale". */
+  private fingerprintsMatch(revision: string, refs: Set<string>): boolean {
+    const observed = this.inspectedTargets.get(revision);
+    if (!observed) return false;
+    return this.inFinalView(() => {
+      const inspector = this.inspector();
+      const xmlByScope = new WeakMap<XmlElement, string>();
+      for (const ref of refs) {
+        const before = observed.get(ref);
+        const current = referenceFingerprint(this.document, inspector, ref, xmlByScope);
+        if (before === undefined || current === null || before !== current) return false;
+      }
+      return true;
+    });
   }
 
   private revisionMatchesEdit(request: AgentEditRequest): boolean {
     if (request.revision === this.revision) return true;
     if (!this.target) return false;
     const refs = editReferences(request.operations);
-    const observed = this.inspectedTargets.get(request.revision);
-    if (!refs || !observed) return false;
-    const inspector = this.inspector();
-    const xmlByScope = new WeakMap<XmlElement, string>();
-    for (const ref of refs) {
-      const before = observed.get(ref);
-      const current = referenceFingerprint(this.document, inspector, ref, xmlByScope);
-      if (before === undefined || current === null || before !== current) return false;
+    return refs ? this.fingerprintsMatch(request.revision, refs) : false;
+  }
+
+  /** Render the document as deterministic text plus the anchor map that owns
+   * the rendered-to-wire translation. Read-only: nothing here mutates. */
+  project(request: AgentProjectRequest = {}): AgentProjectResult {
+    if (!request || typeof request !== "object") throw new Error("Projection request is required");
+    return this.inFinalView(() => this.projectFinal(request));
+  }
+
+  private projectFinal(request: AgentProjectRequest): AgentProjectResult {
+    const doc = this.document;
+    const result = projectStory(
+      doc,
+      doc.enableStableIds(),
+      this.revision,
+      request.story ?? "body",
+      request.mode ?? "md",
+      request.cursor?.value,
+      request.maxBlocks,
+      request.maxCharacters,
+    );
+    const key = projectionKey(result.story, result.mode, result.window.cursor, result.revision);
+    this.projections.set(key, result);
+    while (this.projections.size > 8) this.projections.delete(this.projections.keys().next().value!);
+    // Anchors carry every block and run the window addresses, so the patch
+    // guard can check exactly the blocks a hunk touches and let concurrent
+    // edits elsewhere through — on local sessions as well as collaborative.
+    this.recordInspection(result.anchors, result.revision, this.inspector());
+    return result;
+  }
+
+  async patch(request: AgentPatchRequest): Promise<AgentPatchResult> {
+    try {
+      return await this.patchWindow(request);
+    } catch (error) {
+      throw rolledBack(error, PATCH_ROLLBACK);
     }
-    return true;
+  }
+
+  private async patchWindow(request: AgentPatchRequest): Promise<AgentPatchResult> {
+    if (!request || typeof request !== "object" || typeof request.revision !== "string") {
+      throw new Error("A patch needs the revision its projection came from");
+    }
+    const hasEdits = Array.isArray(request.edits) && request.edits.length > 0;
+    const hasDiff = typeof request.diff === "string";
+    if (hasEdits === hasDiff) throw new Error("A patch needs either edits or diff");
+    const story = request.story ?? "body";
+    const mode = request.mode ?? "md";
+    const cursor = request.cursor?.value ?? null;
+
+    // The hunks are line numbers into the window the agent read, so patch the
+    // window it read: the cached projection, or a fresh one at the current
+    // revision. A window from a revision this document never projected cannot
+    // be placed at all.
+    const projection = this.projections.get(projectionKey(story, mode, cursor, request.revision))
+      ?? (request.revision === this.revision
+        ? this.project({ story, mode, cursor: request.cursor, maxBlocks: request.maxBlocks, maxCharacters: request.maxCharacters })
+        : undefined);
+    if (!projection) throw new Error("The document revision is stale");
+
+    const lines = projectedLines(projection);
+    const hunks = hasEdits ? request.edits! : hunksFromUnifiedDiff(request.diff!, lines.map((line) => line.text));
+    const operations = patchOperations(lines, hunks, mode, request.suggest === true);
+
+    if (request.revision !== this.revision) {
+      const touched = new Set<string>();
+      for (const hunk of hunks) {
+        for (const line of lines.slice(hunk.startLine - 1, hunk.endLine)) if (line.anchor.blockRef) touched.add(line.anchor.blockRef);
+      }
+      if (!this.fingerprintsMatch(request.revision, touched)) throw new Error("The document revision is stale");
+    }
+
+    // Refresh the window the agent actually held, not the one this request's
+    // budgets would produce, so the returned projection re-anchors the same
+    // region under a cursor the new revision accepts.
+    const refresh = (): AgentProjectResult => this.project({
+      story,
+      mode,
+      ...(projection.window.startBlock > 0 ? { cursor: { value: `docmd:${this.revision}:${projection.window.startBlock}` } } : {}),
+      maxBlocks: projection.window.maxBlocks,
+      maxCharacters: projection.window.maxCharacters,
+    });
+    if (operations.length === 0) {
+      return { revision: this.revision, status: this.target ? "submitted" : "applied", operations: [], projection: refresh() };
+    }
+    const result = await this.editTransaction({ revision: this.revision, operations });
+    return { ...result, projection: refresh() };
   }
 
   capabilities(category?: AgentEditCapability["category"], kind?: Intent["kind"]): ReturnType<typeof agentCapabilities> {
@@ -607,6 +807,14 @@ export class AgentDocument {
   }
 
   async compose(request: AgentComposeRequest): Promise<AgentComposeResult> {
+    try {
+      return await this.composeDocument(request);
+    } catch (error) {
+      throw rolledBack(error, COMPOSE_ROLLBACK);
+    }
+  }
+
+  private async composeDocument(request: AgentComposeRequest): Promise<AgentComposeResult> {
     if (!this.composeAvailable || this.target) throw new Error("Composition is available on a new AgentDocument.create() document");
     if (request.revision !== this.revision) throw new Error("The document revision is stale");
     const trial = new AgentDocument(DocxDocument.load(composeDocxBytes(request)), null, this.provenance);
@@ -629,7 +837,7 @@ export class AgentDocument {
       });
     }
     for (let offset = 0; offset < operations.length; offset += 100) {
-      await trial.edit({ revision: trial.revision, operations: operations.slice(offset, offset + 100) });
+      await trial.editTransaction({ revision: trial.revision, operations: operations.slice(offset, offset + 100) });
     }
 
     const adjustments: AgentOperation[] = [];
@@ -644,7 +852,7 @@ export class AgentDocument {
       });
     }
     for (let offset = 0; offset < adjustments.length; offset += 100) {
-      await trial.edit({ revision: trial.revision, operations: adjustments.slice(offset, offset + 100) });
+      await trial.editTransaction({ revision: trial.revision, operations: adjustments.slice(offset, offset + 100) });
     }
 
     this.localDoc = trial.document;
@@ -667,6 +875,17 @@ export class AgentDocument {
   }
 
   async edit(request: AgentEditRequest): Promise<AgentEditResult> {
+    try {
+      return await this.editTransaction(request);
+    } catch (error) {
+      throw rolledBack(error, EDIT_ROLLBACK);
+    }
+  }
+
+  /** The transaction itself. patch() and compose() call this rather than
+   * edit(), so each states the rollback in its own caller's terms instead of
+   * telling a patch author to resend "operations" it never sent. */
+  private async editTransaction(request: AgentEditRequest): Promise<AgentEditResult> {
     if (!request || typeof request !== "object" || !Array.isArray(request.operations) || request.operations.length === 0) throw new Error("At least one edit operation is required");
     if (request.operations.length > 100) throw new Error("A transaction can contain at most 100 operations");
     if (!this.revisionMatchesEdit(request)) throw new Error("The document revision is stale");
@@ -678,11 +897,21 @@ export class AgentDocument {
     const currentIds = current.enableStableIds();
     const trial = cloneWithIds(current, currentIds);
     let nextId = trial.ids.nextId();
-    const allocateIds = (count: number) => Array.from({ length: count }, () => nextId++);
+    // Skip ids the trial already holds: applying a suggested insertion mid
+    // transaction assigns table-counter ids to the runs it creates, and a
+    // carried id that collides with one of those is a hard reject.
+    const allocateIds = (count: number): number[] => {
+      const out: number[] = [];
+      while (out.length < count) {
+        if (!trial.ids.elOf(nextId)) out.push(nextId);
+        nextId++;
+      }
+      return out;
+    };
     const kinds: string[] = [];
     for (const input of request.operations) {
       const sourceAsset = typeof input.assetRef === "string" ? this.asset(input.assetRef) : undefined;
-      const operation = await compileAgentOperation(input, {
+      const operations = await compileAgentOperation(input, {
         doc: trial.doc,
         ids: trial.ids,
         allocateIds,
@@ -690,12 +919,14 @@ export class AgentDocument {
         asset: (ref) => this.asset(ref),
         prepareMedia: localMedia,
       });
-      const full = { ...operation, clientId: "local-agent", clientSeq: 0, base: 0 } as Intent;
-      const result = applyIntentScoped(trial.doc, trial.ids, full);
-      if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
-      resyncScope(trial.doc, trial.ids, result);
-      installPreparedImage(trial.doc, operation, sourceAsset);
-      kinds.push(operation.kind);
+      for (const operation of operations) {
+        const full = { ...operation, clientId: "local-agent", clientSeq: 0, base: 0 } as Intent;
+        const result = applyIntentScoped(trial.doc, trial.ids, full);
+        if (!result.applied) throw applyFailure(operation.kind);
+        resyncScope(trial.doc, trial.ids, result);
+        installPreparedImage(trial.doc, operation, sourceAsset);
+        kinds.push(operation.kind);
+      }
     }
     this.localDoc = trial.doc;
     this.localRevision++;
@@ -714,10 +945,22 @@ export class AgentDocument {
     let presence: PresencePosition | null = null;
     for (const input of request.operations) {
       const sourceAsset = typeof input.assetRef === "string" ? this.asset(input.assetRef) : undefined;
-      const operation = await compileAgentOperation(input, {
+      const operations = await compileAgentOperation(input, {
         doc: trial.doc,
         ids: trial.ids,
-        allocateIds: (count) => target.allocateIds(count),
+        // Drop allocated ids the trial already holds (allocators never reuse
+        // a number, so a skipped id just leaks): applying a suggested
+        // insertion mid transaction assigns table-counter ids to the runs it
+        // creates, and a carried id colliding with one is a hard reject.
+        allocateIds: (count) => {
+          const out: number[] = [];
+          while (out.length < count) {
+            for (const id of target.allocateIds(count - out.length)) {
+              if (!trial.ids.elOf(id)) out.push(id);
+            }
+          }
+          return out;
+        },
         provenance: this.provenance,
         asset: (ref) => this.asset(ref),
         prepareMedia: async (bytes) => {
@@ -727,13 +970,15 @@ export class AgentDocument {
           return prepared;
         },
       });
-      const hint = presenceHint(trial.doc, operation);
-      const result = applyIntentScoped(trial.doc, trial.ids, { ...operation, clientId: "agent-trial", clientSeq: 0, base: 0 } as Intent);
-      if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
-      resyncScope(trial.doc, trial.ids, result);
-      installPreparedImage(trial.doc, operation, sourceAsset);
-      presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
-      compiled.push({ operation, asset: sourceAsset });
+      for (const operation of operations) {
+        const hint = presenceHint(trial.doc, operation);
+        const result = applyIntentScoped(trial.doc, trial.ids, { ...operation, clientId: "agent-trial", clientSeq: 0, base: 0 } as Intent);
+        if (!result.applied) throw applyFailure(operation.kind);
+        resyncScope(trial.doc, trial.ids, result);
+        installPreparedImage(trial.doc, operation, sourceAsset);
+        presence = presenceAfterOperation(trial.doc, operation, hint) ?? presence;
+        compiled.push({ operation, asset: sourceAsset });
+      }
     }
     if (!this.revisionMatchesEdit(request)) throw new Error("The document revision is stale");
     for (const { operation } of compiled) await target.submit(operation);
@@ -751,6 +996,15 @@ export class AgentDocument {
   }
 
   tools(): AgentTool[] {
+    // Compose exists only on a fresh AgentDocument.create() document.
+    // Advertising it on a connected or loaded document hands the model a
+    // guaranteed-error call, so the tool is simply absent there.
+    const composeTool: AgentTool = {
+      name: "word_document_compose",
+      description: "Create a complete new document from schema-enforced blocks, tables, media, native objects, headers, and footers.",
+      inputSchema: AGENT_COMPOSE_SCHEMA,
+      execute: async (input) => this.compose(asObject(input) as unknown as AgentComposeRequest),
+    };
     return [
       {
         name: "word_document_capabilities",
@@ -768,12 +1022,7 @@ export class AgentDocument {
           return this.capabilities(value.category as AgentEditCapability["category"] | undefined, value.kind as Intent["kind"] | undefined);
         },
       },
-      {
-        name: "word_document_compose",
-        description: "Create a complete new document from schema-enforced blocks, tables, media, native objects, headers, and footers.",
-        inputSchema: AGENT_COMPOSE_SCHEMA,
-        execute: async (input) => this.compose(asObject(input) as unknown as AgentComposeRequest),
-      },
+      ...(this.composeAvailable && !this.target ? [composeTool] : []),
       {
         name: "word_document_inspect",
         description: "Inspect compact bulk text context, overview, a detailed story range, search results, one object, or page geometry.",
@@ -785,6 +1034,18 @@ export class AgentDocument {
         description: "Apply a validated document transaction against an observed revision.",
         inputSchema: editToolSchema,
         execute: async (input) => this.edit(asObject(input) as unknown as AgentEditRequest),
+      },
+      {
+        name: "word_document_project",
+        description: "Project a story as deterministic text or structural markdown with a line anchor map, windowed by cursor.",
+        inputSchema: projectToolSchema,
+        execute: async (input) => this.project(asObject(input) as unknown as AgentProjectRequest),
+      },
+      {
+        name: "word_document_patch",
+        description: "Apply line-range edits or a unified diff written against a projection window.",
+        inputSchema: patchToolSchema,
+        execute: async (input) => this.patch(asObject(input) as unknown as AgentPatchRequest),
       },
       {
         name: "word_document_asset",

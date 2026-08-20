@@ -21,10 +21,11 @@ When the user supplies a URL whose path is `/agent-invite`:
 8. Run the exact local session command from that message with `{"command":"sync","wakeId":"<wakeId>"}` first.
 9. Use one `context` inspection for a broad text task. It returns bounded text and edit references from all non-empty stories.
 10. Use `overview`, `read`, `object`, or `spatial` only when the task needs their extra detail.
-11. Run each JSON command through the local session command supplied in the turn message.
-12. Sync and inspect again when an edit returns `needs_sync`.
-13. Reply through the document chat command with the current `wakeId`, then end the agent turn.
-14. Send `{"command":"close"}` when the inviter ends the collaboration task.
+11. Use `{"command":"project"}` and `{"command":"patch"}` for a bulk prose rewrite. The session bridge exposes the same projection flow as the local tools.
+12. Run each JSON command through the local session command supplied in the turn message.
+13. Sync and read the content again when an edit or a patch returns `needs_sync`.
+14. Reply through the document chat command with the current `wakeId`, then end the agent turn.
+15. Send `{"command":"close"}` when the inviter ends the collaboration task.
 
 The bridge places the visible agent cursor after each edit. The agent does not send a separate cursor command.
 
@@ -64,8 +65,17 @@ Keep the invitation URL in the exact connect command.
 9. Inspect affected objects and page ranges.
 10. Save after semantic and spatial checks pass.
 
+## Rewrite prose in bulk
+
+1. Call `word_document_project` for the story, in `md` or `text` mode.
+2. Edit the projected lines.
+3. Send the changed line ranges back through `word_document_patch` with the projection's `revision`.
+4. Read the refreshed `projection` the patch returns instead of inspecting again.
+5. Use structured operations for formatting, tables, drawings, and page layout.
+
 ## Keep context bounded
 
+- Prefer one projection window and one patch over many structured text calls.
 - Start with `context` for broad text work.
 - Use `search` to locate specific content.
 - Use detailed `read` only when the compact context lacks a required field.

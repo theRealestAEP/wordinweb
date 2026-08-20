@@ -1,4 +1,5 @@
-import { Intent } from "./intents.js";
+import { isInsertableFieldInstruction, isValidShapePreset, validateRegisteredOperation } from "@wordinweb/core";
+import { Intent, isRegisteredIntent } from "./intents.js";
 
 /**
  * Structural validation of an inbound intent BEFORE it is transformed/applied
@@ -62,13 +63,14 @@ export const DEFAULT_INTENT_LIMITS: IntentLimits = {
 };
 
 interface ChartShape {
-  type: unknown; title?: unknown; categories: unknown; series: unknown;
+  type: unknown; title?: unknown; categories: unknown; series: unknown; grouping?: unknown;
 }
 /** Shared chart-payload validation (insertChart + setChartData carry the same
  * shape): a positive type allowlist plus size/element bounds. */
 function chartError(c: ChartShape, who: string): string | null {
   if (typeof c !== "object" || c === null) return `${who}: bad chart`;
-  if (!["column", "bar", "line", "pie"].includes(c.type as string)) return `${who}: bad type`;
+  if (!["column", "bar", "line", "pie", "doughnut", "area", "scatter"].includes(c.type as string)) return `${who}: bad type`;
+  if (c.grouping !== undefined && !["clustered", "stacked", "percentStacked"].includes(c.grouping as string)) return `${who}: bad grouping`;
   if (!Array.isArray(c.categories) || c.categories.length === 0 || c.categories.length > 100) return `${who}: bad categories`;
   if (c.categories.some((x) => typeof x !== "string" || x.length > 200)) return `${who}: bad category`;
   if (c.title !== undefined && (typeof c.title !== "string" || c.title.length > 200)) return `${who}: bad title`;
@@ -89,19 +91,90 @@ function smartArtError(a: { layout: unknown; items: unknown }, who: string): str
   return null;
 }
 
+/**
+ * Bound a run-patch property that is not a scalar with a fixed shape:
+ * characterStyleId is written verbatim into a w:rStyle attribute, so it gets
+ * the same styleId bound every registered style operation applies.
+ */
+function badCharacterStyle(patch: Record<string, unknown>, who: string): string | null {
+  const id = patch?.characterStyleId;
+  if (id === undefined || id === null) return null;
+  return typeof id === "string" && /^[A-Za-z0-9\-_]{1,253}$/.test(id)
+    ? null
+    : `${who}: bad characterStyleId`;
+}
+
+/** Bound the other non-scalar run-patch property: textEffect's nested
+ * outline color/width, written into w14:textOutline (applyRunTextEffect). */
+function badTextEffect(patch: Record<string, unknown>, who: string): string | null {
+  const effect = patch?.textEffect;
+  if (effect === undefined || effect === null) return null;
+  if (typeof effect !== "object") return `${who}: bad textEffect`;
+  const e = effect as { outline?: unknown; shadow?: unknown };
+  if (e.shadow !== undefined && typeof e.shadow !== "boolean") return `${who}: bad textEffect.shadow`;
+  if (e.outline !== undefined && e.outline !== null) {
+    if (typeof e.outline !== "object") return `${who}: bad textEffect.outline`;
+    const o = e.outline as { color?: unknown; widthPt?: unknown };
+    if (typeof o.color !== "string" || !/^#?[0-9a-fA-F]{6}$/.test(o.color)) return `${who}: bad textEffect.outline.color`;
+    if (typeof o.widthPt !== "number" || !Number.isFinite(o.widthPt) || o.widthPt <= 0 || o.widthPt > 50) {
+      return `${who}: bad textEffect.outline.widthPt`;
+    }
+  }
+  return null;
+}
+
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
+  // THE ENVELOPE, before anything reads the payload. clientId/clientSeq/base
+  // are the fields the sequencer orders and de-duplicates by, and they went
+  // unchecked: a non-number `base` passed `base < 0 || base > seq` — both
+  // comparisons coerce — and behaved like base=head. The consequence was
+  // benign (every replica coerces identically, so no fork), which is exactly
+  // why it survived: the ordering fields have to be the right SHAPE before
+  // arithmetic on them means anything.
+  if (typeof intent.clientId !== "string" || intent.clientId.length === 0 || intent.clientId.length > 128) {
+    return "intent: bad clientId";
+  }
+  if (!nonNegInt(intent.clientSeq)) return "intent: bad clientSeq";
+  if (!nonNegInt(intent.base)) return "intent: bad base";
+  // Which equation in the block a math intent names. Absent means the first.
+  // The cap is generous but finite: an index is an array position, and the
+  // apply resolves out-of-range ones to a clean no-op anyway.
+  const badMathIndex = (math: { mathIndex?: number }, kind: string): string | null =>
+    math.mathIndex === undefined || (nonNegInt(math.mathIndex) && math.mathIndex <= 1000) ? null : `${kind}: bad mathIndex`;
+  // Every tracked-change carrier bounds its author/date the same way, so one
+  // check serves them all: absent means a direct (untracked) edit.
+  const badSuggest = (suggest: { author: string; date: string } | undefined): string | null => {
+    if (suggest === undefined) return null;
+    if (typeof suggest.author !== "string" || suggest.author.length > 100) return `${intent.kind}: bad author`;
+    if (typeof suggest.date !== "string" || suggest.date.length > 40) return `${intent.kind}: bad date`;
+    return null;
+  };
+  if ("suggest" in intent && intent.kind !== "suggestRevision") {
+    const bad = badSuggest(intent.suggest);
+    if (bad) return bad;
+  }
   if ("objectIndex" in intent && intent.objectIndex !== undefined &&
       (!Number.isInteger(intent.objectIndex) || intent.objectIndex < 0 || intent.objectIndex > 10000)) {
     return `${intent.kind}: bad objectIndex`;
   }
+  // Registered operations declare their own payload bounds. Narrowing first
+  // keeps the switch below exhaustive over the hand-written intents.
+  if (isRegisteredIntent(intent)) return validateRegisteredOperation(intent);
   switch (intent.kind) {
     case "insertText":
       if (typeof intent.text !== "string") return "insertText: text not a string";
       if (intent.text.length === 0) return "insertText: empty";
       if (intent.text.length > limits.maxInsertLength) return "insertText: too long";
       if (!nonNegInt(intent.at.offset)) return "insertText: bad offset";
+      return null;
+    case "insertSeparator":
+      if (intent.separator !== "br" && intent.separator !== "tab") return "insertSeparator: bad separator";
+      if (!nonNegInt(intent.at.offset)) return "insertSeparator: bad offset";
+      return null;
+    case "deleteSeparator":
+      if (!nonNegInt(intent.at.offset)) return "deleteSeparator: bad offset";
       return null;
     case "suggestRevision": {
       const nRanges = intent.ranges?.length ?? 0;
@@ -127,15 +200,11 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "splitParagraph":
       if (!nonNegInt(intent.at.offset)) return "splitParagraph: bad offset";
       if (!nonNegInt(intent.newBlockId) || !nonNegInt(intent.newRunId)) return "splitParagraph: bad ids";
-      if (intent.suggest !== undefined) {
-        if (typeof intent.suggest.author !== "string" || intent.suggest.author.length > 100) return "splitParagraph: bad author";
-        if (typeof intent.suggest.date !== "string" || intent.suggest.date.length > 40) return "splitParagraph: bad date";
-      }
       return null;
     case "formatRange":
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "formatRange: bad range";
       if (!nonNegInt(intent.middleId)) return "formatRange: bad middleId";
-      return null;
+      return badCharacterStyle(intent.patch, "formatRange") ?? badTextEffect(intent.patch, "formatRange");
     case "commentRun":
       if (typeof intent.text !== "string" || intent.text.length === 0) return "commentRun: empty";
       if (intent.text.length > limits.maxCommentLength) return "commentRun: too long";
@@ -163,11 +232,10 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (typeof intent.mathText !== "string" || intent.mathText.length === 0) return "insertMath: empty";
       if (intent.mathText.length > 10_000) return "insertMath: too long";
       return null;
-    case "insertShape": {
-      const presets = ["line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"];
-      if (!presets.includes(intent.preset)) return "insertShape: bad preset";
+    case "insertShape":
+      // Legacy named presets plus the whole core preset-geometry table.
+      if (typeof intent.preset !== "string" || !isValidShapePreset(intent.preset)) return "insertShape: bad preset";
       return null;
-    }
     case "replyComment":
       if (typeof intent.text !== "string" || intent.text.length === 0) return "replyComment: empty";
       if (intent.text.length > 20_000) return "replyComment: too long";
@@ -240,7 +308,19 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "insertWordArt": {
       if (typeof intent.text !== "string" || intent.text.length === 0) return "insertWordArt: empty text";
       if (intent.text.length > 500) return "insertWordArt: text too long";
-      if (!["plain", "archUp", "archDown", "wave", "chevron"].includes(intent.preset)) return "insertWordArt: bad preset";
+      if (!["plain", "archUp", "archDown", "wave", "chevron", "circle", "button", "chevronDown"].includes(intent.preset)) return "insertWordArt: bad preset";
+      if (intent.style !== undefined) {
+        const style = intent.style;
+        if (typeof style !== "object" || style === null) return "insertWordArt: bad style";
+        if (!/^[0-9a-fA-F]{6}$/.test(style.fill)) return "insertWordArt: bad style fill";
+        if (style.shadow !== undefined && typeof style.shadow !== "boolean") return "insertWordArt: bad style shadow";
+        if (style.outline !== undefined) {
+          if (typeof style.outline !== "object" || style.outline === null) return "insertWordArt: bad style outline";
+          if (!/^[0-9a-fA-F]{6}$/.test(style.outline.color)) return "insertWordArt: bad outline color";
+          const width = style.outline.widthPt;
+          if (typeof width !== "number" || !Number.isFinite(width) || width <= 0 || width > 50) return "insertWordArt: bad outline width";
+        }
+      }
       return null;
     }
     case "insertChart":
@@ -314,11 +394,6 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       }
       return null;
     }
-    case "resizeTableRow": {
-      if (!Number.isInteger(intent.rowIdx) || intent.rowIdx < 0 || intent.rowIdx > 5000) return "resizeTableRow: bad row";
-      if (typeof intent.heightPx !== "number" || !Number.isFinite(intent.heightPx) || intent.heightPx < 1 || intent.heightPx > 20000) return "resizeTableRow: bad height";
-      return null;
-    }
     case "moveTable": {
       const num = (v: unknown) => typeof v === "number" && Number.isFinite(v) && v >= -5000 && v <= 20000;
       if (!num(intent.xPx) || !num(intent.yPx)) return "moveTable: bad position";
@@ -330,13 +405,13 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null; // run-addressed only; resolution is the whole check
     case "setMathLinear":
       if (typeof intent.mathText !== "string" || intent.mathText.length === 0 || intent.mathText.length > 1000) return "setMathLinear: bad mathText";
-      return null;
+      return badMathIndex(intent, "setMathLinear");
     case "deleteMath":
-      return null;
+      return badMathIndex(intent, "deleteMath");
     case "moveMath":
       if (!nonNegInt(intent.at?.offset)) return "moveMath: bad offset";
       if (!Array.isArray(intent.nodeIds) || intent.nodeIds.length > 64) return "moveMath: bad nodeIds";
-      return null;
+      return badMathIndex(intent, "moveMath");
     case "ensureHeaderFooter":
       if (intent.hfKind !== "header" && intent.hfKind !== "footer") return "ensureHeaderFooter: bad kind";
       if (!Array.isArray(intent.nodeIds) || intent.nodeIds.length > 64) return "ensureHeaderFooter: bad nodeIds";
@@ -344,12 +419,20 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
     case "deleteComment":
       if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "deleteComment: bad id";
       return null;
+    case "resolveComment":
+      if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "resolveComment: bad id";
+      if (typeof intent.resolved !== "boolean") return "resolveComment: bad resolved";
+      if (typeof intent.paraId !== "string" || intent.paraId.length === 0 || intent.paraId.length > 16) return "resolveComment: bad paraId";
+      return null;
+    case "editComment":
+      if (typeof intent.commentId !== "string" || intent.commentId.length === 0 || intent.commentId.length > 64) return "editComment: bad id";
+      if (typeof intent.text !== "string" || intent.text.length === 0) return "editComment: empty";
+      if (intent.text.length > limits.maxCommentLength) return "editComment: too long";
+      return null;
     case "insertBookmarkRange":
       // Bookmark names: letters/digits/underscore, must start with letter/_.
       if (typeof intent.name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,39}$/.test(intent.name)) return "insertBookmarkRange: bad name";
       if (!nonNegInt(intent.start) || !nonNegInt(intent.end) || intent.end <= intent.start) return "insertBookmarkRange: bad range";
-      return null;
-    case "toggleCheckbox":
       return null;
     case "acceptRevision":
     case "rejectRevision":
@@ -357,12 +440,12 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     case "acceptAllRevisions":
     case "rejectAllRevisions":
+      // Absent = every revision (what older clients send). Present = one
+      // author's, bounded like every other author string on the wire.
+      if (intent.author !== undefined && (typeof intent.author !== "string" || intent.author.length > 255)) {
+        return `${intent.kind}: bad author`;
+      }
       return null;
-    case "insertTable": {
-      const okDim = (v: unknown) => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 50;
-      if (!okDim(intent.rows) || !okDim(intent.cols)) return "insertTable: bad dimensions";
-      return null;
-    }
     case "setLineNumbering": {
       const p = intent.patch;
       if (typeof p !== "object" || p === null || typeof p.enabled !== "boolean") return "setLineNumbering: bad patch";
@@ -379,21 +462,14 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     }
     case "insertField": {
-      if (typeof intent.instruction !== "string" || intent.instruction.length === 0 || intent.instruction.length > 200) return "insertField: bad instruction";
       if (intent.cachedResult !== undefined && (typeof intent.cachedResult !== "string" || intent.cachedResult.length > 1000)) return "insertField: bad cachedResult";
-      // Positive allowlist on the field TYPE (first token). Blocks external-
-      // content / code fields (INCLUDETEXT, INCLUDEPICTURE, DDE, DDEAUTO, LINK,
-      // HYPERLINK, IMPORT, …) that could exfiltrate or execute (plan doc 11).
-      const SAFE_FIELDS = new Set([
-        "PAGE", "NUMPAGES", "SECTIONPAGES", "SECTION", "DATE", "TIME",
-        "CREATEDATE", "SAVEDATE", "PRINTDATE", "AUTHOR", "TITLE", "SUBJECT",
-        "KEYWORDS", "COMMENTS", "FILENAME", "NUMWORDS", "NUMCHARS", "PAGEREF",
-        "REF", "SEQ", "STYLEREF", "TOC", "INDEX", "LISTNUM", "QUOTE",
-      ]);
-      const type = intent.instruction.trim().split(/\s+/)[0]?.toUpperCase();
-      if (!type || !SAFE_FIELDS.has(type)) return "insertField: field type not allowed";
-      // The whole instruction must be printable ASCII (no control/format chars).
-      if (!/^[\x20-\x7e]+$/.test(intent.instruction)) return "insertField: illegal instruction char";
+      // Positive allowlist on the field TYPE, plus a printable-ASCII rule
+      // (plan doc 11): it blocks the external-content and code fields
+      // (INCLUDETEXT, INCLUDEPICTURE, DDE, DDEAUTO, LINK, HYPERLINK, IMPORT, …)
+      // that could exfiltrate or execute. The predicate lives in core so the
+      // local insertField path enforces exactly the same set — two copies that
+      // drifted would mean an instruction one host writes and another refuses.
+      if (!isInsertableFieldInstruction(intent.instruction)) return "insertField: instruction not allowed";
       return null;
     }
     case "setDrawingRotation":
@@ -403,15 +479,19 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       if (intent.color !== null && !/^[0-9a-fA-F]{6}$/.test(intent.color)) return "setDrawingFill: bad color";
       return null;
     case "formatRun":
+      // The patch is otherwise free-form but every property setRunProps reads
+      // is a bounded scalar. characterStyleId and textEffect are the
+      // exceptions: one lands verbatim in a w:rStyle attribute, the other
+      // carries a nested outline color/width, so both are bounded here.
+      return badCharacterStyle(intent.patch, "formatRun") ?? badTextEffect(intent.patch, "formatRun");
     case "formatParagraph":
-    case "setListType":
     case "mergeParagraph":
       // Id-addressed, no free-form payload to bound here.
       return null;
     case "tableOp": {
       const op = intent.op;
       if (typeof op === "string") {
-        return ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight"].includes(op)
+        return ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight", "mergeRight", "mergeDown", "splitCell"].includes(op)
           ? null
           : "tableOp: bad operation";
       }

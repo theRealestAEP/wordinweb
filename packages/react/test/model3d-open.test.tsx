@@ -90,3 +90,117 @@ describe("demo File > Open with a 3D model in the document", () => {
     container.remove();
   });
 });
+
+/**
+ * ONE REPRESENTATION, AND THE OBJECT STILL MOVES (#140).
+ *
+ * Reported as the model showing "some other same copy artifact behind it
+ * doubling it up". The interactive branch built a frame holding BOTH the
+ * poster <img> and the <model-viewer>, and the viewer paints on a transparent
+ * background — so every part of the box the model did not cover showed the
+ * poster underneath, and rotating the model separated the two completely.
+ *
+ * Chasing that turned up a second defect nobody had reported in those words:
+ * the viewer covered the whole box (inset:0) and its pointerdown called
+ * stopPropagation, so EVERY drag rotated and the editor never saw a move
+ * gesture. A 3D object could not be dragged anywhere; it just spun.
+ */
+describe("a 3D model paints once and stays draggable", () => {
+  const mount = async (editable: boolean) => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(createElement(DocxView, { source: model3dDocxBytes(), editable }));
+    });
+    for (let i = 0; i < 60 && !container.querySelector("[data-dxw-model3d]"); i++) await tick();
+    const model = container.querySelector<HTMLElement>("[data-dxw-model3d]");
+    expect(model).toBeTruthy();
+    return { container, root, model: model! };
+  };
+
+  it("shows the viewer INSTEAD of the poster, not on top of it", async () => {
+    const { container, root, model } = await mount(true);
+
+    // The doubling, stated as the two things that cannot both be in the box.
+    expect(model.querySelectorAll("img")).toHaveLength(0);
+    expect(model.querySelectorAll("[data-dxw-model3d-viewer]")).toHaveLength(1);
+    // The poster is not lost — model-viewer paints it itself until the GLB
+    // loads, which is the whole reason the second copy was redundant.
+    const viewer = model.querySelector<HTMLElement>("[data-dxw-model3d-viewer]")!;
+    expect(viewer.getAttribute("poster")).toMatch(/^blob:|^data:/);
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
+
+  it("leaves the viewer transparent to pointers, with rotation on its own handle", async () => {
+    const { container, root, model } = await mount(true);
+    const viewer = model.querySelector<HTMLElement>("[data-dxw-model3d-viewer]")!;
+    const handle = model.querySelector<HTMLElement>("[data-dxw-model3d-rotate]");
+
+    // The viewer must not eat the gesture the editor needs to move the object.
+    expect(viewer.style.pointerEvents).toBe("none");
+    // Rotation is still reachable, on a control of its own.
+    expect(handle).toBeTruthy();
+    expect(handle!.style.cursor).toBe("grab");
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
+
+  it("selects the model from a press that targets the FRAME, as a real one does", async () => {
+    // #147, and the reason the tests above could not catch it.
+    //
+    // The editor used to resolve a model with
+    // `target.closest("[data-dxw-model3d-viewer]")`. The tests above drive the
+    // viewer with `dispatchEvent`, which makes the viewer the target whatever
+    // its `pointer-events` are — so that lookup always succeeded HERE and
+    // always failed in the browser, where a `pointer-events: none` element is
+    // never a target and the frame is its PARENT. Selection died, rotation
+    // died with it, and this suite stayed green.
+    //
+    // This one dispatches from the FRAME, which is what real hit-testing
+    // produces. It fails against the viewer-anchored lookup.
+    const { container, root, model } = await mount(true);
+
+    const viewer = model.querySelector<HTMLElement>("[data-dxw-model3d-viewer]")!;
+    // The premise: a real press cannot land on the viewer...
+    expect(viewer.style.pointerEvents, "the viewer is untargetable").toBe("none");
+    // ...the frame carries the marker the editor must key on instead...
+    expect(model.matches("[data-dxw-model3d]")).toBe(true);
+    // ...and the puck is inside the FRAME but outside the VIEWER, which is
+    // why one anchor serves both gestures and the old one served neither.
+    const handle = model.querySelector<HTMLElement>("[data-dxw-model3d-rotate]")!;
+    expect(model.contains(handle)).toBe(true);
+    expect(viewer.contains(handle), "the puck is the viewer's sibling, not its child").toBe(false);
+
+    await act(async () => {
+      model.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerId: 1 }),
+      );
+    });
+    await tick();
+
+    expect(
+      container.querySelector("[data-dxw-object-selection]"),
+      "a press on the object's own frame selects it",
+    ).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
+
+  it("keeps the read-only render exactly as it was — the corpus measures that one", async () => {
+    // A parity capture loads with editable=0, so the whole viewer branch is
+    // skipped and the poster <img> IS the render. coverletter-anon scores
+    // 0.00% on that path, so it must not move.
+    const { container, root, model } = await mount(false);
+    expect(model.querySelectorAll("[data-dxw-model3d-viewer]")).toHaveLength(0);
+    expect(model.querySelectorAll("[data-dxw-model3d-rotate]")).toHaveLength(0);
+    expect(model.tagName === "IMG" || model.querySelector("img")).toBeTruthy();
+
+    await act(async () => { root.unmount(); });
+    container.remove();
+  });
+});

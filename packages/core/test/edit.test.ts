@@ -5,34 +5,39 @@ import { applyRunFormat, SelectionSegment, selectionTextLogical } from "../src/e
 import { addComment } from "../src/edit/comments.js";
 import { setListType, setListLevel } from "../src/edit/lists.js";
 import { setLink, removeLink, linkAt } from "../src/edit/links.js";
-import { adjustIndent, paragraphDividerAt, setDropCapAt, setParagraphDivider, setParagraphSpacing } from "../src/edit/paragraph.js";
-import { findAll, replaceAll, transformCase } from "../src/edit/find.js";
-import { applyTableOp, cellShadingAt, resizeDrawing } from "../src/edit/tables.js";
+import { adjustIndent, paragraphBordersAt, paragraphDividerAt, setDropCapAt, setParagraphBorders, setParagraphDivider, setParagraphSpacing, setTabStops, tabStopsAt } from "../src/edit/paragraph.js";
+import { compileReplaceAll, findAll, replaceAll, transformCase } from "../src/edit/find.js";
+import { applyTableOp, cellShadingAt, resizeDrawing, setTableHeaderRows, sortTableRows } from "../src/edit/tables.js";
 import {
   adjustFloatingPosition,
   drawingRotation,
   imageAltText,
+  imageCrop,
   isFloatingDrawing,
   replaceImageBlip,
   setDrawingOrder,
   setDrawingRotation,
   setFloatingPagePosition,
   setImageAltText,
+  setImageCrop,
 } from "../src/edit/images.js";
-import { insertFootnote } from "../src/edit/notes.js";
+import { removeDrawingRun } from "../src/edit/editor.js";
+import { insertEndnote, insertFootnote } from "../src/edit/notes.js";
 import { insertDateTimeField, insertField, insertPageField } from "../src/edit/fields.js";
 import { insertBlankPageAt, insertBreakAt, insertCoverPage, sectionContextAt } from "../src/edit/sections.js";
+import { convertTableToText, convertTextToTable } from "../src/edit/blocks.js";
 import { drawingLineStyle, drawingWordArtText, insertInkAt, insertShapeAt, insertWordArtAt, isDrawingWordArt, setDrawingLineStyle, setDrawingWordArtStyle, setDrawingWordArtText, type ShapePreset, type WordArtPreset } from "../src/edit/drawings.js";
 import { buildChartXml, insertChartAt, setChartData } from "../src/edit/charts.js";
-import { buildSmartArtDataXml, buildSmartArtDrawingXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
+import { parseChartPart } from "../src/parse/chart.js";
+import { buildSmartArtColorsXml, buildSmartArtDataXml, buildSmartArtDrawingXml, buildSmartArtLayoutXml, insertSmartArtAt, setSmartArtData, setSmartArtFill, setSmartArtNodeText, setSmartArtTextFormat, smartArtFillColor, smartArtTextFormat } from "../src/edit/smartart.js";
 import { insertEmbeddedObjectAt, insertModel3DAt, insertWebVideoAt } from "../src/edit/objects.js";
 import { buildOlePackage, extractOlePackage } from "../src/parse/ole.js";
-import { insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
+import { bookmarkTextTarget, insertBookmarkAroundSelection, insertBookmarkAt, insertCrossReference, listBookmarks, validBookmarkName } from "../src/edit/references.js";
 import { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf, isLinearSafe } from "../src/edit/math.js";
 import { XmlElement, localName } from "../src/xml.js";
 import { serializeXml, parseXml } from "../src/xml.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, p, W_NS } from "./helpers.js";
-import { Paragraph, Run, TextContent } from "../src/model.js";
+import { Paragraph, Run, Table, TextContent } from "../src/model.js";
 import { layoutDocument } from "../src/layout/engine.js";
 import type { ChartData, SmartArtData } from "../src/model.js";
 import { Package } from "../src/zip.js";
@@ -325,6 +330,51 @@ describe("run formatting commands", () => {
     const after = firstRun(doc).run;
     expect(after.props.highlight).toBeUndefined();
   });
+
+  it("writes w14 outline/shadow text effects on an ordinary run, not just WordArt", () => {
+    const doc = loadDoc(p("Poster text"));
+    const { run } = firstRun(doc);
+    applyRunFormat(doc, [segFor(run, 0, 6)], {
+      color: "#FFFFFF",
+      textEffect: { outline: { color: "#4472C4", widthPt: 1 }, shadow: true },
+    });
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml")!;
+    expect(xml).toContain('<w:color w:val="FFFFFF"');
+    expect(xml).toContain('<w14:textOutline');
+    expect(xml).toContain('w14:w="12700"');
+    expect(xml).toContain('<w14:srgbClr w14:val="4472C4"');
+    expect(xml).toContain('<w14:shadow');
+    // No forced fill: this feature keeps whatever color the patch set (or the
+    // run already had), unlike WordArt insertion's applyWordArtStyle.
+    expect(xml).not.toContain('<w14:textFill');
+
+    const reloaded = DocxDocument.load(doc.save());
+    const styled = (reloaded.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    expect(styled.props.color).toBe("#FFFFFF");
+    expect(styled.props.textOutline).toEqual({ color: "#4472C4", width: 4 / 3 });
+    expect(styled.props.textShadow).toBe(true);
+
+    // null clears every w14 effect and leaves the color alone.
+    const { run: styledRun } = firstRun(doc);
+    applyRunFormat(doc, [segFor(styledRun, 0, 6)], { textEffect: null });
+    const cleared = firstRun(doc).run;
+    expect(cleared.props.textOutline).toBeUndefined();
+    expect(cleared.props.textShadow).toBeUndefined();
+    expect(cleared.props.color).toBe("#FFFFFF");
+  });
+
+  it("text-effect clear does not touch the legacy w:shadow toggle (different feature, same local name)", () => {
+    const doc = loadDoc(
+      `<w:p><w:r><w:rPr><w:shadow/></w:rPr><w:t>engraved</w:t></w:r></w:p>`,
+    );
+    const { run } = firstRun(doc);
+    expect(run.props.emboss).toBeUndefined();
+    applyRunFormat(doc, [segFor(run, 0, 8)], { textEffect: null });
+    const after = firstRun(doc).run;
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml")!;
+    expect(xml).toContain("<w:shadow");
+    expect(after.props.textShadow).toBe(true); // legacy w:shadow still reads as the boolean
+  });
 });
 
 describe("paragraph styles", () => {
@@ -533,6 +583,26 @@ describe("block commands", () => {
     if (blocks[1].type !== "table") return;
     expect(blocks[1].rows.length).toBe(2);
     expect(blocks[1].rows[0].cells.length).toBe(3);
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.sections[0].blocks[1].type).toBe("table");
+  });
+
+  it("authors cell content and a bold header row at insert time", async () => {
+    const { insertTableAfter } = await import("../src/edit/blocks.js");
+    const doc = loadDoc(p("before"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(
+      insertTableAfter(doc, t as never, 2, 3, {
+        cells: [["Quarter", "Region", "Sales"], ["Q1", "West"]],
+        headerRow: true,
+      }),
+    ).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    for (const text of ["Quarter", "Region", "Sales", "Q1", "West"]) expect(xml).toContain(text);
+    expect(xml).toContain("<w:tblHeader");
+    // The three header runs are bold; the body row's runs stay plain.
+    expect((xml.match(/<w:b\s*\/>/g) ?? []).length).toBe(3);
     const reloaded = DocxDocument.load(doc.save());
     expect(reloaded.sections[0].blocks[1].type).toBe("table");
   });
@@ -1023,10 +1093,63 @@ describe("chart insertion", () => {
       .flatMap((item) => item.type === "run" ? item.content : [])
       .find((item) => item.kind === "drawing");
     if (!drawing || drawing.kind !== "drawing") throw new Error("chart drawing missing");
-    expect(drawing.chart).toEqual(DATA);
+    // The parse also recovers the axes and legend the writer emitted, so this
+    // checks the cached data specifically.
+    expect(drawing.chart).toMatchObject(DATA);
     expect(drawing.width).toBeCloseTo(480, 0);
     expect(drawing.height).toBeCloseTo(288, 0);
     expect(drawing.srcDrawing).toBeTruthy();
+  });
+
+  it("saves one chart part after a chart is deleted and replaced", () => {
+    // An agent that inserts a chart, cannot build around it, deletes it, and
+    // inserts a replacement used to save TWO chart parts for the one chart the
+    // document shows. Deleting a drawing leaves the part, its rels, its
+    // workbook, the relationship, and the content-type overrides behind; the
+    // save drops the ones nothing references.
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, DATA);
+
+    const findDrawing = (element: XmlElement): XmlElement | undefined => {
+      if (localName(element.name) === "drawing") return element;
+      for (const item of element.children) {
+        const found = findDrawing(item);
+        if (found) return found;
+      }
+      return undefined;
+    };
+    const src = findDrawing(doc.docRoot);
+    if (!src) throw new Error("chart drawing missing");
+    expect(removeDrawingRun(doc, src)).toBe(true);
+
+    const afterDelete = DocxDocument.load(doc.save());
+    expect(afterDelete.pkg.names().filter((n) => /^word\/charts\/chart\d*\.xml$/.test(n))).toEqual([]);
+    expect(afterDelete.pkg.names()).not.toContain("word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
+    expect(afterDelete.pkg.text("word/_rels/document.xml.rels")).not.toContain("charts/chart1.xml");
+    expect(afterDelete.pkg.text("[Content_Types].xml")).not.toContain("charts/chart1.xml");
+
+    // The live document keeps every part, so undo can still restore the
+    // drawing it snapshotted along with the chart it pointed at.
+    expect(doc.pkg.names()).toContain("word/charts/chart1.xml");
+
+    insertChartAt(doc, t, DATA);
+    const afterReplace = DocxDocument.load(doc.save());
+    const parts = afterReplace.pkg.names().filter((n) => /^word\/charts\/chart\d*\.xml$/.test(n));
+    expect(parts).toHaveLength(1);
+    const documentXml = afterReplace.pkg.text("word/document.xml") ?? "";
+    expect((documentXml.match(/<c:chart\b/g) ?? [])).toHaveLength(1);
+    expect(afterReplace.pkg.text(parts[0])).toContain("Quarterly sales");
+  });
+
+  it("keeps a chart part the document still references", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, DATA);
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.names()).toContain("word/charts/chart1.xml");
+    expect(saved.pkg.names()).toContain("word/charts/_rels/chart1.xml.rels");
+    expect(saved.pkg.names()).toContain("word/embeddings/Microsoft_Excel_Worksheet1.xlsx");
   });
 
   it("updates a selected chart's ChartML and workbook with undo and redo", async () => {
@@ -1068,7 +1191,31 @@ describe("chart insertion", () => {
       .find((item) => item.kind === "drawing");
     if (!after || after.kind !== "drawing") throw new Error("updated chart missing");
     expect(after.srcDrawing).not.toBe(source);
-    expect(after.chart).toEqual(updated);
+    expect(after.chart).toMatchObject(updated);
+  });
+
+  it("refuses to rewrite a plot kind the writer cannot express", () => {
+    const doc = loadDoc(p("Anchor"));
+    const t = (firstRun(doc).run.content[0] as TextContent).srcT!;
+    insertChartAt(doc, t, DATA);
+    // Stand a 3-D column chart in the part's place, as a Word file would have.
+    const part = doc.pkg.names().find((name) => name.startsWith("word/charts/chart"))!;
+    doc.pkg.raw()[part] = strToU8(
+      buildChartXml(DATA).replace(/<c:barChart>/, "<c:bar3DChart>").replace(/<\/c:barChart>/, "</c:bar3DChart>"),
+    );
+    doc.markPackageResourceChanged();
+    doc.refresh();
+    const drawing = (doc.sections[0].blocks[0] as Paragraph).children
+      .flatMap((item) => item.type === "run" ? item.content : [])
+      .find((item) => item.kind === "drawing");
+    if (!drawing || drawing.kind !== "drawing" || !drawing.srcDrawing) throw new Error("chart drawing missing");
+    expect(drawing.chart?.unsupported).toBe("bar3DChart");
+
+    // Rewriting it would flatten the 3-D plot to a 2-D one, so it is refused
+    // and the part is left alone.
+    const before = doc.pkg.text(part);
+    expect(setChartData(doc, drawing.srcDrawing, { ...DATA, title: "Replaced" })).toBe(false);
+    expect(doc.pkg.text(part)).toBe(before);
   });
 
   it("emits the native plot element for every supported chart type", () => {
@@ -1076,6 +1223,31 @@ describe("chart insertion", () => {
     expect(buildChartXml({ ...DATA, type: "bar" })).toContain('<c:barDir val="bar"/>');
     expect(buildChartXml({ ...DATA, type: "line" })).toContain("<c:lineChart>");
     expect(buildChartXml({ ...DATA, type: "pie" })).toContain("<c:pieChart>");
+    expect(buildChartXml({ ...DATA, type: "doughnut" })).toContain("<c:holeSize val=\"75\"/>");
+    expect(buildChartXml({ ...DATA, type: "area" })).toContain("<c:areaChart>");
+    const scatter = buildChartXml({ ...DATA, type: "scatter" });
+    expect(scatter).toContain("<c:scatterChart>");
+    expect(scatter).toContain("<c:xVal>");
+    expect(scatter).toContain("<c:yVal>");
+  });
+
+  it("authors stacked and percent-stacked groupings the parser reads back", () => {
+    const stacked = buildChartXml({ ...DATA, grouping: "stacked" });
+    expect(stacked).toContain('<c:grouping val="stacked"/>');
+    // Word's stacked presets put every series in one slot per category.
+    expect(stacked).toContain('<c:overlap val="100"/>');
+    expect(parseChartPart(parseXml(stacked))?.grouping).toBe("stacked");
+
+    const percent = buildChartXml({ ...DATA, type: "area", grouping: "percentStacked" });
+    expect(percent).toContain('<c:grouping val="percentStacked"/>');
+    expect(percent).toContain('<c:numFmt formatCode="0%" sourceLinked="0"/>');
+    expect(parseChartPart(parseXml(percent))?.grouping).toBe("percentStacked");
+
+    // Clustered stays byte-identical to the pre-grouping writer.
+    expect(buildChartXml({ ...DATA, grouping: "clustered" })).toBe(buildChartXml(DATA));
+    // Groupings mean nothing to a pie/line/scatter plot and are dropped.
+    expect(buildChartXml({ ...DATA, type: "pie", grouping: "stacked" })).not.toContain('val="stacked"');
+    expect(buildChartXml({ ...DATA, type: "line", grouping: "stacked" })).not.toContain('val="stacked"');
   });
 });
 
@@ -1099,7 +1271,11 @@ describe("SmartArt insertion", () => {
     expect(drawingRelId).toBeTruthy();
     expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain(`Id="${drawingRelId}" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="diagrams/drawing1.xml"`);
     expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain("urn:wordinweb:smartart:process");
-    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('<dgm:forEach axis="ch" ptType="node">');
+    // Composite layoutDef: per-node l/t/w/h constraints computed from the
+    // cache's own geometry (#94 phase 2), one selecting forEach per node.
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('<dgm:alg type="composite"/>');
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('<dgm:forEach axis="ch" ptType="node" st="1" cnt="1">');
+    expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain('forName="node3"');
     expect(saved.pkg.text("word/diagrams/layout1.xml")).toContain(
       '<dgm:presOf axis="desOrSelf" ptType="node"/>',
     );
@@ -1128,13 +1304,58 @@ describe("SmartArt insertion", () => {
         expect(Number(cx)).toBeGreaterThan(0);
         expect(Number(cy)).toBeGreaterThan(0);
       }
-      expect(xml).toMatch(/<a:xfrm[^>]+flip[HV]="1"/);
+      // Connectors are dropped on both sides — the layoutDef declares none,
+      // so Word draws none and the cache agrees (#94 phase 2).
+      if (layout === "hierarchy") expect(xml).not.toContain("Connector");
       for (const id of ["1", "2", "3"]) expect(xml).toContain(`modelId="${id}"`);
       const dataXml = buildSmartArtDataXml({ layout, items: ["One", "Two", "Three"] }, "rIdDrawing");
       for (const [, id] of xml.matchAll(/<dsp:sp modelId="([^"]+)"/g)) {
         expect(id).toMatch(/^\d+$/);
         expect(dataXml).toContain(`modelId="${id}"`);
       }
+    }
+  });
+
+  it("keeps the cycle layout definition consistent with the cached drawing", () => {
+    // Word re-evaluates the layoutDef and ignores the cached drawing, so both
+    // must describe the same art. Geometry calibrated against desktop Word
+    // exports of word-interop-smartart-only (wordinweb-parity).
+    const data: SmartArtData = { layout: "cycle", items: ["One", "Two", "Three"] };
+    const layoutXml = buildSmartArtLayoutXml(data);
+    const drawingXml = buildSmartArtDrawingXml(data);
+
+    // Same shape family, and no connectors on either side.
+    expect(layoutXml).toContain('<dgm:alg type="cycle">');
+    expect(layoutXml).toContain('<dgm:shape type="ellipse"/>');
+    expect(drawingXml).not.toContain('prst="line"');
+    expect([...drawingXml.matchAll(/prst="ellipse"/g)]).toHaveLength(3);
+
+    // Pinned font with no autofit rule; the cache stores the same 12pt.
+    expect(layoutXml).toContain('type="primFontSz" for="ch" forName="node" val="12"');
+    expect(layoutXml).not.toContain("<dgm:rule ");
+    expect(drawingXml).toContain('sz="1200"');
+
+    // The cache's per-node fills are the colorsDef list, in order.
+    const colorsXml = buildSmartArtColorsXml();
+    const fillList = colorsXml.match(/<dgm:fillClrLst meth="repeat">((?:<a:srgbClr val="[0-9A-F]{6}"\/>)+)<\/dgm:fillClrLst>/);
+    expect(fillList).not.toBeNull();
+    const palette = [...fillList![1].matchAll(/val="([0-9A-F]{6})"/g)].map((m) => m[1]);
+    const cachedFills = [...drawingXml.matchAll(/<a:solidFill><a:srgbClr val="([0-9A-F]{6})"\/><\/a:solidFill><a:ln /g)].map((m) => m[1]);
+    expect(cachedFills).toEqual(palette.slice(0, 3));
+
+    // Geometry: three 90x54pt ellipses on a 54pt-radius circle, first at
+    // twelve o'clock, bounding box centered in the 360x180pt canvas — the
+    // positions desktop Word computes from this layoutDef.
+    const boxes = [...drawingXml.matchAll(/<a:off x="(\d+)" y="(\d+)"\/><a:ext cx="(\d+)" cy="(\d+)"\/>/g)]
+      .map((m) => m.slice(1, 5).map(Number));
+    expect(boxes.map((b) => [Math.round(b[0] / 127) / 100, Math.round(b[1] / 127) / 100])).toEqual([
+      [135, 22.5],
+      [181.77, 103.5],
+      [88.23, 103.5],
+    ]);
+    for (const [, , cx, cy] of boxes) {
+      expect(cx / 12700).toBe(90);
+      expect(cy / 12700).toBe(54);
     }
   });
 
@@ -1738,6 +1959,9 @@ describe("WordArt insertion", () => {
       ["archDown", "textArchDown"],
       ["wave", "textWave1"],
       ["chevron", "textChevron"],
+      ["chevronDown", "textChevronInverted"],
+      ["circle", "textCircle"],
+      ["button", "textButton"],
     ];
     for (const [preset, warp] of presets) {
       const doc = loadDoc(p("Anchor"));
@@ -1765,6 +1989,36 @@ describe("WordArt insertion", () => {
     const { run } = firstRun(doc);
     const t = (run.content[0] as TextContent).srcT!;
     expect(insertWordArtAt(doc, t, "", "plain")).toBeNull();
+  });
+
+  it("writes a gallery style's fill, outline and shadow run effects", () => {
+    const doc = loadDoc(p("Anchor"));
+    const { run } = firstRun(doc);
+    const t = (run.content[0] as TextContent).srcT!;
+    expect(insertWordArtAt(doc, t, "Styled", "plain", {
+      fill: "FFFFFF",
+      outline: { color: "4472C4", widthPt: 1 },
+      shadow: true,
+    })).not.toBeNull();
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml")!;
+    // The legacy fallback colour follows the style fill.
+    expect(xml).toContain('<w:color w:val="FFFFFF"');
+    expect(xml).toContain('<w14:textFill');
+    expect(xml).toContain('<w14:srgbClr w14:val="FFFFFF"');
+    expect(xml).toContain('<w14:textOutline');
+    expect(xml).toContain('w14:w="12700"');
+    expect(xml).toContain('<w14:srgbClr w14:val="4472C4"');
+    expect(xml).toContain('<w14:shadow');
+
+    // The reparsed run carries the effects for the renderer.
+    const reloaded = DocxDocument.load(doc.save());
+    const para = reloaded.sections[0].blocks[0] as Paragraph;
+    const anchor = para.children.flatMap((child) => child.type === "run" ? child.content : []).find((content) => content.kind === "anchor");
+    if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("WordArt missing");
+    const artRun = (anchor.shape.blocks[0] as Paragraph).children[0] as Run;
+    expect(artRun.props.color).toBe("#FFFFFF");
+    expect(artRun.props.textOutline).toEqual({ color: "#4472C4", width: 4 / 3 });
+    expect(artRun.props.textShadow).toBe(true);
   });
 
   it("uses tight plain-text bounds and edits DrawingML text through save/reopen", () => {
@@ -2125,7 +2379,8 @@ describe("find & replace / case", () => {
     expect(hits.length).toBe(2);
     expect(hits[0].ranges.length).toBeGreaterThan(1); // spans split runs
     const n = replaceAll(doc, "cat", "dog");
-    expect(n).toBe(2);
+    expect(n.total).toBe(2);
+    expect(n.byStory).toEqual({ body: 2 });
     expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("The dog sat on the dog mat");
   });
 
@@ -2145,6 +2400,311 @@ describe("find & replace / case", () => {
     const para = doc.sections[0].blocks[0] as Paragraph;
     const r = para.children[0];
     expect(r.type === "run" ? r.props.bold : true).toBeUndefined();
+  });
+});
+
+describe("find & replace depth (whole word, stories, cross-paragraph)", () => {
+  /** A document with matches in the body, a header, and a footnote. */
+  const storiesDoc = () =>
+    loadDoc(`${p("Body cat one")}${p("Second cat here")}`, {
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rIdFn" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes" Target="footnotes.xml"/>
+</Relationships>`,
+      "[Content_Types].xml": `<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>
+  <Override PartName="/word/footnotes.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"/>
+</Types>`,
+      "word/header1.xml": `<?xml version="1.0"?>
+<w:hdr ${W_NS}>${p("Header cat text")}</w:hdr>`,
+      "word/footnotes.xml": `<?xml version="1.0"?>
+<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>
+  <w:footnote w:id="1"><w:p><w:r><w:t xml:space="preserve">Note cat text</w:t></w:r></w:p></w:footnote>
+</w:footnotes>`,
+    });
+
+  const storiesDocWithIds = () => {
+    const doc = storiesDoc();
+    doc.enableStableIds();
+    return doc;
+  };
+
+  it("matches whole words only when asked", () => {
+    const doc = loadDoc(p("The cat concatenates cats"));
+    expect(findAll(doc, "cat").length).toBe(3);
+    expect(findAll(doc, "cat", { wholeWord: true }).length).toBe(1);
+    expect(findAll(doc, "Cat", { wholeWord: true, matchCase: true }).length).toBe(0);
+  });
+
+  it("finds in headers and footnotes with story labels", () => {
+    const doc = storiesDoc();
+    const hits = findAll(doc, "cat");
+    expect(hits.map((h) => h.story)).toEqual(["body", "body", "header", "footnote"]);
+  });
+
+  it("replaceAll reaches every story and reports counts per story", () => {
+    const doc = storiesDoc();
+    const result = replaceAll(doc, "cat", "dog");
+    expect(result.total).toBe(4);
+    expect(result.byStory).toEqual({ body: 2, header: 1, footnote: 1 });
+    const header = doc.headers.get("rId1")!.blocks[0] as Paragraph;
+    expect(textOf(header)).toBe("Header dog text");
+    const note = doc.footnotes.get(1)![0] as Paragraph;
+    expect(textOf(note)).toBe("Note dog text");
+    expect(findAll(doc, "cat").length).toBe(0);
+  });
+
+  it("compileReplaceAll reaches every story with the local pass's counts (#112)", () => {
+    const doc = storiesDoc();
+    doc.enableStableIds();
+    const { intents, result } = compileReplaceAll(doc, "cat", "dog");
+    expect(result.total).toBe(4);
+    expect(result.byStory).toEqual({ body: 2, header: 1, footnote: 1 });
+    // One deleteText + one insertText per single-range match, back-to-front.
+    expect(intents.map((i) => i.kind)).toEqual(
+      ["deleteText", "insertText", "deleteText", "insertText", "deleteText", "insertText", "deleteText", "insertText"],
+    );
+    // Suggesting compiles the strike-then-insert pair with the carried meta.
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z" };
+    const suggested = compileReplaceAll(storiesDocWithIds(), "cat", "dog", undefined, meta);
+    expect(suggested.result).toEqual(result);
+    expect(suggested.intents.map((i) => i.kind)).toEqual(
+      ["suggestRevision", "insertText", "suggestRevision", "insertText", "suggestRevision", "insertText", "suggestRevision", "insertText"],
+    );
+    for (const intent of suggested.intents) {
+      expect((intent as { suggest?: unknown }).suggest).toEqual(meta);
+    }
+  });
+
+  it("a query containing \\n matches across the paragraph boundary", () => {
+    const doc = loadDoc(`${p("one two")}${p("three four")}`);
+    expect(findAll(doc, "two three").length).toBe(0); // space is not a paragraph mark
+    const hits = findAll(doc, "two\nthree");
+    expect(hits.length).toBe(1);
+    // The ranges cover both paragraphs' text (the mark itself has no w:t).
+    const owners = new Set(hits[0].ranges.map((r) => r.t));
+    expect(owners.size).toBe(2);
+    // Replacing keeps the paragraph mark: only the text is replaced.
+    const result = replaceAll(doc, "two\nthree", "X");
+    expect(result.total).toBe(1);
+    expect(doc.sections[0].blocks.length).toBe(2);
+    expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("one X");
+    expect(textOf(doc.sections[0].blocks[1] as Paragraph)).toBe(" four");
+  });
+
+  it("bookmarkTextTarget resolves Go To positions", () => {
+    const doc = loadDoc(
+      `${p("Alpha")}<w:bookmarkStart w:id="1" w:name="mid"/><w:bookmarkEnd w:id="1"/>${p("Beta")}<w:bookmarkStart w:id="2" w:name="tail"/><w:bookmarkEnd w:id="2"/>`,
+    );
+    const mid = bookmarkTextTarget(doc, "mid")!;
+    expect(mid.t.text).toBe("Beta");
+    expect(mid.offset).toBe(0);
+    // A bookmark after the last text lands at the end of the text before it.
+    const tail = bookmarkTextTarget(doc, "tail")!;
+    expect(tail.t.text).toBe("Beta");
+    expect(tail.offset).toBe(4);
+    expect(bookmarkTextTarget(doc, "missing")).toBeNull();
+  });
+});
+
+describe("paragraph borders & shading (setParagraphBorders / paragraphBordersAt)", () => {
+  const firstT = (doc: DocxDocument) =>
+    ((doc.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+
+  it("writes per-edge w:pBdr rules and a w:shd fill the layout model picks up", () => {
+    const doc = loadDoc(p("boxed"));
+    const rule = { style: "double" as const, sz: 8, color: "FF0000", space: 2 };
+    expect(setParagraphBorders(doc, [firstT(doc)], {
+      borders: { top: rule, bottom: rule, left: rule, right: rule },
+      shading: "D9E2F3",
+    })).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain(`<w:top w:val="double" w:sz="8" w:space="2" w:color="FF0000"/>`);
+    expect(xml).toContain(`<w:shd w:val="clear" w:color="auto" w:fill="D9E2F3"/>`);
+    // CT_PBdr order and pPr position: pBdr before shd.
+    expect(xml.indexOf("<w:pBdr>")).toBeLessThan(xml.indexOf("<w:shd"));
+    // The parsed model (what the layout paints) carries both.
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    expect(para.props.borders?.top).toBeTruthy();
+    expect(para.props.borders?.left).toBeTruthy();
+    expect(para.props.shading).toBeTruthy();
+    // Read-back for the dialog prefill.
+    const read = paragraphBordersAt(doc, firstT(doc));
+    expect(read.shading).toBe("#D9E2F3");
+    expect(read.borders.top).toEqual(rule);
+  });
+
+  it("null edges and null shading clear; an emptied pBdr is dropped", () => {
+    const doc = loadDoc(p("clear me"));
+    const rule = { style: "single" as const, sz: 4, color: "auto" };
+    setParagraphBorders(doc, [firstT(doc)], { borders: { top: rule, bottom: rule }, shading: "EEEEEE" });
+    expect(setParagraphBorders(doc, [firstT(doc)], {
+      borders: { top: null, bottom: null },
+      shading: null,
+    })).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).not.toContain("pBdr");
+    expect(xml).not.toContain("w:shd");
+    // An empty patch is an honest no-op.
+    expect(setParagraphBorders(doc, [firstT(doc)], {})).toBe(false);
+  });
+
+  it("suggesting records a w:pPrChange", () => {
+    const doc = loadDoc(p("tracked box"));
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z", nextId: () => doc.nextRevisionId() };
+    expect(setParagraphBorders(doc, [firstT(doc)], { shading: "FFFF00" }, meta)).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("w:pPrChange");
+    expect(xml).toContain(`w:author="R"`);
+  });
+});
+
+describe("tab stops (setTabStops / tabStopsAt)", () => {
+  const firstT = (doc: DocxDocument) =>
+    ((doc.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+
+  it("writes w:tabs with val/leader/pos, sorted, and reads them back", () => {
+    const doc = loadDoc(p("resume line"));
+    expect(tabStopsAt(doc, firstT(doc))).toEqual([]);
+    expect(setTabStops(doc, [firstT(doc)], [
+      { posPt: 216, align: "right", leader: "dot" },
+      { posPt: 72, align: "left", leader: "none" },
+    ])).toBe(true);
+    expect(tabStopsAt(doc, firstT(doc))).toEqual([
+      { posPt: 72, align: "left", leader: "none" },
+      { posPt: 216, align: "right", leader: "dot" },
+    ]);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain(`<w:tab w:val="left" w:pos="1440"/>`);
+    expect(xml).toContain(`<w:tab w:val="right" w:leader="dot" w:pos="4320"/>`);
+    // The parsed model the layout reads carries the stops.
+    const para = doc.sections[0].blocks[0] as Paragraph;
+    expect(para.props.tabs?.map((t) => t.align)).toEqual(["left", "right"]);
+    // Survives save/load in schema order.
+    const reloaded = DocxDocument.load(doc.save());
+    const rt = ((reloaded.sections[0].blocks[0] as Paragraph).children[0] as Run).content.find((c) => c.kind === "text")!.srcT!;
+    expect(tabStopsAt(reloaded, rt)).toHaveLength(2);
+  });
+
+  it("an empty list removes w:tabs; w:tabs lands before w:jc", () => {
+    const doc = loadDoc(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t xml:space="preserve">x</w:t></w:r></w:p>`);
+    expect(setTabStops(doc, [firstT(doc)], [{ posPt: 36, align: "center", leader: "none" }])).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml.indexOf("<w:tabs>")).toBeLessThan(xml.indexOf("<w:jc"));
+    expect(setTabStops(doc, [firstT(doc)], [])).toBe(true);
+    expect(serializeXml(doc.docRoot)).not.toContain("w:tabs");
+  });
+
+  it("suggesting records the prior properties in a w:pPrChange", () => {
+    const doc = loadDoc(p("tracked"));
+    const meta = { author: "R", date: "2026-08-08T00:00:00Z", nextId: () => doc.nextRevisionId() };
+    expect(setTabStops(doc, [firstT(doc)], [{ posPt: 144, align: "decimal", leader: "hyphen" }], meta)).toBe(true);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("w:pPrChange");
+    expect(xml).toContain(`w:author="R"`);
+    expect(xml).toContain(`<w:tab w:val="decimal" w:leader="hyphen" w:pos="2880"/>`);
+  });
+});
+
+describe("sort table rows", () => {
+  const tblXml = (rows: string[][], firstRowHeader = false) =>
+    `<w:tbl><w:tblPr/><w:tblGrid>${'<w:gridCol w:w="2400"/>'.repeat(rows[0].length)}</w:tblGrid>` +
+    rows
+      .map(
+        (r, i) =>
+          `<w:tr>${i === 0 && firstRowHeader ? "<w:trPr><w:tblHeader/></w:trPr>" : ""}${r
+            .map((c) => `<w:tc><w:p><w:r><w:t xml:space="preserve">${c}</w:t></w:r></w:p></w:tc>`)
+            .join("")}</w:tr>`,
+      )
+      .join("") +
+    `</w:tbl>`;
+  const rowTexts = (doc: DocxDocument): string[] => {
+    const tbl = doc.sections[0].blocks[0] as Table;
+    return tbl.rows.map((r) => r.cells.map((c) => textOf(c.blocks[0] as Paragraph)).join("|"));
+  };
+  const tblEl = (doc: DocxDocument) => (doc.sections[0].blocks[0] as Table).src!;
+
+  it("sorts as text, ascending and descending, by any column", () => {
+    const doc = loadDoc(tblXml([["banana", "3"], ["Apple", "1"], ["cherry", "2"]]));
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "text")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["Apple|1", "banana|3", "cherry|2"]);
+    expect(sortTableRows(doc, tblEl(doc), 1, "desc", "text")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["banana|3", "cherry|2", "Apple|1"]);
+    // Already in that order: an honest no-op.
+    expect(sortTableRows(doc, tblEl(doc), 1, "desc", "text")).toBe(false);
+  });
+
+  it("sorts as numbers, ignoring currency noise, non-numbers last", () => {
+    const doc = loadDoc(tblXml([["$10"], ["9"], ["2.5"], ["n/a"]]));
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "number")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["2.5", "9", "$10", "n/a"]);
+  });
+
+  it("pins the repeating header band and, with hasHeader, the first row", () => {
+    const doc = loadDoc(tblXml([["Name"], ["zeta"], ["alpha"]], true));
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "text")).toBe(true);
+    expect(rowTexts(doc)).toEqual(["Name", "alpha", "zeta"]);
+
+    const doc2 = loadDoc(tblXml([["Name"], ["zeta"], ["alpha"]]));
+    expect(sortTableRows(doc2, tblEl(doc2), 0, "asc", "text", true)).toBe(true);
+    expect(rowTexts(doc2)).toEqual(["Name", "alpha", "zeta"]);
+
+    // setTableHeaderRows composes with sorting: mark two rows, sort the rest.
+    const doc3 = loadDoc(tblXml([["h1"], ["h2"], ["b"], ["a"]]));
+    expect(setTableHeaderRows(doc3, tblEl(doc3), 2)).toBe(true);
+    expect(sortTableRows(doc3, tblEl(doc3), 0, "asc", "text")).toBe(true);
+    expect(rowTexts(doc3)).toEqual(["h1", "h2", "a", "b"]);
+  });
+
+  it("refuses tables with merged cells", () => {
+    const doc = loadDoc(
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2400"/><w:gridCol w:w="2400"/></w:tblGrid>` +
+        `<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:tr>` +
+        `<w:tr><w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
+    );
+    expect(sortTableRows(doc, tblEl(doc), 0, "asc", "text")).toBe(false);
+  });
+});
+
+describe("convert text <-> table", () => {
+  it("converts tab-separated paragraphs into a table and back", () => {
+    const doc = loadDoc(`${p("a\tb")}${p("c\td\te")}${p("after")}`);
+    const paras = doc.sections[0].blocks.slice(0, 2).map((b) => b.src!);
+    expect(convertTextToTable(doc, paras, "tab")).toBe(true);
+    const tbl = doc.sections[0].blocks[0] as Table;
+    expect(tbl.type).toBe("table");
+    expect(tbl.rows.length).toBe(2);
+    expect(tbl.rows[1].cells.map((c) => textOf(c.blocks[0] as Paragraph))).toEqual(["c", "d", "e"]);
+    // Short rows pad with empty cells to the widest row.
+    expect(tbl.rows[0].cells.map((c) => textOf(c.blocks[0] as Paragraph))).toEqual(["a", "b", ""]);
+    // The trailing "after" paragraph survives, after the required empty one.
+    const texts = doc.sections[0].blocks.filter((b): b is Paragraph => b.type === "paragraph").map(textOf);
+    expect(texts).toContain("after");
+
+    // And back: one paragraph per row, cells joined by tabs.
+    expect(convertTableToText(doc, tbl.src!, "tab")).toBe(true);
+    const first = doc.sections[0].blocks[0] as Paragraph;
+    expect(first.type).toBe("paragraph");
+    expect(textOf(first)).toBe("ab"); // tab separators carry no w:t text
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).toContain("<w:tab/>");
+    expect(xml).not.toContain("<w:tbl>");
+  });
+
+  it("converts with a comma separator both ways", () => {
+    const doc = loadDoc(p("x,y,z"));
+    const para = doc.sections[0].blocks[0].src!;
+    expect(convertTextToTable(doc, [para], "comma")).toBe(true);
+    const tbl = doc.sections[0].blocks[0] as Table;
+    expect(tbl.rows[0].cells.map((c) => textOf(c.blocks[0] as Paragraph))).toEqual(["x", "y", "z"]);
+    expect(convertTableToText(doc, tbl.src!, "comma")).toBe(true);
+    expect(textOf(doc.sections[0].blocks[0] as Paragraph)).toBe("x,y,z");
   });
 });
 
@@ -2287,6 +2847,72 @@ describe("image editing", () => {
     const img2 = (para2.children[0] as Run).content.find((c) => c.kind === "image");
     expect(img2 && img2.kind === "image" ? img2.part : "").toContain("media/image");
   });
+
+  /** The drawing element of the fixture's only image. */
+  function drawingOf(doc: DocxDocument): XmlElement {
+    const run = (doc.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    const img = run.content.find((c) => c.kind === "image");
+    if (!img || img.kind !== "image" || !img.srcDrawing) throw new Error("no image");
+    return img.srcDrawing;
+  }
+
+  it("writes a:srcRect percentages, reads them back, and survives save/reload", () => {
+    const doc = loadWithImage();
+    expect(imageCrop(drawingOf(doc))).toEqual({ l: 0.25, t: 0.1, r: 0, b: 0 });
+    expect(setImageCrop(doc, drawingOf(doc), { l: 0.1, t: 0.2, r: 0.05, b: 0.4 })).toBe(true);
+
+    const saved = DocxDocument.load(doc.save());
+    const xml = saved.pkg.text("word/document.xml");
+    expect(xml).toContain(`<a:srcRect l="10000" t="20000" r="5000" b="40000"/>`);
+    expect(imageCrop(drawingOf(saved))).toEqual({ l: 0.1, t: 0.2, r: 0.05, b: 0.4 });
+    // The parsed model carries the same crop the renderer clips with.
+    const run = (saved.sections[0].blocks[0] as Paragraph).children[0] as Run;
+    const img = run.content.find((c) => c.kind === "image");
+    expect(img?.kind === "image" ? img.crop : undefined).toEqual({ l: 0.1, t: 0.2, r: 0.05, b: 0.4 });
+  });
+
+  it("puts a:srcRect between a:blip and the fill mode, as the schema sequence requires", () => {
+    const doc = loadWithImage();
+    setImageCrop(doc, drawingOf(doc), { l: 0.1, t: 0, r: 0, b: 0 });
+    const blipFill = (function find(el: XmlElement): XmlElement | undefined {
+      if (localName(el.name) === "blipFill") return el;
+      for (const c of el.children) {
+        const hit = find(c);
+        if (hit) return hit;
+      }
+      return undefined;
+    })(drawingOf(doc))!;
+    expect(blipFill.children.map((c) => localName(c.name))).toEqual(["blip", "srcRect"]);
+  });
+
+  it("removes a:srcRect entirely when the crop is cleared", () => {
+    const doc = loadWithImage();
+    expect(setImageCrop(doc, drawingOf(doc), { l: 0, t: 0, r: 0, b: 0 })).toBe(true);
+    expect(imageCrop(drawingOf(doc))).toEqual({ l: 0, t: 0, r: 0, b: 0 });
+    expect(DocxDocument.load(doc.save()).pkg.text("word/document.xml")).not.toContain("srcRect");
+  });
+
+  it("leaves parts it did not touch byte-identical when cropping", () => {
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="X"><w:rPr><w:b/></w:rPr></w:style>
+</w:styles>`;
+    const doc = DocxDocument.load(
+      makeDocxWithMedia(
+        {
+          "word/document.xml": wrapDocument(DRAWING),
+          "word/_rels/document.xml.rels": DOCRELS,
+          "_rels/.rels": RELS,
+          "word/styles.xml": styles,
+        },
+        { "word/media/image1.png": PNG },
+      ),
+    );
+    setImageCrop(doc, drawingOf(doc), { l: 0.3, t: 0, r: 0.3, b: 0 });
+    const reloaded = DocxDocument.load(doc.save());
+    expect(reloaded.pkg.text("word/styles.xml")).toBe(styles);
+    expect(reloaded.pkg.text("word/_rels/document.xml.rels")).toBe(DOCRELS);
+  });
 });
 
 describe("insertFootnote", () => {
@@ -2371,6 +2997,121 @@ describe("footnote editing", () => {
     const fnXml = DocxDocument.load(doc.save()).pkg.text("word/footnotes.xml");
     expect(fnXml).toContain("XYZ");
     expect(fnXml).toMatch(/<w:ins\b/);
+  });
+});
+
+describe("insertEndnote", () => {
+  /** First text content of endnote `id`, or null. */
+  const noteText = (doc: DocxDocument, id: number) => {
+    const para = doc.endnotes.get(id)?.find((b) => b.type === "paragraph") as Paragraph | undefined;
+    for (const c of para?.children ?? []) {
+      for (const r of c.type === "run" ? [c] : c.runs) {
+        const tc = r.content.find((rc) => rc.kind === "text");
+        if (tc && tc.kind === "text") return tc;
+      }
+    }
+    return null;
+  };
+
+  const caretT = (doc: DocxDocument) =>
+    firstRun(doc).run.content.find((c) => c.kind === "text")!.srcT!;
+
+  it("creates endnotes.xml with Word's stock separators, splits at the caret, round-trips", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    expect(insertEndnote(doc, caretT(doc), 15, "See Smith 2024.")).toBe(1);
+    expect(noteText(doc, 1)?.text).toContain("See Smith 2024.");
+
+    const saved = DocxDocument.load(doc.save());
+    const enXml = saved.pkg.text("word/endnotes.xml");
+    // Ids -1 and 0 are the separator pair Word requires of the part, so the
+    // first real note is 1.
+    expect(enXml).toContain(`<w:endnote w:type="separator" w:id="-1">`);
+    expect(enXml).toContain(`<w:endnote w:type="continuationSeparator" w:id="0">`);
+    expect(enXml).toContain(`<w:endnote w:id="1">`);
+    expect(enXml).toContain(`<w:endnoteRef/>`);
+    expect(enXml).toContain(`w:val="EndnoteText"`);
+    expect(noteText(saved, 1)?.text).toContain("See Smith 2024.");
+
+    // The reference run lands between "needed" and " here", in the body.
+    const body = saved.pkg.text("word/document.xml");
+    expect(body).toContain(`<w:endnoteReference w:id="1"/>`);
+    expect(body).toContain(`w:val="EndnoteReference"`);
+    expect(textOf(firstRun(saved).para)).toBe("Citation needed here");
+  });
+
+  it("registers the part in the relationships and the content types", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    insertEndnote(doc, caretT(doc), 20, "A note.");
+    const saved = DocxDocument.load(doc.save());
+    expect(saved.pkg.text("word/_rels/document.xml.rels")).toContain(
+      `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"`,
+    );
+    expect(saved.pkg.text("[Content_Types].xml")).toContain(
+      "wordprocessingml.endnotes+xml",
+    );
+  });
+
+  it("allocates the next free id and keeps footnotes on their own numbering", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    expect(insertEndnote(doc, caretT(doc), 20, "first")).toBe(1);
+    expect(insertEndnote(doc, caretT(doc), 20, "second")).toBe(2);
+    // Footnotes count from 1 in their own part, unaffected by the endnotes.
+    expect(insertFootnote(doc, caretT(doc), 20, "a footnote")).toBe(1);
+    expect([...doc.endnotes.keys()]).toEqual([1, 2]);
+    expect([...doc.footnotes.keys()]).toEqual([1]);
+  });
+
+  it("keeps endnote text editable: source refs survive and the part re-serializes", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    insertEndnote(doc, caretT(doc), 15, "See Smith 2024.");
+    const tc = noteText(doc, 1)!;
+    expect(tc.srcT, "endnote text keeps its source w:t").toBeTruthy();
+    expect(doc.findParentOf(tc.srcT!), "the endnote run is reachable").toBeTruthy();
+
+    tc.srcT!.text = tc.srcT!.text.replace("Smith", "Smith & Jones");
+    doc.markDirtyIfFootnote(tc.srcT!);
+    doc.refresh();
+    const reloaded = DocxDocument.load(doc.save());
+    expect(noteText(reloaded, 1)!.text).toContain("Smith & Jones");
+  });
+
+  it("refuses empty text and leaves the part uncreated", () => {
+    const doc = loadDoc(p("Citation needed here"));
+    expect(insertEndnote(doc, caretT(doc), 5, "   ")).toBe(null);
+    expect(doc.endnotesTree()).toBe(null);
+    expect(DocxDocument.load(doc.save()).pkg.text("word/endnotes.xml")).toBeUndefined();
+  });
+
+  it("leaves parts it did not touch byte-identical", () => {
+    const styles = `<?xml version="1.0"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:styleId="X"><w:rPr><w:b/></w:rPr></w:style>
+</w:styles>`;
+    const doc = loadDoc(p("Citation needed here"), { "word/styles.xml": styles });
+    insertEndnote(doc, caretT(doc), 20, "A note.");
+    expect(DocxDocument.load(doc.save()).pkg.text("word/styles.xml")).toBe(styles);
+  });
+
+  it("adds an endnote to a document that already carries one, keeping the part's other notes", () => {
+    const endnotes = `<?xml version="1.0"?>
+<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote>
+  <w:endnote w:id="4"><w:p><w:r><w:t>existing note</w:t></w:r></w:p></w:endnote>
+</w:endnotes>`;
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes" Target="endnotes.xml"/>
+</Relationships>`;
+    const doc = loadDoc(p("Citation needed here"), {
+      "word/endnotes.xml": endnotes,
+      "word/_rels/document.xml.rels": rels,
+    });
+    expect(noteText(doc, 4)?.text).toBe("existing note");
+    // max+1 over the part, so a replica allocating from the same tree agrees.
+    expect(insertEndnote(doc, caretT(doc), 20, "a new note")).toBe(5);
+    const reloaded = DocxDocument.load(doc.save());
+    expect(noteText(reloaded, 4)?.text).toBe("existing note");
+    expect(noteText(reloaded, 5)?.text).toContain("a new note");
   });
 });
 
@@ -2500,6 +3241,40 @@ describe("math editing", () => {
     // degree stays editable as a plain digit.
     expect(linearizeMath(parseMathLinear("∛{x+1}"))).toBe("√[3]{x+1}");
     expect(linearizeMath(parseMathLinear("∜{x+1}"))).toBe("√[4]{x+1}");
+  });
+
+  it("linear form covers accents, group characters, limits and arrays", () => {
+    const cases = [
+      "x̂+1",           // m:acc — the combining mark trails its base
+      "{a+b}⃗",         // …over a braced base
+      "⏞{a+b}",        // m:groupChr — the brace leads its argument
+      "{lim}┴{n→∞}f",  // m:limLow — ┴ stacks the limit below
+      "{max}┬xg",      // m:limUpp — ┬ stacks it above; one character needs no braces
+      "█[x=1;y=2]",    // m:eqArr
+      "■[a]",          // a one-cell matrix, which needs the explicit marker
+      "[a&b;c&d]",     // bigger ones do not
+      "{█[x;-x]}┤",    // Word's "cases": a left brace with no closing delimiter
+    ];
+    for (const c of cases) expect(linearizeMath(parseMathLinear(c))).toBe(c);
+  });
+
+  it("a backslash keeps a structural character as plain text", () => {
+    // Word stores plenty of equations where the author simply TYPED "(x)" or
+    // "-1/2"; those characters must come back as characters.
+    for (const c of ["\\(x\\)", "-1\\/2", "a\\^b", "\\{x\\}"]) {
+      expect(linearizeMath(parseMathLinear(c))).toBe(c);
+    }
+    const literal = parseMathLinear("\\(x\\)");
+    expect(literal.length).toBe(1);
+    expect(literal[0].t).toBe("run");
+  });
+
+  it("a script binds to its whole base, not just the last character", () => {
+    const braced = parseMathLinear("{xy}^2");
+    expect(braced[0].t).toBe("sup");
+    if (braced[0].t === "sup") expect(linearizeMath(braced[0].base)).toBe("xy");
+    // and the emitted form keeps the braces so the next parse agrees
+    expect(linearizeMath(braced)).toBe("{xy}^2");
   });
 
   it("rewrites an equation from linear text", () => {
@@ -2661,19 +3436,71 @@ describe("math editing safety", () => {
   const MATRIX = `<m:oMath><m:m><m:mr><m:e>${run("a")}</m:e><m:e>${run("b")}</m:e></m:mr><m:mr><m:e>${run("c")}</m:e><m:e>${run("d")}</m:e></m:mr></m:m></m:oMath>`;
   const ACCENT = `<m:oMath><m:acc><m:accPr><m:chr m:val="̂"/></m:accPr><m:e>${run("x")}</m:e></m:acc></m:oMath>`;
   const LIMIT = `<m:oMath><m:limLow><m:e>${run("lim")}</m:e><m:lim>${run("n")}</m:lim></m:limLow></m:oMath>`;
+  const GROUP =
+    `<m:oMath><m:groupChr><m:groupChrPr><m:chr m:val="⏞"/><m:pos m:val="top"/><m:vertJc m:val="bot"/>` +
+    `</m:groupChrPr><m:e>${run("a+b")}</m:e></m:groupChr></m:oMath>`;
+  const EQARR = `<m:oMath><m:eqArr><m:e>${run("x=1")}</m:e><m:e>${run("y=2")}</m:e></m:eqArr></m:oMath>`;
+  // Word's piecewise "cases": a left brace with no closing delimiter, wrapping
+  // an equation array.
+  const CASES =
+    `<m:oMath><m:d><m:dPr><m:begChr m:val="{"/><m:endChr m:val=""/></m:dPr><m:e>` +
+    `<m:eqArr><m:e>${run("x")}</m:e><m:e>${run("-x")}</m:e></m:eqArr></m:e></m:d></m:oMath>`;
 
   it("classifies round-trippable equations as editable", () => {
-    for (const omml of [INTEGRAL, DELIM, MATRIX]) {
+    for (const omml of [INTEGRAL, DELIM, MATRIX, ACCENT, LIMIT, GROUP, EQARR]) {
       const { srcOf } = load(omml);
       expect(isLinearSafe(srcOf())).toBe(true);
     }
   });
 
-  it("classifies structure-only equations (accent, limit) as read-only", () => {
-    for (const omml of [ACCENT, LIMIT]) {
+  it("refuses OMML the linear form cannot name (m:func, m:sSubSup)", () => {
+    const FUNC =
+      `<m:oMath><m:func><m:fName>${run("sin")}</m:fName><m:e>${run("θ")}</m:e></m:func></m:oMath>`;
+    const SUBSUP =
+      `<m:oMath><m:sSubSup><m:e>${run("x")}</m:e><m:sub>${run("a")}</m:sub><m:sup>${run("b")}</m:sup></m:sSubSup></m:oMath>`;
+    for (const omml of [FUNC, SUBSUP]) {
       const { srcOf } = load(omml);
       expect(isLinearSafe(srcOf())).toBe(false);
     }
+  });
+
+  it("keeps a property Word hangs off the slot itself", () => {
+    // Word sometimes writes the m:ctrlPr INSIDE the m:e rather than in the
+    // m:dPr beside it. Refilling the slot must not carry off the rest of its
+    // children with the content.
+    const DELIM_INNER_CTRL =
+      `<m:oMath><m:d><m:dPr><m:begChr m:val="("/><m:endChr m:val=")"/></m:dPr>` +
+      `<m:e>${run("x")}<m:ctrlPr><w:rPr><w:i/></w:rPr></m:ctrlPr></m:e></m:d></m:oMath>`;
+    const { doc, srcOf } = load(DELIM_INNER_CTRL);
+    expect(isLinearSafe(srcOf())).toBe(true);
+    expect(setMathLinear(doc, srcOf(), "(y)")).toBe(true);
+    const xml = serializeXml(srcOf());
+    expect(xml).toContain("<m:t>y</m:t>");
+    expect(xml).toContain("<m:ctrlPr><w:rPr><w:i/></w:rPr></m:ctrlPr>");
+  });
+
+  it("re-emits every editable equation byte for byte", () => {
+    for (const omml of [INTEGRAL, DELIM, MATRIX, ACCENT, LIMIT, GROUP, EQARR, CASES]) {
+      const { doc, srcOf } = load(omml);
+      const before = serializeXml(srcOf());
+      expect(setMathLinear(doc, srcOf(), mathLinearOf(doc, srcOf()))).toBe(true);
+      expect(serializeXml(srcOf())).toBe(before);
+    }
+  });
+
+  it("keeps the formatting the linear text does not spell out", () => {
+    // m:limLoc and the run's w:rPr say nothing in linear form; editing the
+    // limit must not drop either.
+    const SUM =
+      `<m:oMath><m:nary><m:naryPr><m:chr m:val="∑"/><m:limLoc m:val="undOvr"/></m:naryPr>` +
+      `<m:sub><m:r><w:rPr><w:rFonts w:ascii="Cambria Math"/></w:rPr><m:t>i=1</m:t></m:r></m:sub>` +
+      `<m:sup>${run("n")}</m:sup><m:e>${run("i")}</m:e></m:nary></m:oMath>`;
+    const { doc, srcOf } = load(SUM);
+    expect(setMathLinear(doc, srcOf(), "∑_{j=1}^n{j}")).toBe(true);
+    const xml = serializeXml(srcOf());
+    expect(xml).toContain('<m:limLoc m:val="undOvr"/>');
+    expect(xml).toContain('w:ascii="Cambria Math"');
+    expect(xml).toContain("<m:t>j=1</m:t>");
   });
 
   it("linear parser reconstructs n-ary, delimiter and matrix structurally", () => {

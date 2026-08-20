@@ -1,8 +1,36 @@
-import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { availableObjectCommands, requestTextInputDialog } from "@wordinweb/core";
-import type { DocxViewApi } from "./index.js";
+import { comparedName, downloadDocx, pickAndCompare } from "./compare.js";
+import {
+  availableObjectCommands,
+  requestTextInputDialog,
+  styleIdFromName,
+  uniqueStyleId,
+  CELL_SCOPE_EDGES,
+  TABLE_BORDER_STYLES,
+  TABLE_SCOPE_EDGES,
+  formulaInstruction,
+  NUMBERING_PRESETS,
+  SHAPE_GALLERY,
+  presetShapeGeometry,
+  type NumberingPresetId,
+  type SelectionFormat,
+  type TabStopSpec,
+  type TableBorderEdge,
+  type TableBorderStyle,
+  type CoverPageLayout,
+  formatCombo,
+  isApplePlatform,
+  matchCombo,
+  type HostShortcutSection,
+  type KeyCombo,
+} from "@wordinweb/core";
+import { planRibbon, type RibbonItem } from "./ribbon-layout.js";
+import { RASTER_IMAGE_ACCEPT, type DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
+
+/** The keys that open the help guide — bound below, listed by the guide. */
+export const HELP_COMBOS: KeyCombo[] = [{ key: "F1" }, { key: "/", mod: true }];
 
 /**
  * Chrome theme tokens. Every color the toolbar paints routes through a CSS
@@ -82,7 +110,134 @@ const btnStyle = (active: boolean): React.CSSProperties => ({
   fontSize: 13,
   padding: "0 5px",
   color: T.fg,
+  transition: "background-color 120ms ease",
 });
+
+/**
+ * The one box shape for a labelled control inside a popover or dialog.
+ *
+ * Declared up here because popovers all over the file use it. It used to have
+ * near-identical siblings — `noteOptionsFieldStyle`, four component-local
+ * copies of `fieldStyle`, and five inline literals — which is how the
+ * popovers came to disagree with each other about padding and corner radius
+ * (#141). `ToolbarMenuSelect variant="field"` paints this same box, so a
+ * select and a text input in one dialog row match.
+ */
+const dialogInput: React.CSSProperties = {
+  width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
+  borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg,
+};
+
+/**
+ * The two things this toolbar's fields need that an inline style cannot say:
+ * a pseudo-ELEMENT (the number spinners) and a pseudo-CLASS (focus).
+ *
+ * Idempotent injected <style> with an id — the same shape the engine already
+ * uses for `ensureDrawingCursorStyle`, for the same reason — and scoped to
+ * our own data attributes so it touches only the fields this toolbar draws.
+ * `T` is CSS variables all the way down, so the rule text themes itself.
+ */
+function ensureToolbarFieldStyles(): void {
+  if (typeof document === "undefined" || document.getElementById("dxw-toolbar-field-style")) return;
+  const style = document.createElement("style");
+  style.id = "dxw-toolbar-field-style";
+  style.textContent =
+    // Spinner arrows. The `appearance` half is for Firefox and Safari, which
+    // do honour it; the pseudo-element half is what Chrome needs. Measured:
+    // on Chrome 150 `appearance: textfield` alone changes nothing at all.
+    // Both live here so no call site carries either, and the six number boxes
+    // with bespoke widths keep them.
+    "[data-dxw-number]{-webkit-appearance:textfield;appearance:textfield}" +
+    "[data-dxw-number]::-webkit-inner-spin-button,[data-dxw-number]::-webkit-outer-spin-button" +
+    "{-webkit-appearance:none;appearance:none;margin:0}" +
+    // Focus ring (#145). Eight popover boxes used to set `outline: none` and
+    // put nothing in its place, so focus was invisible on them. This is the
+    // same ring ToolbarCheckbox already draws for itself, so the whole panel
+    // agrees on what focus looks like.
+    //
+    // THE ACCENT, not the pale selection blue. Measured rather than eyeballed:
+    // `--dxw-tab-active-bg` (#e8f0fe) is 1.15:1 against a white field and
+    // 1.2:1 against the field's own border, so a ring drawn in it is a focus
+    // indicator you cannot see — this ticket's defect over again in a
+    // different colour. The accent is 4.51:1 and 3.28:1, which clears the
+    // WCAG 2.2 focus-appearance bar of 3:1 against adjacent colours.
+    //
+    // BOX-SHADOW ONLY, deliberately. A `border-color` here would be dead on
+    // arrival: the fields set `border` as an inline shorthand, and an inline
+    // style outranks any stylesheet rule, so it would silently not apply.
+    // Measured too — the shadow lands, the border-color did not.
+    //
+    // `:focus-visible` rather than `:focus` because it is the better default
+    // for anything non-textual marked later. For the text boxes it currently
+    // marks the two are the same: per spec a control that takes text keyboard
+    // input always matches :focus-visible, mouse-clicked or not.
+    `[data-dxw-field]:focus-visible{outline:none;box-shadow:0 0 0 2px ${T.accent}}`;
+  document.head.appendChild(style);
+}
+ensureToolbarFieldStyles();
+
+/** The roomier variant, for the tall stacked-label popovers (Citations, Quick
+ * Parts, Chart, Media). Those four each declared these three objects in their
+ * own body, byte for byte the same, before #141 collapsed them. */
+const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
+const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+
+/* A popover that TEACHES rather than lists verbs: a heading per group, one
+ * action per line, and a note saying what the action needs or does. Used by the
+ * Contents menu, where every command depends on something the user has to have
+ * done first. */
+const sectionLabel: React.CSSProperties = {
+  font: "600 11px system-ui, sans-serif",
+  color: T.muted,
+  textTransform: "uppercase",
+  letterSpacing: 0.4,
+  margin: "10px 0 4px",
+};
+const menuItem: React.CSSProperties = {
+  display: "block",
+  width: "100%",
+  textAlign: "left",
+  border: "none",
+  background: "none",
+  color: T.fg,
+  font: "13px system-ui, sans-serif",
+  padding: "6px 6px",
+  borderRadius: 5,
+  cursor: "pointer",
+};
+const menuNote: React.CSSProperties = {
+  color: T.muted,
+  font: "11.5px system-ui, sans-serif",
+  lineHeight: 1.45,
+  margin: "2px 6px 8px",
+};
+const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
+
+/**
+ * The single text box that IS a popover — Bookmark, Text Box, WordArt,
+ * Watermark, Shape, Link. Same box as `fieldStyle` at a tighter vertical pad.
+ * Six components spelled this out identically, a seventh differed only by a
+ * margin and an eighth only by `flex: 1`.
+ *
+ * All eight carried `outline: "none"` with nothing in its place, so tabbing
+ * into one showed nothing at all (#145). The suppression is gone; the ring
+ * now comes from `ensureToolbarFieldStyles` via `data-dxw-field`.
+ */
+const popoverInput: React.CSSProperties = {
+  width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`,
+  borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif",
+};
+
+/** The comment and link popovers' multi-line box: `popoverInput` that grows.
+ * Both spelled it out identically, and both hid their focus ring too. */
+const popoverTextarea: React.CSSProperties = {
+  ...popoverInput, minHeight: 54, resize: "vertical", padding: 6,
+};
+
+/** The little colour well beside a hex box. Two of these, at two sizes. */
+const colorSwatch: React.CSSProperties = {
+  border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg,
+};
 
 const PAGE_SIZES = [
   { value: "letter", label: "Letter", description: '8.5" × 11"', width: 8.5, height: 11 },
@@ -101,11 +256,12 @@ const PAGE_SIZES = [
   { value: "envelope10", label: "Envelope #10", description: '4.13" × 9.5"', width: 4.13, height: 9.5 },
 ] as const;
 
-function Btn({ label, title, active, onClick, buttonRef }: { label: React.ReactNode; title: string; active?: boolean; onClick: () => void; buttonRef?: React.Ref<HTMLButtonElement> }) {
+function Btn({ label, title, active, onClick, buttonRef, fold }: { label: React.ReactNode; title: string; active?: boolean; onClick: () => void; buttonRef?: React.Ref<HTMLButtonElement>; fold?: number }) {
   return (
     <button
       ref={buttonRef}
       title={title}
+      data-dxw-fold={fold}
       style={btnStyle(!!active)}
       onMouseDown={(e) => e.preventDefault()}
       onMouseEnter={(e) => ((e.target as HTMLElement).style.background = active ? T.activeBg : T.hoverBg)}
@@ -117,67 +273,21 @@ function Btn({ label, title, active, onClick, buttonRef }: { label: React.ReactN
   );
 }
 
+/** Group divider. Marked so the layout engine can drop one that would be left
+ * starting or ending a line with nothing on the other side of it. */
 function Sep() {
-  return <span style={{ width: 1, height: 18, background: T.border, margin: "0 4px", flexShrink: 0 }} />;
-}
-
-function OverflowIcon() {
-  return (
-    <svg style={icon} viewBox="0 0 16 16" fill="currentColor">
-      <circle cx="8" cy="3" r="1.4" />
-      <circle cx="8" cy="8" r="1.4" />
-      <circle cx="8" cy="13" r="1.4" />
-    </svg>
-  );
-}
-
-/**
- * "More" (⋮) menu holding the toolbar groups that don't fit the current width.
- * On a phone/tablet the low-frequency groups collapse in here (Google-Docs
- * pattern) so the primary row stays a single clean strip; every control stays
- * reachable. The grouped controls render stacked, wrapping as needed.
- */
-function OverflowMenu({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-  return (
-    <span ref={rootRef} style={{ position: "relative", display: "inline-flex", marginLeft: "auto" }}>
-      <button
-        title="More tools"
-        data-dxw-overflow=""
-        style={btnStyle(open)}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpen(!open)}
-      >
-        <OverflowIcon />
-      </button>
-      {open && (
-        <div
-          data-dxw-overflow-menu=""
-          style={{
-            position: "absolute", top: 30, right: 0, zIndex: 100, background: T.popoverBg,
-            border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 8, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 4,
-            width: "min(280px, calc(100vw - 16px))",
-            boxSizing: "border-box",
-          }}
-        >
-          {children}
-        </div>
-      )}
-    </span>
-  );
+  return <span data-dxw-sep="" style={{ width: 1, height: 18, background: T.border, margin: "0 4px", flexShrink: 0 }} />;
 }
 
 const icon = { width: 16, height: 16, display: "block" } as const;
+
+function ExpandChevronIcon({ up }: { up: boolean }) {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      {up ? <path d="M4 9.5L8 5.5l4 4" /> : <path d="M4 6.5l4 4 4-4" />}
+    </svg>
+  );
+}
 
 function ImageIcon() {
   return (
@@ -218,6 +328,329 @@ export interface ToolbarMenuSelectProps {
   menuWidth?: number;
   className?: string;
   style?: React.CSSProperties;
+  /** Greys the control and refuses to open it. Distinct from an option's own
+   * `disabled`, which only rules out that one choice. */
+  disabled?: boolean;
+  /**
+   * `"bar"` (default) sits in the ribbon: no border, no background, 26px.
+   * `"field"` sits in a popover or dialog beside a label, where the control
+   * has to read as an input — visible box, full width, popover background.
+   *
+   * A preset rather than a style object at each call site: the 23 selects
+   * this replaced carried four different near-identical style sources between
+   * them, which is how they drifted apart in the first place.
+   */
+  variant?: "bar" | "field";
+  /** Fold priority for the bar's layout engine; see RibbonItem.fold. */
+  fold?: number;
+}
+
+/**
+ * Where a menu opened from a bar control should hang from.
+ *
+ * The toolbar can be several lines tall once it is expanded, and a menu
+ * anchored to its own control's bottom edge would then open over the controls
+ * on the lines below it — the bar covering itself. Menus hang from the bottom
+ * of the whole bar instead, so they only ever cover the document. Controls
+ * outside the bar are unaffected: they fall back to their own bottom edge.
+ */
+function menuAnchorBottom(anchor: Element | null | undefined, rect: { bottom: number }): number {
+  const bar = anchor?.closest("[data-dxw-toolbar-mode]");
+  const barBottom = bar?.getBoundingClientRect().bottom;
+  return barBottom === undefined ? rect.bottom : Math.max(rect.bottom, barBottom);
+}
+
+/**
+ * A run patch as it would read back on the selection, so the bar can show what
+ * the user just asked for without waiting for the engine to catch up.
+ *
+ * Only the keys `SelectionFormat` actually has: a patch also carries `clear`
+ * and `textEffect`, which the toolbar does not paint a state from. `null` in a
+ * patch means "remove", which reads back as absent.
+ */
+function appliedRunFormat(patch: Parameters<DocxViewApi["applyFormat"]>[0]): Partial<SelectionFormat> {
+  if (patch.clear) return { bold: false, italic: false, underline: false, strike: false };
+  const out: Partial<SelectionFormat> = {};
+  if (patch.bold !== undefined) out.bold = patch.bold;
+  if (patch.italic !== undefined) out.italic = patch.italic;
+  if (patch.underline !== undefined) out.underline = patch.underline;
+  if (patch.strike !== undefined) out.strike = patch.strike;
+  if (patch.fontSizePt !== undefined) out.fontSizePt = patch.fontSizePt;
+  if (patch.fontFamily !== undefined) out.fontFamily = patch.fontFamily;
+  if (patch.color !== undefined) out.color = patch.color ?? undefined;
+  if (patch.highlight !== undefined) out.highlight = patch.highlight ?? undefined;
+  if (patch.verticalAlign !== undefined) out.verticalAlign = patch.verticalAlign ?? undefined;
+  if (patch.characterStyleId !== undefined) out.characterStyleId = patch.characterStyleId;
+  return out;
+}
+
+/**
+ * The controls on a ribbon line, seeing through any `display: contents`
+ * grouping.
+ *
+ * Such a wrapper has NO box of its own — it measures 0x0 — so the layout
+ * engine skipped it as a zero-width child and came away with nothing to fit,
+ * while the controls it holds were promoted into the line by the browser and
+ * wrapped freely onto extra rows. Both contextual tabs group their controls
+ * that way, which is why the bar grew 26px the moment the caret entered a
+ * table and the document jumped under the pointer (#155).
+ */
+function ribbonControls(line: HTMLElement): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  for (const child of Array.from(line.children) as HTMLElement[]) {
+    if (getComputedStyle(child).display === "contents") out.push(...ribbonControls(child));
+    else out.push(child);
+  }
+  return out;
+}
+
+/** The gap every anchored panel keeps between itself and the window edge. */
+const PANEL_MARGIN = 8;
+
+/** Which edge of the panel lines up with which edge of its anchor. */
+type PanelAlign = "start" | "center" | "end";
+
+interface AnchoredPanelPosition {
+  left: number;
+  top: number;
+  /** The panel's width, already narrowed to fit the window. */
+  width: number;
+  /** Room left over on the chosen side, for panels that scroll. */
+  maxHeight: number;
+}
+
+/**
+ * Where a panel anchored to a control has to sit for all of it to stay on
+ * screen.
+ *
+ * Pure, so the placement can be tested without a browser. It takes the
+ * measurements and returns coordinates; the hook below does the measuring.
+ *
+ * - Horizontally: the panel's left edge lines up with the anchor's left edge,
+ *   its right edge with the anchor's right edge (`align: "end"`), or its
+ *   centre under the anchor's centre (`align: "center"`, which is what a
+ *   tooltip wants). Either way both edges are then clamped inside the
+ *   viewport, so an anchor near the right edge of the window pulls the panel
+ *   back in rather than pushing it off (#148).
+ * - Vertically: the panel hangs below `barBottom`, flips above the anchor when
+ *   it does not fit below and there is more room above, and is shifted back up
+ *   if it still runs past the bottom. `maxHeight` reports the room on the
+ *   chosen side.
+ *
+ * A zero `panel.height` means "not measured yet" — the first layout pass, for
+ * one frame. It places below, which the measured pass then corrects.
+ */
+function anchoredPanelPosition(
+  anchor: { left: number; right: number; top: number },
+  barBottom: number,
+  panel: { width: number; height: number },
+  viewport: { width: number; height: number },
+  options: { align?: PanelAlign; maxHeight?: number } = {},
+): AnchoredPanelPosition {
+  const cap = options.maxHeight ?? Infinity;
+  const width = Math.min(panel.width, viewport.width - PANEL_MARGIN * 2);
+  const wanted = options.align === "end"
+    ? anchor.right - width
+    : options.align === "center"
+      ? (anchor.left + anchor.right) / 2 - width / 2
+      : anchor.left;
+  const left = Math.max(PANEL_MARGIN, Math.min(wanted, viewport.width - width - PANEL_MARGIN));
+
+  const below = viewport.height - barBottom - PANEL_MARGIN;
+  // Room above the anchor, but never more room than the window has: an
+  // expanded ribbon can be taller than a short window, which puts the control
+  // itself below the fold and would otherwise report hundreds of pixels of
+  // space that are not on screen.
+  const above = Math.min(anchor.top, viewport.height) - PANEL_MARGIN;
+  const placeAbove = panel.height > below && above > below;
+  const maxHeight = Math.max(96, Math.min(cap, placeAbove ? above : below));
+  const shown = Math.min(panel.height || maxHeight, maxHeight);
+  // Either way the last word is the window: the bottom edge stays on screen.
+  const bottomLimit = viewport.height - shown - PANEL_MARGIN;
+  const top = placeAbove
+    ? Math.max(PANEL_MARGIN, Math.min(anchor.top - shown - 4, bottomLimit))
+    : Math.max(PANEL_MARGIN, Math.min(barBottom + 4, bottomLimit));
+  return { left, top, width, maxHeight };
+}
+
+/**
+ * Every panel that is open right now, in the order they opened.
+ *
+ * Escape closes the LAST one only. Popovers nest — a colour menu opens inside
+ * a dialog, and that dialog inside nothing — and each of them listens on the
+ * document, so without an order they would all take the same Escape and the
+ * user would lose the dialog they were filling in as well as the swatch grid
+ * they meant to dismiss.
+ */
+const openPanels: { close: () => void }[] = [];
+
+/**
+ * Move the keyboard into a panel that has just opened, unless it is already
+ * there.
+ *
+ * The PANEL takes focus, not the first control in it. Focusing a control runs
+ * that control's own focus handling, and the table-size grid reads focus as
+ * the user choosing a size: it relabelled itself "1 x 1" the moment the panel
+ * opened, when nothing had been chosen at all. Tab from the container goes to
+ * the first control anyway, which is all the reported defect needed.
+ */
+function focusInside(panel: HTMLElement | null): void {
+  if (!panel || panel.contains(document.activeElement)) return;
+  // Programmatically focusable, still out of the tab order.
+  if (!panel.hasAttribute("tabindex")) panel.tabIndex = -1;
+  // preventScroll: the panel is already placed where it should be, and letting
+  // the browser scroll to it would move the document underneath.
+  panel.focus({ preventScroll: true });
+}
+
+/** The control to put focus back on when a panel closes from the keyboard. */
+function panelTrigger(anchor: HTMLElement | null): HTMLElement | null {
+  if (!anchor) return null;
+  // The anchor is either the trigger itself or the span wrapping it.
+  if (anchor.matches("button, [tabindex]")) return anchor;
+  return anchor.querySelector<HTMLElement>("button, [tabindex]");
+}
+
+/**
+ * Keeps an open panel placed against its anchor and inside the window, and —
+ * given `onClose` — dismisses it on Escape or a click outside.
+ *
+ * The one implementation of both in the file, on purpose. Three controls had
+ * grown their own placement and drifted apart; two dozen more never grew any,
+ * and opened straight off the right edge of a narrow window (#148). Those same
+ * two dozen each hand-rolled an outside-click listener and NOTHING else, so
+ * Escape did not close them and a keyboard user had no way out at all (#151).
+ * Both defects are the same absence, so they get the same cure: one hook the
+ * panels share rather than a boilerplate effect each.
+ *
+ * Callers still own opening. This owns placement, dismissal and returning
+ * focus to the trigger, and returns coordinates for a `position: fixed` panel.
+ * Panels may stay inside their trigger's DOM subtree — `fixed` takes them out
+ * of flow, so an outside-click check that asks whether the click landed in
+ * that subtree keeps working; portalled panels are covered because the panel
+ * itself is checked too.
+ */
+function useAnchoredPanel(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  panelRef: React.RefObject<HTMLElement | null>,
+  open: boolean,
+  options: {
+    width?: number;
+    align?: PanelAlign;
+    maxHeight?: number;
+    hangFromBar?: boolean;
+    /** Dismiss this panel. Omit for panels the caller dismisses itself. */
+    onClose?: () => void;
+  } = {},
+): AnchoredPanelPosition {
+  const { width, align, maxHeight, hangFromBar = true, onClose } = options;
+  const [position, setPosition] = useState<AnchoredPanelPosition>({ left: PANEL_MARGIN, top: PANEL_MARGIN, width: width ?? 0, maxHeight: maxHeight ?? 320 });
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const panel = panelRef.current;
+      const next = anchoredPanelPosition(
+        rect,
+        // Menus clear the whole bar; a tooltip belongs under its own control.
+        hangFromBar ? menuAnchorBottom(anchor, rect) : rect.bottom + 2,
+        // The panel's own box once it has one: a declared width is not always
+        // the painted width, and the height is never known in advance.
+        { width: width ?? panel?.offsetWidth ?? 0, height: panel?.offsetHeight ?? 0 },
+        { width: window.innerWidth, height: window.innerHeight },
+        { align, maxHeight },
+      );
+      // Only when something moved: this runs on every scroll event, and a new
+      // object each time would re-render the whole panel for nothing.
+      setPosition((current) =>
+        current.left === next.left && current.top === next.top
+          && current.width === next.width && current.maxHeight === next.maxHeight
+          ? current
+          : next,
+      );
+    };
+    update();
+    // Second pass once the panel is in the DOM and has a measurable box.
+    const frame = requestAnimationFrame(update);
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open, anchorRef, panelRef, width, align, maxHeight, hangFromBar]);
+
+  useDismissablePanel(anchorRef, panelRef, open, onClose);
+  return position;
+}
+
+/**
+ * Closes an open panel on Escape or on a click outside it, and hands focus
+ * back to the control that opened it.
+ *
+ * Twenty-four panels in this bar each added a document "mousedown" listener
+ * and nothing else, so a click elsewhere dismissed them and the keyboard had
+ * no way out at all (#151). `useAnchoredPanel` calls this for everything it
+ * places; the SmartArt modal, which has no anchor to be placed against, calls
+ * it directly.
+ */
+function useDismissablePanel(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  panelRef: React.RefObject<HTMLElement | null>,
+  open: boolean,
+  onClose: (() => void) | undefined,
+): void {
+  // Held in a ref, not read from the deps: every call site passes an inline
+  // arrow, so depending on it would re-subscribe on each render.
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    if (!open || !closeRef.current) return;
+    const entry = { close: () => closeRef.current?.() };
+    openPanels.push(entry);
+    // Put the keyboard where the panel is.
+    //
+    // Opening one with the MOUSE left focus on the editor's hidden textarea —
+    // the triggers preventDefault on mousedown so the caret and selection
+    // survive, which is deliberate and must stay — so Tab moved FORWARD from
+    // the document, away from the bar, and the open panel could not be reached
+    // by keyboard at all. Measured in Chromium: 35 of the 51 panels a mouse
+    // can open left activeElement on TEXTAREA (#157).
+    //
+    // A panel that wants a different target sets it in its own effect, which
+    // runs after this one and wins: the forms focus their first field, and a
+    // menu opened from the keyboard focuses the option it was asked for.
+    focusInside(panelRef.current);
+    const landedInside = (target: Node | null) =>
+      !!target && (!!panelRef.current?.contains(target) || !!anchorRef.current?.contains(target));
+    const onMouseDown = (event: MouseEvent) => {
+      if (!landedInside(event.target as Node)) entry.close();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Innermost only, so a swatch grid inside a dialog gives the dialog
+      // back rather than closing it too.
+      if (event.key !== "Escape" || openPanels[openPanels.length - 1] !== entry) return;
+      const hadFocus = panelRef.current?.contains(document.activeElement);
+      entry.close();
+      // Closing a panel the user was inside would otherwise strand focus on
+      // the body, leaving the keyboard nowhere.
+      if (hadFocus) {
+        const trigger = panelTrigger(anchorRef.current);
+        requestAnimationFrame(() => trigger?.focus({ preventScroll: true }));
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      const at = openPanels.indexOf(entry);
+      if (at >= 0) openPanels.splice(at, 1);
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open, anchorRef, panelRef]);
 }
 
 /** CSS-overridable replacement for visible native selects. An inert,
@@ -235,66 +668,47 @@ export function ToolbarMenuSelect({
   menuWidth,
   className,
   style,
+  disabled,
+  variant = "bar",
+  fold,
 }: ToolbarMenuSelectProps) {
-  const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState({ left: 8, top: 8, width: menuWidth ?? 180, maxHeight: 320 });
+  // Derived rather than guarded at each handler: a control can be disabled
+  // while its menu is open (Find & Replace turns three fields off the moment
+  // Wildcards is ticked), and the menu has to shut on its own when that
+  // happens.
+  const [openState, setOpen] = useState(false);
+  const open = openState && !disabled;
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const keyboardOpen = useRef<"first" | "last" | null>(null);
   const id = useId();
   const selected = options.find((option) => option.value === value);
+  // The trigger's own width is the floor, so the menu is never narrower than
+  // the control it drops from; the widest option can push it wider.
+  const [intrinsicWidth, setIntrinsicWidth] = useState(menuWidth ?? 180);
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { width: intrinsicWidth, maxHeight: 320 , onClose: () => setOpen(false) });
 
   useLayoutEffect(() => {
     if (!open) return;
-    const update = () => {
-      const trigger = triggerRef.current;
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const nextWidth = Math.min(
-        window.innerWidth - 16,
-        menuWidth ?? Math.max(rect.width, menuRef.current?.scrollWidth ?? 180),
-      );
-      const below = window.innerHeight - rect.bottom - 8;
-      const above = rect.top - 8;
-      const placeAbove = below < 140 && above > below;
-      const maxHeight = Math.max(96, Math.min(320, placeAbove ? above : below));
-      const shownHeight = Math.min(menuRef.current?.scrollHeight ?? maxHeight, maxHeight);
-      setPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - nextWidth - 8)),
-        top: placeAbove ? Math.max(8, rect.top - shownHeight - 4) : rect.bottom + 4,
-        width: nextWidth,
-        maxHeight,
-      });
+    const measure = () => {
+      if (menuWidth !== undefined) return setIntrinsicWidth(menuWidth);
+      const trigger = triggerRef.current?.getBoundingClientRect().width ?? 0;
+      setIntrinsicWidth(Math.max(trigger, menuRef.current?.scrollWidth ?? 180));
     };
-    update();
+    measure();
     const frame = requestAnimationFrame(() => {
-      update();
+      measure();
       if (!keyboardOpen.current) return;
       const items = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]');
       const item = keyboardOpen.current === "last" ? items?.[items.length - 1] : items?.[0];
       item?.focus({ preventScroll: true });
       keyboardOpen.current = null;
     });
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-        requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
-      }
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", measure);
     return () => {
       cancelAnimationFrame(frame);
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", measure);
     };
   }, [open, menuWidth]);
 
@@ -334,13 +748,15 @@ export function ToolbarMenuSelect({
       ref={rootRef}
       className={`dxw-menu-select${className ? ` ${className}` : ""}`}
       data-dxw-menu-select=""
-      style={{ position: "relative", display: "inline-flex", width }}
+      data-dxw-fold={fold}
+      style={{ position: "relative", display: "inline-flex", width: width ?? (variant === "field" ? "100%" : undefined) }}
     >
       <select
         tabIndex={-1}
         title={title}
         aria-label={ariaLabel}
         aria-hidden="true"
+        disabled={disabled}
         value={value}
         onChange={(event) => pick(event.target.value)}
         data-dxw-native-bridge=""
@@ -366,6 +782,7 @@ export function ToolbarMenuSelect({
         data-tip={title}
         className="dxw-menu-select-trigger"
         data-dxw-menu-select-trigger=""
+        disabled={disabled}
         onMouseDown={(event) => event.preventDefault()}
         onClick={() => setOpen(!open)}
         onKeyDown={(event) => {
@@ -378,18 +795,26 @@ export function ToolbarMenuSelect({
         style={{
           width: "100%",
           minWidth: 0,
-          height: "var(--dxw-select-height, 26px)",
-          border: "1px solid var(--dxw-select-border, transparent)",
-          borderRadius: "var(--dxw-select-radius, 4px)",
-          background: "var(--dxw-select-bg, transparent)",
-          color: "var(--dxw-select-fg, var(--dxw-toolbar-fg, #3c4043))",
-          padding: "var(--dxw-select-padding, 0 6px)",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "space-between",
           gap: 6,
-          cursor: "pointer",
-          font: "var(--dxw-select-font, 13px system-ui, sans-serif)",
+          cursor: disabled ? "default" : "pointer",
+          opacity: disabled ? 0.5 : 1,
+          // A field reads as an input beside its label: same box as
+          // `dialogInput`, so a select and a text box in one dialog row line
+          // up. A bar control reads as part of the ribbon: no box at all.
+          ...(variant === "field"
+            ? { boxSizing: "border-box", minHeight: 26, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, padding: "4px 6px", font: "inherit", textAlign: "left" as const }
+            : {
+                height: "var(--dxw-select-height, 26px)",
+                border: "1px solid var(--dxw-select-border, transparent)",
+                borderRadius: "var(--dxw-select-radius, 4px)",
+                background: "var(--dxw-select-bg, transparent)",
+                color: "var(--dxw-select-fg, var(--dxw-toolbar-fg, #3c4043))",
+                padding: "var(--dxw-select-padding, 0 6px)",
+                font: "var(--dxw-select-font, 13px system-ui, sans-serif)",
+              }),
           ...style,
         }}
       >
@@ -477,7 +902,107 @@ export function ToolbarMenuSelect({
   );
 }
 
-/** Menu select that runs an action and resets (never shows a value). */
+export interface ToolbarCheckboxProps {
+  /** The visible text beside the box. */
+  label: React.ReactNode;
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  /** Accessible name, when the visible label is not the whole story. */
+  ariaLabel?: string;
+  disabled?: boolean;
+  title?: string;
+  /** Call sites use 11.5 for the dense edge grids and 12 elsewhere. */
+  fontSize?: number;
+}
+
+/**
+ * CSS-overridable replacement for a visible native checkbox — the companion
+ * to ToolbarMenuSelect, built the same way and for the same reason (#141).
+ *
+ * The real `<input type="checkbox">` stays in the DOM, holding the checked
+ * state, the accessible name, focus and the keyboard. Only its PAINT is
+ * replaced. That is not fussiness: a native checkbox is drawn by the
+ * operating system and ignores the theme entirely, so seven of them sitting
+ * beside themed dropdowns would have looked more out of place, not less —
+ * but two suites find these boxes with `input[type="checkbox"]`, one clicking
+ * the input and one reading its `aria-label`, and a `<div role="checkbox">`
+ * would have broken both for a purely cosmetic gain.
+ */
+export function ToolbarCheckbox({ label, checked, onChange, ariaLabel, disabled, title, fontSize = 12 }: ToolbarCheckboxProps) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <label
+      title={title}
+      data-dxw-checkbox=""
+      style={{
+        position: "relative",
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        fontSize,
+        color: T.fg,
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "default" : "pointer",
+      }}
+    >
+      <input
+        type="checkbox"
+        // Marks this as THE component's own input, the way the select keeps
+        // `data-dxw-native-bridge`. The regression guard has to tell the one
+        // legitimate native checkbox from a newly added bare one, and "it is
+        // the transparent one" would be a guess about styling.
+        data-dxw-checkbox-input=""
+        aria-label={ariaLabel}
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        // Sized and placed OVER the painted box rather than parked off-screen,
+        // so the browser's own focus and screen-reader rectangles land where
+        // the box is actually drawn.
+        style={{ position: "absolute", left: 0, width: 15, height: 15, margin: 0, opacity: 0, cursor: "inherit" }}
+      />
+      <span
+        aria-hidden="true"
+        style={{
+          flexShrink: 0,
+          width: 15,
+          height: 15,
+          boxSizing: "border-box",
+          borderRadius: 3,
+          border: `1px solid ${checked ? T.accent : T.border}`,
+          background: checked ? T.accent : T.popoverBg,
+          color: T.accentFg,
+          display: "grid",
+          placeItems: "center",
+          font: "700 10px system-ui, sans-serif",
+          lineHeight: 1,
+          // A gap in the panel colour, then the accent — the box itself is
+          // filled with the accent once ticked, and a ring drawn straight
+          // onto it would disappear. Accent rather than the pale selection
+          // blue for the reason measured in `ensureToolbarFieldStyles`: at
+          // 1.15:1 against white that ring is invisible, which is the same
+          // defect as having none (#145).
+          boxShadow: focused ? `0 0 0 2px ${T.popoverBg}, 0 0 0 4px ${T.accent}` : "none",
+        }}
+      >
+        {checked ? "✓" : ""}
+      </span>
+      {label}
+    </label>
+  );
+}
+
+/** Menu select that runs an action and resets (never shows a value).
+ *
+ * The trigger takes NO fixed width. Its label never changes — an action menu
+ * shows the same word whatever you pick — so a pinned width buys nothing and
+ * costs a clipped label: "Header & footer" in a 118px box reads "Header &
+ * foo…". The ribbon's layout engine already refuses to squeeze a control
+ * (flexShrink 0) and folds whole controls away when the line is full, so a
+ * label sized to its own text is the one that always fits.
+ */
 function ActionMenu({
   label,
   title,
@@ -489,6 +1014,7 @@ function ActionMenu({
   title: string;
   groups: { label?: string; items: [value: string, text: string][] }[];
   onPick: (value: string) => void;
+  /** Minimum width of the dropped menu, in px. Not the trigger's width. */
   width?: number;
 }) {
   return (
@@ -497,7 +1023,6 @@ function ActionMenu({
       triggerAriaLabel={title}
       value=""
       placeholder={label}
-      width={width}
       menuWidth={Math.max(width ?? 0, 190)}
       options={groups.flatMap((group) => group.items.map(([value, text]) => ({
         value,
@@ -513,14 +1038,10 @@ function ActionMenu({
 function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: string | null) => void }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  // One swatch per highlight plus the "no highlight" tile: 20px each, 4px
+  // apart, inside 8px of padding.
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: (HIGHLIGHTS.length + 1) * 24 + 12 , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button
@@ -533,26 +1054,43 @@ function HighlightMenu({ current, onPick }: { current?: string; onPick: (v: stri
       </button>
       {open && (
         <div
+          ref={panelRef}
           onMouseDown={(e) => e.preventDefault()}
           style={{
-            position: "absolute", top: 28, left: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 6, boxShadow: T.popoverShadow,
+            width: position.width, boxSizing: "border-box",
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             padding: 8, display: "flex", gap: 4, alignItems: "center",
           }}
         >
           {HIGHLIGHTS.map((h) => (
-            <div
+            <button
               key={h.name}
+              type="button"
               title={h.name}
+              aria-label={`Highlight ${h.name}`}
+              aria-pressed={current === h.name}
+              data-dxw-highlight={h.name}
+              onMouseDown={(e) => e.preventDefault()}
               onClick={() => { onPick(h.name); setOpen(false); }}
-              style={{ width: 20, height: 20, background: h.css, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
+              style={{
+                width: 20, height: 20, padding: 0, background: h.css, borderRadius: 3, cursor: "pointer",
+                border: current === h.name ? `2px solid ${T.accent}` : `1px solid ${T.border}`,
+              }}
             />
           ))}
-          <div
+          <button
+            type="button"
             title="No highlight"
+            aria-label="No highlight"
+            aria-pressed={!current}
+            data-dxw-highlight=""
+            onMouseDown={(e) => e.preventDefault()}
             onClick={() => { onPick(null); setOpen(false); }}
             style={{
-              width: 20, height: 20, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
+              width: 20, height: 20, padding: 0, borderRadius: 3, cursor: "pointer",
+              border: !current ? `2px solid ${T.accent}` : `1px solid ${T.border}`,
               background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
             }}
           />
@@ -593,46 +1131,14 @@ function ColorMenu({
 }) {
   const [open, setOpen] = useState(false);
   const [custom, setCustom] = useState(current);
-  const [position, setPosition] = useState({ left: 8, top: 8 });
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const valid = normalizedColor(custom);
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { onClose: () => setOpen(false) });
+  // Reopening shows the colour the selection has now, not the last one typed.
   useLayoutEffect(() => {
-    if (!open) return;
-    setCustom(current);
-    const update = () => {
-      const rect = triggerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const width = Math.min(236, window.innerWidth - 16);
-      const menuHeight = menuRef.current?.offsetHeight ?? 188;
-      const top = window.innerHeight - rect.bottom >= menuHeight + 8
-        ? rect.bottom + 4
-        : Math.max(8, rect.top - menuHeight - 4);
-      setPosition({ left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), top });
-    };
-    update();
-    const frame = requestAnimationFrame(update);
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-        requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
-      }
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      cancelAnimationFrame(frame);
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-    };
+    if (open) setCustom(current);
   }, [open, current]);
   const pick = (value: string) => {
     onPick(value);
@@ -693,6 +1199,7 @@ function ColorMenu({
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 8 }}>
             <span aria-hidden="true" style={{ width: 24, height: 24, borderRadius: 4, border: `1px solid ${T.border}`, background: valid ?? current, flexShrink: 0 }} />
             <input
+              data-dxw-field=""
               aria-label="Custom hex color"
               className="dxw-color-value"
               value={custom}
@@ -700,7 +1207,7 @@ function ColorMenu({
               onKeyDown={(event) => { if (event.key === "Enter" && valid) pick(valid); }}
               spellCheck={false}
               placeholder="#1a73e8"
-              style={{ minWidth: 0, flex: 1, height: 28, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 6px", color: T.fg, background: T.popoverBg }}
+              style={{ ...dialogInput, minWidth: 0, flex: 1, height: 28, padding: "3px 6px" }}
             />
             <button type="button" disabled={!valid} onClick={() => valid && pick(valid)} style={pillBtn}>Apply</button>
           </div>
@@ -751,6 +1258,66 @@ function ClearFormatIcon() {
   );
 }
 
+/** The w14 outline/shadow vocabulary that a WordArt object's text carries
+ * (WordArtMenu's gallery), applied directly to an ordinary run instead —
+ * Word's Home-tab "Text Effects and Typography" gallery. A small preset row,
+ * not the ~20-swatch gallery WordArt gets: outline, shadow, three tasteful
+ * combos, and a way back to plain text. Two presets set a fixed color
+ * alongside the effect (a genuine gallery "look"); the rest keep whatever
+ * color the run already has. */
+const TEXT_EFFECT_PRESETS: {
+  label: string;
+  color?: string;
+  effect: Parameters<DocxViewApi["applyFormat"]>[0]["textEffect"];
+}[] = [
+  { label: "No effect", effect: null },
+  { label: "Outline", effect: { outline: { color: "#000000", widthPt: 0.75 } } },
+  { label: "Shadow", effect: { shadow: true } },
+  { label: "Outline, shadow", effect: { outline: { color: "#000000", widthPt: 0.75 }, shadow: true } },
+  { label: "Bold red outline", effect: { outline: { color: "#C00000", widthPt: 1.5 } } },
+  { label: "White, blue outline, shadow", color: "#FFFFFF", effect: { outline: { color: "#4472C4", widthPt: 1 }, shadow: true } },
+];
+
+function TextEffectsMenu({ apply }: { apply: (patch: Parameters<DocxViewApi["applyFormat"]>[0]) => void }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 216 , onClose: () => setOpen(false) });
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Text Effects and Typography" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ color: "#2e74b5", fontWeight: 700, fontSize: 14, WebkitTextStroke: "0.5px #1F4E79" }}>A</span>
+      </button>
+      {open && (
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 4 }}>
+            {TEXT_EFFECT_PRESETS.map((preset) => (
+              <button
+                key={preset.label}
+                title={preset.label}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => {
+                  apply(preset.color ? { color: preset.color, textEffect: preset.effect } : { textEffect: preset.effect });
+                  setOpen(false);
+                }}
+                style={{
+                  height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, cursor: "pointer",
+                  font: "700 15px Georgia, serif",
+                  color: preset.color ?? T.fg,
+                  WebkitTextStroke: preset.effect?.outline ? `0.6px ${preset.effect.outline.color}` : undefined,
+                  textShadow: preset.effect?.shadow ? "1px 1px 2px rgba(0,0,0,0.55)" : undefined,
+                }}
+              >
+                A
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
 function IndentIcon({ dir }: { dir: 1 | -1 }) {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -765,16 +1332,13 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
     setUrl(api?.getLinkAt() ?? "");
     inputRef.current?.focus();
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open, api]);
   const submit = () => {
     const v = url.trim();
@@ -788,20 +1352,23 @@ function LinkMenu({ api }: { api: DocxViewApi | null }) {
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
-            position: "absolute", top: 28, left: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 10, width: 260, display: "flex", gap: 6, alignItems: "center",
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+            padding: 10, width: position.width, boxSizing: "border-box", display: "flex", gap: 6, alignItems: "center",
           }}
         >
           <input
+              data-dxw-field=""
             ref={inputRef}
             type="url"
             value={url}
             placeholder="Paste or type a link"
             onChange={(e) => setUrl(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && submit()}
-            style={{ flex: 1, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={{ ...popoverInput, flex: 1 }}
           />
           <button style={pillBtn} disabled={!url.trim()} onClick={submit}>Apply</button>
           {api?.getLinkAt() && (
@@ -829,6 +1396,19 @@ function FootnoteIcon() {
   );
 }
 
+/** The footnote mark over its separator, plus the closing rule that says the
+ * note sits at the END of the document rather than the foot of the page. */
+function EndnoteIcon() {
+  return (
+    <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
+      <path d="M2.5 10.5V3.5M2.5 3.5h7" strokeLinecap="round" />
+      <text x="10.2" y="6.6" fontSize="6.4" fill="currentColor" stroke="none" fontFamily="system-ui">i</text>
+      <path d="M2.5 10.5h11" strokeLinecap="round" strokeDasharray="1.5 1.6" />
+      <path d="M2.5 13.5h11" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function CommentIcon() {
   return (
     <svg style={icon} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4">
@@ -838,24 +1418,23 @@ function CommentIcon() {
   );
 }
 
-/** Insert-footnote popover: a text box; the note lands at the caret. */
-function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
+/** Insert-note popover: a text box; the note lands at the caret. A footnote
+ * goes to the foot of its page, an endnote to the end of the document. */
+function NoteMenu({ api, kind }: { api: DocxViewApi | null; kind: "footnote" | "endnote" }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const [hint, setHint] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = () => {
-    if (api?.addFootnote(text)) {
+    const added = kind === "footnote" ? api?.addFootnote(text) : api?.addEndnote(text);
+    if (added) {
       setText("");
       setHint("");
       setOpen(false);
@@ -865,21 +1444,24 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
-      <button title="Insert footnote (at the caret)" style={btnStyle(open)} onMouseDown={(e) => e.preventDefault()} onClick={() => setOpen(!open)}>
-        <FootnoteIcon />
+      <button title={`Insert ${kind} (at the caret)`} style={btnStyle(open)} onMouseDown={(e) => e.preventDefault()} onClick={() => setOpen(!open)}>
+        {kind === "footnote" ? <FootnoteIcon /> : <EndnoteIcon />}
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
-            position: "absolute", top: 28, right: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 10, width: 240,
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+            padding: 10, width: position.width, boxSizing: "border-box",
           }}
         >
           <textarea
+              data-dxw-field=""
             ref={inputRef}
             value={text}
-            placeholder="Footnote text…"
+            placeholder={kind === "footnote" ? "Footnote text…" : "Endnote text…"}
             onChange={(e) => setText(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
@@ -887,11 +1469,7 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
                 submit();
               }
             }}
-            style={{
-              width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
-              border: `1px solid ${T.border}`, borderRadius: 6, padding: 6,
-              font: "13px system-ui, sans-serif", outline: "none",
-            }}
+            style={popoverTextarea}
           />
           {hint && <div style={{ color: "#c5221f", fontSize: 12, marginTop: 4 }}>{hint}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 6 }}>
@@ -904,21 +1482,175 @@ function FootnoteMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+type FootnoteOpts = ReturnType<NonNullable<DocxViewApi>["getFootnoteOptions"]>;
+type EndnoteOpts = ReturnType<NonNullable<DocxViewApi>["getEndnoteOptions"]>;
+type FootnotePatch = Parameters<NonNullable<DocxViewApi>["setFootnoteOptions"]>[0];
+type EndnotePatch = Parameters<NonNullable<DocxViewApi>["setEndnoteOptions"]>[0];
+
+const noteOptionsFieldStyle: React.CSSProperties = { ...dialogInput, font: "12.5px system-ui, sans-serif" };
+const noteOptionsLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+
+const NOTE_FORMAT_OPTIONS = [
+  { value: "decimal", label: "1, 2, 3" },
+  { value: "lowerRoman", label: "i, ii, iii" },
+  { value: "upperRoman", label: "I, II, III" },
+  { value: "lowerLetter", label: "a, b, c" },
+  { value: "upperLetter", label: "A, B, C" },
+  { value: "chicago", label: "*, †, ‡, §" },
+];
+
+const NOTE_RESTART_OPTIONS = [
+  { value: "continuous", label: "Continuous" },
+  { value: "eachSect", label: "Each section" },
+  { value: "eachPage", label: "Each page" },
+];
+
+/** One note type's fields (number format, restart rule, start-at, position):
+ * shared markup for the footnote and endnote halves of NoteOptionsMenu — the
+ * two differ only in their position vocabulary and which setter applies. */
+function NoteOptionsFields({
+  title,
+  fieldPrefix,
+  values,
+  onPatch,
+  posOptions,
+}: {
+  title: string;
+  fieldPrefix: string;
+  values: { fmt: string; start: number | null; restart: string; pos: string };
+  onPatch: (patch: { fmt?: string; start?: number | null; restart?: string; pos?: string }) => void;
+  posOptions: readonly (readonly [string, string])[];
+}) {
+  return (
+    <div style={{ display: "grid", gap: 6, padding: 8, border: `1px solid ${T.border}`, borderRadius: 6, background: T.bg }}>
+      <strong style={{ color: T.fg, font: "600 12px system-ui, sans-serif", letterSpacing: .2 }}>{title}</strong>
+      <label style={noteOptionsLabelStyle}>
+        <span>Number format</span>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel={`${fieldPrefix} number format`}
+          value={values.fmt}
+          options={NOTE_FORMAT_OPTIONS}
+          onChange={(fmt) => onPatch({ fmt })}
+          style={noteOptionsFieldStyle}
+        />
+      </label>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        <label style={noteOptionsLabelStyle}>
+          <span>Restart</span>
+          <ToolbarMenuSelect
+            variant="field"
+            ariaLabel={`${fieldPrefix} restart`}
+            value={values.restart}
+            options={NOTE_RESTART_OPTIONS}
+            onChange={(restart) => onPatch({ restart })}
+            style={noteOptionsFieldStyle}
+          />
+        </label>
+        <label style={noteOptionsLabelStyle}>
+          <span>Start at</span>
+          <input
+              data-dxw-field=""
+            aria-label={`${fieldPrefix} start at`}
+            type="number"
+              data-dxw-number=""
+            min={0}
+            value={values.start ?? ""}
+            placeholder="1"
+            onChange={(event) => {
+              const raw = event.target.value.trim();
+              const n = raw === "" ? null : parseInt(raw, 10);
+              if (n === null || (Number.isInteger(n) && n >= 0)) onPatch({ start: n });
+            }}
+            style={noteOptionsFieldStyle}
+          />
+        </label>
+      </div>
+      <label style={noteOptionsLabelStyle}>
+        <span>Position</span>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel={`${fieldPrefix} position`}
+          value={values.pos}
+          options={posOptions.map(([value, label]) => ({ value, label }))}
+          onChange={(pos) => onPatch({ pos })}
+          style={noteOptionsFieldStyle}
+        />
+      </label>
+    </div>
+  );
+}
+
+const FOOTNOTE_POS_OPTIONS = [["pageBottom", "Bottom of page"], ["beneathText", "Beneath text"]] as const;
+const ENDNOTE_POS_OPTIONS = [["sectEnd", "End of section"], ["docEnd", "End of document"]] as const;
+
+/**
+ * Word's Footnote and Endnote "options" dialog (the small launcher arrow in
+ * the References > Footnotes group): number format, restart rule, start-at,
+ * and position, for both note types in one popover beside the insert
+ * controls. Every change applies immediately (no separate Apply/Insert step,
+ * like WatermarkMenu) since each field is independent document-wide state.
+ */
+function NoteOptionsMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 278, align: "end" , onClose: () => setOpen(false) });
+  const [fn, setFn] = useState<FootnoteOpts>(() => api?.getFootnoteOptions() ?? { fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" });
+  const [en, setEn] = useState<EndnoteOpts>(() => api?.getEndnoteOptions() ?? { fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" });
+  useEffect(() => {
+    if (!open) return;
+    if (api?.getFootnoteOptions) setFn(api.getFootnoteOptions());
+    if (api?.getEndnoteOptions) setEn(api.getEndnoteOptions());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Footnote and endnote options" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        <span style={{ fontSize: 12.5 }}>Note options</span>
+      </button>
+      {open && (
+        // 278 wide, not 250: at 250 the side-by-side Restart and Start-at
+        // boxes were narrower than the words above them. The gap between the
+        // two halves is 14 and each is boxed, because a hairline alone left
+        // eight fields reading as one unbroken column (#141).
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 14, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <NoteOptionsFields
+            title="Footnotes"
+            fieldPrefix="Footnote"
+            values={fn}
+            posOptions={FOOTNOTE_POS_OPTIONS}
+            onPatch={(patch) => {
+              if (api?.setFootnoteOptions(patch as FootnotePatch)) setFn({ ...fn, ...patch } as FootnoteOpts);
+            }}
+          />
+          <NoteOptionsFields
+            title="Endnotes"
+            fieldPrefix="Endnote"
+            values={en}
+            posOptions={ENDNOTE_POS_OPTIONS}
+            onPatch={(patch) => {
+              if (api?.setEndnoteOptions(patch as EndnotePatch)) setEn({ ...en, ...patch } as EndnoteOpts);
+            }}
+          />
+        </div>
+      )}
+    </span>
+  );
+}
+
 /** Google-Docs-style "add comment": popover with a text box, anchored to the
  * current selection (the editor keeps its owned selection while typing). */
 function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions?: string[] }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
   const submit = () => {
     if (api?.addComment(text)) {
@@ -950,13 +1682,16 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
-            position: "absolute", top: 28, right: 0, zIndex: 100, background: T.popoverBg,
+            position: "fixed", top: position.top, left: position.left, zIndex: 100, background: T.popoverBg,
             border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow,
-            padding: 10, width: 240,
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+            padding: 10, width: position.width, boxSizing: "border-box",
           }}
         >
           <textarea
+              data-dxw-field=""
             ref={inputRef}
             value={text}
             placeholder="Comment on the selection…"
@@ -967,11 +1702,7 @@ function CommentMenu({ api, mentions = [] }: { api: DocxViewApi | null; mentions
                 submit();
               }
             }}
-            style={{
-              width: "100%", minHeight: 54, resize: "vertical", boxSizing: "border-box",
-              border: `1px solid ${T.border}`, borderRadius: 6, padding: 6,
-              font: "13px system-ui, sans-serif", outline: "none",
-            }}
+            style={popoverTextarea}
           />
           {mentions.length > 0 && (
             <div aria-label="Mention a collaborator" style={{ display: "flex", flexWrap: "wrap", gap: 4, alignItems: "center", marginTop: 6 }}>
@@ -1015,16 +1746,14 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
   const [name, setName] = useState("");
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 , onClose: () => setOpen(false) });
   const inputRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
+  const bookmarks = open ? (api?.listBookmarks() ?? []) : [];
   const submit = () => {
     const value = name.trim();
     if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(value)) {
@@ -1037,7 +1766,8 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
     }
     setName("");
     setError("");
-    setOpen(false);
+    // Stay open: the new bookmark appears in the list below, which is the only
+    // confirmation that anything happened — the document shows nothing.
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -1045,21 +1775,51 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
         Bookmark
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 280, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 6, color: T.fg }}>Bookmark name</div>
           <input
+              data-dxw-field=""
             ref={inputRef}
             value={name}
             placeholder="Quarterly_Revenue"
             onChange={(event) => { setName(event.target.value); setError(""); }}
             onKeyDown={(event) => event.key === "Enter" && submit()}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
           {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
             <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => setOpen(false)}>Cancel</button>
             <button style={pillBtn} disabled={!name.trim()} onClick={submit}>Add</button>
           </div>
+
+          {/* THE BOOKMARKS THAT EXIST. Adding one was the whole feature: a
+              bookmark is invisible in the document, so without a list there was
+              no way to tell whether one had been made, what it was called, or
+              how to get back to it. Reading on open keeps it a walk per
+              opening rather than per render. */}
+          <div style={sectionLabel}>In this document</div>
+          {bookmarks.length === 0 ? (
+            <div style={menuNote}>
+              None yet. Bookmarks are invisible markers — add one here, then jump back to it from this
+              list or point a cross-reference at it.
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 2 }} data-testid="bookmark-list">
+              {bookmarks.map((mark) => (
+                <button
+                  key={mark}
+                  style={menuItem}
+                  title={`Go to ${mark}`}
+                  onClick={() => {
+                    api?.goToBookmark(mark);
+                    setOpen(false);
+                  }}
+                >
+                  {mark}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </span>
@@ -1068,20 +1828,25 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
 
 function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
-  const [bookmark, setBookmark] = useState("");
+  const [refType, setRefType] = useState<"bookmark" | "heading" | "caption" | "numberedItem">("bookmark");
+  const [choice, setChoice] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const bookmarks = open ? api?.listBookmarks() ?? [] : [];
-  const selected = bookmarks.includes(bookmark) ? bookmark : bookmarks[0] ?? "";
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 280 , onClose: () => setOpen(false) });
+  const bookmarks = open && refType === "bookmark" ? api?.listBookmarks() ?? [] : [];
+  const targets = open && refType !== "bookmark"
+    ? (api?.listCrossRefTargets() ?? []).filter((target) => target.kind === refType)
+    : [];
+  const options = refType === "bookmark"
+    ? bookmarks.map((name) => ({ value: `b:${name}`, label: name }))
+    : targets.map((target) => ({ value: `t:${target.key}`, label: target.text }));
+  const selected = options.some((option) => option.value === choice) ? choice : options[0]?.value ?? "";
   const insert = (kind: "text" | "page") => {
-    if (selected && api?.insertCrossReference(selected, kind)) setOpen(false);
+    if (!selected) return;
+    const done = selected.startsWith("b:")
+      ? api?.insertCrossReference(selected.slice(2), kind)
+      : api?.insertCrossRefToTarget(selected.slice(2), kind);
+    if (done) setOpen(false);
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -1089,23 +1854,41 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
         Cross-reference
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, left: 0, zIndex: 100, width: 260, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          {bookmarks.length === 0 ? (
-            <div style={{ color: T.muted, fontSize: 12 }}>Add a bookmark first, then reference its text or page.</div>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 8 }}>
+          <ToolbarMenuSelect
+            value={refType}
+            ariaLabel="Reference type"
+            width="100%"
+            menuWidth={240}
+            options={[
+              { value: "bookmark", label: "Bookmark" },
+              { value: "heading", label: "Heading" },
+              { value: "caption", label: "Caption" },
+              { value: "numberedItem", label: "Numbered item" },
+            ]}
+            onChange={(value) => { setRefType(value as "bookmark" | "heading" | "caption" | "numberedItem"); setChoice(""); }}
+            style={{ borderColor: T.border }}
+          />
+          {options.length === 0 ? (
+            <div style={{ color: T.muted, fontSize: 12 }}>
+              {refType === "bookmark"
+                ? "Add a bookmark first, then reference its text or page."
+                : "Nothing of this type to reference yet."}
+            </div>
           ) : (
             <>
               <ToolbarMenuSelect
                 value={selected}
-                ariaLabel="Bookmark to reference"
+                ariaLabel="Target to reference"
                 width="100%"
-                menuWidth={240}
-                options={bookmarks.map((name) => ({ value: name, label: name }))}
-                onChange={setBookmark}
+                menuWidth={260}
+                options={options}
+                onChange={setChoice}
                 style={{ borderColor: T.border }}
               />
-              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
                 <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => insert("page")}>Page number</button>
-                <button style={pillBtn} onClick={() => insert("text")}>Bookmark text</button>
+                <button style={pillBtn} onClick={() => insert("text")}>Referenced text</button>
               </div>
             </>
           )}
@@ -1115,33 +1898,121 @@ function CrossReferenceMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+/** Word's Insert Caption, popover-sized: label, optional text, above/below. */
+function CaptionMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [label, setLabel] = useState("Figure");
+  const [text, setText] = useState("");
+  const [position, setPosition] = useState<"below" | "above">("below");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const panelPosition = useAnchoredPanel(rootRef, panelRef, open, { width: 250 , onClose: () => setOpen(false) });
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Insert a caption for the selected object or table" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        Caption
+      </button>
+      {open && (
+        <div ref={panelRef} style={{ position: "fixed", top: panelPosition.top, left: panelPosition.left, zIndex: 100, width: panelPosition.width, maxHeight: panelPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 7 }}>
+          <label style={dialogFieldRow}>
+            <span>Label</span>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Caption label"
+              value={label}
+              options={[
+                { value: "Figure", label: "Figure" },
+                { value: "Table", label: "Table" },
+                { value: "Equation", label: "Equation" },
+              ]}
+              onChange={setLabel}
+            />
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Text</span>
+            <input data-dxw-field="" aria-label="Caption text" value={text} onChange={(event) => setText(event.target.value)} placeholder="optional" style={dialogInput} />
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Position</span>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Caption position"
+              value={position}
+              options={[
+                { value: "below", label: "Below" },
+                { value: "above", label: "Above" },
+              ]}
+              onChange={(value) => setPosition(value as "below" | "above")}
+            />
+          </label>
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              style={pillBtn}
+              onClick={() => {
+                if (api?.insertCaption(label, text.trim(), position)) {
+                  setText("");
+                  setOpen(false);
+                }
+              }}
+            >
+              Insert
+            </button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Structure gallery: each button inserts a ready-made linear-grammar template
+ * with □ placeholder tokens through the same insertEquation path the manual
+ * input uses — Word's "click a structure, then fill in the boxes" workflow.
+ *
+ * Palette is exactly the set of structures the linear grammar (edit/math.ts)
+ * round-trips: fraction, sup/sub, radical, the three n-ary operators, a
+ * delimiter pair, a stacked limit, and a matrix — every one covered by the
+ * math-corpus round-trip test. Word's "Function" structures (sin, cos, log…)
+ * are NOT included: they author m:func, which the linear grammar does not
+ * model (isLinearSafe refuses it — math-corpus.test.ts's dense fixture notes
+ * "4 m:func equations" as the read-only ones), so a Function button would
+ * insert an equation the user could never open again to edit.
+ */
+const EQUATION_STRUCTURES = [
+  ["fraction", "Fraction", "𝑎/𝑏", "□/□"],
+  ["superscript", "Superscript", "𝑥²", "□^□"],
+  ["subscript", "Subscript", "𝑥₂", "□_□"],
+  ["radical", "Radical", "√𝑥", "√□"],
+  ["integral", "Integral", "∫", "∫_□^□□"],
+  ["sum", "Summation", "∑", "∑_□^□□"],
+  ["product", "Product", "∏", "∏_□^□□"],
+  ["brackets", "Brackets", "( )", "(□)"],
+  // "┴" is the linear grammar's own limLow glyph (edit/math.ts LIM_LOW) —
+  // this is exactly what linearizing an m:limLow produces.
+  ["limit", "Limit", "lim", "{lim}┴□"],
+  ["matrix", "Matrix (2×2)", "▦", "[□&□;□&□]"],
+] as const;
+
 function EquationMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [linear, setLinear] = useState("x={-b±√{b^2-4ac}}/{2a}");
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 340 , onClose: () => setOpen(false) });
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
   }, [open]);
-  const submit = () => {
-    if (api?.insertEquation(linear)) {
+  const submit = (text: string) => {
+    if (api?.insertEquation(text)) {
       setError("");
       setOpen(false);
     } else {
       setError("Place the caret in editable text and enter a valid equation.");
     }
   };
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const viewportWidth = typeof window === "undefined" ? 356 : window.innerWidth;
-  const popoverWidth = Math.min(340, viewportWidth - 16);
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert equation" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
@@ -1149,21 +2020,468 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ marginLeft: 5 }}>Equation</span>
       </button>
       {open && (
-        <div data-dxw-equation-menu="" style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Linear equation</div>
+        <div ref={panelRef} data-dxw-equation-menu="" style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg }}>Structures</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 5, marginBottom: 8 }}>
+            {EQUATION_STRUCTURES.map(([key, title, glyph, template]) => (
+              <button
+                key={key}
+                type="button"
+                title={title}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => submit(template)}
+                style={{ height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "15px 'Cambria Math', serif" }}
+              >
+                {glyph}
+              </button>
+            ))}
+          </div>
+          <div style={{ font: "600 12px system-ui, sans-serif", marginBottom: 5, color: T.fg, borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>Linear equation</div>
           <input
+              data-dxw-field=""
             ref={inputRef}
             aria-label="Linear equation"
             value={linear}
             onChange={(event) => { setLinear(event.target.value); setError(""); }}
-            onKeyDown={(event) => event.key === "Enter" && submit()}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "15px 'Cambria Math', serif", outline: "none" }}
+            onKeyDown={(event) => event.key === "Enter" && submit(linear)}
+            style={{ ...popoverInput, padding: "6px 8px", font: "15px 'Cambria Math', serif" }}
           />
           <div style={{ color: T.muted, fontSize: 11.5, marginTop: 5 }}>Use ^, _, /, √&#123;…&#125;, ∫, matrices [a&amp;b;c&amp;d], and grouped &#123;…&#125; expressions.</div>
           {error && <div style={{ color: "#c5221f", fontSize: 11.5, marginTop: 5 }}>{error}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
-            <button style={pillBtn} disabled={!linear.trim()} onClick={submit}>Insert</button>
+            <button style={pillBtn} disabled={!linear.trim()} onClick={() => submit(linear)}>Insert</button>
           </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Table of contents, and the two update passes that keep a document's field
+ * results current.
+ *
+ * Word puts these on a References tab this ribbon does not have. A TOC IS a
+ * field, so it lands beside the other field controls — the same placement
+ * INSERT_COMMANDS already records for `insertToc`.
+ *
+ * The two updates are different jobs and both are offered: refreshTocs
+ * REBUILDS the entry paragraphs from the document's current headings, while
+ * updateFields only recomputes every field's result (page numbers, dates,
+ * cross-references) against the current layout.
+ */
+function ContentsMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 320, align: "end", onClose: () => setOpen(false) });
+  // Read when the menu OPENS, not on every render: the counts come from a walk
+  // of the document, and a ribbon control must not pay for that while idle.
+  const available = open ? api?.contentsAvailability() : undefined;
+  const headings = available?.headings ?? 0;
+  const marked = available?.indexEntries ?? 0;
+
+  const act = (run: () => void) => {
+    run();
+    setOpen(false);
+  };
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        title="Insert or update a table of contents"
+        style={{ ...btnStyle(open), display: "inline-flex", alignItems: "center", gap: 5 }}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setOpen(!open)}
+        data-testid="contents-menu"
+      >
+        Contents
+        <span aria-hidden="true" style={{ fontSize: 10 }}>⌄</span>
+      </button>
+      {open && (
+        <div
+          ref={panelRef}
+          style={{
+            position: "fixed", top: position.top, left: position.left, zIndex: 100,
+            width: position.width, maxHeight: position.maxHeight, overflowY: "auto",
+            overscrollBehavior: "contain", boxSizing: "border-box", padding: 10,
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow,
+          }}
+        >
+          <div style={sectionLabel}>Table of contents</div>
+          {/* WHAT IT IS BUILT FROM, said before it is built. Inserting a TOC
+              into a document with no headings drops Word's "No table of
+              contents entries found." into the page — true, and no help at all
+              about what to do next. */}
+          <div style={{ ...menuNote, color: headings > 0 ? T.muted : T.accent }} data-testid="toc-state">
+            {headings > 0
+              ? `${headings} heading${headings === 1 ? "" : "s"} found — the contents will list ${headings === 1 ? "it" : "them"}.`
+              : "No headings yet. A table of contents lists paragraphs styled Heading 1–3, so style your section titles first."}
+          </div>
+          <button style={menuItem} onClick={() => act(() => api?.insertToc())} data-testid="toc-insert">
+            Insert table of contents
+          </button>
+          <button style={menuItem} onClick={() => act(() => api?.insertToc({ captionLabel: "Figure" }))}>
+            Insert table of figures
+          </button>
+          <button style={menuItem} onClick={() => act(() => api?.refreshTocs())}>
+            Update it from the document
+          </button>
+          <div style={menuNote}>
+            A table of contents is a snapshot. Update it after you add or rename headings.
+          </div>
+
+          <div style={sectionLabel}>Index</div>
+          <div style={{ ...menuNote, color: marked > 0 ? T.muted : T.accent }} data-testid="index-state">
+            {marked > 0
+              ? `${marked} entr${marked === 1 ? "y" : "ies"} marked.`
+              : "Nothing marked yet. Select a word, mark it, then insert the index."}
+          </div>
+          <button style={menuItem} onClick={() => act(() => api?.addIndexEntry())} data-testid="index-mark">
+            Mark the selected text
+          </button>
+          <button style={menuItem} onClick={() => act(() => api?.insertIndex())}>
+            Insert index
+          </button>
+
+          <div style={sectionLabel}>Everything else</div>
+          <button style={menuItem} onClick={() => act(() => api?.updateFields())}>
+            Update all fields
+          </button>
+          <div style={menuNote}>
+            Recomputes page numbers, dates and cross-references against the current layout.
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/**
+ * The References citations cluster: insert a citation (picker over the
+ * document's sources), manage sources (new / edit / delete), pick the
+ * citation style, and insert the generated bibliography. One popover in the
+ * chart-data-editor idiom — the source form is the only multi-field surface
+ * the cluster needs.
+ */
+function CitationsMenu({ api }: { api: DocxViewApi | null }) {
+  type Source = ReturnType<NonNullable<typeof api>["listCitationSources"]>[number];
+  const SOURCE_TYPES = [
+    ["book", "Book"],
+    ["article", "Journal article"],
+    ["website", "Website"],
+    ["report", "Report"],
+  ] as const;
+  type SourceType = (typeof SOURCE_TYPES)[number][0];
+  const [open, setOpen] = useState(false);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [style, setStyle] = useState("APA");
+  /** null = list view; "" = new-source form; a tag = edit that source. */
+  const [editing, setEditing] = useState<string | null>(null);
+  const [type, setType] = useState<SourceType>("book");
+  const [tag, setTag] = useState("");
+  const [authors, setAuthors] = useState("");
+  const [corporate, setCorporate] = useState("");
+  const [title, setTitle] = useState("");
+  const [year, setYear] = useState("");
+  const [container, setContainer] = useState("");
+  const [error, setError] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 380 , onClose: () => setOpen(false) });
+
+  const refresh = () => {
+    setSources(api?.listCitationSources() ?? []);
+    setStyle(api?.getCitationStyle() ?? "APA");
+  };
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    refresh();
+    setEditing(null);
+    setError("");
+    setOpen(true);
+  };
+
+  const containerLabel = type === "article" ? "Journal" : type === "website" ? "URL" : "Publisher";
+  const parseAuthors = (text: string): { last: string; first?: string }[] =>
+    text
+      .split(";")
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .map((part) => {
+        const [last, first] = part.split(",").map((half) => half.trim());
+        return first ? { last, first } : { last };
+      })
+      .filter((person) => person.last);
+  const defaultTag = (): string => {
+    const stem = (parseAuthors(authors)[0]?.last ?? corporate ?? title ?? "Source")
+      .replace(/[^A-Za-z0-9_-]/g, "")
+      .slice(0, 20) || "Source";
+    const base = `${stem}${year.slice(-2)}`;
+    let candidate = base;
+    for (let n = 2; sources.some((source) => source.tag === candidate); n++) candidate = `${base}_${n}`;
+    return candidate;
+  };
+  const openForm = (source: Source | null) => {
+    setEditing(source?.tag ?? "");
+    setType(
+      source?.sourceType === "JournalArticle" ? "article"
+        : source?.sourceType === "InternetSite" ? "website"
+          : source?.sourceType === "Report" ? "report" : "book",
+    );
+    setTag(source?.tag ?? "");
+    setAuthors((source?.authors ?? []).map((person) => (person.first ? `${person.last}, ${person.first}` : person.last)).join("; "));
+    setCorporate(source?.corporate ?? "");
+    setTitle(source?.title ?? "");
+    setYear(source?.year ?? "");
+    setContainer(source?.journal ?? source?.publisher ?? source?.url ?? "");
+    setError("");
+  };
+  const submitForm = () => {
+    const fields = {
+      type,
+      authors: parseAuthors(authors),
+      corporate: parseAuthors(authors).length > 0 ? "" : corporate.trim(),
+      title: title.trim(),
+      year: year.trim(),
+      publisher: type === "book" || type === "report" ? container.trim() : "",
+      journal: type === "article" ? container.trim() : "",
+      url: type === "website" ? container.trim() : "",
+    };
+    const done = editing
+      ? api?.editCitationSource(editing, fields)
+      : api?.createCitationSource({ tag: tag.trim() || defaultTag(), ...fields });
+    if (!done) {
+      setError(editing ? "Could not update the source." : "Could not add the source — is the tag already in use?");
+      return;
+    }
+    setEditing(null);
+    refresh();
+  };
+  const remove = (sourceTag: string) => {
+    if (api?.deleteCitationSource(sourceTag)) {
+      setError("");
+      refresh();
+    } else {
+      setError("The source is cited in the document. Remove its citations first.");
+    }
+  };
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Citations and bibliography" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>
+        Citations
+      </button>
+      {open && (
+        <div ref={panelRef} data-dxw-citations-menu="" style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflow: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>Citations</strong>
+          <label style={{ ...fieldLabelStyle, gridTemplateColumns: "auto 1fr", alignItems: "center", display: "grid", gap: 6 }}>
+            <span>Style</span>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Citation style"
+              value={style === "MLA" ? "MLA" : "APA"}
+              options={[
+                { value: "APA", label: "APA" },
+                { value: "MLA", label: "MLA" },
+              ]}
+              onChange={(next) => {
+                api?.setCitationStyle(next as "APA" | "MLA");
+                refresh();
+              }}
+              style={fieldStyle}
+            />
+          </label>
+          {editing === null ? (
+            <>
+              <div role="list" aria-label="Bibliography sources" style={{ display: "grid", gap: 5 }}>
+                {sources.length === 0 && (
+                  <div style={{ color: T.muted, font: "12px system-ui, sans-serif" }}>No sources yet. Add one to cite it.</div>
+                )}
+                {sources.map((source) => (
+                  <div key={source.tag} role="listitem" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.fg, font: "12px system-ui, sans-serif" }} title={source.title ?? source.tag}>
+                      {source.title || source.tag}
+                      {source.year ? ` (${source.year})` : ""}
+                    </span>
+                    <button type="button" title={`Cite ${source.tag}`} style={rowBtn} onClick={() => { if (api?.insertCitation(source.tag)) setOpen(false); }}>Cite</button>
+                    <button type="button" title={`Edit ${source.tag}`} style={rowBtn} onClick={() => openForm(source)}>Edit</button>
+                    <button type="button" title={`Delete ${source.tag}`} style={rowBtn} onClick={() => remove(source.tag)}>✕</button>
+                  </div>
+                ))}
+              </div>
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end", borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+                <button type="button" style={rowBtn} onClick={() => openForm(null)}>New source</button>
+                <button type="button" style={pillBtn} onClick={() => { if (api?.insertBibliography()) setOpen(false); }}>Insert bibliography</button>
+              </div>
+            </>
+          ) : (
+            <div role="group" aria-label={editing ? "Edit source" : "New source"} style={{ display: "grid", gap: 7 }}>
+              <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{editing ? `Edit source (${editing})` : "New source"}</strong>
+              <label style={fieldLabelStyle}>
+                <span>Type</span>
+                <ToolbarMenuSelect
+                  variant="field"
+                  ariaLabel="Source type"
+                  value={type}
+                  options={SOURCE_TYPES.map(([value, label]) => ({ value, label }))}
+                  onChange={(value) => setType(value as SourceType)}
+                  style={fieldStyle}
+                />
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Authors — Last, First; Last, First</span>
+                <input data-dxw-field="" aria-label="Authors" value={authors} onChange={(event) => setAuthors(event.target.value)} placeholder="Doe, Jane; Smith, Ada" style={fieldStyle} />
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Corporate author (when no person author)</span>
+                <input data-dxw-field="" aria-label="Corporate author" value={corporate} onChange={(event) => setCorporate(event.target.value)} style={fieldStyle} />
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Title</span>
+                <input data-dxw-field="" aria-label="Title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: 6 }}>
+                <label style={fieldLabelStyle}>
+                  <span>Year</span>
+                  <input data-dxw-field="" aria-label="Year" value={year} onChange={(event) => setYear(event.target.value)} style={fieldStyle} />
+                </label>
+                <label style={fieldLabelStyle}>
+                  <span>{containerLabel}</span>
+                  <input data-dxw-field="" aria-label={containerLabel} value={container} onChange={(event) => setContainer(event.target.value)} style={fieldStyle} />
+                </label>
+              </div>
+              {!editing && (
+                <label style={fieldLabelStyle}>
+                  <span>Tag (blank = automatic)</span>
+                  <input data-dxw-field="" aria-label="Source tag" value={tag} onChange={(event) => setTag(event.target.value)} placeholder={defaultTag()} style={fieldStyle} />
+                </label>
+              )}
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button type="button" style={rowBtn} onClick={() => { setEditing(null); setError(""); }}>Cancel</button>
+                <button type="button" style={pillBtn} onClick={submitForm}>{editing ? "Save" : "Add source"}</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/**
+ * Quick Parts (building blocks): save the current selection into the
+ * document's glossary part under a name, then insert any saved block at the
+ * caret from a gallery grouped by category — the CitationsMenu popover idiom
+ * (list view / form view in one popover, toggled by `saving`).
+ */
+function QuickPartsMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [blocks, setBlocks] = useState<{ name: string; category: string }[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [name, setName] = useState("");
+  const [category, setCategory] = useState("");
+  const [error, setError] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 320 , onClose: () => setOpen(false) });
+
+  const refresh = () => setBlocks(api?.listBuildingBlocks() ?? []);
+  const toggle = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
+    refresh();
+    setSaving(false);
+    setError("");
+    setOpen(true);
+  };
+  const openSaveForm = () => {
+    setName("");
+    setCategory("");
+    setError("");
+    setSaving(true);
+  };
+  const submitSave = () => {
+    if (!api?.createBuildingBlock(name.trim(), category.trim())) {
+      setError("Could not save the selection — select some content first, or pick a different name.");
+      return;
+    }
+    setSaving(false);
+    refresh();
+  };
+  const insert = (blockName: string) => {
+    if (api?.insertBuildingBlock(blockName)) setOpen(false);
+  };
+  const remove = (blockName: string) => {
+    if (api?.deleteBuildingBlock(blockName)) refresh();
+  };
+
+  const byCategory = new Map<string, { name: string; category: string }[]>();
+  for (const block of blocks) {
+    const group = byCategory.get(block.category) ?? [];
+    group.push(block);
+    byCategory.set(block.category, group);
+  }
+
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Quick Parts: save and reuse content" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>
+        Quick Parts
+      </button>
+      {open && (
+        <div ref={panelRef} data-dxw-quickparts-menu="" style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflow: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>Quick Parts</strong>
+          {!saving ? (
+            <>
+              <div role="list" aria-label="Quick Parts gallery" style={{ display: "grid", gap: 8 }}>
+                {blocks.length === 0 && (
+                  <div style={{ color: T.muted, font: "12px system-ui, sans-serif" }}>No Quick Parts yet. Save a selection to reuse it.</div>
+                )}
+                {[...byCategory.entries()].map(([groupName, groupBlocks]) => (
+                  <div key={groupName} style={{ display: "grid", gap: 4 }}>
+                    <span style={{ color: T.muted, font: "600 10.5px system-ui, sans-serif", textTransform: "uppercase" }}>{groupName}</span>
+                    {groupBlocks.map((block) => (
+                      <div key={block.name} role="listitem" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.fg, font: "12px system-ui, sans-serif" }} title={block.name}>
+                          {block.name}
+                        </span>
+                        <button type="button" title={`Insert ${block.name}`} style={rowBtn} onClick={() => insert(block.name)}>Insert</button>
+                        <button type="button" title={`Delete ${block.name}`} style={rowBtn} onClick={() => remove(block.name)}>✕</button>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", justifyContent: "flex-end", borderTop: `1px solid ${T.border}`, paddingTop: 8 }}>
+                <button type="button" style={pillBtn} onClick={openSaveForm}>Save selection as Quick Part</button>
+              </div>
+            </>
+          ) : (
+            <div role="group" aria-label="Save selection as Quick Part" style={{ display: "grid", gap: 7 }}>
+              <label style={fieldLabelStyle}>
+                <span>Name</span>
+                <input data-dxw-field="" aria-label="Quick Part name" autoFocus value={name} onChange={(event) => setName(event.target.value)} style={fieldStyle} />
+              </label>
+              <label style={fieldLabelStyle}>
+                <span>Category (blank = General)</span>
+                <input data-dxw-field="" aria-label="Quick Part category" value={category} onChange={(event) => setCategory(event.target.value)} placeholder="General" style={fieldStyle} />
+              </label>
+              {error && <div role="alert" style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</div>}
+              <div style={{ display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button type="button" style={rowBtn} onClick={() => { setSaving(false); setError(""); }}>Cancel</button>
+                <button type="button" style={pillBtn} onClick={submitSave} disabled={!name.trim()}>Save</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </span>
@@ -1176,16 +2494,8 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [custom, setCustom] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, (typeof window === "undefined" ? 280 : window.innerWidth) - 272));
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 264 , onClose: () => setOpen(false) });
   const insertCustom = () => {
     if (api?.insertSymbol(custom)) {
       setCustom("");
@@ -1198,7 +2508,7 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ fontFamily: "serif", fontSize: 14 }}>Ω <span style={{ fontFamily: "system-ui, sans-serif", fontSize: 12 }}>Advanced Symbol</span></span>
       </button>
       {open && (
-        <div style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: 264, padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(6, 32px)", gap: 5 }}>
             {SYMBOLS.map((symbol) => (
               <button key={symbol} title={`Insert ${symbol}`} onMouseDown={(event) => event.preventDefault()} onClick={() => { if (api?.insertSymbol(symbol)) setOpen(false); }} style={{ width: 32, height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "17px 'Cambria Math', serif" }}>
@@ -1210,13 +2520,14 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
             <label style={{ display: "block", color: T.muted, font: "11.5px system-ui, sans-serif", marginBottom: 4 }} htmlFor="dxw-advanced-symbol">Any Unicode symbol</label>
             <div style={{ display: "flex", gap: 6 }}>
               <input
+              data-dxw-field=""
                 id="dxw-advanced-symbol"
                 aria-label="Advanced symbol characters"
                 value={custom}
                 onChange={(event) => setCustom(event.target.value)}
                 onKeyDown={(event) => event.key === "Enter" && insertCustom()}
                 placeholder="Paste or type a symbol"
-                style={{ minWidth: 0, flex: 1, border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 7px", background: T.popoverBg, color: T.fg, font: "15px 'Cambria Math', serif" }}
+                style={{ ...dialogInput, minWidth: 0, flex: 1, padding: "5px 7px", font: "15px 'Cambria Math', serif" }}
               />
               <button type="button" disabled={!custom} onClick={insertCustom} style={pillBtn}>Insert</button>
             </div>
@@ -1227,15 +2538,25 @@ function SymbolMenu({ api }: { api: DocxViewApi | null }) {
   );
 }
 
-const SHAPES = [
+/** The picker's Lines/Text row: presets with no gallery geometry of their own. */
+const SHAPE_TOOLS = [
   ["line", "Line", "―"],
   ["verticalLine", "Vertical line", "│"],
-  ["rectangle", "Rectangle", "▭"],
-  ["roundedRectangle", "Rounded rectangle", "▢"],
-  ["ellipse", "Ellipse", "◯"],
-  ["diamond", "Diamond", "◇"],
   ["textBox", "Text box", "T"],
 ] as const;
+
+/** A gallery icon: the shape's own preset outline evaluated at icon size. */
+function ShapeGlyph({ preset }: { preset: string }) {
+  const geom = presetShapeGeometry(preset, 26, 20);
+  if (!geom) return null;
+  return (
+    <svg viewBox="-1 -1 28 22" width={26} height={20} aria-hidden="true" style={{ display: "block" }}>
+      {geom.paths.map((path, index) => (
+        <path key={index} d={path.d} fill="none" stroke="currentColor" strokeWidth={1.2} strokeLinejoin="round" />
+      ))}
+    </svg>
+  );
+}
 
 function DividerMenu({ api }: { api: DocxViewApi | null }) {
   type Divider = NonNullable<ReturnType<DocxViewApi["getParagraphDivider"]>>;
@@ -1245,14 +2566,8 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
   const [widthPt, setWidthPt] = useState(1);
   const [spacePt, setSpacePt] = useState(1);
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" , onClose: () => setOpen(false) });
   const toggle = () => {
     if (!open) {
       const current = api?.getParagraphDivider();
@@ -1275,31 +2590,37 @@ function DividerMenu({ api }: { api: DocxViewApi | null }) {
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert or edit divider" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>Divider</button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 270, padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <div style={{ color: T.muted, font: "11.5px system-ui, sans-serif" }}>Horizontal rule below the current paragraph</div>
           <div aria-hidden="true" style={{ height: 12, borderBottom: `${Math.max(widthPt, 1)}px ${previewStyle} ${color}` }} />
           <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
             Style
-            <select aria-label="Divider style" value={style} onChange={(event) => setStyle(event.target.value as Divider["style"])} style={{ border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 7px", background: T.popoverBg, color: T.fg }}>
-              <option value="single">Single</option>
-              <option value="double">Double</option>
-              <option value="dashed">Dashed</option>
-              <option value="dotted">Dotted</option>
-              <option value="thinThickSmallGap">Thin + thick</option>
-            </select>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Divider style"
+              value={style}
+              options={[
+                { value: "single", label: "Single" },
+                { value: "double", label: "Double" },
+                { value: "dashed", label: "Dashed" },
+                { value: "dotted", label: "Dotted" },
+                { value: "thinThickSmallGap", label: "Thin + thick" },
+              ]}
+              onChange={(value) => setStyle(value as Divider["style"])}
+            />
           </label>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 7 }}>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Color
-              <input aria-label="Divider color" type="color" value={color} onChange={(event) => setColor(event.target.value)} style={{ width: "100%", height: 30, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg }} />
+              <input aria-label="Divider color" type="color" value={color} onChange={(event) => setColor(event.target.value)} style={{ ...colorSwatch, width: "100%", height: 30 }} />
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Width (pt)
-              <input aria-label="Divider width in points" type="number" min="0.25" step="0.25" value={widthPt} onChange={(event) => setWidthPt(Number(event.target.value))} style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 6px", color: T.fg, background: T.popoverBg }} />
+              <input data-dxw-field="" aria-label="Divider width in points" type="number" data-dxw-number="" min="0.25" step="0.25" value={widthPt} onChange={(event) => setWidthPt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "11.5px system-ui, sans-serif" }}>
               Gap (pt)
-              <input aria-label="Divider gap in points" type="number" min="0" step="1" value={spacePt} onChange={(event) => setSpacePt(Number(event.target.value))} style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "5px 6px", color: T.fg, background: T.popoverBg }} />
+              <input data-dxw-field="" aria-label="Divider gap in points" type="number" data-dxw-number="" min="0" step="1" value={spacePt} onChange={(event) => setSpacePt(Number(event.target.value))} style={{ ...dialogInput, padding: "5px 6px" }} />
             </label>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
@@ -1319,14 +2640,8 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
   const [lineWidth, setLineWidth] = useState("1.33");
   const [lineDash, setLineDash] = useState<"solid" | "dashed" | "dotted">("solid");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 290, align: "end" , onClose: () => setOpen(false) });
   const insert = (preset: Parameters<DocxViewApi["insertShape"]>[0]) => {
     const isLine = preset === "line" || preset === "verticalLine";
     const width = Number(lineWidth);
@@ -1342,13 +2657,14 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
         <span style={{ fontSize: 17 }}>◇</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 290, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input
+              data-dxw-field=""
             aria-label="Shape text"
             value={text}
             placeholder="Shape text (optional)"
             onChange={(event) => setText(event.target.value)}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
           <div style={{ marginTop: 9, color: T.muted, font: "11.5px system-ui, sans-serif" }}>Line appearance</div>
           <div style={{ display: "grid", gridTemplateColumns: "auto 82px 88px", gap: 6, alignItems: "end", marginTop: 5 }}>
@@ -1366,35 +2682,61 @@ function ShapeMenu({ api }: { api: DocxViewApi | null }) {
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "10.5px system-ui, sans-serif" }}>
               Weight (px)
               <input
+              data-dxw-field=""
                 aria-label="Line width in pixels"
                 type="number"
+              data-dxw-number=""
                 min="0.25"
                 step="0.25"
                 value={lineWidth}
                 onChange={(event) => setLineWidth(event.target.value)}
-                style={{ width: "100%", height: 28, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 5px", color: T.fg, background: T.popoverBg }}
+                style={{ ...dialogInput, height: 28, padding: "3px 5px" }}
               />
             </label>
             <label style={{ display: "grid", gap: 3, color: T.muted, font: "10.5px system-ui, sans-serif" }}>
               Style
-              <select
-                aria-label="Line style"
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Line style"
                 value={lineDash}
-                onChange={(event) => setLineDash(event.target.value as typeof lineDash)}
-                style={{ width: "100%", height: 28, border: `1px solid ${T.border}`, borderRadius: 5, padding: "3px 4px", color: T.fg, background: T.popoverBg }}
-              >
-                <option value="solid">Solid</option>
-                <option value="dashed">Dashed</option>
-                <option value="dotted">Dotted</option>
-              </select>
+                options={[
+                  { value: "solid", label: "Solid" },
+                  { value: "dashed", label: "Dashed" },
+                  { value: "dotted", label: "Dotted" },
+                ]}
+                onChange={(value) => setLineDash(value as typeof lineDash)}
+                style={{ height: 28, padding: "3px 4px" }}
+              />
             </label>
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
-            {SHAPES.map(([preset, label, glyph]) => (
-              <button key={preset} title={`Insert ${label}`} onClick={() => insert(preset)} style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif" }}>
-                <span style={{ display: "block", fontSize: 20, lineHeight: 1 }}>{glyph}</span>
+            {SHAPE_TOOLS.map(([preset, label, glyph]) => (
+              <button key={preset} title={`Insert ${label}`} onClick={() => insert(preset)} style={{ minHeight: 40, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif" }}>
+                <span style={{ display: "block", fontSize: 17, lineHeight: 1 }}>{glyph}</span>
                 <span>{label}</span>
               </button>
+            ))}
+          </div>
+          <div style={{ maxHeight: 320, overflowY: "auto", marginTop: 8, paddingRight: 2 }}>
+            {SHAPE_GALLERY.map((section) => (
+              <div key={section.category}>
+                <div style={{ margin: "7px 0 4px", color: T.muted, font: "600 11px system-ui, sans-serif" }}>{section.category}</div>
+                <div role="group" aria-label={section.category} style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 2 }}>
+                  {section.items.map((entry) => (
+                    <button
+                      key={entry.preset}
+                      title={entry.label}
+                      aria-label={`Insert ${entry.label}`}
+                      onClick={() => insert(entry.preset)}
+                      style={{ padding: "4px 2px", border: "1px solid transparent", borderRadius: 4, background: "none", color: T.fg, cursor: "pointer", display: "flex", justifyContent: "center" }}
+                      onMouseEnter={(event) => { event.currentTarget.style.borderColor = T.border; event.currentTarget.style.background = T.hoverBg; }}
+                      onMouseLeave={(event) => { event.currentTarget.style.borderColor = "transparent"; event.currentTarget.style.background = "none"; }}
+                    >
+                      <ShapeGlyph preset={entry.preset} />
+                    </button>
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         </div>
@@ -1407,14 +2749,8 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const insert = () => {
     if (api?.insertShape("textBox", text)) {
       setText("");
@@ -1425,19 +2761,283 @@ function TextBoxMenu({ api }: { api: DocxViewApi | null }) {
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert text box" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Text Box</button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 240, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <label htmlFor="dxw-text-box-text" style={{ display: "block", color: T.muted, font: "11.5px system-ui, sans-serif", marginBottom: 4 }}>Initial text</label>
           <input
+              data-dxw-field=""
             id="dxw-text-box-text"
             aria-label="Text box text"
             value={text}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => event.key === "Enter" && insert()}
             placeholder="Text box"
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
           <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
             <button type="button" onClick={insert} style={pillBtn}>Insert</button>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** Insert-tab Header & Footer menu: enter either band, plus Word's two
+ * page-variant toggles (different first page / different odd & even). The
+ * toggle state is read from the api at render time; picking one re-reads it
+ * immediately (this menu re-renders on its own, ahead of the next
+ * dxw-selection announcement). */
+function HeaderFooterMenu({ api }: { api: DocxViewApi | null }) {
+  const [, force] = useReducer((n: number) => n + 1, 0);
+  const first = api?.getDifferentFirstPage() ?? false;
+  const oddEven = api?.getOddEvenHeaders() ?? false;
+  return (
+    <ActionMenu
+      label="Header & footer"
+      title="Edit the repeating header or footer"
+      width={118}
+      groups={[
+        { items: [["header", "Header"], ["footer", "Footer"]] },
+        {
+          label: "Header presets",
+          items: [
+            ["hpreset:blank", "Blank"],
+            ["hpreset:centeredTitle", "Centered title"],
+            ["hpreset:titleAndDate", "Title and date"],
+            ["hpreset:threeColumn", "Three column"],
+          ],
+        },
+        {
+          label: "Footer presets",
+          items: [
+            ["fpreset:blank", "Blank"],
+            ["fpreset:centeredTitle", "Centered title"],
+            ["fpreset:titleAndDate", "Title and date"],
+            ["fpreset:threeColumn", "Three column"],
+          ],
+        },
+        {
+          label: "Page setup",
+          items: [
+            ["first", `${first ? "✓ " : ""}Different first page`],
+            ["oddEven", `${oddEven ? "✓ " : ""}Different odd & even pages`],
+          ],
+        },
+      ]}
+      onPick={(value) => {
+        if (value === "header" || value === "footer") api?.openHeaderFooter(value);
+        else if (value === "first") api?.setDifferentFirstPage(!first);
+        else if (value === "oddEven") api?.setOddEvenHeaders(!oddEven);
+        else if (value.startsWith("hpreset:")) {
+          api?.insertHeaderFooterPreset("header", value.slice(8) as Parameters<NonNullable<typeof api>["insertHeaderFooterPreset"]>[1]);
+        } else if (value.startsWith("fpreset:")) {
+          api?.insertHeaderFooterPreset("footer", value.slice(8) as Parameters<NonNullable<typeof api>["insertHeaderFooterPreset"]>[1]);
+        }
+        force();
+      }}
+    />
+  );
+}
+
+/** Insert-tab Page Number menu: the two field inserts plus the section's
+ * number format (w:pgNumType fmt) and start-at value. */
+function PageNumberMenu({ api }: { api: DocxViewApi | null }) {
+  const [, force] = useReducer((n: number) => n + 1, 0);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const current = api?.getPageNumberFormat() ?? { fmt: "decimal" as const, start: null };
+  const mark = (fmt: string) => (current.fmt === fmt ? "✓ " : "");
+  return (
+    <span ref={rootRef} style={{ display: "inline-block" }}>
+      <ActionMenu
+        label="Page number"
+        title="Insert a page number and choose its format"
+        width={104}
+        groups={[
+          { items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] },
+          {
+            label: "Top of page",
+            items: [
+              ["pos:top:left", "Left"],
+              ["pos:top:center", "Center"],
+              ["pos:top:right", "Right"],
+            ],
+          },
+          {
+            label: "Bottom of page",
+            items: [
+              ["pos:bottom:left", "Left"],
+              ["pos:bottom:center", "Center"],
+              ["pos:bottom:right", "Right"],
+            ],
+          },
+          { items: [["remove", "Remove page numbers"]] },
+          {
+            label: "Number format",
+            items: [
+              ["fmt:decimal", `${mark("decimal")}1, 2, 3`],
+              ["fmt:lowerRoman", `${mark("lowerRoman")}i, ii, iii`],
+              ["fmt:upperRoman", `${mark("upperRoman")}I, II, III`],
+              ["fmt:lowerLetter", `${mark("lowerLetter")}a, b, c`],
+              ["fmt:upperLetter", `${mark("upperLetter")}A, B, C`],
+            ],
+          },
+          {
+            label: "Page numbering",
+            items: [
+              ["start:set", current.start !== null ? `Start at ${current.start}…` : "Start at…"],
+              ["start:continue", `${current.start === null ? "✓ " : ""}Continue from previous`],
+            ],
+          },
+        ]}
+        onPick={(value) => {
+          if (value === "pn:page") api?.insertPageNumber("page");
+          else if (value === "pn:pageof") api?.insertPageNumber("pageOfTotal");
+          else if (value === "remove") api?.removePageNumbers();
+          else if (value.startsWith("pos:")) {
+            const [, position, align] = value.split(":");
+            api?.insertPageNumberPosition(
+              position as Parameters<NonNullable<typeof api>["insertPageNumberPosition"]>[0],
+              align as Parameters<NonNullable<typeof api>["insertPageNumberPosition"]>[1],
+            );
+          } else if (value.startsWith("fmt:")) {
+            api?.setPageNumberFormat({ fmt: value.slice(4) as Parameters<NonNullable<typeof api>["setPageNumberFormat"]>[0]["fmt"] });
+          } else if (value === "start:continue") api?.setPageNumberFormat({ start: null });
+          else if (value === "start:set") {
+            const anchor = rootRef.current;
+            if (!anchor) return;
+            void requestTextInputDialog(anchor, {
+              title: "Page numbering",
+              label: "Start at",
+              value: String(current.start ?? 1),
+              submitLabel: "Apply",
+              inputType: "number",
+              min: 0,
+              step: 1,
+            }).then((next) => {
+              if (next === null) return;
+              const start = parseInt(next.trim(), 10);
+              if (Number.isInteger(start) && start >= 0) api?.setPageNumberFormat({ start });
+              force();
+            });
+            return;
+          }
+          force();
+        }}
+      />
+    </span>
+  );
+}
+
+/** Word's own gallery presets, the four people actually reach for. */
+const WATERMARKS = ["CONFIDENTIAL", "DO NOT COPY", "DRAFT", "SAMPLE"] as const;
+
+function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("CONFIDENTIAL");
+  const [diagonal, setDiagonal] = useState(true);
+  const [status, setStatus] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const pictureInput = useRef<HTMLInputElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
+  const stamp = (value: string) => {
+    if (api?.insertWatermark({ text: value, diagonal })) setOpen(false);
+  };
+  /** Why a picture watermark did not happen, IN the panel that asked for it —
+   * the file dialog closes on its own, so a silent panel reads as a dead
+   * button. */
+  const stampPicture = async (file: File) => {
+    setStatus("");
+    const result = await api?.insertPictureWatermark(file);
+    if (result === undefined || result === "inserted") {
+      setOpen(false);
+      return;
+    }
+    setStatus(
+      result === "unsupported-format"
+        ? "A watermark picture must be PNG, JPEG, GIF, BMP or WebP."
+        : result === "too-large"
+          ? "That picture is too large for this document."
+          : result === "no-relay"
+            ? "This shared document has no image relay, so a picture watermark can’t be added."
+            : result === "upload-failed"
+              ? "Upload failed. Try a smaller picture."
+              : "That file could not be read as an image.",
+    );
+  };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button title="Watermark" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
+        Watermark
+      </button>
+      {open && (
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div style={{ display: "grid", gap: 6 }}>
+            {WATERMARKS.map((preset) => (
+              <button
+                key={preset}
+                title={`Stamp ${preset} on every page`}
+                onClick={() => stamp(preset)}
+                style={{ padding: "7px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: "#9aa0a6", cursor: "pointer", font: "700 12px system-ui, sans-serif", letterSpacing: 0.5 }}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+          <input
+              data-dxw-field=""
+            aria-label="Watermark text"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            style={{ ...popoverInput, marginTop: 8 }}
+          />
+          <div style={{ marginTop: 8 }}>
+            <ToolbarCheckbox label="Diagonal" checked={diagonal} onChange={setDiagonal} />
+          </div>
+          <button
+            type="button"
+            title="Stamp a picture on every page, washed out behind the text"
+            onClick={() => pictureInput.current?.click()}
+            style={{ width: "100%", marginTop: 8, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}
+          >
+            Picture…
+          </button>
+          <input
+            ref={pictureInput}
+            aria-label="Watermark picture"
+            type="file"
+            accept={RASTER_IMAGE_ACCEPT}
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void stampPicture(file);
+              event.target.value = "";
+            }}
+          />
+          {status && (
+            <div role="status" style={{ marginTop: 8, color: T.muted, font: "12px system-ui, sans-serif" }}>
+              {status}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button
+              title="Stamp this text on every page"
+              disabled={!text}
+              onClick={() => stamp(text)}
+              style={{ flex: 1, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, cursor: text ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}
+            >
+              Custom
+            </button>
+            <button
+              title="Remove the watermark from every page"
+              onClick={() => {
+                api?.removeWatermark();
+                setOpen(false);
+              }}
+              style={{ flex: 1, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}
+            >
+              Remove
+            </button>
           </div>
         </div>
       )}
@@ -1451,41 +3051,82 @@ const WORD_ART = [
   ["archDown", "Arch down", "⌣"],
   ["wave", "Wave", "∿"],
   ["chevron", "Chevron", "⌃"],
+  ["chevronDown", "Chevron down", "⌄"],
+  ["circle", "Circle", "◌"],
+  ["button", "Button", "◉"],
 ] as const;
+
+/** Word's WordArt gallery styles: fill / outline / shadow combinations. */
+const WORD_ART_STYLES: { label: string; style?: { fill: string; outline?: { color: string; widthPt: number }; shadow?: boolean } }[] = [
+  { label: "Classic blue" },
+  { label: "Blue, shadow", style: { fill: "4472C4", shadow: true } },
+  { label: "Black, shadow", style: { fill: "000000", shadow: true } },
+  { label: "Orange, shadow", style: { fill: "ED7D31", shadow: true } },
+  { label: "Gold, shadow", style: { fill: "FFC000", shadow: true } },
+  { label: "White, blue outline, shadow", style: { fill: "FFFFFF", outline: { color: "4472C4", widthPt: 1 }, shadow: true } },
+  { label: "Blue, darker outline", style: { fill: "4472C4", outline: { color: "2F5597", widthPt: 1 } } },
+];
 
 function WordArtMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("Your text here");
+  const [styleIndex, setStyleIndex] = useState(0);
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 270, align: "end" , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert WordArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
         <span style={{ color: "#2e74b5", fontSize: 17, fontStyle: "italic", fontWeight: 700 }}>A</span>
       </button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 270, padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <input
+              data-dxw-field=""
             aria-label="WordArt text"
             value={text}
             onChange={(event) => setText(event.target.value)}
-            style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 8px", font: "13px system-ui, sans-serif", outline: "none" }}
+            style={popoverInput}
           />
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 8 }}>
+          <div style={{ marginTop: 8, color: T.muted, font: "11px system-ui, sans-serif" }}>Style</div>
+          <div role="radiogroup" aria-label="WordArt style" style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginTop: 4 }}>
+            {WORD_ART_STYLES.map((entry, index) => {
+              const fill = entry.style ? `#${entry.style.fill}` : "#2e74b5";
+              const selected = index === styleIndex;
+              return (
+                <button
+                  key={entry.label}
+                  role="radio"
+                  aria-checked={selected}
+                  title={entry.label}
+                  aria-label={`WordArt style ${entry.label}`}
+                  onClick={() => setStyleIndex(index)}
+                  style={{
+                    height: 34,
+                    border: `1px solid ${selected ? T.accent : T.border}`,
+                    borderRadius: 5,
+                    background: selected ? T.tabActiveBg : T.popoverBg,
+                    cursor: "pointer",
+                    font: "700 17px Georgia, serif",
+                    color: fill,
+                    WebkitTextStroke: entry.style?.outline ? `0.6px #${entry.style.outline.color}` : undefined,
+                    textShadow: entry.style?.shadow ? "1px 1px 2px rgba(0,0,0,0.55)" : undefined,
+                  }}
+                >
+                  A
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 8, color: T.muted, font: "11px system-ui, sans-serif" }}>Transform</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6, marginTop: 4 }}>
             {WORD_ART.map(([preset, label, glyph]) => (
               <button
                 key={preset}
                 title={`Insert WordArt ${label}`}
                 disabled={!text}
                 onClick={() => {
-                  if (api?.insertWordArt(text, preset)) setOpen(false);
+                  if (api?.insertWordArt(text, preset, WORD_ART_STYLES[styleIndex]?.style)) setOpen(false);
                 }}
                 style={{ minHeight: 48, border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: "#2e74b5", cursor: text ? "pointer" : "default", font: "600 12px system-ui, sans-serif" }}
               >
@@ -1505,30 +3146,27 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(false);
   const [type, setType] = useState<Chart["type"]>("column");
+  const [grouping, setGrouping] = useState<NonNullable<Chart["grouping"]>>("clustered");
   const [title, setTitle] = useState("");
   const [categories, setCategories] = useState(["", ""]);
   const [series, setSeries] = useState([{ name: "", values: ["", ""] }]);
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 440 , onClose: () => setOpen(false) });
+  const sliced = type === "pie" || type === "doughnut";
+  const stackable = type === "column" || type === "bar" || type === "area";
   const submit = () => {
     const categoryValues = categories.map((value) => value.trim());
-    const rawSeries = (type === "pie" ? series.slice(0, 1) : series).map((entry) => ({
+    const rawSeries = (sliced ? series.slice(0, 1) : series).map((entry) => ({
       name: entry.name.trim(),
       values: entry.values.map((value) => value.trim()),
     }));
     if (categoryValues.some((value) => !value)) {
-      setError(type === "pie" ? "Enter a label for every slice." : "Enter a name for every category.");
+      setError(sliced ? "Enter a label for every slice." : "Enter a name for every category.");
       return;
     }
-    if (type !== "pie" && rawSeries.some((entry) => !entry.name)) {
+    if (!sliced && rawSeries.some((entry) => !entry.name)) {
       setError("Enter a name for every series.");
       return;
     }
@@ -1536,19 +3174,25 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
       setError("Enter a number in every value field.");
       return;
     }
-    if (type === "pie" && rawSeries.some((entry) => entry.values.some((value) => Number(value) < 0))) {
-      setError("Pie chart values must be zero or greater.");
+    if (sliced && rawSeries.some((entry) => entry.values.some((value) => Number(value) < 0))) {
+      setError("Slice values must be zero or greater.");
       return;
     }
-    if (type === "pie" && rawSeries.every((entry) => entry.values.every((value) => Number(value) === 0))) {
-      setError("Enter at least one pie chart value greater than zero.");
+    if (sliced && rawSeries.every((entry) => entry.values.every((value) => Number(value) === 0))) {
+      setError("Enter at least one slice value greater than zero.");
       return;
     }
     const seriesValues = rawSeries.map((entry) => ({
-      name: type === "pie" ? entry.name || "Values" : entry.name,
+      name: sliced ? entry.name || "Values" : entry.name,
       values: entry.values.map(Number),
     }));
-    const data: Chart = { type, title: title.trim(), categories: categoryValues, series: seriesValues };
+    const data: Chart = {
+      type,
+      title: title.trim(),
+      categories: categoryValues,
+      series: seriesValues,
+      ...(stackable && grouping !== "clustered" ? { grouping } : {}),
+    };
     if (api?.updateSelectedChart(data) || api?.insertChart(data)) {
       setError("");
       setOpen(false);
@@ -1565,19 +3209,13 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
   };
   const changeType = (next: Chart["type"]) => {
     setType(next);
-    if (next === "pie") {
+    if (next === "pie" || next === "doughnut") {
       setSeries((current) => [
         current[0] ?? { name: "Values", values: categories.map(() => "") },
       ]);
     }
     setError("");
   };
-  const anchor = open ? rootRef.current?.getBoundingClientRect() : null;
-  const viewportWidth = typeof window === "undefined" ? 456 : window.innerWidth;
-  const popoverWidth = Math.min(440, viewportWidth - 16);
-  const popoverLeft = Math.max(8, Math.min(anchor?.left ?? 8, viewportWidth - popoverWidth - 8));
-  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
-  const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
   const tableHeaderStyle: React.CSSProperties = { padding: "0 3px 4px", textAlign: "left", verticalAlign: "bottom", color: T.muted, font: "600 11px system-ui, sans-serif" };
   const tableCellStyle: React.CSSProperties = { padding: 3, verticalAlign: "bottom" };
   const toggle = () => {
@@ -1595,9 +3233,10 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
       : [{ name: "", values: nextCategories.map(() => "") }];
     setEditing(!!selected);
     setType(selected?.type ?? "column");
+    setGrouping(selected?.grouping === "stacked" || selected?.grouping === "percentStacked" ? selected.grouping : "clustered");
     setTitle(selected?.title ?? "");
     setCategories(nextCategories);
-    setSeries(selected?.type === "pie" ? nextSeries.slice(0, 1) : nextSeries);
+    setSeries(selected?.type === "pie" || selected?.type === "doughnut" ? nextSeries.slice(0, 1) : nextSeries);
     setError("");
     setOpen(true);
   };
@@ -1605,13 +3244,16 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
     { value: "column", label: "Column" },
     { value: "bar", label: "Bar" },
     { value: "line", label: "Line" },
+    { value: "area", label: "Area" },
+    { value: "scatter", label: "Scatter" },
     { value: "pie", label: "Pie" },
+    { value: "doughnut", label: "Doughnut" },
   ];
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert or edit chart" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>{label}</button>
       {open && (
-        <div style={{ position: "fixed", top: anchor?.bottom ?? 28, left: popoverLeft, zIndex: 100, width: popoverWidth, maxHeight: "calc(100vh - 48px)", overflow: "auto", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflow: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 8, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
           <strong style={{ color: T.fg, font: "600 13px system-ui, sans-serif" }}>{editing ? "Edit chart" : "Insert chart"}</strong>
           <fieldset style={{ minWidth: 0, margin: 0, padding: 0, border: 0 }}>
             <legend style={{ marginBottom: 4, color: T.muted, font: "11px system-ui, sans-serif" }}>Chart type</legend>
@@ -1641,15 +3283,32 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
               })}
             </div>
           </fieldset>
+          {stackable && (
+            <label style={fieldLabelStyle}>
+              <span>Grouping</span>
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Series grouping"
+                value={grouping}
+                options={[
+                  { value: "clustered", label: type === "area" ? "Standard" : "Clustered" },
+                  { value: "stacked", label: "Stacked" },
+                  { value: "percentStacked", label: "100% stacked" },
+                ]}
+                onChange={(value) => setGrouping(value as typeof grouping)}
+                style={fieldStyle}
+              />
+            </label>
+          )}
           <label style={fieldLabelStyle}>
             <span>Chart title (optional)</span>
-            <input aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
+            <input data-dxw-field="" aria-label="Chart title" value={title} onChange={(event) => setTitle(event.target.value)} style={fieldStyle} />
           </label>
           <div role="group" aria-label="Chart data" style={{ display: "grid", gap: 7 }}>
-            <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{type === "pie" ? "Slices" : "Chart data"}</strong>
+            <strong style={{ color: T.fg, font: "600 11.5px system-ui, sans-serif" }}>{sliced ? "Slices" : "Chart data"}</strong>
             <div style={{ overflowX: "auto" }}>
-              {type === "pie" ? (
-                <table aria-label="Pie chart data" style={{ width: "100%", borderCollapse: "collapse" }}>
+              {sliced ? (
+                <table aria-label={`${type} chart data`} style={{ width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>
                       <th scope="col" style={tableHeaderStyle}>Slice label</th>
@@ -1664,6 +3323,7 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                           <label style={fieldLabelStyle}>
                             <span>Slice {index + 1}</span>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart slice ${index + 1} label`}
                               value={category}
                               onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === index ? event.target.value : value))}
@@ -1673,8 +3333,10 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                         </th>
                         <td style={tableCellStyle}>
                           <input
+              data-dxw-field=""
                             aria-label={`Chart slice ${index + 1} value`}
                             type="number"
+              data-dxw-number=""
                             min="0"
                             step="any"
                             value={series[0]?.values[index] ?? ""}
@@ -1696,12 +3358,13 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                 <table aria-label={`${type} chart data`} style={{ minWidth: series.length > 2 ? 430 : undefined, width: "100%", borderCollapse: "collapse" }}>
                   <thead>
                     <tr>
-                      <th scope="col" style={tableHeaderStyle}>Category</th>
+                      <th scope="col" style={tableHeaderStyle}>{type === "scatter" ? "X value" : "Category"}</th>
                       {series.map((entry, seriesIndex) => (
                         <th key={seriesIndex} scope="col" style={tableHeaderStyle}>
                           <label style={fieldLabelStyle}>
                             <span>Series {seriesIndex + 1} name</span>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart series ${seriesIndex + 1} name`}
                               value={entry.name}
                               onChange={(event) => setSeries(series.map((value, itemIndex) => itemIndex === seriesIndex ? { ...value, name: event.target.value } : value))}
@@ -1719,8 +3382,9 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                       <tr key={categoryIndex}>
                         <th scope="row" style={{ ...tableCellStyle, minWidth: 120, fontWeight: 400 }}>
                           <label style={fieldLabelStyle}>
-                            <span>Category {categoryIndex + 1}</span>
+                            <span>{type === "scatter" ? `X value ${categoryIndex + 1}` : `Category ${categoryIndex + 1}`}</span>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart category ${categoryIndex + 1}`}
                               value={category}
                               onChange={(event) => setCategories(categories.map((value, itemIndex) => itemIndex === categoryIndex ? event.target.value : value))}
@@ -1731,8 +3395,10 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
                         {series.map((entry, seriesIndex) => (
                           <td key={seriesIndex} style={{ ...tableCellStyle, minWidth: 82 }}>
                             <input
+              data-dxw-field=""
                               aria-label={`Chart series ${seriesIndex + 1} value ${categoryIndex + 1}`}
                               type="number"
+              data-dxw-number=""
                               step="any"
                               value={entry.values[categoryIndex] ?? ""}
                               onChange={(event) => setSeries(series.map((seriesValue, itemIndex) => itemIndex === seriesIndex ? {
@@ -1753,8 +3419,8 @@ function ChartMenu({ api, label = "Chart" }: { api: DocxViewApi | null; label?: 
               )}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              {type !== "pie" && <button type="button" onClick={() => setSeries([...series, { name: "", values: categories.map(() => "") }])} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add series</button>}
-              <button type="button" onClick={addCategory} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>{type === "pie" ? "Add slice" : "Add category"}</button>
+              {!sliced && <button type="button" onClick={() => setSeries([...series, { name: "", values: categories.map(() => "") }])} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Add series</button>}
+              <button type="button" onClick={addCategory} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>{sliced ? "Add slice" : "Add category"}</button>
             </div>
           </div>
           {error && <div role="alert" style={{ color: "#c5221f", font: "11.5px system-ui, sans-serif" }}>{error}</div>}
@@ -1773,13 +3439,14 @@ function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; la
   const [layout, setLayout] = useState<SmartArt["layout"]>("process");
   const [items, setItems] = useState([""]);
   const rootRef = useRef<HTMLSpanElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useDismissablePanel(rootRef, dialogRef, open, () => setOpen(false));
   const submit = () => {
     const values = items.map((value) => value.trim()).filter(Boolean);
     if (!values.length) return;
     const data: SmartArt = { layout, items: values };
     if (api?.updateSelectedSmartArt(data) || api?.insertSmartArt(data)) setOpen(false);
   };
-  const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
   const toggle = () => {
     if (open) {
       setOpen(false);
@@ -1810,7 +3477,7 @@ function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; la
       <button title="Insert or edit SmartArt" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={toggle}>{label}</button>
       {open && createPortal(
         <div style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 16, background: "rgba(0,0,0,.34)" }} onMouseDown={(event) => event.target === event.currentTarget && setOpen(false)}>
-          <div role="dialog" aria-modal="true" aria-label={editing ? "Edit SmartArt" : "Insert SmartArt"} style={{ width: "min(560px,calc(100vw - 32px))", maxHeight: "calc(100vh - 32px)", overflow: "auto", boxSizing: "border-box", padding: 18, display: "grid", gap: 14, color: T.fg, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: T.popoverShadow }}>
+          <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={editing ? "Edit SmartArt" : "Insert SmartArt"} style={{ width: "min(560px,calc(100vw - 32px))", maxHeight: "calc(100vh - 32px)", overflow: "auto", boxSizing: "border-box", padding: 18, display: "grid", gap: 14, color: T.fg, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: T.popoverShadow }}>
             <div>
               <strong style={{ display: "block", font: "600 18px system-ui, sans-serif" }}>{step === "layout" ? "Choose a SmartArt layout" : editing ? "Edit SmartArt" : "Add SmartArt text"}</strong>
               <span style={{ color: T.muted, font: "12px system-ui, sans-serif" }}>{step === "layout" ? "Choose one of the supported layout families." : layouts.find((item) => item.value === layout)?.label}</span>
@@ -1828,7 +3495,7 @@ function SmartArtMenu({ api, label = "SmartArt" }: { api: DocxViewApi | null; la
               <div role="group" aria-label="SmartArt items" style={{ display: "grid", gap: 7 }}>
                 {items.map((item, index) => (
                   <div key={index} style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto", gap: 5 }}>
-                    <input aria-label={`SmartArt item ${index + 1}`} value={item} placeholder="Item" onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} style={fieldStyle} />
+                    <input data-dxw-field="" aria-label={`SmartArt item ${index + 1}`} value={item} placeholder="Item" onChange={(event) => setItems(items.map((value, itemIndex) => itemIndex === index ? event.target.value : value))} style={fieldStyle} />
                     <button type="button" aria-label={`Move SmartArt item ${index + 1} up`} disabled={index === 0} onClick={() => setItems(items.map((value, itemIndex) => itemIndex === index - 1 ? items[index] : itemIndex === index ? items[index - 1] : value))} style={{ ...pillBtn, padding: "0 8px" }}>↑</button>
                     <button type="button" aria-label={`Move SmartArt item ${index + 1} down`} disabled={index === items.length - 1} onClick={() => setItems(items.map((value, itemIndex) => itemIndex === index ? items[index + 1] : itemIndex === index + 1 ? items[index] : value))} style={{ ...pillBtn, padding: "0 8px" }}>↓</button>
                     <button type="button" aria-label={`Remove SmartArt item ${index + 1}`} disabled={items.length === 1} onClick={() => setItems(items.filter((_, itemIndex) => itemIndex !== index))} style={{ ...pillBtn, padding: "0 8px" }}>×</button>
@@ -1856,20 +3523,14 @@ function MediaMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 300, align: "end" , onClose: () => setOpen(false) });
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert online video" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Media</button>
       {open && (
-        <div style={{ position: "absolute", top: 28, right: 0, zIndex: 100, width: 300, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
-          <input aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg }} />
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <input data-dxw-field="" aria-label="Online video URL" type="url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://www.youtube.com/watch?v=…" style={fieldStyle} />
           <button
             disabled={!url.trim()}
             onClick={() => void api?.insertOnlineVideo(url).then((inserted) => inserted && setOpen(false))}
@@ -1948,6 +3609,9 @@ function formatBytes(n: number): string {
 
 function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
   const [status, setStatus] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLSpanElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, status !== "", { width: 210, onClose: () => setStatus("") });
   const capture = async () => {
     setStatus("Capturing screenshot…");
     const result = await api?.insertScreenshot();
@@ -1962,13 +3626,14 @@ function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
             : "Screenshot failed. Please try again.");
   };
   return (
-    <span style={{ position: "relative", display: "inline-flex" }}>
+    <span ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
       <Btn label="Screenshot" title="Capture and insert a screen, window, or tab" onClick={() => void capture()} />
       {status && (
         <span
           role={status === "Screenshot inserted." ? "status" : "alert"}
+          ref={panelRef}
           data-dxw-screenshot-status=""
-          style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 210, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+          style={{ position: "fixed", top: position.top, left: position.left, zIndex: 120, width: position.width, boxSizing: "border-box", padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
         >
           {status}
         </span>
@@ -1977,22 +3642,23 @@ function ScreenshotButton({ api }: { api: DocxViewApi | null }) {
   );
 }
 
+const COVER_PAGE_LAYOUT_LABELS: [CoverPageLayout, string][] = [
+  ["title", "Title"],
+  ["banner", "Banner"],
+  ["sidebar", "Sidebar"],
+];
+
 function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState("");
   const [subtitle, setSubtitle] = useState("");
   const [author, setAuthor] = useState("");
+  const [layout, setLayout] = useState<CoverPageLayout>("title");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 260 , onClose: () => setOpen(false) });
   const insert = () => {
-    if (!title.trim() || !api?.insertCoverPage({ title, subtitle, author })) return;
+    if (!title.trim() || !api?.insertCoverPage({ title, subtitle, author, layout })) return;
     setOpen(false);
     setTitle("");
     setSubtitle("");
@@ -2000,18 +3666,42 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
   };
   const input = (label: string, value: string, set: (value: string) => void) => (
     <input
+              data-dxw-field=""
       aria-label={label}
       placeholder={label}
       value={value}
       onChange={(event) => set(event.target.value)}
-      style={{ width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif" }}
+      style={fieldStyle}
     />
   );
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Insert cover page" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>Cover page</button>
       {open && (
-        <div style={{ position: "absolute", top: 30, left: 0, zIndex: 100, width: 260, padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, display: "grid", gap: 7, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
+          <div role="radiogroup" aria-label="Cover page design" style={{ display: "flex", gap: 4 }}>
+            {COVER_PAGE_LAYOUT_LABELS.map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={layout === value}
+                onClick={() => setLayout(value)}
+                style={{
+                  flex: 1,
+                  border: `1px solid ${layout === value ? T.accent : T.border}`,
+                  borderRadius: 6,
+                  padding: "5px 6px",
+                  background: layout === value ? T.accent : "transparent",
+                  color: layout === value ? T.accentFg : T.fg,
+                  cursor: "pointer",
+                  font: "12px system-ui, sans-serif",
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
           {input("Cover title", title, setTitle)}
           {input("Cover subtitle", subtitle, setSubtitle)}
           {input("Cover author", author, setAuthor)}
@@ -2025,19 +3715,61 @@ function CoverPageMenu({ api }: { api: DocxViewApi | null }) {
 /** Google-Docs-style table menu: hover grid picker + row/column operations. */
 function TableMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
-  const [hover, setHover] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
+  /**
+   * The size the grid is showing — set by hovering a cell OR by arrowing to
+   * one, because those are the same gesture with different hardware.
+   *
+   * It used to be called `hover`, and that name was the defect: the size was
+   * reachable only by a pointer, and the grid was the only route to inserting
+   * a table anywhere in the product (#152).
+   */
+  const [size, setSize] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
   const rootRef = useRef<HTMLSpanElement | null>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", close);
-    return () => document.removeEventListener("mousedown", close);
-  }, [open]);
-
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const ROWS = 8, COLS = 10;
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: COLS * 18 + 16 , onClose: () => setOpen(false) });
+
+  /**
+   * The one cell in the tab order. A grid of 80 tab stops would technically
+   * be reachable and unusable, so the grid is a single stop and the arrows
+   * move within it — the roving tabindex pattern.
+   */
+  const cursor = { r: Math.max(1, size.r), c: Math.max(1, size.c) };
+  const gridRef = useRef<HTMLDivElement | null>(null);
+
+  /** Move the size by one cell, stopping at the edges rather than wrapping. */
+  const moveCursor = (dr: number, dc: number) => {
+    setSize({
+      r: Math.min(ROWS, Math.max(1, cursor.r + dr)),
+      c: Math.min(COLS, Math.max(1, cursor.c + dc)),
+    });
+  };
+
+  /**
+   * Keep focus on the chosen cell, which is also the only cell in the tab
+   * order — leaving it behind would strand focus on a `tabindex="-1"` cell
+   * and the next arrow would have nowhere to come from.
+   *
+   * Guarded on the grid ALREADY holding focus, so that a pointer sweeping the
+   * cells does not snatch focus away from whatever the user was typing in.
+   * Done in an effect rather than after a frame: tying focus to the paint
+   * clock leaves it one step behind the size, and clicking then inserts the
+   * cell before the one on screen.
+   */
+  useEffect(() => {
+    const grid = gridRef.current;
+    if (!grid?.contains(document.activeElement)) return;
+    const cell = grid.querySelector<HTMLButtonElement>(`[data-dxw-table-size="${cursor.r}x${cursor.c}"]`);
+    if (cell && cell !== document.activeElement) cell.focus();
+  }, [cursor.r, cursor.c]);
+
+  const insert = (r: number, c: number) => {
+    api?.insertTable(r, c);
+    setOpen(false);
+    setSize({ r: 0, c: 0 });
+  };
+
+
   const ops: [string, string][] = [
     ["rowAbove", "Insert row above"],
     ["rowBelow", "Insert row below"],
@@ -2051,6 +3783,8 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
     ["valign:top", "Cell align top"],
     ["valign:center", "Cell align middle"],
     ["valign:bottom", "Cell align bottom"],
+    ["convert:text", "Convert text to table"],
+    ["convert:table", "Convert table to text"],
     ["deleteTable", "Delete table"],
   ];
   const CELL_FILLS = ["FFF2CC", "D9E2F3", "E2EFDA", "FCE4EC", "F1F3F4"];
@@ -2061,46 +3795,74 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
         title="Table"
         style={btnStyle(open)}
         onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpen(!open)}
+        // Reopening starts from nothing selected: a size left over from a
+        // pointer that swept the grid and then dismissed it is not a choice
+        // the user made.
+        onClick={() => { setSize({ r: 0, c: 0 }); setOpen(!open); }}
       >
         Table ▾
       </button>
       {open && (
         <div
+          ref={panelRef}
           style={{
-            position: "absolute",
-            top: 28,
-            left: 0,
+            position: "fixed",
+            top: position.top,
+            left: position.left,
             zIndex: 100,
             background: T.popoverBg,
             border: `1px solid ${T.border}`,
             borderRadius: 6,
             boxShadow: T.popoverShadow,
+            maxHeight: position.maxHeight,
+            overflowY: "auto",
+            overscrollBehavior: "contain",
             padding: 8,
-            width: COLS * 18 + 16,
+            boxSizing: "border-box",
+            width: position.width,
           }}
           onMouseDown={(e) => e.preventDefault()}
         >
-          <div style={{ fontSize: 12, color: T.muted, marginBottom: 4 }}>
-            {hover.r > 0 ? `${hover.r} × ${hover.c}` : "Insert table"}
+          <div aria-live="polite" style={{ fontSize: 12, color: T.muted, marginBottom: 4 }}>
+            {size.r > 0 ? `${size.r} × ${size.c}` : "Insert table"}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 16px)`, gap: 2 }}>
+          <div
+            ref={gridRef}
+            role="group"
+            aria-label="Table size"
+            onKeyDown={(e) => {
+              const step: Record<string, [number, number]> = {
+                ArrowRight: [0, 1], ArrowLeft: [0, -1], ArrowDown: [1, 0], ArrowUp: [-1, 0],
+              };
+              const move = step[e.key];
+              if (move) {
+                // Or the arrows scroll the panel instead of moving the size.
+                e.preventDefault();
+                moveCursor(move[0], move[1]);
+              }
+            }}
+            style={{ display: "grid", gridTemplateColumns: `repeat(${COLS}, 16px)`, gap: 2 }}
+          >
             {Array.from({ length: ROWS * COLS }, (_, i) => {
               const r = Math.floor(i / COLS) + 1;
               const c = (i % COLS) + 1;
-              const lit = r <= hover.r && c <= hover.c;
+              const lit = r <= size.r && c <= size.c;
               return (
-                <div
+                <button
                   key={i}
-                  onMouseEnter={() => setHover({ r, c })}
-                  onClick={() => {
-                    api?.insertTable(r, c);
-                    setOpen(false);
-                    setHover({ r: 0, c: 0 });
-                  }}
+                  type="button"
+                  aria-label={`${r} × ${c} table`}
+                  data-dxw-table-size={`${r}x${c}`}
+                  tabIndex={r === cursor.r && c === cursor.c ? 0 : -1}
+                  // Same value means the same object, so React bails out
+                  // rather than re-rendering the grid on every focus echo.
+                  onFocus={() => setSize((s) => (s.r === r && s.c === c ? s : { r, c }))}
+                  onMouseEnter={() => setSize((s) => (s.r === r && s.c === c ? s : { r, c }))}
+                  onClick={() => insert(r, c)}
                   style={{
                     width: 16,
                     height: 16,
+                    padding: 0,
                     border: `1px solid ${lit ? T.accent : T.border}`,
                     background: lit ? T.activeBg : T.popoverBg,
                     borderRadius: 2,
@@ -2112,38 +3874,51 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
           </div>
           <div style={{ borderTop: "1px solid #eee", marginTop: 8, paddingTop: 4 }}>
             {ops.map(([op, label]) => (
-              <div
+              <button
                 key={op}
+                type="button"
                 onClick={() => {
                   if (op.startsWith("valign:")) {
                     api?.tableOp({ kind: "cellVAlign", v: op.slice(7) as "top" | "center" | "bottom" });
+                  } else if (op === "convert:text") {
+                    api?.convertTextToTable("tab");
+                  } else if (op === "convert:table") {
+                    api?.convertTableToText("tab");
                   } else {
                     api?.tableOp(op as Parameters<NonNullable<typeof api>["tableOp"]>[0]);
                   }
                   setOpen(false);
                 }}
-                style={{ padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4, color: T.fg }}
-                onMouseEnter={(e) => ((e.target as HTMLElement).style.background = T.hoverBg)}
-                onMouseLeave={(e) => ((e.target as HTMLElement).style.background = "transparent")}
+                style={{
+                  display: "block", width: "100%", textAlign: "left", border: 0,
+                  padding: "4px 6px", fontSize: 13, cursor: "pointer", borderRadius: 4,
+                  color: T.fg, background: "transparent", font: "inherit",
+                }}
+                onMouseEnter={(e) => ((e.currentTarget as HTMLElement).style.background = T.hoverBg)}
+                onMouseLeave={(e) => ((e.currentTarget as HTMLElement).style.background = "transparent")}
               >
                 {label}
-              </div>
+              </button>
             ))}
             <div style={{ display: "flex", gap: 4, alignItems: "center", padding: "4px 6px" }}>
               <span style={{ fontSize: 12, color: T.muted, marginRight: 2 }}>Cell fill</span>
               {CELL_FILLS.map((f) => (
-                <div
+                <button
                   key={f}
+                  type="button"
                   title={`#${f}`}
+                  aria-label={`Cell fill #${f}`}
                   onClick={() => { api?.tableOp({ kind: "cellShading", fill: f }); setOpen(false); }}
-                  style={{ width: 16, height: 16, background: `#${f}`, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
+                  style={{ width: 16, height: 16, padding: 0, background: `#${f}`, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer" }}
                 />
               ))}
-              <div
+              <button
+                type="button"
                 title="No fill"
+                aria-label="No cell fill"
                 onClick={() => { api?.tableOp({ kind: "cellShading", fill: null }); setOpen(false); }}
                 style={{
-                  width: 16, height: 16, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
+                  width: 16, height: 16, padding: 0, border: `1px solid ${T.border}`, borderRadius: 3, cursor: "pointer",
                   background: "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
                 }}
               />
@@ -2154,6 +3929,822 @@ function TableMenu({ api }: { api: DocxViewApi | null }) {
     </span>
   );
 }
+
+/**
+ * Keep a popover under the control that opened it, and close it on a click
+ * outside or on Escape. Returns the fixed position to paint at.
+ *
+ * The layout tab's three custom dialogs each grew their own copy of this
+ * before there was a third; new popovers share this one.
+ */
+function useAnchoredPopover(
+  anchorRef: React.RefObject<HTMLElement | null>,
+  rootRef: React.RefObject<HTMLElement | null>,
+  width: number,
+  onClose: () => void,
+  /**
+   * Whether the popover is on screen. AnchoredDialog renders only when it is
+   * open so it leaves this alone; the styles pane calls this hook from a
+   * component that is always mounted, and passing `true` there meant the
+   * effect ran once at mount — with no panel in the DOM to place, to dismiss,
+   * or to put the keyboard into — and never again.
+   */
+  open = true,
+): AnchoredPanelPosition {
+  return useAnchoredPanel(anchorRef, rootRef, open, { width, onClose });
+}
+
+/**
+ * A popover form anchored under the control that opened it, ending with the
+ * Cancel/Apply pair every form in this bar ends with.
+ */
+function AnchoredDialog({
+  anchorRef,
+  title,
+  label,
+  width = 236,
+  onClose,
+  onApply,
+  applyDisabled,
+  children,
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>;
+  title: string;
+  /** Accessible name; defaults to the visible title. */
+  label?: string;
+  width?: number;
+  onClose: () => void;
+  onApply: () => void;
+  applyDisabled?: boolean;
+  children: React.ReactNode;
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPopover(anchorRef, rootRef, width, onClose);
+  return (
+    <div
+      ref={rootRef}
+      role="dialog"
+      aria-label={label ?? title}
+      onMouseDown={(event) => event.stopPropagation()}
+      style={{
+        position: "fixed", top: position.top, left: position.left, zIndex: 201,
+        width: position.width, boxSizing: "border-box",
+        // A form taller than the window scrolls inside itself rather than
+        // running its Apply button off the bottom edge.
+        maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+        background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+        boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7, color: T.fg,
+      }}
+    >
+      <strong style={{ fontSize: 13 }}>{title}</strong>
+      {children}
+      {/* Marked, because a field inside the form can be a popover with its own
+          Cancel/Apply pair (the color menu is): "the last button called Apply"
+          is not a safe way to find this one. */}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+        <button type="button" data-dxw-dialog-cancel="" onClick={onClose} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+        <button type="button" data-dxw-dialog-apply="" onClick={onApply} disabled={applyDisabled} style={pillBtn}>Apply</button>
+      </div>
+    </div>
+  );
+}
+
+/** Shared row shape for the labelled fields inside an AnchoredDialog. */
+const dialogFieldRow: React.CSSProperties = {
+  display: "grid", gridTemplateColumns: "78px 1fr", gap: 8, alignItems: "center", fontSize: 12,
+};
+
+/** A number the user typed, or null when the box is empty or not a number. */
+function typedNumber(value: string): number | null {
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Points, rounded the way a dialog shows them rather than to full float. */
+function showPt(value: number): string {
+  return String(Math.round(value * 100) / 100);
+}
+
+/**
+ * Word's Table → Formula dialog, simple tier: the instruction ("=SUM(ABOVE)"
+ * prefilled, Word's own default) and an optional \# number format. The
+ * formula grammar is validated live through the same core rule the insert
+ * enforces, so Apply can never submit an instruction the engine refuses.
+ */
+function TableFormulaDialog({ api, onChanged }: { api: DocxViewApi | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [formula, setFormula] = useState("=SUM(ABOVE)");
+  const [numFmt, setNumFmt] = useState("");
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
+  const fmt = numFmt.trim() === "" ? undefined : numFmt.trim();
+  const valid = formulaInstruction(formula, fmt) !== null;
+  const apply = () => {
+    if (!valid) return;
+    if (api?.insertTableFormula(formula, fmt)) {
+      setOpen(false);
+      onChanged();
+    }
+  };
+  return (
+    <span style={{ display: "contents" }}>
+      <Btn
+        label="Formula"
+        title='Insert a formula field ("=SUM(ABOVE)") in the current cell'
+        active={open}
+        buttonRef={triggerRef}
+        onClick={() => setOpen(!open)}
+      />
+      {open && (
+        <AnchoredDialog
+          anchorRef={triggerRef}
+          title="Formula"
+          width={244}
+          onClose={close}
+          onApply={apply}
+          applyDisabled={!valid}
+        >
+          <label style={dialogFieldRow}>
+            <span>Formula</span>
+            <input
+              data-dxw-field=""
+              aria-label="Formula"
+              value={formula}
+              onChange={(event) => setFormula(event.target.value)}
+              style={dialogInput}
+            />
+          </label>
+          <label style={dialogFieldRow}>
+            <span>Number format</span>
+            <input
+              data-dxw-field=""
+              aria-label="Number format"
+              placeholder="#,##0.00"
+              value={numFmt}
+              onChange={(event) => setNumFmt(event.target.value)}
+              style={dialogInput}
+            />
+          </label>
+          <span style={{ fontSize: 11, color: T.muted }}>
+            SUM, AVERAGE, COUNT, MAX, MIN, PRODUCT over ABOVE, BELOW, LEFT, RIGHT, cell references (A1, A1:B3), and arithmetic.
+          </span>
+        </AnchoredDialog>
+      )}
+    </span>
+  );
+}
+
+const MARGIN_SIDES = ["top", "left", "bottom", "right"] as const;
+
+/**
+ * Word's Table Properties dialog, for the numbers its ribbon buttons cannot
+ * express: an exact table width, one column's width, the default cell
+ * margins, and the size of the repeating header band.
+ *
+ * It PREFILLS from the document (api.getTableProperties) and applies only the
+ * values the user actually changed. Applying everything would write a w:tblW
+ * onto a table that never had one — and, in suggesting mode, record a tracked
+ * change for a property nobody touched.
+ */
+function TablePropertiesDialog({ api, onChanged }: { api: DocxViewApi | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  type Form = {
+    widthUnit: "auto" | "pt" | "pct";
+    widthValue: string;
+    columnWidth: string;
+    margins: Record<(typeof MARGIN_SIDES)[number], string>;
+    headerRows: string;
+  };
+  const [initial, setInitial] = useState<{ form: Form; columnIdx: number; columnCount: number } | null>(null);
+  const [form, setForm] = useState<Form | null>(null);
+
+  const openDialog = () => {
+    const info = api?.getTableProperties();
+    if (!info) return;
+    const next: Form = {
+      widthUnit: info.width.unit,
+      widthValue: info.width.unit === "auto" ? "" : showPt(info.width.value),
+      columnWidth: showPt(info.columnWidthsPt[info.columnIdx] ?? 0),
+      margins: {
+        top: info.cellMargins.top === undefined ? "" : showPt(info.cellMargins.top),
+        left: info.cellMargins.left === undefined ? "" : showPt(info.cellMargins.left),
+        bottom: info.cellMargins.bottom === undefined ? "" : showPt(info.cellMargins.bottom),
+        right: info.cellMargins.right === undefined ? "" : showPt(info.cellMargins.right),
+      },
+      headerRows: String(info.headerRows),
+    };
+    setInitial({ form: next, columnIdx: info.columnIdx, columnCount: info.columnCount });
+    setForm(next);
+    setOpen(true);
+  };
+
+  const close = useCallback(() => setOpen(false), []);
+
+  const widthOk =
+    form === null ||
+    form.widthUnit === "auto" ||
+    (() => {
+      const n = typedNumber(form.widthValue);
+      return n !== null && n > 0 && (form.widthUnit === "pct" ? n <= 100 : n <= 1584);
+    })();
+  const columnOk = form === null || (() => {
+    const n = typedNumber(form.columnWidth);
+    return n !== null && n >= 1 && n <= 1584;
+  })();
+  const marginsOk =
+    form === null ||
+    MARGIN_SIDES.every((side) => {
+      const raw = form.margins[side];
+      if (raw.trim() === "") return true;
+      const n = typedNumber(raw);
+      return n !== null && n >= 0 && n <= 144;
+    });
+  const headerOk = form === null || (() => {
+    const n = typedNumber(form.headerRows);
+    return n !== null && n >= 0 && Number.isInteger(n);
+  })();
+  const valid = widthOk && columnOk && marginsOk && headerOk;
+
+  const apply = () => {
+    if (!form || !initial || !valid) return;
+    const was = initial.form;
+    if (form.widthUnit !== was.widthUnit || form.widthValue !== was.widthValue) {
+      if (form.widthUnit === "auto") api?.setTableWidth("auto");
+      else api?.setTableWidth(form.widthUnit, typedNumber(form.widthValue) ?? 0);
+    }
+    if (form.columnWidth !== was.columnWidth) {
+      api?.setTableColumnWidth(initial.columnIdx, typedNumber(form.columnWidth) ?? 0);
+    }
+    if (MARGIN_SIDES.some((side) => form.margins[side] !== was.margins[side])) {
+      const margins: Record<string, number> = {};
+      for (const side of MARGIN_SIDES) {
+        const n = typedNumber(form.margins[side]);
+        if (n !== null) margins[side] = n;
+      }
+      api?.setTableCellMargins("table", margins);
+    }
+    if (form.headerRows !== was.headerRows) {
+      api?.setTableHeaderRows(typedNumber(form.headerRows) ?? 0);
+    }
+    setOpen(false);
+    onChanged();
+  };
+
+  const marginField = (side: (typeof MARGIN_SIDES)[number], label: string) => (
+    <label key={side} style={{ display: "grid", gap: 3, fontSize: 11, color: T.muted }}>
+      <span>{label}</span>
+      <input
+              data-dxw-field=""
+        aria-label={`${label} cell margin (points)`}
+        type="number"
+              data-dxw-number=""
+        min="0"
+        step="0.5"
+        placeholder="—"
+        value={form?.margins[side] ?? ""}
+        onChange={(event) =>
+          setForm((f) => (f ? { ...f, margins: { ...f.margins, [side]: event.target.value } } : f))
+        }
+        style={dialogInput}
+      />
+    </label>
+  );
+
+  return (
+    <span style={{ display: "contents" }}>
+      <Btn
+        label="Properties"
+        title="Table properties: exact widths, cell margins and header rows"
+        active={open}
+        buttonRef={triggerRef}
+        onClick={() => (open ? close() : openDialog())}
+      />
+      {open && form && initial && (
+        <AnchoredDialog
+          anchorRef={triggerRef}
+          title="Table Properties"
+          width={252}
+          onClose={close}
+          onApply={apply}
+          applyDisabled={!valid}
+        >
+          <label style={dialogFieldRow}>
+            <span>Table width</span>
+            <span style={{ display: "flex", gap: 6 }}>
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Table width unit"
+                value={form.widthUnit}
+                width={78}
+                options={[
+                  { value: "auto", label: "Auto" },
+                  { value: "pt", label: "Points" },
+                  { value: "pct", label: "Percent" },
+                ]}
+                onChange={(widthUnit) =>
+                  setForm({ ...form, widthUnit: widthUnit as Form["widthUnit"] })
+                }
+              />
+              <input
+              data-dxw-field=""
+                aria-label="Table width"
+                type="number"
+              data-dxw-number=""
+                min="0"
+                step="1"
+                disabled={form.widthUnit === "auto"}
+                value={form.widthUnit === "auto" ? "" : form.widthValue}
+                onChange={(event) => setForm({ ...form, widthValue: event.target.value })}
+                style={dialogInput}
+              />
+            </span>
+          </label>
+          <label style={dialogFieldRow}>
+            <span>{`Column ${initial.columnIdx + 1} of ${initial.columnCount}`}</span>
+            <input
+              data-dxw-field=""
+              aria-label="Column width (points)"
+              type="number"
+              data-dxw-number=""
+              min="1"
+              step="1"
+              value={form.columnWidth}
+              onChange={(event) => setForm({ ...form, columnWidth: event.target.value })}
+              style={dialogInput}
+            />
+          </label>
+          <span style={{ fontSize: 12 }}>Cell margins (points)</span>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
+            {marginField("top", "Top")}
+            {marginField("left", "Left")}
+            {marginField("bottom", "Bottom")}
+            {marginField("right", "Right")}
+          </div>
+          <label style={dialogFieldRow}>
+            <span>Header rows</span>
+            <input
+              data-dxw-field=""
+              aria-label="Repeating header rows"
+              type="number"
+              data-dxw-number=""
+              min="0"
+              step="1"
+              value={form.headerRows}
+              onChange={(event) => setForm({ ...form, headerRows: event.target.value })}
+              style={dialogInput}
+            />
+          </label>
+          <span style={{ color: T.muted, fontSize: 11 }}>
+            Only the boxes you change are written. A blank margin keeps the table's current one.
+          </span>
+        </AnchoredDialog>
+      )}
+    </span>
+  );
+}
+
+/** Word's border weights, in points. w:sz counts eighths of a point. */
+const BORDER_WIDTHS_PT = [0.25, 0.5, 0.75, 1, 1.5, 2.25, 3, 4.5, 6];
+
+/** Display names for the border styles the engine writes. */
+const BORDER_STYLE_NAMES: Record<TableBorderStyle, string> = {
+  single: "Single",
+  thick: "Thick",
+  double: "Double",
+  dotted: "Dotted",
+  dashed: "Dashed",
+  dotDash: "Dot dash",
+  dotDotDash: "Dot dot dash",
+  thinThickSmallGap: "Thin then thick",
+  triple: "Triple",
+  wave: "Wave",
+  none: "None (suppress)",
+};
+
+/** The style and weight lists as menu options. Shared by the table and
+ * paragraph border dialogs, which offer exactly the same two vocabularies. */
+const BORDER_STYLE_OPTIONS = TABLE_BORDER_STYLES.map((value) => ({ value, label: BORDER_STYLE_NAMES[value] }));
+const BORDER_WIDTH_OPTIONS = BORDER_WIDTHS_PT.map((pt) => ({ value: String(pt), label: `${pt} pt` }));
+
+const EDGE_NAMES: Record<TableBorderEdge, string> = {
+  top: "Top",
+  bottom: "Bottom",
+  left: "Left",
+  right: "Right",
+  insideH: "Inside horizontal",
+  insideV: "Inside vertical",
+  tl2br: "Diagonal ↘",
+  tr2bl: "Diagonal ↗",
+};
+
+/**
+ * The full border editor behind the Borders menu's presets: any of the
+ * engine's line styles, any weight w:sz can carry, any color, on whichever
+ * edges the chosen scope allows.
+ *
+ * The scope decides the edge list rather than the user filtering it, because
+ * setTableBorders REFUSES an edge the scope does not own (a table has no
+ * diagonals; a cell has no inside rules) and a checkbox that silently does
+ * nothing is worse than an absent one.
+ */
+function CustomBorderDialog({
+  api,
+  anchorRef,
+  onClose,
+  onChanged,
+}: {
+  api: DocxViewApi | null;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [scope, setScope] = useState<"table" | "cell">("table");
+  const [style, setStyle] = useState<TableBorderStyle>("single");
+  const [widthPt, setWidthPt] = useState("0.5");
+  const [color, setColor] = useState("#000000");
+  const [edges, setEdges] = useState<TableBorderEdge[]>(["top", "bottom", "left", "right"]);
+
+  const allowed = scope === "cell" ? CELL_SCOPE_EDGES : TABLE_SCOPE_EDGES;
+  const chosen = edges.filter((edge) => allowed.includes(edge));
+  const width = typedNumber(widthPt);
+  const validColor = normalizedColor(color);
+  const valid =
+    chosen.length > 0 &&
+    validColor !== null &&
+    (style === "none" || (width !== null && width >= 0.125 && width <= 12));
+
+  const apply = () => {
+    if (!valid) return;
+    api?.setTableBorders(
+      scope,
+      [...chosen],
+      style === "none"
+        ? { style: "none" }
+        : {
+            style,
+            // w:sz is eighths of a point, and the engine takes it in that
+            // unit; the box asks for points because that is what Word's
+            // weight list shows.
+            sz: Math.min(96, Math.max(1, Math.round((width ?? 0.5) * 8))),
+            color: validColor!.slice(1).toUpperCase(),
+          },
+    );
+    onClose();
+    onChanged();
+  };
+
+  return (
+    <AnchoredDialog
+      anchorRef={anchorRef}
+      title="Custom Border"
+      width={244}
+      onClose={onClose}
+      onApply={apply}
+      applyDisabled={!valid}
+    >
+      <label style={dialogFieldRow}>
+        <span>Apply to</span>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Border scope"
+          value={scope}
+          options={[
+            { value: "table", label: "Whole table" },
+            { value: "cell", label: "This cell" },
+          ]}
+          onChange={(value) => setScope(value as "table" | "cell")}
+        />
+      </label>
+      <label style={dialogFieldRow}>
+        <span>Style</span>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Border style"
+          value={style}
+          options={BORDER_STYLE_OPTIONS}
+          onChange={(value) => setStyle(value as TableBorderStyle)}
+        />
+      </label>
+      <label style={dialogFieldRow}>
+        <span>Weight</span>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Border width (points)"
+          value={widthPt}
+          disabled={style === "none"}
+          options={BORDER_WIDTH_OPTIONS}
+          onChange={setWidthPt}
+        />
+      </label>
+      <span style={dialogFieldRow}>
+        <span>Color</span>
+        <ColorMenu
+          current={validColor ?? "#000000"}
+          title="Border color"
+          trigger={(
+            <>
+              <span
+                aria-hidden="true"
+                style={{ width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`, background: validColor ?? "#000000" }}
+              />
+              {validColor ?? "#000000"}
+            </>
+          )}
+          onPick={setColor}
+        />
+      </span>
+      <span style={{ fontSize: 12 }}>Edges</span>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+        {allowed.map((edge) => (
+          <ToolbarCheckbox
+            key={edge}
+            label={EDGE_NAMES[edge]}
+            ariaLabel={EDGE_NAMES[edge]}
+            fontSize={11.5}
+            checked={chosen.includes(edge)}
+            onChange={(on) =>
+              setEdges((current) =>
+                on ? [...current, edge] : current.filter((other) => other !== edge),
+              )
+            }
+          />
+        ))}
+      </div>
+    </AnchoredDialog>
+  );
+}
+
+const TAB_ALIGN_NAMES: Record<TabStopSpec["align"], string> = {
+  left: "Left",
+  center: "Center",
+  right: "Right",
+  decimal: "Decimal",
+  bar: "Bar",
+};
+
+const TAB_LEADER_NAMES: Record<TabStopSpec["leader"], string> = {
+  none: "None",
+  dot: "Dots ….",
+  hyphen: "Hyphens ---",
+  underscore: "Underline ___",
+  middleDot: "Middle dots ···",
+};
+
+const TAB_ALIGN_OPTIONS = (Object.keys(TAB_ALIGN_NAMES) as TabStopSpec["align"][])
+  .map((value) => ({ value, label: TAB_ALIGN_NAMES[value] }));
+const TAB_LEADER_OPTIONS = (Object.keys(TAB_LEADER_NAMES) as TabStopSpec["leader"][])
+  .map((value) => ({ value, label: TAB_LEADER_NAMES[value] }));
+
+/**
+ * Word's Tabs dialog, popover-sized: the paragraph's direct tab stops as
+ * editable rows (position in points, alignment, leader), plus add and
+ * remove. Apply replaces the whole list; applying an empty list clears
+ * w:tabs so style stops and the default grid take over again.
+ */
+function TabStopsDialog({
+  api,
+  anchorRef,
+  onClose,
+}: {
+  api: DocxViewApi | null;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const [rows, setRows] = useState<{ pos: string; align: TabStopSpec["align"]; leader: TabStopSpec["leader"] }[]>(
+    () => (api?.getTabStops() ?? []).map((stop) => ({ pos: showPt(stop.posPt), align: stop.align, leader: stop.leader })),
+  );
+  const parsed = rows.map((row) => ({ ...row, posPt: typedNumber(row.pos) }));
+  const valid = parsed.every((row) => row.posPt !== null && row.posPt >= 0 && row.posPt <= 1584);
+  const patch = (index: number, part: Partial<(typeof rows)[number]>) =>
+    setRows((current) => current.map((row, i) => (i === index ? { ...row, ...part } : row)));
+  const apply = () => {
+    if (!valid) return;
+    api?.setTabStops(parsed.map((row) => ({ posPt: row.posPt!, align: row.align, leader: row.leader })));
+    onClose();
+  };
+  return (
+    <AnchoredDialog
+      anchorRef={anchorRef}
+      title="Tab stops"
+      width={288}
+      onClose={onClose}
+      onApply={apply}
+      applyDisabled={!valid}
+    >
+      {rows.length === 0 && (
+        <span style={{ fontSize: 12, color: T.muted }}>
+          No custom stops — tabs use the default half-inch grid.
+        </span>
+      )}
+      {rows.map((row, index) => (
+        <div key={index} style={{ display: "grid", gridTemplateColumns: "64px 1fr 1fr 22px", gap: 6, alignItems: "center" }}>
+          <input
+              data-dxw-field=""
+            aria-label={`Tab stop ${index + 1} position (points)`}
+            type="number"
+              data-dxw-number=""
+            min={0}
+            max={1584}
+            step={1}
+            value={row.pos}
+            onChange={(event) => patch(index, { pos: event.target.value })}
+            style={dialogInput}
+          />
+          <ToolbarMenuSelect
+            variant="field"
+            ariaLabel={`Tab stop ${index + 1} alignment`}
+            value={row.align}
+            options={TAB_ALIGN_OPTIONS}
+            onChange={(align) => patch(index, { align: align as TabStopSpec["align"] })}
+          />
+          <ToolbarMenuSelect
+            variant="field"
+            ariaLabel={`Tab stop ${index + 1} leader`}
+            value={row.leader}
+            options={TAB_LEADER_OPTIONS}
+            onChange={(leader) => patch(index, { leader: leader as TabStopSpec["leader"] })}
+          />
+          <button
+            type="button"
+            aria-label={`Remove tab stop ${index + 1}`}
+            title="Remove this stop"
+            onClick={() => setRows((current) => current.filter((_, i) => i !== index))}
+            style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 6px" }}
+          >
+            ×
+          </button>
+        </div>
+      ))}
+      <div>
+        <button
+          type="button"
+          onClick={() =>
+            setRows((current) => {
+              const last = typedNumber(current[current.length - 1]?.pos ?? "");
+              return [...current, { pos: showPt((last ?? 0) + 36), align: "left", leader: "none" }];
+            })
+          }
+          style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}
+        >
+          Add stop
+        </button>
+      </div>
+    </AnchoredDialog>
+  );
+}
+
+const PARA_EDGE_NAMES: Record<"top" | "left" | "bottom" | "right" | "between", string> = {
+  top: "Top",
+  left: "Left",
+  bottom: "Bottom",
+  right: "Right",
+  between: "Between paragraphs",
+};
+
+/**
+ * Word's Borders and Shading dialog for PARAGRAPHS, popover-sized. The
+ * style/weight/color rows are the table border picker's vocabulary; edges
+ * are the paragraph's own (top/left/bottom/right/between), and the shading
+ * row drives w:shd.
+ */
+function ParagraphBorderDialog({
+  api,
+  anchorRef,
+  onClose,
+}: {
+  api: DocxViewApi | null;
+  anchorRef: React.RefObject<HTMLElement | null>;
+  onClose: () => void;
+}) {
+  const [style, setStyle] = useState<TableBorderStyle>("single");
+  const [widthPt, setWidthPt] = useState("0.5");
+  const [color, setColor] = useState("#000000");
+  const [edges, setEdges] = useState<(keyof typeof PARA_EDGE_NAMES)[]>(["top", "bottom", "left", "right"]);
+  const [shading, setShading] = useState<string | null>(() => api?.getParagraphBorders().shading ?? null);
+
+  const width = typedNumber(widthPt);
+  const validColor = normalizedColor(color);
+  const valid =
+    validColor !== null &&
+    (style === "none" || (width !== null && width >= 0.125 && width <= 12));
+
+  const apply = () => {
+    if (!valid) return;
+    const spec =
+      style === "none"
+        ? { style: "none" as const }
+        : {
+            style,
+            sz: Math.min(96, Math.max(1, Math.round((width ?? 0.5) * 8))),
+            color: validColor!.slice(1).toUpperCase(),
+          };
+    const borders = Object.fromEntries(edges.map((edge) => [edge, spec]));
+    api?.setParagraphBorders({
+      ...(edges.length > 0 ? { borders } : {}),
+      shading: shading === null ? null : shading.replace(/^#/, "").toUpperCase(),
+    });
+    onClose();
+  };
+
+  return (
+    <AnchoredDialog
+      anchorRef={anchorRef}
+      title="Paragraph borders"
+      width={252}
+      onClose={onClose}
+      onApply={apply}
+      applyDisabled={!valid}
+    >
+      <label style={dialogFieldRow}>
+        <span>Style</span>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Paragraph border style"
+          value={style}
+          options={BORDER_STYLE_OPTIONS}
+          onChange={(value) => setStyle(value as TableBorderStyle)}
+        />
+      </label>
+      <label style={dialogFieldRow}>
+        <span>Weight</span>
+        <ToolbarMenuSelect
+          variant="field"
+          ariaLabel="Paragraph border width (points)"
+          value={widthPt}
+          disabled={style === "none"}
+          options={BORDER_WIDTH_OPTIONS}
+          onChange={setWidthPt}
+        />
+      </label>
+      <span style={dialogFieldRow}>
+        <span>Color</span>
+        <ColorMenu
+          current={validColor ?? "#000000"}
+          title="Paragraph border color"
+          trigger={(
+            <>
+              <span
+                aria-hidden="true"
+                style={{ width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`, background: validColor ?? "#000000" }}
+              />
+              {validColor ?? "#000000"}
+            </>
+          )}
+          onPick={setColor}
+        />
+      </span>
+      <span style={{ fontSize: 12 }}>Edges</span>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2 }}>
+        {(Object.keys(PARA_EDGE_NAMES) as (keyof typeof PARA_EDGE_NAMES)[]).map((edge) => (
+          <ToolbarCheckbox
+            key={edge}
+            label={PARA_EDGE_NAMES[edge]}
+            ariaLabel={PARA_EDGE_NAMES[edge]}
+            fontSize={11.5}
+            checked={edges.includes(edge)}
+            onChange={(on) =>
+              setEdges((list) => (on ? [...list, edge] : list.filter((other) => other !== edge)))
+            }
+          />
+        ))}
+      </div>
+      <span style={dialogFieldRow}>
+        <span>Shading</span>
+        <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+          <ColorMenu
+            current={shading ?? "#FFFF99"}
+            title="Paragraph shading fill"
+            trigger={(
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`,
+                  background: shading ?? "linear-gradient(to top left, #fff 46%, #d93025 49%, #d93025 51%, #fff 54%)",
+                }}
+              />
+            )}
+            onPick={setShading}
+          />
+          {shading !== null && (
+            <button
+              type="button"
+              onClick={() => setShading(null)}
+              style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 8px" }}
+            >
+              No fill
+            </button>
+          )}
+        </span>
+      </span>
+    </AnchoredDialog>
+  );
+}
+
+/** Menu value standing for "remove the style reference". */
+const NO_TABLE_STYLE = "(no table style)";
 
 function TableFormatTab({
   api,
@@ -2168,6 +4759,31 @@ function TableFormatTab({
     api?.tableOp(op);
     onChanged();
   };
+  const after = (act: () => void) => {
+    act();
+    onChanged();
+  };
+  const [customBorder, setCustomBorder] = useState(false);
+  const borderMenuRef = useRef<HTMLSpanElement | null>(null);
+  const closeCustomBorder = useCallback(() => setCustomBorder(false), []);
+  // Word's "No Borders" and its eraser are different edits, and the engine
+  // keeps them apart: SUPPRESS writes w:val="nil" so no rule is drawn even
+  // when the table style asks for one, while CLEAR removes the direct edges
+  // so the style's rules come back. Both are offered rather than guessing.
+  const ALL_TABLE_EDGES = ["top", "bottom", "left", "right", "insideH", "insideV"] as const;
+  const borderActions: Record<string, () => void> = {
+    tableAll: () => api?.setTableBorders("table", [...ALL_TABLE_EDGES], { style: "single", sz: 4 }),
+    tableOutside: () => api?.setTableBorders("table", ["top", "bottom", "left", "right"], { style: "single", sz: 4 }),
+    tableInside: () => api?.setTableBorders("table", ["insideH", "insideV"], { style: "single", sz: 4 }),
+    tableNone: () => api?.setTableBorders("table", [...ALL_TABLE_EDGES], { style: "none" }),
+    tableClear: () => api?.setTableBorders("table", [...ALL_TABLE_EDGES], null),
+    cellAll: () => api?.setTableBorders("cell", ["top", "bottom", "left", "right"], { style: "single", sz: 4 }),
+    cellNone: () => api?.setTableBorders("cell", ["top", "bottom", "left", "right"], { style: "none" }),
+    cellClear: () => api?.setTableBorders("cell", ["top", "bottom", "left", "right"], null),
+  };
+  const look = api?.getTableLook();
+  const styleId = api?.getTableStyleId() ?? null;
+  const tick = (on: boolean | undefined, text: string) => `${on ? "\u2713 " : "\u2007\u2007"}${text}`;
   return (
     <span data-dxw-table-format="" style={{ display: "contents" }}>
       <ColorMenu
@@ -2206,7 +4822,528 @@ function TableFormatTab({
         groups={[{ items: [["mergeRight", "Merge right"], ["mergeDown", "Merge down"], ["splitCell", "Split cell"]] }]}
         onPick={(value) => run(value as Parameters<DocxViewApi["tableOp"]>[0])}
       />
+      <ActionMenu
+        label="Sort"
+        title="Sort rows by the current column (repeating header rows stay in place)"
+        width={64}
+        groups={[
+          { label: "Text", items: [["text:asc", "Sort A → Z"], ["text:desc", "Sort Z → A"]] },
+          { label: "Numbers", items: [["number:asc", "Sort 0 → 9"], ["number:desc", "Sort 9 → 0"]] },
+        ]}
+        onPick={(value) => {
+          const [compare, order] = value.split(":") as ["text" | "number", "asc" | "desc"];
+          const colIdx = api?.getTableProperties()?.columnIdx ?? 0;
+          after(() => api?.sortTableRows(colIdx, order, compare));
+        }}
+      />
+      <ActionMenu
+        label="Convert"
+        title="Convert this table to text"
+        width={82}
+        groups={[{ items: [["tab", "To text (tabs)"], ["comma", "To text (commas)"]] }]}
+        onPick={(value) => after(() => api?.convertTableToText(value as "tab" | "comma"))}
+      />
+      <span ref={borderMenuRef} style={{ display: "inline-flex" }}>
+        <ActionMenu
+          label="Borders"
+          title="Set or clear the borders of the table or the current cell"
+          width={92}
+          groups={[
+            {
+              label: "Table",
+              items: [
+                ["tableAll", "All borders"],
+                ["tableOutside", "Outside borders"],
+                ["tableInside", "Inside borders"],
+                ["tableNone", "No borders"],
+                ["tableClear", "Clear direct borders"],
+              ],
+            },
+            {
+              label: "Cell",
+              items: [
+                ["cellAll", "All borders"],
+                ["cellNone", "No borders"],
+                ["cellClear", "Clear direct borders"],
+              ],
+            },
+            { items: [["custom", "Custom border…"]] },
+          ]}
+          onPick={(value) => {
+            if (value === "custom") setCustomBorder(true);
+            else after(() => borderActions[value]?.());
+          }}
+        />
+      </span>
+      {customBorder && (
+        <CustomBorderDialog
+          api={api}
+          anchorRef={borderMenuRef}
+          onClose={closeCustomBorder}
+          onChanged={onChanged}
+        />
+      )}
+      <ActionMenu
+        label={styleId ? "Style" : "Table style"}
+        title="Apply a table style defined in this document"
+        width={112}
+        groups={[
+          {
+            items: [
+              // Not "": ToolbarMenuSelect treats the empty value as the
+              // current selection and appends its own tick, which would
+              // contradict the ticks this menu draws itself. A style id is
+              // an XML name, so it can never collide with this sentinel.
+              [NO_TABLE_STYLE, tick(styleId === null, "No style")],
+              ...(api?.listTableStyles() ?? []).map(
+                ({ id, name }) => [id, tick(id === styleId, name)] as [string, string],
+              ),
+            ],
+          },
+        ]}
+        onPick={(value) => after(() => api?.setTableStyle(value === NO_TABLE_STYLE ? null : value))}
+      />
+      {/* The six checkboxes Word calls Table Style Options: they choose WHICH
+          of a style's conditional formats apply, so they are meaningless
+          without one. */}
+      {styleId !== null && (
+        <ActionMenu
+          label="Style options"
+          title="Choose which parts of the table style apply"
+          width={118}
+          groups={[
+            {
+              items: [
+                ["firstRow", tick(look?.firstRow, "Header row")],
+                ["lastRow", tick(look?.lastRow, "Total row")],
+                ["firstColumn", tick(look?.firstColumn, "First column")],
+                ["lastColumn", tick(look?.lastColumn, "Last column")],
+                ["bandedRows", tick(look?.bandedRows, "Banded rows")],
+                ["bandedCols", tick(look?.bandedCols, "Banded columns")],
+              ],
+            },
+          ]}
+          onPick={(value) => {
+            const key = value as keyof NonNullable<typeof look>;
+            if (!look) return;
+            after(() => api?.setTableLook({ [key]: !look[key] }));
+          }}
+        />
+      )}
+      <ActionMenu
+        label="AutoFit"
+        title="Choose how the table sizes its columns"
+        width={92}
+        groups={[
+          {
+            items: [
+              ["contents", "AutoFit to contents"],
+              ["window", "AutoFit to window"],
+              ["fixed", "Fixed column width"],
+            ],
+          },
+        ]}
+        onPick={(value) =>
+          after(() => {
+            if (value === "fixed") {
+              api?.setTableLayout("fixed");
+              return;
+            }
+            api?.setTableLayout("autofit");
+            // "To window" is autofit measured against a full-width target
+            // rather than against the content's own width.
+            if (value === "window") api?.setTableWidth("pct", 100);
+          })
+        }
+      />
+      <ActionMenu
+        label="Header rows"
+        title="Repeat leading rows at the top of every page"
+        width={112}
+        groups={[{ items: [["0", "None"], ["1", "First row"], ["2", "First two rows"]] }]}
+        onPick={(value) => after(() => api?.setTableHeaderRows(Number(value)))}
+      />
+      <TableFormulaDialog api={api} onChanged={onChanged} />
+      <TablePropertiesDialog api={api} onChanged={onChanged} />
       <Btn label="Delete table" title="Delete the current table" onClick={() => run("deleteTable")} />
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------- styles pane
+
+type StyleEntry = ReturnType<NonNullable<DocxViewApi["listStyles"]>>[number];
+
+/** Paint a gallery row the way the style itself would paint text. RunProps
+ * carries a resolved size in PX and a CSS color, so both go straight through. */
+function previewStyle(preview: StyleEntry["preview"]): React.CSSProperties {
+  return {
+    fontFamily: preview.font,
+    fontWeight: preview.bold ? 600 : 400,
+    fontStyle: preview.italic ? "italic" : "normal",
+    textDecoration: preview.underline && preview.underline !== "none" ? "underline" : undefined,
+    // Clamped: a 36pt Title would push every other row off the panel.
+    fontSize: preview.size ? Math.min(18, Math.max(11, preview.size)) : 13,
+    color: preview.color && preview.color !== "auto" ? preview.color : undefined,
+  };
+}
+
+/** The form both "New style" and "Modify style" fill in. */
+interface StyleForm {
+  name: string;
+  type: "paragraph" | "character";
+  basedOn: string;
+  quickStyle: boolean;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  sizePt: string;
+  color: string;
+  /** "" leaves the alignment alone, which for a new style means inherit. */
+  alignment: "" | "left" | "center" | "right" | "both";
+}
+
+const PX_PER_PT = 4 / 3;
+
+function formFor(entry: StyleEntry | null): StyleForm {
+  const preview = entry?.preview ?? {};
+  return {
+    name: entry?.name ?? "",
+    type: entry?.type === "character" ? "character" : "paragraph",
+    basedOn: entry?.basedOn ?? "",
+    quickStyle: entry?.quickStyle ?? true,
+    bold: !!preview.bold,
+    italic: !!preview.italic,
+    underline: !!preview.underline && preview.underline !== "none",
+    sizePt: preview.size ? showPt(preview.size / PX_PER_PT) : "",
+    color: preview.color && preview.color !== "auto" ? preview.color : "",
+    alignment: "",
+  };
+}
+
+/**
+ * Word's Styles pane, as a ribbon popover.
+ *
+ * listStyles/createStyle/modifyStyle/deleteStyle have all been on the api
+ * since the styles work landed, reachable only from the two dropdowns that
+ * APPLY a style. Nothing in the toolbar could define one, rename one, or say
+ * how much of the document a style is holding up.
+ *
+ * Paragraph and character styles only: those are the two an "apply" click at
+ * the caret can honour. A table style is applied through the table tab, where
+ * there is a table to apply it to.
+ *
+ * MODIFY WRITES ONLY WHAT CHANGED. The form prefills from the RESOLVED
+ * preview — what the user is looking at — so saving the whole form would
+ * copy every inherited property onto the definition and quietly cut it out of
+ * its own cascade.
+ */
+function StylesPane({ api, onChanged }: { api: DocxViewApi | null; onChanged: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<{ entry: StyleEntry | null; form: StyleForm; initial: StyleForm } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const close = useCallback(() => {
+    setOpen(false);
+    setEditing(null);
+    setConfirmDelete(null);
+    setError("");
+  }, []);
+  const position = useAnchoredPopover(triggerRef, rootRef, 300, close, open);
+
+  const entries = (open ? api?.listStyles?.() ?? [] : []).filter(
+    (entry) => entry.type === "paragraph" || entry.type === "character",
+  );
+
+  const applyStyle = (entry: StyleEntry) => {
+    if (entry.type === "character") api?.applyFormat({ characterStyleId: entry.id });
+    else api?.setParagraphStyle(entry.id);
+    onChanged();
+    close();
+  };
+
+  const remove = (entry: StyleEntry) => {
+    if (!api?.deleteStyle(entry.id)) {
+      setError(`${entry.name} cannot be deleted — the default paragraph style holds up every other one.`);
+      return;
+    }
+    setConfirmDelete(null);
+    onChanged();
+  };
+
+  const startEdit = (entry: StyleEntry | null) => {
+    const form = formFor(entry);
+    setEditing({ entry, form, initial: form });
+    setError("");
+  };
+
+  /** The run properties the user actually moved, and nothing else. */
+  const runPatch = (form: StyleForm, initial: StyleForm) => {
+    const patch: Record<string, unknown> = {};
+    if (form.bold !== initial.bold) patch.bold = form.bold;
+    if (form.italic !== initial.italic) patch.italic = form.italic;
+    if (form.underline !== initial.underline) patch.underline = form.underline;
+    if (form.sizePt !== initial.sizePt) {
+      const pt = typedNumber(form.sizePt);
+      if (pt !== null) patch.fontSizePt = pt;
+    }
+    if (form.color !== initial.color) {
+      const color = normalizedColor(form.color);
+      if (color) patch.color = color.slice(1).toUpperCase();
+    }
+    return patch;
+  };
+
+  const save = () => {
+    if (!editing || !api) return;
+    const { entry, form, initial } = editing;
+    const name = form.name.trim();
+    if (!name) {
+      setError("Give the style a name.");
+      return;
+    }
+    const run = runPatch(form, initial);
+    const paragraph = form.alignment === "" ? undefined : { alignment: form.alignment };
+    if (entry) {
+      const patch = {
+        ...(name === entry.name ? {} : { name }),
+        ...(form.basedOn === (entry.basedOn ?? "") ? {} : { basedOn: form.basedOn === "" ? null : form.basedOn }),
+        ...(form.quickStyle === entry.quickStyle ? {} : { quickStyle: form.quickStyle }),
+        ...(Object.keys(run).length > 0 ? { run } : {}),
+        ...(paragraph && entry.type === "paragraph" ? { paragraph } : {}),
+      };
+      if (Object.keys(patch).length === 0) {
+        setEditing(null);
+        return;
+      }
+      if (!api.modifyStyle(entry.id, patch)) {
+        setError("That change was refused — a style cannot be based on itself.");
+        return;
+      }
+    } else {
+      const styleId = uniqueStyleId(api.document, styleIdFromName(name));
+      const created = api.createStyle({
+        styleId,
+        type: form.type,
+        name,
+        ...(form.basedOn === "" ? {} : { basedOn: form.basedOn }),
+        quickStyle: form.quickStyle,
+        ...(Object.keys(run).length > 0 ? { run } : {}),
+        ...(paragraph && form.type === "paragraph" ? { paragraph } : {}),
+      });
+      if (!created) {
+        setError("The style could not be created. A shared document defines styles through the room.");
+        return;
+      }
+    }
+    setEditing(null);
+    onChanged();
+  };
+
+  const check = (
+    label: string,
+    value: boolean,
+    onToggle: (next: boolean) => void,
+  ) => (
+    <ToolbarCheckbox label={label} ariaLabel={label} checked={value} onChange={onToggle} />
+  );
+
+  const form = editing?.form;
+  return (
+    <span style={{ position: "relative", display: "inline-flex" }}>
+      <Btn
+        label="Styles"
+        title="Styles pane: create, change and remove this document's styles"
+        active={open}
+        buttonRef={triggerRef}
+        onClick={() => (open ? close() : (setOpen(true), setEditing(null)))}
+      />
+      {open && (
+        <div
+          ref={rootRef}
+          role="dialog"
+          aria-label="Styles"
+          data-dxw-styles-pane=""
+          onMouseDown={(event) => event.stopPropagation()}
+          style={{
+            position: "fixed", top: position.top, left: position.left, zIndex: 201,
+            width: position.width, boxSizing: "border-box",
+            maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7, color: T.fg,
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <strong style={{ fontSize: 13 }}>{editing ? (editing.entry ? "Modify Style" : "New Style") : "Styles"}</strong>
+            {!editing && (
+              <button type="button" style={pillBtn} onClick={() => startEdit(null)}>New style</button>
+            )}
+          </div>
+
+          {!editing && (
+            <div style={{ maxHeight: 260, overflowY: "auto", display: "grid", gap: 1 }}>
+              {entries.map((entry) => (
+                <div key={entry.id} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                  <button
+                    type="button"
+                    title={`Apply ${entry.name}`}
+                    aria-label={`Apply ${entry.name}`}
+                    onClick={() => applyStyle(entry)}
+                    style={{
+                      flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none",
+                      borderRadius: 5, padding: "4px 6px", cursor: "pointer", color: T.fg,
+                      display: "flex", justifyContent: "space-between", gap: 8, alignItems: "baseline",
+                    }}
+                  >
+                    <span style={{ ...previewStyle(entry.preview), overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {entry.type === "character" ? "\u{1D400} " : "¶ "}
+                      {entry.name}
+                    </span>
+                    <span style={{ color: T.muted, fontSize: 11, flex: "none" }}>
+                      {entry.usageCount === 0 ? "unused" : `${entry.usageCount} use${entry.usageCount === 1 ? "" : "s"}`}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    title={`Modify ${entry.name}`}
+                    aria-label={`Modify ${entry.name}`}
+                    onClick={() => startEdit(entry)}
+                    style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 7px" }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    title={`Delete ${entry.name}`}
+                    aria-label={confirmDelete === entry.id ? `Confirm delete ${entry.name}` : `Delete ${entry.name}`}
+                    onClick={() => (confirmDelete === entry.id ? remove(entry) : setConfirmDelete(entry.id))}
+                    style={{ ...pillBtn, background: T.popoverBg, color: T.fg, padding: "2px 7px" }}
+                  >
+                    {confirmDelete === entry.id ? "Sure?" : "×"}
+                  </button>
+                </div>
+              ))}
+              {entries.length === 0 && (
+                <span style={{ color: T.muted, fontSize: 12 }}>This document declares no styles yet.</span>
+              )}
+            </div>
+          )}
+
+          {editing && form && (
+            <>
+              <label style={dialogFieldRow}>
+                <span>Name</span>
+                <input
+              data-dxw-field=""
+                  aria-label="Style name"
+                  autoFocus
+                  value={form.name}
+                  onChange={(event) => setEditing({ ...editing, form: { ...form, name: event.target.value } })}
+                  style={dialogInput}
+                />
+              </label>
+              {!editing.entry && (
+                <label style={dialogFieldRow}>
+                  <span>Type</span>
+                  <ToolbarMenuSelect
+                    variant="field"
+                    ariaLabel="Style type"
+                    value={form.type}
+                    options={[
+                      { value: "paragraph", label: "Paragraph" },
+                      { value: "character", label: "Character" },
+                    ]}
+                    onChange={(type) =>
+                      setEditing({ ...editing, form: { ...form, type: type as StyleForm["type"] } })
+                    }
+                  />
+                </label>
+              )}
+              <label style={dialogFieldRow}>
+                <span>Based on</span>
+                <ToolbarMenuSelect
+                  variant="field"
+                  ariaLabel="Based on"
+                  value={form.basedOn}
+                  options={[
+                    { value: "", label: "(none)" },
+                    ...entries
+                      .filter((other) => other.type === form.type && other.id !== editing.entry?.id)
+                      .map((other) => ({ value: other.id, label: other.name })),
+                  ]}
+                  onChange={(basedOn) => setEditing({ ...editing, form: { ...form, basedOn } })}
+                />
+              </label>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {check("Bold", form.bold, (bold) => setEditing({ ...editing, form: { ...form, bold } }))}
+                {check("Italic", form.italic, (italic) => setEditing({ ...editing, form: { ...form, italic } }))}
+                {check("Underline", form.underline, (underline) => setEditing({ ...editing, form: { ...form, underline } }))}
+              </div>
+              <label style={dialogFieldRow}>
+                <span>Size (pt)</span>
+                <input
+              data-dxw-field=""
+                  aria-label="Style font size (points)"
+                  type="number"
+              data-dxw-number=""
+                  min="1"
+                  step="1"
+                  placeholder="—"
+                  value={form.sizePt}
+                  onChange={(event) => setEditing({ ...editing, form: { ...form, sizePt: event.target.value } })}
+                  style={dialogInput}
+                />
+              </label>
+              <span style={dialogFieldRow}>
+                <span>Color</span>
+                <ColorMenu
+                  current={normalizedColor(form.color) ?? "#000000"}
+                  title="Style text color"
+                  trigger={(
+                    <>
+                      <span
+                        aria-hidden="true"
+                        style={{ width: 14, height: 14, borderRadius: 3, border: `1px solid ${T.border}`, background: normalizedColor(form.color) ?? "#000000" }}
+                      />
+                      {form.color === "" ? "Inherited" : form.color}
+                    </>
+                  )}
+                  onPick={(color) => setEditing({ ...editing, form: { ...form, color } })}
+                />
+              </span>
+              {form.type === "paragraph" && (
+                <label style={dialogFieldRow}>
+                  <span>Alignment</span>
+                  <ToolbarMenuSelect
+                    variant="field"
+                    ariaLabel="Style alignment"
+                    value={form.alignment}
+                    options={[
+                      { value: "", label: "(unchanged)" },
+                      { value: "left", label: "Left" },
+                      { value: "center", label: "Center" },
+                      { value: "right", label: "Right" },
+                      { value: "both", label: "Justified" },
+                    ]}
+                    onChange={(alignment) =>
+                      setEditing({ ...editing, form: { ...form, alignment: alignment as StyleForm["alignment"] } })
+                    }
+                  />
+                </label>
+              )}
+              {check("Show in the quick-style gallery", form.quickStyle, (quickStyle) =>
+                setEditing({ ...editing, form: { ...form, quickStyle } }))}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+                <button type="button" data-dxw-dialog-cancel="" onClick={() => setEditing(null)} style={{ ...pillBtn, background: T.popoverBg, color: T.fg }}>Cancel</button>
+                <button type="button" data-dxw-dialog-apply="" onClick={save} style={pillBtn}>Save</button>
+              </div>
+            </>
+          )}
+          {error && <span style={{ color: "#c5221f", fontSize: 11.5 }}>{error}</span>}
+        </div>
+      )}
     </span>
   );
 }
@@ -2323,24 +5460,15 @@ function LayoutMenu({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const keyboardOpen = useRef<"first" | "last" | null>(null);
-  const [position, setPosition] = useState({ left: 8, top: 8, maxHeight: 480 });
+  const position = useAnchoredPanel(triggerRef, menuRef, open, { maxHeight: 480 , onClose: () => onOpenChange(false) });
   const [portalTokens, setPortalTokens] = useState<React.CSSProperties>({});
   useLayoutEffect(() => {
     if (!open) return;
+    // The menu is portalled to the body, so it inherits none of the toolbar's
+    // custom properties. Copy the ones it paints with from the trigger.
     const update = () => {
       const trigger = triggerRef.current;
-      const menu = menuRef.current;
       if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const menuWidth = menu?.offsetWidth ?? 304;
-      const left = Math.max(8, Math.min(rect.left, window.innerWidth - menuWidth - 8));
-      const below = window.innerHeight - rect.bottom - 12;
-      const above = rect.top - 12;
-      const placeAbove = below < 180 && above > below;
-      const maxHeight = Math.max(120, Math.min(480, placeAbove ? above : below));
-      const shownHeight = Math.min(menu?.scrollHeight ?? maxHeight, maxHeight);
-      const top = placeAbove ? Math.max(8, rect.top - shownHeight - 4) : rect.bottom + 4;
-      setPosition({ left, top, maxHeight });
       const computed = getComputedStyle(trigger);
       const tokens: Record<string, string> = {};
       for (const property of [
@@ -2363,27 +5491,10 @@ function LayoutMenu({
       keyboardOpen.current = null;
     }
     const frame = requestAnimationFrame(update);
-    const close = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) onOpenChange(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        const restore = menuRef.current?.contains(document.activeElement);
-        onOpenChange(false);
-        if (restore) requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }));
-      }
-    };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
     window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
     return () => {
       cancelAnimationFrame(frame);
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
       window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
     };
   }, [open]);
 
@@ -2514,35 +5625,8 @@ function MarginMenu({
   const [customOpen, setCustomOpen] = useState(false);
   const [values, setValues] = useState({ top: "1", bottom: "1", left: "1", right: "1" });
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
-  useEffect(() => {
-    if (!customOpen) return;
-    const positionDialog = () => {
-      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const width = Math.min(244, window.innerWidth - 16);
-      setDialogPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 294)),
-      });
-    };
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCustomOpen(false);
-    };
-    positionDialog();
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", positionDialog);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", positionDialog);
-    };
-  }, [customOpen]);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 , onClose: () => setCustomOpen(false) });
 
   const pick = (value: string) => {
     if (value === "m:custom") {
@@ -2574,8 +5658,10 @@ function MarginMenu({
     <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
       <span>{label}</span>
       <input
+              data-dxw-field=""
         aria-label={`${label} margin (inches)`}
         type="number"
+              data-dxw-number=""
         min="0"
         step="0.05"
         required
@@ -2586,7 +5672,7 @@ function MarginMenu({
           if (event.key === "Escape") setCustomOpen(false);
           else if (event.key === "Enter") applyCustom();
         }}
-        style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px" }}
+        style={{ ...dialogInput, width: 92 }}
       />
     </label>
   );
@@ -2610,12 +5696,14 @@ function MarginMenu({
       />
       {customOpen && (
         <div
+          ref={dialogRef}
           role="dialog"
           aria-label="Custom Margins"
           onMouseDown={(event) => event.stopPropagation()}
           style={{
             position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
-            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            width: dialogPosition.width, boxSizing: "border-box",
+            maxHeight: dialogPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
             boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7,
           }}
@@ -2652,35 +5740,8 @@ function PageSizeMenu({
   const [customOpen, setCustomOpen] = useState(false);
   const [values, setValues] = useState({ width: "8.5", height: "11" });
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
-  useEffect(() => {
-    if (!customOpen) return;
-    const positionDialog = () => {
-      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const width = Math.min(244, window.innerWidth - 16);
-      setDialogPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 210)),
-      });
-    };
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCustomOpen(false);
-    };
-    positionDialog();
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", positionDialog);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", positionDialog);
-    };
-  }, [customOpen]);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 224 , onClose: () => setCustomOpen(false) });
 
   const valid = Object.values(values).every((value) =>
     value.trim() !== "" && Number.isFinite(Number(value)) && Number(value) > 0,
@@ -2694,8 +5755,10 @@ function PageSizeMenu({
     <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
       <span>{label}</span>
       <input
+              data-dxw-field=""
         aria-label={`Page ${side} (inches)`}
         type="number"
+              data-dxw-number=""
         min="0.1"
         step="0.05"
         required
@@ -2706,7 +5769,7 @@ function PageSizeMenu({
           if (event.key === "Escape") setCustomOpen(false);
           else if (event.key === "Enter") applyCustom();
         }}
-        style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px" }}
+        style={{ ...dialogInput, width: 92 }}
       />
     </label>
   );
@@ -2740,11 +5803,13 @@ function PageSizeMenu({
       {customOpen && (
         <div
           role="dialog"
+          ref={dialogRef}
           aria-label="Custom Paper Size"
           onMouseDown={(event) => event.stopPropagation()}
           style={{
             position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
-            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            width: dialogPosition.width, boxSizing: "border-box",
+            maxHeight: dialogPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
             boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 7,
           }}
@@ -2765,6 +5830,16 @@ function PageSizeMenu({
   );
 }
 
+/** Word's page-border weights. Written as fractions, unlike the table and
+ * paragraph border dialogs, which spell the same values as decimals. */
+const BORDER_WEIGHT_OPTIONS = [
+  { value: "0.5", label: "½ pt" },
+  { value: "1", label: "1 pt" },
+  { value: "1.5", label: "1½ pt" },
+  { value: "2.25", label: "2¼ pt" },
+  { value: "3", label: "3 pt" },
+];
+
 function PageBorderMenu({
   scope,
   onApply,
@@ -2780,35 +5855,8 @@ function PageBorderMenu({
   const [color, setColor] = useState("#4472c4");
   const [widthPt, setWidthPt] = useState("1");
   const rootRef = useRef<HTMLSpanElement | null>(null);
-  const [dialogPosition, setDialogPosition] = useState({ left: 8, top: 8 });
-  useEffect(() => {
-    if (!customOpen) return;
-    const positionDialog = () => {
-      const trigger = rootRef.current?.querySelector<HTMLElement>("[data-dxw-layout-menu-trigger]");
-      if (!trigger) return;
-      const rect = trigger.getBoundingClientRect();
-      const width = Math.min(244, window.innerWidth - 16);
-      setDialogPosition({
-        left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
-        top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 224)),
-      });
-    };
-    const close = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setCustomOpen(false);
-    };
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setCustomOpen(false);
-    };
-    positionDialog();
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", keydown);
-    window.addEventListener("resize", positionDialog);
-    return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", keydown);
-      window.removeEventListener("resize", positionDialog);
-    };
-  }, [customOpen]);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const dialogPosition = useAnchoredPanel(rootRef, dialogRef, customOpen, { width: 236 , onClose: () => setCustomOpen(false) });
 
   const validColor = normalizedColor(color);
   const width = Number(widthPt);
@@ -2849,11 +5897,13 @@ function PageBorderMenu({
       {customOpen && (
         <div
           role="dialog"
+          ref={dialogRef}
           aria-label="Custom Page Border"
           onMouseDown={(event) => event.stopPropagation()}
           style={{
             position: "fixed", top: dialogPosition.top, left: dialogPosition.left, zIndex: 201,
-            width: "min(224px, calc(100vw - 16px))", boxSizing: "border-box",
+            width: dialogPosition.width, boxSizing: "border-box",
+            maxHeight: dialogPosition.maxHeight, overflowY: "auto", overscrollBehavior: "contain",
             background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
             boxShadow: T.popoverShadow, padding: 10, display: "grid", gap: 8,
           }}
@@ -2862,19 +5912,20 @@ function PageBorderMenu({
           <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
             <span>Color</span>
             <span style={{ display: "flex", gap: 6 }}>
-              <input aria-label="Page border color picker" type="color" value={validColor ?? "#4472c4"} onChange={(event) => setColor(event.target.value)} style={{ width: 34, height: 28, padding: 1, border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg }} />
-              <input aria-label="Page border color" autoFocus value={color} onChange={(event) => setColor(event.target.value)} onKeyDown={(event) => event.key === "Enter" && applyCustom()} spellCheck={false} style={{ width: 92, boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg }} />
+              <input aria-label="Page border color picker" type="color" value={validColor ?? "#4472c4"} onChange={(event) => setColor(event.target.value)} style={{ ...colorSwatch, width: 34, height: 28, padding: 1 }} />
+              <input data-dxw-field="" aria-label="Page border color" autoFocus value={color} onChange={(event) => setColor(event.target.value)} onKeyDown={(event) => event.key === "Enter" && applyCustom()} spellCheck={false} style={{ ...dialogInput, width: 92 }} />
             </span>
           </label>
           <label style={{ display: "grid", gridTemplateColumns: "54px 1fr", gap: 8, alignItems: "center", fontSize: 12 }}>
             <span>Weight</span>
-            <select aria-label="Page border width" value={widthPt} onChange={(event) => setWidthPt(event.target.value)} style={{ width: 132, border: `1px solid ${T.border}`, borderRadius: 5, padding: "4px 6px", color: T.fg, background: T.popoverBg }}>
-              <option value="0.5">½ pt</option>
-              <option value="1">1 pt</option>
-              <option value="1.5">1½ pt</option>
-              <option value="2.25">2¼ pt</option>
-              <option value="3">3 pt</option>
-            </select>
+            <ToolbarMenuSelect
+              variant="field"
+              ariaLabel="Page border width"
+              value={widthPt}
+              width={132}
+              options={BORDER_WEIGHT_OPTIONS}
+              onChange={setWidthPt}
+            />
           </label>
           <span style={{ color: T.muted, fontSize: 11 }}>
             Applies to {scope === "section" ? "this section" : "the whole document"}.
@@ -3004,6 +6055,24 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
           else setLn({ enabled: true, countBy: 10 });
         }}
       />
+      {/* Hyphenation is document-global settings.xml state (w:autoHyphenation
+          — §17.15.1.10), not per-section, so it ignores the scope selector.
+          This engine's own layout does not hyphenate; the setting governs
+          Word's rendering when the document is opened there. */}
+      <LayoutMenu
+        name="hyphenation"
+        label="Hyphenation"
+        {...menuState("hyphenation")}
+        options={[
+          { value: "off", label: "None", description: "No automatic hyphenation", preview: <PagePreview kind="hyphenation" /> },
+          { value: "auto", label: "Automatic", description: "Word hyphenates line ends when it opens this document", preview: <PagePreview kind="hyphenation" /> },
+          { value: "autoNoCaps", label: "Automatic, keep CAPS whole", description: "Automatic, but words in capitals are not hyphenated", preview: <PagePreview kind="hyphenation" /> },
+        ]}
+        onPick={(value) => {
+          if (value === "off") api?.setHyphenation({ auto: false });
+          else api?.setHyphenation({ auto: true, noCaps: value === "autoNoCaps" });
+        }}
+      />
       {showArrange && objectSelected && (
         <>
           <Sep />
@@ -3040,6 +6109,229 @@ function LayoutTab({ api, showArrange }: { api: DocxViewApi | null; showArrange:
         </>
       )}
     </span>
+  );
+}
+
+/** Match-count status suffix: per-story breakdown when replacements landed
+ * outside the body ("2 in headers, 1 in footnotes"). */
+const FIND_STORY_LABELS: Record<string, string> = {
+  body: "body", header: "headers", footer: "footers", footnote: "footnotes", endnote: "endnotes",
+};
+
+/** Find & Replace popover: find selects the first match and reports the
+ * count; replace-all reports how many replacements were applied, per story.
+ * The Go To row jumps to a page number or a named bookmark. */
+function FindReplaceMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [replacement, setReplacement] = useState("");
+  const [matchCase, setMatchCase] = useState(false);
+  const [wholeWord, setWholeWord] = useState(false);
+  const [wildcards, setWildcards] = useState(false);
+  const [gotoPage, setGotoPage] = useState("");
+  const [status, setStatus] = useState("");
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240 , onClose: () => setOpen(false) });
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    inputRef.current?.focus();
+  }, [open]);
+  const opts = { matchCase, wholeWord, wildcards };
+  const runFind = () => {
+    const n = api?.find(query, opts) ?? 0;
+    setStatus(n === 1 ? "1 match" : `${n} matches`);
+  };
+  const runReplaceAll = () => {
+    const result = api?.replaceAll(query, replacement, opts);
+    if (!result) return;
+    const head = result.total === 1 ? "Replaced 1 match" : `Replaced ${result.total} matches`;
+    const stories = Object.entries(result.byStory);
+    const breakdown = stories
+      .map(([story, n]) => `${n} in ${FIND_STORY_LABELS[story] ?? story}`)
+      .join(", ");
+    setStatus(stories.length > 1 || (stories.length === 1 && stories[0][0] !== "body") ? `${head} (${breakdown})` : head);
+  };
+  const runGoToPage = () => {
+    const n = Number.parseInt(gotoPage, 10);
+    if (!Number.isInteger(n) || n < 1) return;
+    setStatus(api?.goToPage(n) ? `Page ${n}` : `No page ${n}`);
+  };
+  const bookmarks = open ? api?.listBookmarks() ?? [] : [];
+  const field: React.CSSProperties = { ...popoverInput, padding: 6 };
+  return (
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        title="Find & replace"
+        style={btnStyle(open)}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => { setStatus(""); setOpen(!open); }}
+      >
+        Find & replace
+      </button>
+      {open && (
+        <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow, display: "grid", gap: 6 }}>
+          <input
+              data-dxw-field=""
+            ref={inputRef}
+            aria-label="Find text"
+            placeholder="Find…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                runFind();
+              }
+            }}
+            style={field}
+          />
+          <input
+              data-dxw-field=""
+            aria-label="Replace with"
+            placeholder="Replace with…"
+            value={replacement}
+            onChange={(e) => setReplacement(e.target.value)}
+            style={field}
+          />
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {/* Wildcard matching is always case-sensitive and carries its own
+                word boundaries (< >), so the two flags grey out — Word's own
+                dialog behavior. */}
+            <ToolbarCheckbox label="Match case" disabled={wildcards} checked={matchCase} onChange={setMatchCase} />
+            <ToolbarCheckbox label="Whole word" disabled={wildcards} checked={wholeWord} onChange={setWholeWord} />
+            <ToolbarCheckbox
+              label="Wildcards"
+              title={"Word's wildcard patterns: ? * [ ] [! ] @ < > \\"}
+              checked={wildcards}
+              onChange={setWildcards}
+            />
+          </div>
+          {status && <div data-dxw-find-status="" style={{ color: T.muted, fontSize: 12 }}>{status}</div>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}>
+            <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} disabled={!query} onClick={runFind}>Find</button>
+            <button style={pillBtn} disabled={!query} onClick={runReplaceAll}>Replace all</button>
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", borderTop: `1px solid ${T.border}`, paddingTop: 6 }}>
+            <input
+              data-dxw-field=""
+              aria-label="Go to page"
+              placeholder="Page…"
+              inputMode="numeric"
+              value={gotoPage}
+              onChange={(e) => setGotoPage(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  runGoToPage();
+                }
+              }}
+              style={{ ...field, width: 64 }}
+            />
+            <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} disabled={!gotoPage} onClick={runGoToPage}>Go</button>
+            {/* The wrapper carries the flex sizing: `style` lands on the
+                trigger button, and it is the control's own root that is this
+                row's flex item. */}
+            <span style={{ flex: 1, minWidth: 0, display: "flex" }}>
+              <ToolbarMenuSelect
+                variant="field"
+                ariaLabel="Go to bookmark"
+                value=""
+                placeholder="Bookmark…"
+                disabled={bookmarks.length === 0}
+                options={bookmarks.map((name) => ({ value: name, label: name }))}
+                onChange={(name) => {
+                  if (name) setStatus(api?.goToBookmark(name) ? `Bookmark ${name}` : `Bookmark ${name} not found`);
+                }}
+                style={{ font: "12px system-ui, sans-serif" }}
+              />
+            </span>
+          </div>
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** Word's Review ribbon: track-changes toggle, accept/reject, the live
+ * revision count, comments, and find & replace. All state is read from the
+ * api at render time; the toolbar already re-renders on selectionchange /
+ * dxw-selection (the `refresh` subscription), and each command here calls
+ * `onChanged` (that same refresh) so the count and toggle update at once. */
+function ReviewTab({
+  api,
+  onChanged,
+  showComment,
+  mentions,
+}: {
+  api: DocxViewApi | null;
+  onChanged: () => void;
+  showComment: boolean;
+  mentions?: string[];
+}) {
+  // The parent's refresh bails out of re-rendering when the selection format
+  // is unchanged (focus sits in the toolbar during accept/reject clicks), and
+  // in a session-backed view the command applies asynchronously — so read the
+  // count on every dxw-selection announcement with an unconditional re-render
+  // of this tab alone.
+  const [, force] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    const bump = () => force();
+    document.addEventListener("dxw-selection", bump);
+    document.addEventListener("selectionchange", bump);
+    return () => {
+      document.removeEventListener("dxw-selection", bump);
+      document.removeEventListener("selectionchange", bump);
+    };
+  }, []);
+  const suggesting = api?.isSuggesting() ?? false;
+  const count = api?.revisionCount() ?? 0;
+  return (
+    <>
+      <Btn
+        label="Track changes"
+        title={suggesting ? "Stop tracking changes" : "Record edits as tracked changes"}
+        active={suggesting}
+        onClick={() => {
+          api?.setSuggesting(!suggesting);
+          onChanged();
+        }}
+      />
+      <Sep />
+      <ActionMenu
+        label="Accept"
+        title="Accept tracked changes"
+        width={72}
+        groups={[{ items: [["next", "Accept and move to next"], ["all", "Accept all changes"]] }]}
+        onPick={(value) => {
+          if (value === "next") api?.acceptRevisionAtCaret();
+          else api?.acceptAllRevisions();
+          onChanged();
+        }}
+      />
+      <ActionMenu
+        label="Reject"
+        title="Reject tracked changes"
+        width={72}
+        groups={[{ items: [["next", "Reject and move to next"], ["all", "Reject all changes"]] }]}
+        onPick={(value) => {
+          if (value === "next") api?.rejectRevisionAtCaret();
+          else api?.rejectAllRevisions();
+          onChanged();
+        }}
+      />
+      <span data-dxw-revision-count="" style={{ color: T.muted, font: "12px system-ui, sans-serif", padding: "0 4px", whiteSpace: "nowrap" }}>
+        {count === 1 ? "1 change" : `${count} changes`}
+      </span>
+      <Sep />
+      {showComment && <CommentMenu api={api} mentions={mentions} />}
+      <Btn label="◀" title="Go to previous comment" onClick={() => api?.stepComment(-1)} />
+      <Btn label="▶" title="Go to next comment" onClick={() => api?.stepComment(1)} />
+      <FindReplaceMenu api={api} />
+      <Sep />
+      <CompareEntry api={api} />
+    </>
   );
 }
 
@@ -3127,6 +6419,20 @@ function ObjectFormatTab({
       onPick={(value) => run(value as Parameters<DocxViewApi["runSelectedObjectCommand"]>[0])}
     />
   );
+  const autofitItems = ([
+    ["autofitNone", "Do not autofit"],
+    ["autofitResizeShape", "Resize shape to fit text"],
+    ["autofitShrinkText", "Shrink text on overflow"],
+  ] as [Parameters<DocxViewApi["runSelectedObjectCommand"]>[0], string][]).filter(([command]) => offered.has(command));
+  const autofit = autofitItems.length > 0 && (
+    <ActionMenu
+      label="Autofit"
+      title="How the shape's text and its box fit each other"
+      width={82}
+      groups={[{ items: autofitItems }]}
+      onPick={(value) => run(value as Parameters<DocxViewApi["runSelectedObjectCommand"]>[0])}
+    />
+  );
   return (
     <span data-dxw-object-format="" style={{ display: "contents" }}>
       {context.kind === "chart" && <ChartMenu api={api} label="Edit data" />}
@@ -3150,8 +6456,10 @@ function ObjectFormatTab({
       {offered.has("lineStyle") && <Btn label="Line style" title="Line color, weight, and style" onClick={() => run("lineStyle")} />}
       {offered.has("altText") && <Btn label="Alt text" title="Alternative text" onClick={() => run("altText")} />}
       {wrap}
+      {autofit}
       {offered.has("size") && <Btn label="Size" title="Exact size" onClick={() => run("size")} />}
       {offered.has("position") && <Btn label="Position" title="Exact page position" onClick={() => run("position")} />}
+      {offered.has("crop") && <Btn label="Crop" title="Crop to part of the picture" onClick={() => run("crop")} />}
       {offered.has("rotate") && <Btn label="Rotate" title="Set rotation" onClick={() => run("rotate")} />}
       {offered.has("bringForward") && (
         <>
@@ -3169,6 +6477,8 @@ function ObjectFormatTab({
 export type ToolbarFeature =
   | "history"
   | "styles"
+  | "charStyles"
+  | "formatPainter"
   | "font"
   | "size"
   | "format"
@@ -3179,6 +6489,7 @@ export type ToolbarFeature =
   | "spacing"
   | "link"
   | "lists"
+  | "borders"
   | "table"
   | "image"
   | "icon"
@@ -3194,6 +6505,8 @@ export type ToolbarFeature =
   | "crossReference"
   | "dateTime"
   | "field"
+  | "citations"
+  | "quickParts"
   | "equation"
   | "symbol"
   | "shape"
@@ -3204,10 +6517,12 @@ export type ToolbarFeature =
   | "arrange"
   | "dropCap"
   | "headerFooter"
+  | "watermark"
   | "coverPage"
   | "pageNumber"
   | "break"
   | "layout"
+  | "review"
   | "help"
   | "download";
 
@@ -3238,6 +6553,10 @@ export interface InsertCommandSpec {
 
 export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertTable", feature: "table" },
+  // A formula is a field in a cell; the Table Format tab offers it, so it
+  // gates with the table group. Outside a table it declines — the honest
+  // no-op branch of the rule.
+  { command: "insertTableFormula", feature: "table" },
   { command: "insertImage", feature: "image" },
   { command: "insertScreenshot", feature: "screenshot" },
   { command: "insertModel3D", feature: "model3D" },
@@ -3250,14 +6569,43 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   { command: "insertEquation", feature: "equation" },
   { command: "insertSymbol", feature: "symbol" },
   { command: "insertPageNumber", feature: "pageNumber" },
+  // The position gallery lands in the same Page Number menu as insertPageNumber.
+  { command: "insertPageNumberPosition", feature: "pageNumber" },
   { command: "insertField", feature: "field" },
+  // A table of contents IS a field, and it lands in the field group. It
+  // emits like any other insert; the entry count rides in the payload so the
+  // carried id allocation can be sized for a mutation whose size comes from
+  // the document rather than from its arguments.
+  { command: "insertToc", feature: "field" },
+  // The index cluster lands beside the TOC: XE marks and the INDEX field are
+  // fields, offered from the same Contents menu.
+  { command: "addIndexEntry", feature: "field" },
+  { command: "insertIndex", feature: "field" },
+  // Citations are fields too, but they get their own group: the whole
+  // References cluster (insert citation, bibliography, source manager,
+  // style) hangs together and a host hides or shows it as one.
+  { command: "insertCitation", feature: "citations" },
+  { command: "insertBibliography", feature: "citations" },
+  // A Quick Part is a stored building block, not a field, so it gets its own
+  // group rather than folding into "field" the way TOC/index do.
+  { command: "insertBuildingBlock", feature: "quickParts" },
   { command: "insertDateTime", feature: "dateTime" },
   { command: "insertCrossReference", feature: "crossReference" },
+  { command: "insertCrossRefToTarget", feature: "crossReference" },
+  { command: "insertCaption", feature: "crossReference" },
   { command: "insertBreak", feature: "break" },
   { command: "insertBlankPage", feature: "break" },
   { command: "insertCoverPage", feature: "coverPage" },
+  // The preset gallery lands in the Header & Footer menu, like openHeaderFooter.
+  { command: "insertHeaderFooterPreset", feature: "headerFooter" },
+  // A watermark lands in the header parts rather than at the caret, so it
+  // needs no addressable position — but it is an insert, and the rule the
+  // list exists for applies to it unchanged.
+  { command: "insertWatermark", feature: "watermark" },
+  { command: "insertPictureWatermark", feature: "watermark" },
   { command: "addComment", feature: "comment" },
   { command: "addFootnote", feature: "footnote" },
+  { command: "addEndnote", feature: "footnote" },
   { command: "addBookmark", feature: "bookmark" },
 ];
 
@@ -3266,7 +6614,7 @@ export type ToolbarMode = "simple" | "advanced";
 export interface DocxToolbarProps {
   api: DocxViewApi | null;
   onSave?: (bytes: Uint8Array) => void;
-  /** Simple shows basic Home editing; advanced adds the Insert, Draw, and Layout ribbons. */
+  /** Simple shows basic Home editing; advanced adds the Insert, Draw, Layout, and Review ribbons. */
   mode?: ToolbarMode;
   /** Per-group overrides; every group defaults to enabled. */
   features?: Partial<Record<ToolbarFeature, boolean>>;
@@ -3276,7 +6624,38 @@ export interface DocxToolbarProps {
   style?: React.CSSProperties;
   /** Connected collaborator names offered as @mention shortcuts in comments. */
   commentMentions?: string[];
+  /** Start with the toolbar expanded (all groups inline, wrapping onto extra
+   * rows). A choice the user makes via the chevron toggle is persisted in
+   * localStorage and wins over this default. */
+  defaultExpanded?: boolean;
+  /**
+   * Shortcuts the embedding application owns, listed in the help guide
+   * alongside the editor's own. A desktop menu accelerator is consumed by the
+   * menu before the editor sees the key, so the engine cannot discover it;
+   * the app declares it once and passes it here, and the reference stays
+   * complete. Electron hosts can read the live menu rather than repeat it:
+   * walk Menu.getApplicationMenu() for {label, accelerator} pairs.
+   */
+  hostShortcuts?: HostShortcutSection[];
 }
+
+/** localStorage key for the expand/collapse chevron choice. */
+const EXPANDED_KEY = "dxw-toolbar-expanded";
+
+/** Gap between two controls on the bar, in px (the flex `gap` below). */
+const RIBBON_GAP = 2;
+
+/**
+ * Width kept free at the right end of the first line for the expand chevron.
+ *
+ * Reserved whether or not the chevron is rendered, so the fit test cannot
+ * depend on its own answer: measuring the free space with the chevron absent
+ * says "everything fits" and renders nothing, while measuring it present says
+ * "one control too many" — a bar that flips between the two on every resize
+ * tick. A constant reservation makes the decision monotone in the window
+ * width, which is also why this file no longer needs hysteresis.
+ */
+const EXPAND_RESERVE = 30;
 
 export function DocxToolbar({
   api,
@@ -3286,11 +6665,13 @@ export function DocxToolbar({
   className,
   style,
   commentMentions,
+  defaultExpanded = false,
+  hostShortcuts,
 }: DocxToolbarProps) {
   const on = (k: ToolbarFeature) => features?.[k] !== false;
   // Ribbon-style tabs: complex tool groups get their own surface instead of
   // one overloaded row (Layout especially).
-  type NormalTab = "home" | "insert" | "draw" | "layout";
+  type NormalTab = "home" | "insert" | "draw" | "layout" | "review";
   const [tab, setTab] = useState<NormalTab | "format" | "tableFormat">("home");
   const priorNormalTab = useRef<NormalTab>("home");
   const [objectContext, setObjectContext] = useState<SelectedObjectContext | null>(null);
@@ -3301,7 +6682,11 @@ export function DocxToolbar({
     setTab(next);
   };
   const [helpOpen, setHelpOpen] = useState(false);
-  const apple = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+  const [tabStopsOpen, setTabStopsOpen] = useState(false);
+  const tabStopsAnchorRef = useRef<HTMLSpanElement | null>(null);
+  const [paraBordersOpen, setParaBordersOpen] = useState(false);
+  const paraBordersAnchorRef = useRef<HTMLSpanElement | null>(null);
+  const apple = isApplePlatform();
   const shortcut = (key: string) => apple ? `⌘${key}` : `Ctrl+${key}`;
   const closeHelp = useCallback(() => setHelpOpen(false), []);
   const iconInput = useRef<HTMLInputElement | null>(null);
@@ -3311,8 +6696,13 @@ export function DocxToolbar({
   // Subtle delayed tooltips: controls declare `title`; on first hover the
   // title moves to data-tip (suppressing the OS tooltip) and a quiet custom
   // one fades in under the control after a beat.
-  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const [tip, setTip] = useState<string | null>(null);
   const tipTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The hovered control, so the tip is placed by the same clamping every
+  // popover uses. A tip that ran off the right edge was half of #148.
+  const tipAnchor = useRef<HTMLElement | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
+  const tipPosition = useAnchoredPanel(tipAnchor, tipRef, tip !== null, { align: "center", hangFromBar: false });
   const onTipOver = useCallback((e: React.MouseEvent) => {
     const el = (e.target as HTMLElement).closest("[title], [data-tip]") as HTMLElement | null;
     if (!el) return;
@@ -3325,8 +6715,8 @@ export function DocxToolbar({
     if (!text) return;
     if (tipTimer.current) clearTimeout(tipTimer.current);
     tipTimer.current = setTimeout(() => {
-      const r = el.getBoundingClientRect();
-      setTip({ text, x: r.left + r.width / 2, y: r.bottom + 6 });
+      tipAnchor.current = el;
+      setTip(text);
     }, 550);
   }, []);
   const onTipOut = useCallback(() => {
@@ -3336,6 +6726,9 @@ export function DocxToolbar({
   const [fmt, setFmt] = useState<ReturnType<NonNullable<DocxViewApi["getSelectionFormat"]>> | null>(null);
   const [curStyle, setCurStyle] = useState<string | null>(null);
   const [listKind, setListKind] = useState<"bullet" | "number" | null>(null);
+  // Format painter: the copied formatting, held until it is painted or cleared.
+  // Word keeps it on the toolbar rather than the document, so it lives here.
+  const [painted, setPainted] = useState<SelectionFormat | null>(null);
   // Toolbar popovers can move focus away from the document selection; remember
   // the last real range and restore it before applying their choice.
   const savedRange = useRef<Range | null>(null);
@@ -3351,6 +6744,9 @@ export function DocxToolbar({
    * failure, and each of them says something.
    */
   const [imageStatus, setImageStatus] = useState("");
+  const imageStatusAnchor = useRef<HTMLSpanElement | null>(null);
+  const imageStatusRef = useRef<HTMLSpanElement | null>(null);
+  const imageStatusPosition = useAnchoredPanel(imageStatusAnchor, imageStatusRef, imageStatus !== "", { width: 230, onClose: () => setImageStatus("") });
   useEffect(() => {
     if (!imageStatus) return;
     const t = setTimeout(() => setImageStatus(""), 8000);
@@ -3391,31 +6787,63 @@ export function DocxToolbar({
               : "That file could not be read as an image.",
     );
   };
-  // Responsive collapse: measure the toolbar width and pick a tier; the higher
-  // the tier the more low-frequency Home groups fold into the ⋮ overflow menu,
-  // so the strip stays single-row-clean on phones and tablets (Google Docs
-  // does exactly this). Full width keeps everything inline, so desktop and the
-  // e2e specs (1400px) are unchanged.
+  /**
+   * Responsive layout. The bar measures its own controls and fits them to the
+   * space it actually has (see ribbon-layout.ts). The expand chevron is the
+   * single affordance for the controls that do not fit, and the choice
+   * persists across reloads.
+   */
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const [tier, setTier] = useState(0);
+  const tabsRef = useRef<HTMLDivElement | null>(null);
+  const trailingRef = useRef<HTMLDivElement | null>(null);
+  const ribbonRef = useRef<HTMLDivElement | null>(null);
+  const [canExpand, setCanExpand] = useState(false);
+  const [hiddenCount, setHiddenCount] = useState(0);
+  // Bumped when the bar's own width changes, to re-run the layout effect.
+  const [, remeasure] = useReducer((n: number) => n + 1, 0);
+  const [expanded, setExpanded] = useState(() => {
+    try {
+      const stored = localStorage.getItem(EXPANDED_KEY);
+      if (stored !== null) return stored === "1";
+    } catch {
+      /* storage may be unavailable (SSR, privacy mode) */
+    }
+    return defaultExpanded;
+  });
+  const toggleExpanded = () =>
+    setExpanded((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(EXPANDED_KEY, next ? "1" : "0");
+      } catch {
+        /* storage may be unavailable */
+      }
+      return next;
+    });
+  // Whether the expanded controls take full-width lines below the tab strip;
+  // the layout engine decides, since it is the one that knows how many lines
+  // each arrangement costs.
+  const [stacked, setStacked] = useState(false);
+  const expandLabel = expanded
+    ? "Hide the extra tools"
+    : `Show ${hiddenCount} more tool${hiddenCount === 1 ? "" : "s"}`;
   useEffect(() => {
     if (!on("help")) return;
     const keydown = (event: KeyboardEvent) => {
-      if (event.key === "F1" || ((event.metaKey || event.ctrlKey) && event.key === "/")) {
-        event.preventDefault();
-        setHelpOpen(true);
-      }
+      if (!HELP_COMBOS.some((combo) => matchCombo(event, combo, apple))) return;
+      event.preventDefault();
+      setHelpOpen(true);
     };
     document.addEventListener("keydown", keydown);
     return () => document.removeEventListener("keydown", keydown);
-  }, [features]);
+  }, [apple, features]);
   useEffect(() => {
     const refreshObject = () => {
       const next = api?.getSelectedObjectContext() ?? null;
       setObjectContext(next);
       setTab((current) => {
         if (next) {
-          if (["home", "insert", "draw", "layout"].includes(current)) priorNormalTab.current = current as NormalTab;
+          if (["home", "insert", "draw", "layout", "review"].includes(current)) priorNormalTab.current = current as NormalTab;
           return "format";
         }
         return current === "format"
@@ -3427,22 +6855,156 @@ export function DocxToolbar({
     document.addEventListener("dxw-object-selection", refreshObject);
     return () => document.removeEventListener("dxw-object-selection", refreshObject);
   }, [api]);
+  // A width change is the one thing that does not re-render the toolbar by
+  // itself, so it has to be announced. Only a real change counts: folding a
+  // control changes what is inside the bar, never the bar's own width, so the
+  // engine below cannot feed itself.
   useEffect(() => {
     const el = rootRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
-    const measure = () => {
-      const w = Math.min(el.clientWidth, window.innerWidth);
-      setTier(w >= 1280 ? 0 : w >= 720 ? 1 : 2);
+    let last = el.clientWidth;
+    const announce = () => {
+      const next = el.clientWidth;
+      if (next === last) return;
+      last = next;
+      remeasure();
     };
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    window.addEventListener("resize", measure);
-    measure();
+    const observer = new ResizeObserver(announce);
+    observer.observe(el);
+    window.addEventListener("resize", announce);
     return () => {
-      ro.disconnect();
-      window.removeEventListener("resize", measure);
+      observer.disconnect();
+      window.removeEventListener("resize", announce);
     };
   }, []);
+
+  /**
+   * The layout engine: measure every control, then fit them.
+   *
+   * It runs after each commit rather than on a dependency list, because the
+   * controls themselves come and go (selecting a table adds a tab; a document
+   * with no character styles drops a menu) and a stale measurement is exactly
+   * what cuts a control in half at the window edge. Measuring means un-folding
+   * first: a control folded on the last pass has no width until it is shown
+   * again. All of it runs in a layout effect, before the browser paints, so
+   * the fully-unfolded state it passes through is never on screen.
+   *
+   * Only controls the engine itself folded are shown again (the `dxwFolded`
+   * mark): clearing `display` on every child would reveal the file inputs and
+   * status bubbles that are hidden by their own render.
+   */
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    const ribbon = ribbonRef.current;
+    if (!root || !ribbon) return;
+    /**
+     * The Layout tab renders one element that claims a whole line of the bar
+     * and wraps its own controls inside it. Its width is therefore whatever
+     * the bar gives it, so measuring IT measures nothing — and folding on that
+     * measurement fed itself: the fit changed the line, the line changed the
+     * width, and React stopped the bar with "maximum update depth exceeded".
+     * Descend into such an element and fit the controls it holds instead.
+     */
+    // Take last pass's line break out before anything reads the DOM. It is a
+    // full-width element, so leaving it in would both add a bogus control to
+    // the measurement and make the single-child test below miscount.
+    ribbon.querySelector("[data-dxw-ribbon-break]")?.remove();
+    const topLevel = ribbonControls(ribbon);
+    const only = topLevel.length === 1 ? topLevel[0] : null;
+    const nested = only && getComputedStyle(only).flexBasis === "100%" ? only : null;
+    // The flex container the controls actually lay out in. A `display:
+    // contents` wrapper is not one — its children belong to the ribbon — so
+    // the line break and the scroll flag still go on the ribbon itself.
+    const line = nested ?? ribbon;
+    const children = nested ? ribbonControls(nested) : topLevel;
+    for (const child of children) {
+      if (child.dataset.dxwFolded === "1") {
+        child.style.display = "";
+        delete child.dataset.dxwFolded;
+      }
+      // Never squeeze a control to make it fit: a squeezed control is a
+      // clipped label, the bug this engine exists to make impossible.
+      child.style.flexShrink = "0";
+      child.style.order = "";
+    }
+    line.style.overflowX = "";
+
+    const measured: { el: HTMLElement; item: RibbonItem }[] = [];
+    for (const child of children) {
+      const childStyle = getComputedStyle(child);
+      // A popover or dialog a control renders beside itself is out of flow: it
+      // takes no room on the line and must not be folded away.
+      if (childStyle.position === "fixed" || childStyle.position === "absolute") continue;
+      // Margins count. A group divider is a 1px hairline with 4px either side,
+      // and reading only its box left the line 8px short per divider — enough
+      // over a Home tab's five dividers to wrap two controls onto a second row
+      // that the engine believed did not exist.
+      const width = Math.ceil(
+        child.getBoundingClientRect().width +
+          (parseFloat(childStyle.marginLeft) || 0) +
+          (parseFloat(childStyle.marginRight) || 0),
+      );
+      if (width === 0) continue;
+      measured.push({
+        el: child,
+        item: {
+          width,
+          fold: Number(child.dataset.dxwFold ?? 0),
+          separator: child.dataset.dxwSep !== undefined,
+        },
+      });
+    }
+
+    const rootStyle = getComputedStyle(root);
+    const padding = (parseFloat(rootStyle.paddingLeft) || 0) + (parseFloat(rootStyle.paddingRight) || 0);
+    const content = root.clientWidth - padding;
+    const tabsWidth = tabsRef.current?.offsetWidth ?? 0;
+    const trailingWidth = trailingRef.current?.offsetWidth ?? 0;
+    const plan = planRibbon(
+      measured.map((entry) => entry.item),
+      {
+        gap: RIBBON_GAP,
+        // What is left of the line once the tab strip and the trailing
+        // controls (Download, Help) have taken their share. The chevron is
+        // deliberately NOT part of the trailing measurement; it is reserved as
+        // a constant so its own presence cannot change the answer. A nested
+        // line already spans the bar, so for it the whole width is the share.
+        inlineAvailable: nested ? content : content - tabsWidth - trailingWidth - RIBBON_GAP * 3,
+        reserve: EXPAND_RESERVE,
+      },
+      expanded,
+    );
+    let anyRevealed = false;
+    measured.forEach((entry, index) => {
+      if (plan.hidden[index]) {
+        entry.el.style.display = "none";
+        entry.el.dataset.dxwFolded = "1";
+      }
+      // Flex `order`, not DOM order: the revealed controls are not a suffix of
+      // the bar, so the ones that belong below cannot be separated from the
+      // ones that stay by any single cut. Ordering moves them past the break
+      // without touching the tree React owns.
+      if (plan.revealed[index]) {
+        entry.el.style.order = "2";
+        anyRevealed = true;
+      }
+    });
+    if (anyRevealed) {
+      // A zero-height full-width flex item: the line above it is the collapsed
+      // line, unchanged, and the revealed controls wrap beneath.
+      const brk = document.createElement("div");
+      brk.dataset.dxwRibbonBreak = "";
+      brk.style.cssText = "flex:0 0 100%;height:0;margin:0;order:1";
+      line.appendChild(brk);
+    }
+    if (plan.needsScroll) line.style.overflowX = "auto";
+    if (plan.offerExpand !== canExpand) setCanExpand(plan.offerExpand);
+    // A nested line is already a line of its own, so the bar always gives it
+    // one rather than squeezing it in beside the tabs.
+    const wantsStack = nested !== null;
+    if (wantsStack !== stacked) setStacked(wantsStack);
+    if (plan.hiddenCount !== hiddenCount) setHiddenCount(plan.hiddenCount);
+  });
 
   const refresh = useCallback(() => {
     const sel = window.getSelection();
@@ -3458,7 +7020,7 @@ export function DocxToolbar({
     setTableCellFill(nextTableFill);
     setTab((current) => {
       if (nextTableFill !== undefined && !wasInTable && current !== "format") {
-        if (["home", "insert", "draw", "layout"].includes(current)) priorNormalTab.current = current as NormalTab;
+        if (["home", "insert", "draw", "layout", "review"].includes(current)) priorNormalTab.current = current as NormalTab;
         return "tableFormat";
       }
       if (nextTableFill === undefined && current === "tableFormat") return priorNormalTab.current;
@@ -3487,10 +7049,42 @@ export function DocxToolbar({
     }
   };
 
-  const apply = (patch: Parameters<DocxViewApi["applyFormat"]>[0]) => {
+  /**
+   * Apply a run-format patch, deciding it from the selection as it is NOW.
+   *
+   * The toggles used to read the CACHED `fmt` to decide what to send, and
+   * `fmt` was refreshed here from a read taken immediately after applyFormat.
+   * The engine's model does not update synchronously: measured on
+   * wild2-med-phase23-protocol, `getSelectionFormat()` still reported the old
+   * value at 0ms, at a microtask, at two animation frames and at 50ms, and
+   * only told the truth by 100ms. So this cached the PREVIOUS answer and the
+   * next click computed its toggle from it, asking for the state the text was
+   * already in — a click that did nothing. Bold went on, stuck, off, stuck,
+   * which is why turning it off took three clicks (#160).
+   *
+   * Taking a builder rather than a patch is what fixes it: the value is
+   * decided from a live read, after the selection is restored, at the moment
+   * of the click. That is what the keyboard path has always done (index.tsx
+   * reads `api.getSelectionFormat()` before its switch), which is why ⌘B
+   * never had this bug while the button beside it did.
+   *
+   * No delay anywhere, deliberately. 50ms was too early and 100ms was enough
+   * on one document on one machine, so a wait here would be a race dressed up
+   * as a fix.
+   */
+  const apply = (
+    patch:
+      | Parameters<DocxViewApi["applyFormat"]>[0]
+      | ((live: SelectionFormat | null) => Parameters<DocxViewApi["applyFormat"]>[0]),
+  ) => {
     restoreSelection();
-    api?.applyFormat(patch);
-    setFmt(api?.getSelectionFormat() ?? null);
+    const live = api?.getSelectionFormat() ?? null;
+    const next = typeof patch === "function" ? patch(live) : patch;
+    api?.applyFormat(next);
+    // Show what the user just asked for rather than what the engine can answer
+    // this instant, so the button's own highlight is right between the click
+    // and the engine catching up. A later selectionchange re-reads the truth.
+    setFmt(live ? { ...live, ...appliedRunFormat(next) } : null);
   };
 
   // Home-tab controls as ordered groups so the low-frequency ones can fold into
@@ -3502,8 +7096,8 @@ export function DocxToolbar({
         key: "history",
         node: (
           <>
-            <Btn label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
-            <Btn label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
+            <Btn fold={-2} label={"↶"} title="Undo (⌘Z)" onClick={() => { api?.undo(); refresh(); }} />
+            <Btn fold={-2} label={"↷"} title="Redo (⇧⌘Z)" onClick={() => { api?.redo(); refresh(); }} />
             <Sep />
           </>
         ),
@@ -3512,6 +7106,7 @@ export function DocxToolbar({
       groups.push({
         key: "styles",
         node: (
+          <>
           <ToolbarMenuSelect
             title="Paragraph style"
             value={curStyle ?? "__normal"}
@@ -3533,6 +7128,61 @@ export function DocxToolbar({
               }
             }}
           />
+          <StylesPane
+            api={api}
+            onChanged={() => {
+              refresh();
+              setCurStyle(api?.getParagraphStyleId?.() ?? null);
+            }}
+          />
+          </>
+        ),
+      });
+    if (on("charStyles")) {
+      const charStyles = api?.listStyles?.({ type: "character" }) ?? [];
+      // A document with no character styles beyond Word's hidden defaults has
+      // nothing to offer, so the control stays out of the way entirely.
+      const offered = charStyles.filter((style) => style.quickStyle || style.usageCount > 0);
+      if (offered.length > 0)
+        groups.push({
+          key: "charStyles",
+          node: (
+            <ToolbarMenuSelect
+              title="Character style"
+              value={fmt?.characterStyleId ?? "__none"}
+              width={86}
+              menuWidth={190}
+              options={[
+                { value: "__none", label: "None" },
+                ...offered.map((style) => ({ value: style.id, label: style.name })),
+              ]}
+              onChange={(value) => {
+                if (value) apply({ characterStyleId: value === "__none" ? null : value });
+              }}
+            />
+          ),
+        });
+    }
+    if (on("formatPainter"))
+      groups.push({
+        key: "formatPainter",
+        node: (
+          <Btn
+            label={"\u{1F58C}"}
+            title={painted ? "Paint the copied formatting" : "Copy formatting (format painter)"}
+            active={!!painted}
+            onClick={() => {
+              // One button, two halves: the first click copies, the next
+              // paints and hands the brush back — Word's single-use painter.
+              if (painted) {
+                api?.applyCopiedFormatting?.(painted);
+                setPainted(null);
+                setFmt(api?.getSelectionFormat() ?? null);
+              } else {
+                setPainted(api?.copyFormatting?.() ?? null);
+              }
+            }}
+          />
         ),
       });
     if (on("font"))
@@ -3540,6 +7190,7 @@ export function DocxToolbar({
         key: "font",
         node: (
           <ToolbarMenuSelect
+            fold={-1}
             title="Font"
             value={fmt?.fontFamily ?? ""}
             placeholder="Font"
@@ -3560,6 +7211,7 @@ export function DocxToolbar({
         node: (
           <>
           <ToolbarMenuSelect
+            fold={-1}
             title="Font size"
             value={fmt?.fontSizePt === undefined ? "" : String(fmt.fontSizePt)}
             placeholder="Size"
@@ -3577,22 +7229,23 @@ export function DocxToolbar({
         key: "format",
         node: (
           <>
-            <Btn label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply({ bold: !fmt?.bold })} />
-            <Btn label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply({ italic: !fmt?.italic })} />
-            <Btn label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply({ underline: !fmt?.underline })} />
-            <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply({ strike: !fmt?.strike })} />
+            <Btn fold={-3} label={<b>B</b>} title="Bold (⌘B)" active={!!fmt?.bold} onClick={() => apply((live) => ({ bold: !live?.bold }))} />
+            <Btn fold={-3} label={<i>I</i>} title="Italic" active={!!fmt?.italic} onClick={() => apply((live) => ({ italic: !live?.italic }))} />
+            <Btn fold={-3} label={<u>U</u>} title="Underline" active={!!fmt?.underline} onClick={() => apply((live) => ({ underline: !live?.underline }))} />
+            <Btn label={<s>S</s>} title="Strikethrough" active={!!fmt?.strike} onClick={() => apply((live) => ({ strike: !live?.strike }))} />
             <Btn
               label={<span style={{ fontSize: 12 }}>x<sup style={{ fontSize: 9 }}>2</sup></span>}
               title="Superscript"
               active={fmt?.verticalAlign === "superscript"}
-              onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "superscript" ? null : "superscript" })}
+              onClick={() => apply((live) => ({ verticalAlign: live?.verticalAlign === "superscript" ? null : "superscript" }))}
             />
             <Btn
               label={<span style={{ fontSize: 12 }}>x<sub style={{ fontSize: 9 }}>2</sub></span>}
               title="Subscript"
               active={fmt?.verticalAlign === "subscript"}
-              onClick={() => apply({ verticalAlign: fmt?.verticalAlign === "subscript" ? null : "subscript" })}
+              onClick={() => apply((live) => ({ verticalAlign: live?.verticalAlign === "subscript" ? null : "subscript" }))}
             />
+            <TextEffectsMenu apply={apply} />
             <Btn label={<ClearFormatIcon />} title="Clear formatting" onClick={() => apply({ clear: true })} />
             <ActionMenu
               label="Aa"
@@ -3646,6 +7299,12 @@ export function DocxToolbar({
           <>
             <Btn label={<IndentIcon dir={-1} />} title="Decrease indent" onClick={() => api?.adjustIndent(-1)} />
             <Btn label={<IndentIcon dir={1} />} title="Increase indent" onClick={() => api?.adjustIndent(1)} />
+            <span ref={tabStopsAnchorRef} style={{ display: "inline-flex" }}>
+              <Btn label={"⇥"} title="Tab stops" onClick={() => setTabStopsOpen(true)} />
+            </span>
+            {tabStopsOpen && (
+              <TabStopsDialog api={api} anchorRef={tabStopsAnchorRef} onClose={() => setTabStopsOpen(false)} />
+            )}
           </>
         ),
       });
@@ -3706,34 +7365,70 @@ export function DocxToolbar({
               active={listKind === "number"}
               onClick={() => { api?.toggleList("number"); refresh(); }}
             />
+            <ActionMenu
+              label="⇶"
+              title="Multilevel list gallery"
+              width={44}
+              groups={[{
+                label: "Multilevel list",
+                items: Object.entries(NUMBERING_PRESETS).map(([id, preset]) => [id, preset.name] as [string, string]),
+              }]}
+              onPick={(value) => { api?.applyNumberingPreset(value as NumberingPresetId); refresh(); }}
+            />
+            <Sep />
+          </>
+        ),
+      });
+    if (on("borders"))
+      groups.push({
+        key: "borders",
+        node: (
+          <>
+            <span ref={paraBordersAnchorRef} style={{ display: "inline-flex" }}>
+              <ActionMenu
+                label="▦"
+                title="Paragraph borders and shading"
+                width={44}
+                groups={[
+                  {
+                    label: "Borders",
+                    items: [
+                      ["outside", "Outside borders"],
+                      ["all", "All borders"],
+                      ["top", "Top border"],
+                      ["bottom", "Bottom border"],
+                      ["left", "Left border"],
+                      ["right", "Right border"],
+                      ["none", "No border"],
+                    ],
+                  },
+                  { items: [["custom", "Borders and shading…"]] },
+                ]}
+                onPick={(v) => {
+                  const rule = { style: "single" as const, sz: 4, color: "auto" };
+                  if (v === "custom") setParaBordersOpen(true);
+                  else if (v === "none")
+                    api?.setParagraphBorders({ borders: { top: null, left: null, bottom: null, right: null, between: null, bar: null } });
+                  else if (v === "outside")
+                    api?.setParagraphBorders({ borders: { top: rule, bottom: rule, left: rule, right: rule } });
+                  else if (v === "all")
+                    api?.setParagraphBorders({ borders: { top: rule, bottom: rule, left: rule, right: rule, between: rule } });
+                  else api?.setParagraphBorders({ borders: { [v]: rule } });
+                }}
+              />
+            </span>
+            {paraBordersOpen && (
+              <ParagraphBorderDialog api={api} anchorRef={paraBordersAnchorRef} onClose={() => setParaBordersOpen(false)} />
+            )}
             <Sep />
           </>
         ),
       });
 
-    // Per-tier overflow: which group keys fold into ⋮. Tier 0 keeps all inline.
-    const overflowKeys =
-      tier === 0
-        ? new Set<string>()
-        : tier === 1
-          ? new Set(["styles", "indent", "spacing"])
-          : new Set(["styles", "font", "size", "color", "highlight", "alignment", "indent", "spacing"]);
-    const inline = groups.filter((g) => !overflowKeys.has(g.key));
-    const overflow = groups.filter((g) => overflowKeys.has(g.key));
-    return (
-      <>
-        {inline.map((g) => (
-          <Fragment key={g.key}>{g.node}</Fragment>
-        ))}
-        {overflow.length > 0 && (
-          <OverflowMenu>
-            {overflow.map((g) => (
-              <Fragment key={g.key}>{g.node}</Fragment>
-            ))}
-          </OverflowMenu>
-        )}
-      </>
-    );
+    // Every group renders on the bar; the layout engine folds control by
+    // control from the measured widths, so what leaves the line at a given
+    // width is what does not fit, never what a breakpoint table guessed.
+    return groups.map((group) => <Fragment key={group.key}>{group.node}</Fragment>);
   };
 
   return (
@@ -3752,8 +7447,9 @@ export function DocxToolbar({
         maxWidth: "100%",
         minWidth: 0,
         boxSizing: "border-box",
-        gap: 2,
-        alignItems: "center",
+        gap: RIBBON_GAP,
+        rowGap: 4,
+        alignItems: "flex-start",
         padding: "4px 10px",
         borderBottom: `1px solid ${T.border}`,
         background: T.bg,
@@ -3762,32 +7458,39 @@ export function DocxToolbar({
         ...style,
       }}
     >
-      {tip && (
+      {tip !== null && (
         <div
+          ref={tipRef}
+          data-dxw-tooltip=""
           style={{
             position: "fixed",
-            left: tip.x,
-            top: tip.y,
-            transform: "translateX(-50%)",
+            left: tipPosition.left,
+            top: tipPosition.top,
+            // A long tip on a narrow window wraps rather than running off the
+            // edge; short ones still sit on one line.
+            maxWidth: "calc(100vw - 16px)",
+            boxSizing: "border-box",
             background: "rgba(32,33,36,.92)",
             color: T.accentFg,
             font: "11.5px system-ui, sans-serif",
             padding: "4px 8px",
             borderRadius: 4,
             pointerEvents: "none",
-            whiteSpace: "nowrap",
             zIndex: 1000,
             boxShadow: "0 2px 6px rgba(0,0,0,.2)",
           }}
         >
-          {tip.text}
+          {tip}
         </div>
       )}
       {mode === "advanced" && (
-        <>
-          <div style={{ display: "flex", gap: 2, marginRight: 8 }}>
-            {(["home", "insert", "draw", "layout"] as const)
-              .filter((t) => (t !== "draw" || on("drawing")) && (t !== "layout" || on("layout")))
+        <div
+          ref={tabsRef}
+          data-dxw-toolbar-tabs=""
+          style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 2, minHeight: 30, flexShrink: 0 }}
+        >
+            {(["home", "insert", "draw", "layout", "review"] as const)
+              .filter((t) => (t !== "draw" || on("drawing")) && (t !== "layout" || on("layout")) && (t !== "review" || on("review")))
               .map((t) => (
               <button
                 key={t}
@@ -3877,130 +7580,54 @@ export function DocxToolbar({
                 Help
               </button>
             )}
-          </div>
           <Sep />
-        </>
+        </div>
       )}
-      {(mode === "simple" || tab === "home") && renderHome()}
-      {mode === "advanced" && tab === "insert" && (
-        <>
-          {on("coverPage") && <CoverPageMenu api={api} />}
-          {on("table") && <TableMenu api={api} />}
-          {on("image") && (
-            <span style={{ position: "relative", display: "inline-flex" }}>
-              <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
-              {imageStatus && (
-                <span
-                  role="alert"
-                  data-dxw-image-status=""
-                  style={{ position: "absolute", top: 30, left: 0, zIndex: 120, width: 230, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
-                >
-                  {imageStatus}
-                </span>
-              )}
-            </span>
-          )}
-          {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
-          {on("screenshot") && <ScreenshotButton api={api} />}
-          {tier === 0 ? (
+      {/*
+        * The controls of the active tab, and the only children the layout
+        * engine measures. Collapsed it is one line beside the tabs; expanded
+        * it takes a full-width line of its own below them, because a second
+        * line indented past the tab strip would waste ~350px of every row it
+        * adds — the width that decides whether the extra lines are dense or
+        * ragged.
+        */}
+      <div
+        style={{
+          display: "flex",
+          minWidth: 0,
+          // Two elements, because the line break and the line width are
+          // different jobs: this one claims a whole line of the bar when the
+          // controls are stacked below the tabs, while the one inside it is
+          // squeezed to the width that balances the wrapped lines. Done on one
+          // element, the squeeze shrank the flex item back under the tab
+          // strip's leftover space and the "own line" break stopped happening
+          // at some widths and not others.
+          flex: stacked ? "1 1 100%" : "1 1 0%",
+          order: stacked ? 2 : 0,
+        }}
+      >
+      <div
+        ref={ribbonRef}
+        data-dxw-toolbar-ribbon=""
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: RIBBON_GAP,
+          rowGap: 4,
+          minWidth: 0,
+          minHeight: 30,
+          width: "100%",
+        }}
+      >
+        {(mode === "simple" || tab === "home") && renderHome()}
+        {mode === "advanced" && tab === "insert" && (() => {
+          // The rest of the Insert tab (galleries, references, page parts,
+          // fields…). It renders as plain siblings so the layout engine can fold
+          // it control by control; it used to fold as one all-or-nothing block,
+          // which is how a 1400px-wide tab became five icons and a ⋮.
+          const rest = (
             <>
-          {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
-          {on("smartArt") && <SmartArtMenu api={api} />}
-          {on("chart") && <ChartMenu api={api} />}
-          {on("media") && <MediaMenu api={api} />}
-          {on("shape") && <ShapeMenu api={api} />}
-          {on("divider") && <DividerMenu api={api} />}
-          {on("textBox") && <TextBoxMenu api={api} />}
-          {on("wordArt") && <WordArtMenu api={api} />}
-          {on("link") && <LinkMenu api={api} />}
-          {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
-          {on("footnote") && <FootnoteMenu api={api} />}
-          {on("bookmark") && <BookmarkMenu api={api} />}
-          {on("crossReference") && <CrossReferenceMenu api={api} />}
-          {on("headerFooter") && (
-            <ActionMenu
-              label="Header & footer"
-              title="Edit the repeating header or footer"
-              width={118}
-              groups={[{ items: [["header", "Header"], ["footer", "Footer"]] }]}
-              onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
-            />
-          )}
-          <Sep />
-          {on("pageNumber") && (
-            <ActionMenu
-              label="Page number"
-              title="Insert a dynamic page number at the caret"
-              width={104}
-              groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
-              onPick={(v) => {
-                if (v === "pn:page") api?.insertPageNumber("page");
-                else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-              }}
-            />
-          )}
-          {on("break") && (
-            <>
-              <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
-              <ActionMenu
-                label="Break"
-                title="Insert a page, column or section break at the caret"
-                width={64}
-                groups={[
-                  { label: "Breaks", items: [["br:page", "Page break"], ["br:column", "Column break"]] },
-                  { label: "Section breaks", items: [["br:next", "Section break (next page)"], ["br:cont", "Section break (continuous)"]] },
-                ]}
-                onPick={(v) => {
-                  if (v === "br:page") api?.insertBreak("page");
-                  else if (v === "br:column") api?.insertBreak("column");
-                  else if (v === "br:next") api?.insertBreak("sectionNextPage");
-                  else if (v === "br:cont") api?.insertBreak("sectionContinuous");
-                }}
-              />
-            </>
-          )}
-          {on("dateTime") && (
-            <ActionMenu
-              label="Date & time"
-              title="Insert an automatically updating date or time"
-              width={100}
-              groups={[
-                { label: "Date", items: [["date:short", "Short date"], ["date:long", "Long date"], ["date:intl", "Day month year"]] },
-                { label: "Time", items: [["time:12", "12-hour time"], ["time:24", "24-hour time"]] },
-              ]}
-              onPick={(value) => {
-                if (value === "date:short") api?.insertDateTime("date", "M/d/yyyy");
-                else if (value === "date:long") api?.insertDateTime("date", "MMMM d, yyyy");
-                else if (value === "date:intl") api?.insertDateTime("date", "d MMMM yyyy");
-                else if (value === "time:12") api?.insertDateTime("time", "h:mm am/pm");
-                else if (value === "time:24") api?.insertDateTime("time", "HH:mm");
-              }}
-            />
-          )}
-          {on("field") && (
-            <ActionMenu
-              label="Field"
-              title="Insert a Word field"
-              width={68}
-              groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]}
-              onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
-            />
-          )}
-          {on("equation") && <EquationMenu api={api} />}
-          {on("symbol") && <SymbolMenu api={api} />}
-          {on("dropCap") && (
-            <ActionMenu
-              label="Drop cap"
-              title="Drop cap"
-              width={84}
-              groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]}
-              onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")}
-            />
-          )}
-          {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
-            </>
-          ) : (
-            <OverflowMenu>
               {on("model3D") && <Btn label="3D Models" title="Insert a GLB 3D model" onClick={() => modelInput.current?.click()} />}
               {on("smartArt") && <SmartArtMenu api={api} />}
               {on("chart") && <ChartMenu api={api} />}
@@ -4011,30 +7638,16 @@ export function DocxToolbar({
               {on("wordArt") && <WordArtMenu api={api} />}
               {on("link") && <LinkMenu api={api} />}
               {on("comment") && <CommentMenu api={api} mentions={commentMentions} />}
-              {on("footnote") && <FootnoteMenu api={api} />}
+              {on("footnote") && <NoteMenu api={api} kind="footnote" />}
+              {on("footnote") && <NoteMenu api={api} kind="endnote" />}
+              {on("footnote") && <NoteOptionsMenu api={api} />}
               {on("bookmark") && <BookmarkMenu api={api} />}
               {on("crossReference") && <CrossReferenceMenu api={api} />}
-              {on("headerFooter") && (
-                <ActionMenu
-                  label="Header & footer"
-                  title="Edit the repeating header or footer"
-                  width={118}
-                  groups={[{ items: [["header", "Header"], ["footer", "Footer"]] }]}
-                  onPick={(value) => api?.openHeaderFooter(value as "header" | "footer")}
-                />
-              )}
-              {on("pageNumber") && (
-                <ActionMenu
-                  label="Page number"
-                  title="Insert a dynamic page number at the caret"
-                  width={104}
-                  groups={[{ items: [["pn:page", "Page number"], ["pn:pageof", "Page X of Y"]] }]}
-                  onPick={(v) => {
-                    if (v === "pn:page") api?.insertPageNumber("page");
-                    else if (v === "pn:pageof") api?.insertPageNumber("pageOfTotal");
-                  }}
-                />
-              )}
+              {on("crossReference") && <CaptionMenu api={api} />}
+              {on("headerFooter") && <HeaderFooterMenu api={api} />}
+              {on("watermark") && <WatermarkMenu api={api} />}
+              <Sep />
+              {on("pageNumber") && <PageNumberMenu api={api} />}
               {on("break") && (
                 <>
                   <Btn label="Blank page" title="Insert blank page" onClick={() => api?.insertBlankPage()} />
@@ -4074,22 +7687,101 @@ export function DocxToolbar({
                 />
               )}
               {on("field") && (
-                <ActionMenu label="Field" title="Insert a Word field" width={68} groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]} onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)} />
+                <ActionMenu
+                  label="Field"
+                  title="Insert a Word field"
+                  width={68}
+                  groups={[{ items: [["PAGE", "Current page"], ["NUMPAGES", "Number of pages"], ["DATE", "Current date"], ["TIME", "Current time"]] }]}
+                  onPick={(value) => api?.insertField(`${value} \\* MERGEFORMAT`)}
+                />
               )}
+              {on("field") && <ContentsMenu api={api} />}
+              {on("citations") && <CitationsMenu api={api} />}
+              {on("quickParts") && <QuickPartsMenu api={api} />}
               {on("equation") && <EquationMenu api={api} />}
               {on("symbol") && <SymbolMenu api={api} />}
-              {on("dropCap") && <ActionMenu label="Drop cap" title="Drop cap" width={84} groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]} onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")} />}
+              {on("dropCap") && (
+                <ActionMenu
+                  label="Drop cap"
+                  title="Drop cap"
+                  width={84}
+                  groups={[{ items: [["drop", "Dropped"], ["margin", "In margin"], ["none", "None"]] }]}
+                  onPick={(value) => api?.setDropCap(value === "none" ? null : value as "drop" | "margin")}
+                />
+              )}
               {on("object") && <Btn label="Object" title="Embed a file in this document" onClick={() => objectInput.current?.click()} />}
-            </OverflowMenu>
-          )}
-        </>
-      )}
-      {mode === "advanced" && tab === "draw" && on("drawing") && <DrawTab api={api} />}
-      {mode === "advanced" && tab === "format" && objectContext && (
-        <ObjectFormatTab api={api} context={objectContext} showArrange={on("arrange")} />
-      )}
-      {mode === "advanced" && tab === "tableFormat" && tableCellFill !== undefined && (
-        <TableFormatTab api={api} fill={tableCellFill} onChanged={refresh} />
+            </>
+          );
+          return (
+            <>
+              {on("coverPage") && <CoverPageMenu api={api} />}
+              {on("table") && <TableMenu api={api} />}
+              {on("image") && (
+                <span ref={imageStatusAnchor} style={{ position: "relative", display: "inline-flex" }}>
+                  <Btn label={<ImageIcon />} title="Insert image" onClick={() => imageInput.current?.click()} />
+                  {imageStatus && (
+                    <span
+                      role="alert"
+                      ref={imageStatusRef}
+                      data-dxw-image-status=""
+                      style={{ position: "fixed", top: imageStatusPosition.top, left: imageStatusPosition.left, zIndex: 120, width: imageStatusPosition.width, boxSizing: "border-box", padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, boxShadow: T.popoverShadow, color: T.fg, font: "12px system-ui, sans-serif" }}
+                    >
+                      {imageStatus}
+                    </span>
+                  )}
+                </span>
+              )}
+              {on("icon") && <Btn label="Icons" title="Insert SVG icon" onClick={() => iconInput.current?.click()} />}
+              {on("screenshot") && <ScreenshotButton api={api} />}
+              {rest}
+            </>
+          );
+        })()}
+        {mode === "advanced" && tab === "draw" && on("drawing") && <DrawTab api={api} />}
+        {mode === "advanced" && tab === "format" && objectContext && (
+          <ObjectFormatTab api={api} context={objectContext} showArrange={on("arrange")} />
+        )}
+        {mode === "advanced" && tab === "tableFormat" && tableCellFill !== undefined && (
+          <TableFormatTab api={api} fill={tableCellFill} onChanged={refresh} />
+        )}
+        {mode === "advanced" && tab === "layout" && on("layout") && <LayoutTab api={api} showArrange={on("arrange")} />}
+        {mode === "advanced" && tab === "review" && on("review") && (
+          <ReviewTab api={api} onChanged={refresh} showComment={on("comment")} mentions={commentMentions} />
+        )}
+      </div>
+      </div>
+      <div
+        ref={trailingRef}
+        data-dxw-toolbar-trailing=""
+        style={{ display: "flex", alignItems: "center", gap: 2, minHeight: 30, marginLeft: "auto", flexShrink: 0, order: 1 }}
+      >
+        {mode === "simple" && on("help") && (
+          <Btn buttonRef={helpTrigger} label="Help" title={`Help and keyboard shortcuts (${shortcut("/")})`} onClick={() => setHelpOpen(true)} />
+        )}
+        {on("download") && onSave && (
+          <Btn label="Download" title="Save edited .docx" onClick={() => api && onSave(api.save())} />
+        )}
+      </div>
+      {/*
+        * The one "there is more" affordance on this bar. It appears only when
+        * there is a line's worth of tools behind it (see MIN_REVEAL): at a
+        * width where everything fits, and at a width where expanding would
+        * spend a line to reveal one or two controls, there is no chrome
+        * offering to reveal nothing.
+        */}
+      {canExpand && (
+        <button
+          type="button"
+          title={expandLabel}
+          aria-label={expandLabel}
+          aria-expanded={expanded}
+          data-dxw-toolbar-expand=""
+          style={{ ...btnStyle(expanded), flexShrink: 0, order: 1 }}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={toggleExpanded}
+        >
+          <ExpandChevronIcon up={expanded} />
+        </button>
       )}
       <input
         ref={imageInput}
@@ -4140,19 +7832,50 @@ export function DocxToolbar({
           e.target.value = "";
         }}
       />
-      {mode === "advanced" && tab === "layout" && on("layout") && <LayoutTab api={api} showArrange={on("arrange")} />}
-      {mode === "simple" && on("help") && (
-        <span style={{ marginLeft: "auto" }}>
-          <Btn buttonRef={helpTrigger} label="Help" title={`Help and keyboard shortcuts (${shortcut("/")})`} onClick={() => setHelpOpen(true)} />
+      <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} helpCombos={HELP_COMBOS} hostShortcuts={hostShortcuts} />
+    </div>
+  );
+}
+
+/**
+ * Review ▸ Compare Documents… — Word's "legal blackline".
+ *
+ * The document on screen is the ORIGINAL and the picked file is the REVISED
+ * one, which is the direction Word's dialog defaults to. The result downloads
+ * as a new file: every difference is a tracked change, so accepting them all
+ * gives the picked file back and rejecting them all gives this one back.
+ *
+ * Anything the tracked-change model could not express is named beside the
+ * button rather than swallowed. A comparison that silently skipped something
+ * is worse than one that says what it skipped.
+ */
+function CompareEntry({ api }: { api: DocxViewApi | null }) {
+  const [status, setStatus] = useState("");
+  return (
+    <>
+      <Btn
+        label="Compare…"
+        title="Compare this document with another file (Word's legal blackline)"
+        onClick={() => {
+          if (!api) return;
+          setStatus("Comparing…");
+          void pickAndCompare(api.save(), {
+            onResult: (result) => {
+              downloadDocx(result.bytes, comparedName(result.revisedName));
+              setStatus(result.notes.length === 0 ? "Compared" : `Compared — ${result.notes.length} not tracked`);
+            },
+          })
+            .then((picked) => {
+              if (!picked) setStatus("");
+            })
+            .catch(() => setStatus("Could not read that file"));
+        }}
+      />
+      {status && (
+        <span style={{ color: T.muted, font: "12px system-ui, sans-serif", padding: "0 4px", whiteSpace: "nowrap" }}>
+          {status}
         </span>
       )}
-      {on("download") && onSave && (
-        <>
-          <span style={{ flex: 1 }} />
-          <Btn label="Download" title="Save edited .docx" onClick={() => api && onSave(api.save())} />
-        </>
-      )}
-      <HelpGuide open={helpOpen} onClose={closeHelp} returnFocus={helpTrigger} />
-    </div>
+    </>
   );
 }

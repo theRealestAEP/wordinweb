@@ -1,0 +1,168 @@
+// Compile the OOXML DrawingML preset shape definitions into
+// packages/core/src/preset-definitions.ts.
+//
+// Input: the canonical presetShapeDefinitions.xml published with ECMA-376
+// (the parametric avLst/gdLst/pathLst source for every ST_ShapeType preset,
+// ECMA-376 Part 1 §20.1.10.56 / §20.1.9). A copy is maintained in the
+// LibreOffice tree:
+//   https://raw.githubusercontent.com/LibreOffice/core/master/oox/source/drawingml/customshapes/presetShapeDefinitions.xml
+//
+// Usage: node scripts/gen-preset-definitions.mjs <path-to-presetShapeDefinitions.xml>
+//
+// Skipped preset families:
+// - actionButton* (18): PowerPoint slide-navigation chrome, not Word gallery shapes.
+// - bentConnector2..5, curvedConnector2..5, straightConnector1, line (10):
+//   connector/line presets; the engine renders those through its line branch.
+
+import { readFileSync, writeFileSync } from "node:fs";
+
+const SKIP = /^(actionButton|bentConnector|curvedConnector|straightConnector|line$)/;
+
+const source = process.argv[2];
+if (!source) {
+  console.error("usage: node scripts/gen-preset-definitions.mjs <presetShapeDefinitions.xml>");
+  process.exit(1);
+}
+const xml = readFileSync(source, "utf8");
+
+/** Minimal parser for this machine-generated file: element tree with attrs. */
+function parseElement(text, pos) {
+  const open = text.indexOf("<", pos);
+  if (open === -1) return null;
+  if (text[open + 1] === "/" || text[open + 1] === "?") return { end: open, node: null };
+  const tagEnd = text.indexOf(">", open);
+  const selfClosed = text[tagEnd - 1] === "/";
+  const header = text.slice(open + 1, selfClosed ? tagEnd - 1 : tagEnd);
+  const nameMatch = /^([\w:]+)/.exec(header);
+  const name = nameMatch[1];
+  const attrs = {};
+  for (const m of header.matchAll(/([\w:]+)="([^"]*)"/g)) attrs[m[1]] = m[2];
+  const node = { name, attrs, children: [] };
+  if (selfClosed) return { end: tagEnd + 1, node };
+  let cursor = tagEnd + 1;
+  for (;;) {
+    const closeTag = `</${name}>`;
+    const nextClose = text.indexOf(closeTag, cursor);
+    const child = parseElement(text, cursor);
+    if (!child || !child.node || child.end > nextClose) return { end: nextClose + closeTag.length, node };
+    node.children.push(child.node);
+    cursor = child.end;
+  }
+}
+
+const rootParse = parseElement(xml, xml.indexOf("<presetShapeDefinitons"));
+const shapes = rootParse.node.children;
+if (shapes.length < 180) throw new Error(`expected ~187 shapes, parsed ${shapes.length}`);
+
+const find = (node, name) => node.children.find((c) => c.name === name);
+const findAll = (node, name) => node.children.filter((c) => c.name === name);
+
+function compileCommands(pathEl) {
+  const tokens = [];
+  const pt = (el) => {
+    tokens.push(el.attrs.x, el.attrs.y);
+  };
+  for (const cmd of pathEl.children) {
+    switch (cmd.name) {
+      case "moveTo":
+        tokens.push("M");
+        pt(cmd.children[0]);
+        break;
+      case "lnTo":
+        tokens.push("L");
+        pt(cmd.children[0]);
+        break;
+      case "arcTo":
+        tokens.push("A", cmd.attrs.wR, cmd.attrs.hR, cmd.attrs.stAng, cmd.attrs.swAng);
+        break;
+      case "quadBezTo":
+        tokens.push("Q");
+        cmd.children.forEach(pt);
+        break;
+      case "cubicBezTo":
+        tokens.push("C");
+        cmd.children.forEach(pt);
+        break;
+      case "close":
+        tokens.push("Z");
+        break;
+      default:
+        throw new Error(`unknown path command ${cmd.name}`);
+    }
+  }
+  return tokens.join(" ");
+}
+
+const out = [];
+let count = 0;
+for (const shape of shapes) {
+  if (SKIP.test(shape.name)) continue;
+  const parts = [];
+  const gdOf = (holder) =>
+    findAll(holder, "gd").map((gd) => `[${JSON.stringify(gd.attrs.name)},${JSON.stringify(gd.attrs.fmla)}]`);
+  const avLst = find(shape, "avLst");
+  const av = avLst ? gdOf(avLst) : [];
+  if (av.length) parts.push(`av:[${av.join(",")}]`);
+  const gdLst = find(shape, "gdLst");
+  const gd = gdLst ? gdOf(gdLst) : [];
+  if (gd.length) parts.push(`gd:[${gd.join(",")}]`);
+  const rect = find(shape, "rect");
+  if (rect) {
+    parts.push(
+      `rect:[${[rect.attrs.l, rect.attrs.t, rect.attrs.r, rect.attrs.b].map((v) => JSON.stringify(v)).join(",")}]`,
+    );
+  }
+  const pathLst = find(shape, "pathLst");
+  const paths = findAll(pathLst, "path").map((pathEl) => {
+    const p = [];
+    if (pathEl.attrs.w) p.push(`w:${pathEl.attrs.w}`);
+    if (pathEl.attrs.h) p.push(`h:${pathEl.attrs.h}`);
+    const fill = pathEl.attrs.fill;
+    if (fill && fill !== "norm") p.push(`fill:${JSON.stringify(fill)}`);
+    if (pathEl.attrs.stroke === "false" || pathEl.attrs.stroke === "0") p.push("stroke:false");
+    p.push(`c:${JSON.stringify(compileCommands(pathEl))}`);
+    return `{${p.join(",")}}`;
+  });
+  parts.push(`paths:[${paths.join(",")}]`);
+  out.push(`  ${shape.name}: {${parts.join(",")}},`);
+  count++;
+}
+
+const header = `// GENERATED by scripts/gen-preset-definitions.mjs — do not edit by hand.
+//
+// Parametric DrawingML preset shape definitions (avLst/gdLst/rect/pathLst)
+// for ${count} ST_ShapeType presets, compiled from the canonical
+// presetShapeDefinitions.xml published with ECMA-376 (Part 1 §20.1.10.56;
+// guide formula language §20.1.9.11). Evaluated by preset-geometry.ts.
+
+export interface PresetPathDef {
+  /** Path-local coordinate space (a:path/@w,@h); absent = shape space. */
+  w?: number;
+  h?: number;
+  /** ST_PathFillMode; absent = "norm". */
+  fill?: "none" | "darken" | "darkenLess" | "lighten" | "lightenLess";
+  /** false when the outline is not drawn (a:path/@stroke="false"). */
+  stroke?: false;
+  /** Tokenized commands: M x y | L x y | Q x1 y1 x y | C x1 y1 x2 y2 x y |
+   *  A wR hR stAng swAng | Z — each token a guide name or a number. */
+  c: string;
+}
+
+export interface PresetDef {
+  /** avLst: adjustable guides with their default formulas. */
+  av?: [name: string, fmla: string][];
+  /** gdLst: computed guides, evaluated in order. */
+  gd?: [name: string, fmla: string][];
+  /** Text-rectangle guide refs [l, t, r, b], in shape space. */
+  rect?: [l: string, t: string, r: string, b: string];
+  paths: PresetPathDef[];
+}
+
+export const PRESET_DEFINITIONS: Record<string, PresetDef> = {
+`;
+
+writeFileSync(
+  new URL("../packages/core/src/preset-definitions.ts", import.meta.url),
+  `${header}${out.join("\n")}\n};\n`,
+);
+console.log(`wrote ${count} preset definitions`);

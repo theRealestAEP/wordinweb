@@ -125,10 +125,18 @@ export interface RunProps {
   raise?: number;
   /** w:outline — hollow stroked glyphs. */
   outline?: boolean;
+  /** w14:textOutline — glyph outline stroke (WordArt gallery styles). */
+  textOutline?: { color: string; width: number };
+  /** w:shadow / w14:shadow — offset glyph shadow. */
+  textShadow?: boolean;
   /** w:emboss / w:imprint — Word triple-draws offset copies. */
   emboss?: boolean;
   imprint?: boolean;
   vanish?: boolean;
+  /** w:rPr w:snapToGrid: whether this run participates in the section's
+   * docGrid. A line whose runs ALL declare 0 lays off the grid (see
+   * finishLine); ParaProps.snapToGrid covers the whole paragraph. */
+  snapToGrid?: boolean;
   /** Character style id (w:rStyle). */
   styleId?: string;
   lang?: string;
@@ -303,7 +311,7 @@ export interface EmbeddedObjectReference {
   progId: string;
 }
 /** OMML equation node (subset: runs, scripts, fractions, radicals). */
-export type MathNode =
+export type MathNode = (
   | {
       t: "run";
       text: string;
@@ -330,7 +338,17 @@ export type MathNode =
   /** m:groupChr horizontal group character (over/under brace). */
   | { t: "grp"; chr: string; pos: "top" | "bot"; vertJc: "top" | "bot"; e: MathNode[] }
   /** m:limLow / m:limUpp limit stacked under/over a text operator. */
-  | { t: "lim"; pos: "low" | "upp"; e: MathNode[]; lim: MathNode[] };
+  | { t: "lim"; pos: "low" | "upp"; e: MathNode[]; lim: MathNode[] }
+) & {
+  /**
+   * The OMML element this node was read from. Only the math EDITOR's reader
+   * (edit/math.ts) sets it; the renderer's parser leaves it undefined. Editing
+   * re-emits through it, so the properties the linear syntax does not spell
+   * out — run fonts, m:ctrlPr, a matrix's column specs, an n-ary's limit
+   * placement — survive a text edit instead of being dropped.
+   */
+  src?: XmlElement;
+};
 
 export interface MathContent {
   kind: "math";
@@ -360,6 +378,11 @@ export interface FieldContent {
    * (in the fldChar begin's w:ffData). Its presence makes the rendered ballot
    * box a click-to-toggle target; the glyph derives from its w:checked child. */
   checkbox?: XmlElement;
+  /** The field's own XML: the `w:fldSimple`, or the `w:fldChar` begin of a
+   * complex field. The update pass (edit/update-fields.ts) writes a recomputed
+   * result back through it — layout resolves fields from this model, so
+   * without the link the computed value has nowhere to land in the file. */
+  src?: XmlElement;
 }
 
 /** What an anchored shape's coordinates are measured from. "char" (relH=
@@ -425,9 +448,11 @@ export interface ShapeTextbox {
    * non-rect preset geometries these INCLUDE the geometry's text-rectangle
    * insets (ellipse: inscribed rect; diamond: middle-half rect). */
   insets?: { l: number; t: number; r: number; b: number };
-  /** Non-rect preset geometry: paint this outline (in a viewW x viewH space
-   * scaled to the shape box) instead of a rectangle. */
-  geom?: { d: string; viewW: number; viewH: number };
+  /** Non-rect preset geometry: paint these outline paths (in a viewW x viewH
+   * space scaled to the shape box) instead of a rectangle. Each path carries
+   * its resolved fill colour (undefined = unfilled) and whether the shape's
+   * stroke applies to it. */
+  geom?: { viewW: number; viewH: number; paths: { d: string; fill?: string; stroke: boolean }[] };
   /** bodyPr a:noAutofit: the box does NOT grow with its text — Word hides
    * whole lines that stick out past the shape bottom (phase23 p12 ovals:
    * "Was 0 / B" visible, the wrapped tail rows hidden). */
@@ -436,6 +461,13 @@ export interface ShapeTextbox {
    * plus the top/bottom insets (the stored cy is only Word's last cached
    * value). Width is fixed. */
   autofitHeight?: boolean;
+  /** bodyPr a:normAutofit — "shrink text on overflow". The mode is recorded
+   * because the fit report names it, NOT because it changes the layout:
+   * probe-shapefit measured fourteen normAutofit shapes through desktop Word
+   * and every one paints at its authored size and clips at the box bottom,
+   * exactly like a:noAutofit. `clipText` is set alongside this and is what the
+   * layout reads. */
+  shrinkText?: boolean;
   /** Linked text-box chain id (wps:txbx/@id or wps:linkedTxbx/@id): boxes with
    * the same id form one story. The seq-0 box (wps:txbx) holds the content;
    * later boxes (wps:linkedTxbx, chainSeq>0) are empty sinks that continue the
@@ -514,6 +546,11 @@ export interface ShapeArt {
   behind?: boolean;
   /** a:xfrm rotation, degrees clockwise. */
   rotation?: number;
+  /** wp:wrapSquare/.../wrapTopAndBottom on the anchor. Only FRAME stories
+   * (header/footer/cell) act on it - body flow ignores art wrap, as before. */
+  wrap?: WrapMode;
+  /** wp:anchor dist* in px, used with `wrap`. */
+  dist?: { t: number; b: number; l: number; r: number };
   lines: DrawingLine[];
   images: DrawingImage[];
   paths: DrawingPath[];
@@ -626,18 +663,95 @@ export interface DrawingContent {
   texts?: DrawingTextShape[];
 }
 
-export type ChartType = "column" | "bar" | "line" | "pie";
+/** The c:chartSpace plot kinds the renderer paints. Anything else (3-D, radar,
+ * surface, stock, bubble) parses with `unsupported` set instead. */
+export type ChartType = "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter";
 
 export interface ChartSeries {
   name: string;
   values: number[];
+  /** c:xVal of a scatter series. Every other type shares one category axis,
+   * so only scatter carries per-series x values. */
+  xValues?: number[];
+  /** Explicit series fill/line from c:spPr, overriding the palette slot. */
+  color?: string;
+  /** Explicit c:dPt fills, keyed by point index (pie slices, single bars). */
+  pointColors?: Record<number, string>;
+  /** c:smooth — draw the line series through a spline instead of segments. */
+  smooth?: boolean;
+  /** c:spPr/a:ln/@w, in px. A line or scatter series says here how heavy its
+   * stroke is; a scatter series, whose stroke is optional, says it has one. */
+  lineWidth?: number;
+  /** c:marker/c:symbol, an ST_MarkerStyle name. "none" draws no marker, and a
+   * name with no shape behind it takes the series' slot in Word's sequence. */
+  markerSymbol?: string;
+  /** c:marker/c:size, the width across the marker in px. */
+  markerSize?: number;
+}
+
+export type ChartTickMark = "none" | "in" | "out" | "cross";
+
+/** One axis of a 2-D chart (c:catAx/c:valAx/c:dateAx). */
+export interface ChartAxis {
+  /** c:delete val="1": Word draws no line, ticks or labels for the axis. */
+  hidden?: boolean;
+  /** A c:majorGridlines child is present. */
+  gridlines?: boolean;
+  /** c:numFmt formatCode applied to the tick labels, e.g. "0.0%". */
+  format?: string;
+  title?: string;
+  /** c:scaling overrides of the automatic scale. */
+  min?: number;
+  max?: number;
+  majorUnit?: number;
+  /** c:scaling/c:orientation val="maxMin". */
+  reversed?: boolean;
+  /** c:majorTickMark / c:minorTickMark. The schema default is "out" for major
+   * and "none" for minor; Word writes both explicitly. */
+  majorTick?: ChartTickMark;
+  minorTick?: ChartTickMark;
+  /** c:tickLblPos val="none" keeps the axis but drops its labels. */
+  labels?: boolean;
+  /** c:crossBetween on a value axis, which decides where the category axis puts
+   * its points: "between" insets them by half a category (Word's choice for
+   * bar and column), "midCat" seats the first and last on the plot's edges
+   * (Word's choice for line and area). */
+  crossBetween?: "between" | "midCat";
 }
 
 export interface ChartData {
   type: ChartType;
+  /** Local name of a plot the renderer does not paint (bar3DChart, radarChart,
+   * …). When set, `type` is a placeholder and the renderer draws a labeled box
+   * rather than pretending the data is a column chart. */
+  unsupported?: string;
   title?: string;
   categories: string[];
   series: ChartSeries[];
+  /** c:grouping — how bar/column/area series stack. */
+  grouping?: "clustered" | "stacked" | "percentStacked";
+  /** Legend edge. Absent when the chart has no c:legend. */
+  legend?: "l" | "r" | "t" | "b" | "tr";
+  /** c:dLbls showVal on the plot or on every series. */
+  dataLabels?: boolean;
+  /** c:varyColors — give each point of a single series its own palette slot. */
+  varyColors?: boolean;
+  categoryAxis?: ChartAxis;
+  valueAxis?: ChartAxis;
+  /** c:holeSize percent of a doughnut (Word's default is 75). */
+  holeSize?: number;
+  /** c:gapWidth percent between bar/column categories (Word's default is 150). */
+  gapWidth?: number;
+  /** c:overlap percent between bars of one category (Word: -27 clustered,
+   * 100 stacked). */
+  overlap?: number;
+  /** c:marker val="1" on a line chart: draw a point marker at each value. */
+  markers?: boolean;
+  /** Font size in px from c:title//a:defRPr@sz. Word's default title is 14pt. */
+  titleSize?: number;
+  /** Font size in px from c:txPr//a:defRPr@sz, the chart-wide text size. Word's
+   * default for axis labels, legend entries and data labels is 9pt. */
+  textSize?: number;
 }
 
 export type SmartArtLayout = "process" | "cycle" | "hierarchy" | "list";
@@ -920,7 +1034,10 @@ export interface SectionProps {
   vAlign?: "top" | "center" | "both" | "bottom";
   /** w:pgBorders. Offsets (border.space, px) measure from text or page edge. */
   pageBorders?: { top?: Border; bottom?: Border; left?: Border; right?: Border; offsetFrom: "text" | "page" };
-  /** w:lnNumType: margin line numbering. distance px from the text edge. */
+  /** w:lnNumType: margin line numbering. distance px from the text edge.
+   * start is the raw w:start OFFSET (0 when the attribute is absent, its
+   * literal value otherwise) added to the running per-line count — see
+   * parse/section.ts for why an absent attribute isn't just "start 1". */
   lineNumbering?: {
     countBy: number;
     start: number;
@@ -932,6 +1049,16 @@ export interface SectionProps {
   footnoteNumStart?: number;
   endnoteNumFmt?: string;
   endnoteNumStart?: number;
+  /** w:numRestart: when the mark counter resets. Absent means "continuous"
+   * (the whole document shares one counter — this engine's only honored
+   * value; eachSect/eachPage are round-trip preserved but not laid out). */
+  footnoteNumRestart?: "continuous" | "eachSect" | "eachPage";
+  endnoteNumRestart?: "continuous" | "eachSect" | "eachPage";
+  /** w:pos: where the note text is placed. Round-trip preserved only — the
+   * layout always places footnotes at the page bottom and endnotes at the
+   * document end, regardless of this value. */
+  footnotePos?: "pageBottom" | "beneathText";
+  endnotePos?: "sectEnd" | "docEnd";
   /** w:textDirection tbRl: the whole section flows as East-Asian vertical
    * writing — lines run top-to-bottom, progressing right-to-left. */
   textDirection?: "tbRl";
@@ -957,6 +1084,10 @@ export interface DocComment {
   paraId?: string;
   /** Parent comment id when this comment is a reply (commentsExtended). */
   parentId?: string;
+  /** Thread resolved (w15:commentEx w15:done="1" — the [MS-DOCX] CT_CommentEx
+   * extension; ECMA-376 itself has no resolved state). Meaningful on the
+   * thread parent; Word grays the whole thread from the parent's flag. */
+  resolved?: boolean;
 }
 
 // ---------- headers / footers ----------

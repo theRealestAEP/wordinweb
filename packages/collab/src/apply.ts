@@ -3,13 +3,16 @@ import {
   StableIds,
   deleteSuggestedRange,
   markParagraphGlyph,
+  suggestMeta,
   applyInsertText,
   applySplitParagraph,
   applyDeleteRange,
+  applyInsertSeparator,
+  applyDeleteSeparator,
+  separatorAtWireOffset,
   applyRunFormat,
   setParagraphAlignment,
   setParagraphStyle,
-  setListType,
   adjustIndent,
   setParagraphSpacing,
   insertPageField,
@@ -49,11 +52,10 @@ import {
   deleteMath,
   moveMath,
   deleteComment,
+  setCommentResolved,
+  editCommentText,
   insertBookmarkAroundSelection,
-  checkboxStateElement,
-  toggleCheckbox,
   collectRevisions,
-  insertTableAfter,
   acceptRevision,
   rejectRevision,
   acceptAllRevisions,
@@ -64,10 +66,10 @@ import {
   resolveRunOffset,
   resizeDrawing,
   resizeTableColumn,
-  resizeTableRow,
   moveTableTo,
   removeDrawingRun,
   mergeParagraphBackward,
+  siblingParagraph,
   addComment,
   replyToComment,
   recordedProvenance,
@@ -78,13 +80,18 @@ import {
   insertBreakAt,
   insertMathAt,
   insertShapeAt,
+  ADDRESS_WIRE_FIELD,
+  applyRegisteredOperation,
+  registeredOperation,
+  type OperationAddress,
+  type OperationTarget,
   type EditCaret,
   type Run,
   type Block,
   type XmlElement,
   type SelectionSegment,
 } from "@wordinweb/core";
-import { Intent, Position } from "./intents.js";
+import { Intent, Position, isRegisteredIntent, type RegisteredIntent } from "./intents.js";
 
 /**
  * How much of the document an applied intent disturbed — the input to
@@ -201,9 +208,15 @@ function applyIntentInner(
   out: { scope: Scope },
 ): boolean {
   const runOf = makeRunLookup(doc, ids);
-  // Headless apply does not yet support suggesting mode (needs provenance
-  // threaded through the intent); the session forbids it upstream.
+  // Suggesting mode rides on the intent itself: kinds with a tracked form
+  // carry `suggest` (author/date) and build their own suggesting ctx below.
+  // This default ctx serves the rest, which never suggest.
   const ctx = { suggesting: false, revMeta: () => { throw new Error("suggesting mode unsupported headlessly"); } };
+
+  // Registered operations carry their mutation in the core registry. Narrowing
+  // here leaves the switch below exhaustive over what is still hand-written,
+  // so its `never` gate keeps its full force.
+  if (isRegisteredIntent(intent)) return applyRegistered(doc, ids, runOf, intent);
 
   switch (intent.kind) {
     case "insertText": {
@@ -238,6 +251,58 @@ function applyIntentInner(
       // Plain typing splices characters into one w:t — the whole blast radius
       // is the addressed paragraph (perf B9/B10: this is THE hot path).
       out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+      return true;
+    }
+    case "insertSeparator": {
+      const caret = resolveCaret(ids, runOf, intent.at);
+      if (!caret) return false;
+      if (intent.suggest) {
+        // Tracked separator: a w:ins sibling with carried author/date (the
+        // same scoped-reparse discipline the suggest insertText apply uses —
+        // run splits without carried ids resync by parse order).
+        const s = intent.suggest;
+        const suggestCtx = { suggesting: true, revMeta: () => ({ author: s.author, date: s.date, nextId: () => doc.nextRevisionId() }) };
+        const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+        if (!applyInsertSeparator(doc, caret, intent.separator, suggestCtx)) return false;
+        if (doc.stableIds) resyncScope(doc, ids, scope);
+        out.scope = scope;
+        return true;
+      }
+      // Plain: an in-run w:t split around the separator — no run is created
+      // or removed, so no id changes and the paragraph is the blast radius.
+      if (!applyInsertSeparator(doc, caret, intent.separator, ctx)) return false;
+      out.scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+      return true;
+    }
+    case "deleteSeparator": {
+      const runEl = ids.elOf(intent.at.runId);
+      if (!runEl) return false;
+      // Resolve the addressed wire unit to the concrete separator element; a
+      // unit that no longer holds one (concurrent edit) is a clean no-op.
+      const sepEl = separatorAtWireOffset(runEl, intent.at.offset);
+      if (!sepEl) return false;
+      if (intent.suggest) {
+        // Tracked separator deletion: the host run splits around a w:del
+        // (same scoped-reparse discipline the suggest text strike uses —
+        // run splits without carried ids resync by parse order).
+        const s = intent.suggest;
+        const suggestCtx = { suggesting: true, revMeta: () => ({ author: s.author, date: s.date, nextId: () => doc.nextRevisionId() }) };
+        const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+        if (!applyDeleteSeparator(doc, sepEl, suggestCtx)) return false;
+        if (doc.stableIds) resyncScope(doc, ids, scope);
+        out.scope = scope;
+        return true;
+      }
+      // Plain: the separator element leaves the run and its two w:t halves
+      // join — the insert's exact inverse; the paragraph is the whole blast
+      // radius. Scope resolves BEFORE the mutation: an emptied
+      // separator-only run is dropped by the mutation, and its retired id
+      // is pruned.
+      const scope = blockScope(ids, intent.at.blockId, intent.at.runId);
+      const res = applyDeleteSeparator(doc, sepEl, ctx);
+      if (!res) return false;
+      if (res.removedRun) ids.prune(doc.editableRoots());
+      out.scope = scope;
       return true;
     }
     case "deleteText": {
@@ -289,7 +354,7 @@ function applyIntentInner(
       // Whole-run format: a segment with t=null covers the entire run, so
       // applyRunFormat takes the in-place (no-split) path — run id preserved.
       const seg: SelectionSegment = { run: entry.run, t: null, start: 0, end: 0, props: entry.run.props };
-      applyRunFormat(doc, [seg], intent.patch as never);
+      applyRunFormat(doc, [seg], intent.patch as never, suggestMeta(doc, intent.suggest));
       return true;
     }
     case "formatParagraph": {
@@ -298,16 +363,11 @@ function applyIntentInner(
       // setParagraphAlignment/Style resolve the paragraph by walking UP from a
       // target, so pass a descendant w:t (or the block itself as a fallback).
       const target = firstTextDescendant(blockEl) ?? blockEl;
+      const meta = suggestMeta(doc, intent.suggest);
       let changed = false;
-      if (intent.align) changed = setParagraphAlignment(doc, [target], intent.align) || changed;
-      if (intent.styleId !== undefined) changed = setParagraphStyle(doc, [target], intent.styleId) || changed;
+      if (intent.align) changed = setParagraphAlignment(doc, [target], intent.align, meta) || changed;
+      if (intent.styleId !== undefined) changed = setParagraphStyle(doc, [target], intent.styleId, meta) || changed;
       return changed;
-    }
-    case "setListType": {
-      const blockEl = ids.elOf(intent.blockId);
-      if (!blockEl) return false;
-      const target = firstTextDescendant(blockEl) ?? blockEl;
-      return setListType(doc, [target], intent.listKind);
     }
     case "formatRange": {
       if (intent.end <= intent.start) return false;
@@ -327,7 +387,7 @@ function applyIntentInner(
       if (localEnd > hit.t.text.length) return false;
       // Sub-range format: splits the run into before/middle/after (all new).
       const seg: SelectionSegment = { run: entry.run, t: hit.t, start: hit.offset, end: localEnd, props: entry.run.props };
-      const formatted = applyRunFormat(doc, [seg], intent.patch as never);
+      const formatted = applyRunFormat(doc, [seg], intent.patch as never, suggestMeta(doc, intent.suggest));
       if (formatted.length === 0) return false;
       // Locate the pieces via the returned middle w:t (robust to whatever
       // parent applyRunFormat spliced into): middle run = parent of middleT;
@@ -357,20 +417,25 @@ function applyIntentInner(
       if (!paraEl) return false;
       const target = firstTextDescendant(paraEl) ?? paraEl;
       const isInsert = intent.op === "rowAbove" || intent.op === "rowBelow" || intent.op === "colLeft" || intent.op === "colRight";
-      // For insert ops, snapshot the tracked-node set so we can find the new
-      // nodes afterward and give them the carried ids.
-      const before = isInsert ? trackedSet(ids, doc) : null;
-      const ok = applyTableOp(doc, target, intent.op as never);
+      // mergeDown mints a fresh continuation paragraph, splitCell fresh cells;
+      // both also retire ids (the merged/replaced content), so they take
+      // carried ids like the inserts AND prune like the deletes.
+      const createsNodes = isInsert || intent.op === "mergeDown" || intent.op === "splitCell";
+      // For node-creating ops, snapshot the tracked-node set so we can find
+      // the new nodes afterward and give them the carried ids.
+      const before = createsNodes ? trackedSet(ids, doc) : null;
+      const ok = applyTableOp(doc, target, intent.op as never, suggestMeta(doc, intent.suggest));
       if (!ok) return false;
-      if (isInsert && before && intent.nodeIds) {
+      if (before && intent.nodeIds) {
         // Assign carried ids to the newly created tracked nodes in doc order.
         const fresh: XmlElement[] = [];
         walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
         for (let k = 0; k < fresh.length && k < intent.nodeIds.length; k++) {
           ids.reassign(fresh[k], intent.nodeIds[k]);
         }
-      } else {
-        // Delete/shading ops: retire stale ids for removed content.
+      }
+      if (!isInsert) {
+        // Delete/merge/split/shading ops: retire stale ids for removed content.
         ids.prune(doc.editableRoots());
       }
       return true;
@@ -378,6 +443,17 @@ function applyIntentInner(
     case "mergeParagraph": {
       const pEl = ids.elOf(intent.blockId);
       if (!pEl) return false;
+      const meta = suggestMeta(doc, intent.suggest);
+      if (meta) {
+        // Tracked merge: strike the pilcrow between the two paragraphs — the
+        // PREVIOUS paragraph's mark — and leave both paragraphs standing. The
+        // editor's Backspace-at-paragraph-start does exactly this locally.
+        const previous = siblingParagraph(doc, pEl, -1);
+        if (!previous) return false;
+        markParagraphGlyph(previous, "del", meta);
+        doc.refresh();
+        return true;
+      }
       const ok = mergeParagraphBackward(doc, pEl);
       if (ok) ids.prune(doc.editableRoots()); // retire the merged paragraph's id
       return ok;
@@ -558,7 +634,7 @@ function applyIntentInner(
       const entry = runOf(runEl);
       if (!entry || !entry.firstT) return false;
       const before = trackedSet(ids, doc);
-      const drawing = insertWordArtAt(doc, entry.firstT, intent.text, intent.preset);
+      const drawing = insertWordArtAt(doc, entry.firstT, intent.text, intent.preset, intent.style);
       if (!drawing) return false;
       assignFreshTracked(ids, doc, before, intent.nodeIds);
       return true;
@@ -725,11 +801,6 @@ function applyIntentInner(
       if (!tbl) return false;
       return resizeTableColumn(doc, tbl, intent.boundary, intent.deltaPx, intent.renderedWidths);
     }
-    case "resizeTableRow": {
-      const tbl = tableOfParagraph(doc, ids, intent.cellParagraphId);
-      if (!tbl) return false;
-      return resizeTableRow(doc, tbl, intent.rowIdx, intent.heightPx);
-    }
     case "moveTable": {
       const tbl = tableOfParagraph(doc, ids, intent.cellParagraphId);
       if (!tbl) return false;
@@ -747,21 +818,21 @@ function applyIntentInner(
     case "setMathLinear": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
-      const math = firstMathIn(blockEl);
+      const math = mathIn(blockEl, intent.mathIndex);
       if (!math) return false;
       return setMathLinear(doc, math, intent.mathText);
     }
     case "deleteMath": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
-      const math = firstMathIn(blockEl);
+      const math = mathIn(blockEl, intent.mathIndex);
       if (!math) return false;
       return deleteMath(doc, math);
     }
     case "moveMath": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
-      const math = firstMathIn(blockEl);
+      const math = mathIn(blockEl, intent.mathIndex);
       if (!math) return false;
       const dest = resolveCaret(ids, runOf, intent.at);
       if (!dest) return false;
@@ -789,6 +860,12 @@ function applyIntentInner(
     }
     case "deleteComment":
       return deleteComment(doc, intent.commentId);
+    case "resolveComment":
+      // The carried paraId candidate is consumed only when the thread parent's
+      // body paragraph lacks one (recordedProvenance draws at most one value).
+      return setCommentResolved(doc, intent.commentId, intent.resolved, recordedProvenance({ paraIds: [intent.paraId] }));
+    case "editComment":
+      return editCommentText(doc, intent.commentId, intent.text);
     case "insertBookmarkRange": {
       const runEl = ids.elOf(intent.runId);
       if (!runEl) return false;
@@ -802,16 +879,6 @@ function applyIntentInner(
       const seg: SelectionSegment = { run: entry.run, t: hit.t, start: hit.offset, end: localEnd, props: entry.run.props };
       return insertBookmarkAroundSelection(doc, [seg], intent.name);
     }
-    case "toggleCheckbox": {
-      const runEl = ids.elOf(intent.runId);
-      if (!runEl) return false;
-      const entry = runOf(runEl);
-      if (!entry) return false;
-      const cbEl = checkboxStateElement(entry.run, entry.firstT);
-      if (!cbEl) return false;
-      toggleCheckbox(doc, cbEl);
-      return true;
-    }
     case "acceptRevision": {
       const refs = collectRevisions(doc);
       if (intent.index >= refs.length) return false;
@@ -823,19 +890,9 @@ function applyIntentInner(
       return rejectRevision(doc, refs[intent.index]);
     }
     case "acceptAllRevisions":
-      return acceptAllRevisions(doc) > 0;
+      return acceptAllRevisions(doc, intent.author) > 0;
     case "rejectAllRevisions":
-      return rejectAllRevisions(doc) > 0;
-    case "insertTable": {
-      const runEl = ids.elOf(intent.runId);
-      if (!runEl) return false;
-      const entry = runOf(runEl);
-      if (!entry || !entry.firstT) return false;
-      const before = trackedSet(ids, doc);
-      const ok = insertTableAfter(doc, entry.firstT, intent.rows, intent.cols);
-      if (ok) assignFreshTracked(ids, doc, before, intent.nodeIds);
-      return ok;
-    }
+      return rejectAllRevisions(doc, intent.author) > 0;
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
       const runEl = ids.elOf(intent.runId);
@@ -885,13 +942,13 @@ function applyIntentInner(
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
       const target = firstTextDescendant(blockEl) ?? blockEl;
-      return adjustIndent(doc, [target], intent.direction);
+      return adjustIndent(doc, [target], intent.direction, suggestMeta(doc, intent.suggest));
     }
     case "setSpacing": {
       const blockEl = ids.elOf(intent.blockId);
       if (!blockEl) return false;
       const target = firstTextDescendant(blockEl) ?? blockEl;
-      return setParagraphSpacing(doc, [target], intent.patch as never);
+      return setParagraphSpacing(doc, [target], intent.patch as never, suggestMeta(doc, intent.suggest));
     }
     case "insertPageField": {
       const runEl = ids.elOf(intent.runId);
@@ -955,11 +1012,101 @@ function applyIntentInner(
   }
 }
 
-/** Assign carried ids to tracked nodes created since `before`, in doc order. */
+/**
+ * Resolve a registered operation's stable-id address to a document target.
+ * A null result IS the collaborative "honest no-op": the address named
+ * content this replica cannot see, so nothing is mutated and every replica
+ * records the same rejection.
+ */
+function resolveOperationTarget(
+  doc: DocxDocument,
+  ids: StableIds,
+  runOf: RunLookup,
+  address: OperationAddress,
+  intent: RegisteredIntent,
+): OperationTarget | null {
+  // A document-scoped operation names no node: the document IS the target, so
+  // this address always resolves and the operation's own payload has to carry
+  // its rejection predicate (see the registry's OperationAddress comment).
+  const empty = { t: null, run: null, cellParagraph: null, drawing: null };
+  if (address === "document") return { ...empty, el: doc.docRoot };
+  const addressId = (intent as unknown as Record<string, number>)[ADDRESS_WIRE_FIELD[address]];
+  switch (address) {
+    case "run": {
+      const el = ids.elOf(addressId);
+      if (!el) return null;
+      const entry = runOf(el);
+      if (!entry) return null;
+      return { ...empty, el, t: entry.firstT ?? null, run: entry.run };
+    }
+    case "block": {
+      const el = ids.elOf(addressId);
+      if (!el) return null;
+      return { ...empty, el, t: firstTextDescendant(el) };
+    }
+    case "cell": {
+      const paraEl = ids.elOf(addressId) ?? null;
+      const tbl = paraEl ? tableOf(doc, paraEl) : null;
+      return tbl ? { ...empty, el: tbl, cellParagraph: paraEl } : null;
+    }
+    case "object": {
+      // BOTH halves have to resolve. A run whose contents moved under a
+      // concurrent edit rejects on every replica rather than mutating
+      // whatever now sits at that index — the honest no-op an unresolvable
+      // id already gives, extended to the index that narrows it.
+      const el = ids.elOf(addressId);
+      if (!el) return null;
+      const objectIndex = (intent as unknown as { objectIndex?: number }).objectIndex;
+      const drawing = drawingIn(el, objectIndex, runOf);
+      return drawing ? { ...empty, el, drawing } : null;
+    }
+  }
+}
+
+/** Apply a registered operation: resolve its address, run the declared
+ * mutation, retire the ids of anything it removed, and hand the nodes it
+ * created their carried ids. */
+function applyRegistered(
+  doc: DocxDocument,
+  ids: StableIds,
+  runOf: RunLookup,
+  intent: RegisteredIntent,
+): boolean {
+  const definition = registeredOperation(intent.kind);
+  if (!definition) return false;
+  const target = resolveOperationTarget(doc, ids, runOf, definition.address, intent);
+  if (!target) return false;
+  const nodeIds = "nodeIds" in intent ? intent.nodeIds : undefined;
+  const before = nodeIds ? trackedSet(ids, doc) : null;
+  if (!applyRegisteredOperation(doc, target, intent)) return false;
+  // Prune BEFORE handing out carried ids, so a replacing operation
+  // (insertWatermark) leaves no id pointing at a detached run.
+  if (definition.prunesIds) ids.prune(doc.editableRoots());
+  if (before && nodeIds) assignFreshTracked(ids, doc, before, nodeIds);
+  return true;
+}
+
+/**
+ * Assign carried ids to tracked nodes created since `before`, in doc order.
+ *
+ * The fresh nodes' AUTO ids are dropped first. A refresh inside the mutation
+ * auto-assigns sequential ids starting at the table's `next`, and after an
+ * earlier intent whose batch was only partly consumed, `next` sits INSIDE
+ * that batch's range — so an auto id here can equal a LATER id of THIS
+ * intent's carried batch, and reassign would reject a perfectly good intent
+ * as a collision (found by the index wave: mark an XE entry, then
+ * insertIndex). Dropping the autos first makes the batch land regardless;
+ * fresh nodes beyond the batch re-auto-assign ABOVE the carried maximum
+ * (reassign bumps `next`), which every replica derives identically.
+ */
 function assignFreshTracked(ids: StableIds, doc: DocxDocument, before: Set<XmlElement>, nodeIds: number[]): void {
   const fresh: XmlElement[] = [];
   walkTracked(doc, (el) => { if (!before.has(el)) fresh.push(el); });
-  for (let k = 0; k < fresh.length && k < nodeIds.length; k++) ids.reassign(fresh[k], nodeIds[k]);
+  for (const el of fresh) ids.unassign(el);
+  for (let k = 0; k < fresh.length; k++) {
+    if (k < nodeIds.length) ids.reassign(fresh[k], nodeIds[k]);
+    else ids.assign(fresh[k]);
+  }
 }
 
 function base64ToBytes(b64: string): Uint8Array {
@@ -1003,8 +1150,12 @@ function firstTextDescendant(el: XmlElement): XmlElement | null {
  * pick a paragraph whose nearest tbl is the intended one). */
 function tableOfParagraph(doc: DocxDocument, ids: StableIds, cellParagraphId: number): XmlElement | null {
   const paraEl = ids.elOf(cellParagraphId);
-  if (!paraEl) return null;
-  for (let cur: XmlElement | null = paraEl; cur; cur = doc.findParentOf(cur) ?? null) {
+  return paraEl ? tableOf(doc, paraEl) : null;
+}
+
+/** The nearest w:tbl ancestor of (or equal to) an element. */
+function tableOf(doc: DocxDocument, el: XmlElement): XmlElement | null {
+  for (let cur: XmlElement | null = el; cur; cur = doc.findParentOf(cur) ?? null) {
     if (localName(cur.name) === "tbl") return cur;
   }
   return null;
@@ -1035,15 +1186,18 @@ function drawingIn(runEl: XmlElement, objectIndex: number | undefined, runOf: Ru
   return content ? drawingSource(content) ?? null : null;
 }
 
-/** The m:oMath element inside a run's subtree (math-edit intents address a math
- * object via the run that carries it). */
-function firstMathIn(el: XmlElement): XmlElement | null {
-  if (localName(el.name) === "oMath") return el;
-  for (const c of el.children) {
-    const found = firstMathIn(c);
-    if (found) return found;
-  }
-  return null;
+/** Every m:oMath under `el`, in document order. Must stay identical to the
+ * editor's helper of the same name: both sides have to count the same
+ * equations in the same order for an edit to land on the one the author
+ * touched. */
+function mathsIn(el: XmlElement): XmlElement[] {
+  if (localName(el.name) === "oMath") return [el];
+  return el.children.flatMap(mathsIn);
+}
+
+/** The equation a math intent names: the `index`th under the block. */
+function mathIn(el: XmlElement, index = 0): XmlElement | null {
+  return mathsIn(el)[index] ?? null;
 }
 
 interface RunEntry {

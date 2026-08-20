@@ -55,14 +55,15 @@ describe("document parsing", () => {
     if (para.type !== "paragraph") throw new Error("expected paragraph");
     const objectRun = para.children[1];
     if (objectRun.type !== "run") throw new Error("expected run");
-    // VML pict extents round to whole points (56.5 -> 57pt, 21.4 -> 21pt):
-    // Word's PDF draws every wild2-math-eq-as-images equation raster at
-    // integer pt (31.45->31, 49.65->50, 120.75->121, 290.75->291).
+    // A VML pict keeps its style extent unrounded (56.5pt, 21.4pt). An
+    // earlier rule rounded both axes to whole points; it was measured on a
+    // stale wild2-math-eq-as-images reference, and the re-exported one places
+    // the same rasters on quarter-points instead (31.45->31.50, 15.05->14.75).
     expect(objectRun.content[0]).toMatchObject({
       kind: "image",
       part: "word/media/equation.wmf",
-      width: 76,
-      height: 28,
+      width: 56.5 * (4 / 3),
+      height: 21.4 * (4 / 3),
     });
   });
 
@@ -1168,7 +1169,7 @@ describe("SmartArt cached drawing", () => {
     const pill = drawing.paths![0];
     expect(pill.fill).toBe("#5b9bd5");
     expect(pill.width).toBeCloseTo(1535430 / 9525, 1);
-    const r = Math.min(1535430, 219775) * 0.1667;
+    const r = Math.round(Math.min(1535430, 219775) * 0.1667 * 100) / 100;
     expect(pill.d).toContain(`A ${r} ${r}`);
 
     // The pill's text: white 11pt Calibri, centered, box from dsp:txXfrm.
@@ -1352,7 +1353,8 @@ describe("phase23 fidelity rules", () => {
     if (!anchor || anchor.kind !== "anchor" || anchor.shape.type !== "textbox") throw new Error("expected textbox anchor");
     const shape = anchor.shape;
     // Real ellipse outline (arc commands), white fill + black stroke.
-    expect(shape.geom?.d).toContain("A");
+    expect(shape.geom?.paths[0]?.d).toContain("A");
+    expect(shape.geom?.paths[0]?.fill?.toLowerCase()).toBe("#ffffff");
     expect(shape.fill?.toLowerCase()).toBe("#ffffff");
     expect(shape.stroke?.color).toBe("#000000");
     // Insets = bodyPr insets + the ellipse's inscribed text rectangle

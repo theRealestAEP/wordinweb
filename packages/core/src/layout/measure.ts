@@ -116,13 +116,22 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   verdana: { asc: 1.005371, desc: 0.209039, gap: 0 }, // fitted total 1.21441
   tahoma: { asc: 1.000488, desc: 0.206543, gap: 0 },
   garamond: { asc: 0.861816, desc: 0.263184, gap: 0 },
-  // East Asian line pitch, measured from staging-eastasian's Word PDF (11pt
-  // CJK runs, docDefaults line=259 -> x1.0792). MS Mincho advances 19.5pt/line
-  // (single 18.07pt = 1.643em, baseline 1.364em below the line top). Simplified
-  // Chinese isn't covered by MS Mincho, so Word falls back to Microsoft JhengHei
-  // whose line box is far taller: 36pt/line (single 33.36pt = 3.033em).
-  "hiragino mincho pron": { asc: 1.3636, desc: 0.2794, gap: 0 },
-  "hiragino sans": { asc: 1.3636, desc: 0.2794, gap: 0 },
+  // East Asian: Word's MS Mincho NATURAL line is 1.296em, pinned two ways.
+  // probe-docgrid15b (ja 10/11/12/16pt over lines-grid pitches 240..480tw,
+  // exported twice, ink-identical) snaps 2 rows at every em-threshold
+  // <= 1.25 and 1 row at every threshold >= 1.3125, bracketing the snap
+  // natural in (1.25, 1.3125); the natural-pitch contexts measure the same
+  // em (probe2-ruby-vertical's 20.5px vertical columns = 1.296 x the 1.0792
+  // auto multiplier at 11pt). The old 1.643em here was reverse-engineered
+  // from staging-eastasian's 19.5pt/line advance, which is that fixture's
+  // GRID pitch (360tw x 1.0792), not a natural - it overstated the raw box
+  // (ja 11pt read 24.10px > pitch 24 where Word reads 19.0) and forced the
+  // textSnap EA carve-out. Split kept proportional (baseline 1.0756em below
+  // the line top). Simplified Chinese isn't covered by MS Mincho, so Word
+  // falls back to Microsoft JhengHei whose line box is far taller:
+  // 36pt/line (single 33.36pt = 3.033em).
+  "hiragino mincho pron": { asc: 1.0756, desc: 0.2204, gap: 0 },
+  "hiragino sans": { asc: 1.0756, desc: 0.2204, gap: 0 },
   "pingfang tc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   // Word's glyph-fallback face for symbol characters a symbol-encoded font
   // can't cover (numberingLabel routes literal-Unicode bullets here). Real MS
@@ -273,6 +282,22 @@ export function cambriaMathDescentShare(): number {
   return 0.238;
 }
 
+/** Drop least-recently-used entries until the cache fits under `max`. Callers
+ * re-insert on a hit, so Map insertion order is recency order. Eviction beats
+ * clearing: these caches are re-read in bulk by an incremental relay, which a
+ * clear would send back to the canvas for the whole document. */
+function evictLru(cache: Map<string, unknown>, max: number): void {
+  while (cache.size >= max) {
+    const oldest = cache.keys().next();
+    if (oldest.done) return;
+    cache.delete(oldest.value);
+  }
+}
+
+const WIDTH_CACHE_MAX = 20000;
+/** Ink extents are only asked for by math radicals, so this stays small. */
+const INK_CACHE_MAX = 4000;
+
 /**
  * Canvas-based measurer for browsers. Word's single line spacing derives from
  * the font's ascent+descent+lineGap; canvas fontBoundingBox* exposes exactly
@@ -314,10 +339,34 @@ export class CanvasMeasurer implements TextMeasurer {
   }
 
   width(text: string, font: FontSpec, letterSpacing = 0): number {
+    // A soft hyphen (U+00AD, <w:softHyphen/>) measures ZERO by explicit rule.
+    // Canvas measureText for U+00AD is host-dependent (some faces carry a
+    // real hyphen-width glyph), which would silently embed the host in line
+    // breaking. Word gives it no advance anywhere; the line packer adds the
+    // hyphen GLYPH itself at a soft break (probe-softhyphen).
+    if (text.includes("\u00AD")) text = text.replace(/\u00AD/g, "");
     if (text.length === 0) return 0;
-    const key = fontKey(font) + " " + text;
+    const key = fontKey(font) + "\0" + text;
     let w = this.widthCache.get(key);
-    if (w === undefined) {
+    // Measurement accounting for the typing-latency instrument (armed by a
+    // host that set __dxwPerf). `chars` is the load-bearing one: line breaking
+    // measures CUMULATIVE PREFIXES of a run (see pushLatin), so a paragraph of
+    // n characters costs O(n²) characters of measurement, and on a document
+    // whose paragraphs are each two-thirds of a page that reached 2.3 MILLION
+    // characters per keystroke. Call counts alone hide it completely.
+    const stats = (globalThis as {
+      __dxwPerf?: { width?: { hit: number; miss: number; chars: number } };
+    }).__dxwPerf;
+    if (stats) {
+      const s = (stats.width ??= { hit: 0, miss: 0, chars: 0 });
+      s[w !== undefined ? "hit" : "miss"]++;
+      s.chars += text.length;
+    }
+    if (w !== undefined) {
+      // Re-insert so Map iteration order tracks recency (see evictLru).
+      this.widthCache.delete(key);
+      this.widthCache.set(key, w);
+    } else {
       // Word font sizes are stored in half-points, which become multiples of
       // 2/3px at 96dpi. Canvas loses a small amount of precision at those
       // fractional sizes; measuring at 3x makes every half-point size an
@@ -329,7 +378,7 @@ export class CanvasMeasurer implements TextMeasurer {
       const measureScale = widthScale === 1 ? 3 : 1;
       this.setFont({ ...font, size: font.size * measureScale });
       w = (this.ctx.measureText(text).width / measureScale) * widthScale;
-      if (this.widthCache.size > 20000) this.widthCache.clear();
+      evictLru(this.widthCache, WIDTH_CACHE_MAX);
       this.widthCache.set(key, w);
     }
     return w + letterSpacing * text.length;
@@ -356,13 +405,17 @@ export class CanvasMeasurer implements TextMeasurer {
   inkBox(text: string, font: FontSpec): { ascent: number; descent: number } | undefined {
     const key = "ink " + fontKey(font) + " " + text;
     let m = this.inkBoxCache.get(key);
-    if (m === undefined) {
+    if (m !== undefined) {
+      this.inkBoxCache.delete(key);
+      this.inkBoxCache.set(key, m);
+    } else {
       this.setFont({ ...font, size: font.size * 3 });
       const tm = this.ctx.measureText(text);
       m =
         tm.actualBoundingBoxAscent !== undefined && tm.actualBoundingBoxDescent !== undefined
           ? { ascent: tm.actualBoundingBoxAscent / 3, descent: tm.actualBoundingBoxDescent / 3 }
           : null;
+      evictLru(this.inkBoxCache, INK_CACHE_MAX);
       this.inkBoxCache.set(key, m);
     }
     return m ?? undefined;
@@ -410,6 +463,8 @@ export class CanvasMeasurer implements TextMeasurer {
  */
 export class ApproxMeasurer implements TextMeasurer {
   width(text: string, font: FontSpec, letterSpacing = 0): number {
+    // Same explicit soft-hyphen rule as CanvasMeasurer: U+00AD is zero-width.
+    if (text.includes("\u00AD")) text = text.replace(/\u00AD/g, "");
     let w = 0;
     for (const ch of text) w += charWidth(ch, font);
     return w * fontWidthScale(font) + letterSpacing * text.length;

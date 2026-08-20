@@ -2,6 +2,8 @@ import { DocxDocument } from "../docx.js";
 import { Run, RunProps } from "../model.js";
 import { XmlElement, cloneXml, localName, child } from "../xml.js";
 import { paragraphOf } from "./blocks.js";
+import { RevisionMeta, recordRunFormatChange } from "./suggest.js";
+import { applyRunTextEffect, type RunTextEffectPatch } from "./drawings.js";
 
 /**
  * Editing commands, v1: character formatting over a selection.
@@ -37,6 +39,24 @@ export interface RunFormatPatch {
   fontFamily?: string;
   /** Superscript/subscript; null returns the run to the baseline. */
   verticalAlign?: "superscript" | "subscript" | null;
+  /**
+   * Character style (w:rStyle); null removes the reference.
+   *
+   * This rides the run patch rather than taking an operation of its own
+   * because applying a character style to PART of a run splits the run — which
+   * breaks the registry's position-stable precondition, and which formatRange
+   * already handles with its carried before/middle/after piece ids.
+   */
+  characterStyleId?: string | null;
+  /**
+   * w14 outline/shadow run effects (Word's Home-tab "Text Effects and
+   * Typography" gallery) — the same vocabulary a WordArt object's text
+   * carries, applied directly to ordinary runs. null removes every w14
+   * effect, reverting to plain text. Rides the run patch rather than an
+   * operation of its own for the same reason characterStyleId does: applying
+   * it to PART of a run splits the run, which formatRange already handles.
+   */
+  textEffect?: RunTextEffectPatch | null;
   /** Remove all direct character formatting (and character style). */
   clear?: boolean;
 }
@@ -48,10 +68,16 @@ export interface FormattedRange {
   end: number;
 }
 
+/**
+ * Apply `patch` to every selected run (splitting runs at partial boundaries).
+ * With `meta`, the formatting is SUGGESTED: each run that changes first records
+ * the properties it had in a w:rPrChange, so the change is reviewable.
+ */
 export function applyRunFormat(
   doc: DocxDocument,
   segments: SelectionSegment[],
   patch: RunFormatPatch,
+  meta?: RevisionMeta,
 ): FormattedRange[] {
   const formatted: FormattedRange[] = [];
   // Group by run; merge ranges on the same w:t.
@@ -92,6 +118,7 @@ export function applyRunFormat(
 
     if (coversAllTs || !parent || tTargets.size !== 1) {
       // Whole-run formatting (also the safe fallback for multi-t partials).
+      if (meta) recordRunFormatChange(rEl, meta);
       setRunProps(rEl, patch);
       for (const c of rEl.children) {
         if (localName(c.name) === "t") formatted.push({ t: c, start: 0, end: c.text.length });
@@ -100,7 +127,7 @@ export function applyRunFormat(
     }
 
     const [t, range] = Array.from(tTargets)[0];
-    const middleT = splitAndFormat(parent, rEl, t, range.start, range.end, patch);
+    const middleT = splitAndFormat(parent, rEl, t, range.start, range.end, patch, meta);
     if (middleT) formatted.push({ t: middleT, start: 0, end: middleT.text.length });
   }
 
@@ -123,6 +150,7 @@ function splitAndFormat(
   start: number,
   end: number,
   patch: RunFormatPatch,
+  meta?: RevisionMeta,
 ): XmlElement | null {
   const idx = parent.children.indexOf(rEl);
   const tIdx = rEl.children.indexOf(t);
@@ -159,6 +187,8 @@ function splitAndFormat(
 
   const middleT = makeT(text.slice(start, end));
   const middle = makeRun([middleT]);
+  // Only the middle run's formatting changes, so only it records what it had.
+  if (meta) recordRunFormatChange(middle, meta);
   setRunProps(middle, patch);
   newRuns.push(middle);
 
@@ -181,6 +211,9 @@ const RPR_ORDER = [
   "vanish", "webHidden", "color", "spacing", "w", "kern", "position", "sz",
   "szCs", "highlight", "u", "effect", "bdr", "shd", "fitText", "vertAlign",
   "rtl", "cs", "em", "lang", "eastAsianLayout", "specVanish", "oMath",
+  // A recorded tracked-format change closes the element, after everything it
+  // records — so a new property inserts before it, never after.
+  "rPrChange",
 ];
 
 function prefixOf(el: XmlElement): string {
@@ -236,10 +269,18 @@ function prefixAttrs(prefix: string, attrs: Record<string, string>): Record<stri
 export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
   if (Object.keys(patch).length === 0) return;
   if (patch.clear) {
-    rEl.children = rEl.children.filter((c) => localName(c.name) !== "rPr");
+    // Clearing drops every direct property — except a recorded tracked-format
+    // change, which is what a reviewer would restore, not a property itself.
+    const rPr = rEl.children.find((c) => localName(c.name) === "rPr");
+    const change = rPr?.children.find((c) => localName(c.name) === "rPrChange");
+    if (rPr && change) rPr.children = [change];
+    else rEl.children = rEl.children.filter((c) => localName(c.name) !== "rPr");
     return;
   }
   const rPr = ensureRPr(rEl);
+  if (patch.characterStyleId !== undefined) {
+    setProp(rPr, "rStyle", patch.characterStyleId === null ? null : { val: patch.characterStyleId });
+  }
   if (patch.bold !== undefined) {
     setProp(rPr, "b", patch.bold ? {} : { val: "0" });
     setProp(rPr, "bCs", patch.bold ? {} : { val: "0" });
@@ -271,6 +312,9 @@ export function setRunProps(rEl: XmlElement, patch: RunFormatPatch): void {
   if (patch.verticalAlign !== undefined) {
     setProp(rPr, "vertAlign", patch.verticalAlign === null ? null : { val: patch.verticalAlign });
   }
+  if (patch.textEffect !== undefined) {
+    applyRunTextEffect(rPr, patch.textEffect);
+  }
 }
 
 // ---------- selection format summary ----------
@@ -286,6 +330,9 @@ export interface SelectionFormat {
   highlight?: string;
   fontFamily?: string;
   verticalAlign?: "superscript" | "subscript";
+  /** The character style every selected run carries, if they agree. Null when
+   * they agree on carrying none; undefined when the selection is mixed. */
+  characterStyleId?: string | null;
 }
 
 /** Summarize effective formatting across segments (for toolbar state/toggles). */
@@ -310,6 +357,44 @@ export function summarizeSelection(segments: SelectionSegment[]): SelectionForma
       (v) => (v === "superscript" || v === "subscript" ? v : undefined),
     ),
     fontFamily: uniform((p) => p.font),
+    // Read off the run's OWN props, not the effective ones: the effective set
+    // is what the style resolved TO, and the toolbar needs which style is
+    // applied. Absent is normalized to null so "all plain" is distinguishable
+    // from "the selection disagrees".
+    characterStyleId: uniformOwn(segments, (r) => r.props.styleId ?? null),
+  };
+}
+
+function uniformOwn<T>(segments: SelectionSegment[], read: (run: Run) => T): T | undefined {
+  const first = read(segments[0].run);
+  return segments.every((s) => read(s.run) === first) ? first : undefined;
+}
+
+/**
+ * The run patch that reproduces a summarized selection's character formatting
+ * — the format painter, as a pure function.
+ *
+ * A property the source selection did not agree on is LEFT OUT rather than
+ * guessed, so painting a mixed selection carries over only what it actually
+ * had in common. The booleans are always carried, including when false: a
+ * painter that could not turn bold OFF would be a one-way tool.
+ */
+export function formatPatchFrom(format: SelectionFormat): RunFormatPatch {
+  return {
+    bold: format.bold,
+    italic: format.italic,
+    underline: format.underline,
+    strike: format.strike,
+    verticalAlign: format.verticalAlign ?? null,
+    ...(format.fontSizePt !== undefined ? { fontSizePt: format.fontSizePt } : {}),
+    ...(format.fontFamily !== undefined ? { fontFamily: format.fontFamily } : {}),
+    // Color and highlight are nullable in the patch, so an agreed ABSENCE is
+    // paintable: a selection with no direct color clears the target's.
+    ...(format.color !== undefined ? { color: format.color } : {}),
+    ...(format.highlight !== undefined ? { highlight: format.highlight } : {}),
+    ...(format.characterStyleId !== undefined
+      ? { characterStyleId: format.characterStyleId }
+      : {}),
   };
 }
 

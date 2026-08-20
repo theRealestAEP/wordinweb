@@ -29,11 +29,13 @@ import {
   WrapMode,
 } from "../model.js";
 import { emuToPx, ptToPx, twipsToPx } from "../units.js";
+import { applyClrTransforms, solidColorOf, solidFillColor } from "./color.js";
 import { ParseContext, parseBorder, parseParaProps, parseRunProps, parseShading } from "./properties.js";
 import { parseSectionProps, defaultSectionProps } from "./section.js";
 import { Relationships, parseRelationships, relsPathFor } from "./rels.js";
 import { parseChartPart } from "./chart.js";
 import { parseSmartArtParts } from "./smartart.js";
+import { presetFillColor, presetShapeGeometry, type PresetGeom } from "../preset-geometry.js";
 
 export interface DocParseContext extends ParseContext {
   rels: Relationships;
@@ -165,6 +167,9 @@ interface FieldState {
    * w:ffData, carried onto the emitted field content so it becomes a
    * click-to-toggle target. */
   checkbox?: XmlElement;
+  /** The w:fldChar begin element, carried onto the emitted field content as
+   * its `src` so the update pass can find the field's result region again. */
+  beginEl?: XmlElement;
 }
 
 export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
@@ -621,7 +626,7 @@ function parseParaChildren(
       const fieldRun: Run = {
         type: "run",
         props,
-        content: [{ kind: "field", instruction, cachedResult: cached }],
+        content: [{ kind: "field", instruction, cachedResult: cached, src: el }],
       };
       out.push(fieldRun);
       captureRefBookmarkRun(ctx, fieldRun);
@@ -663,6 +668,7 @@ function flushField(field: FieldState): void {
       instruction: field.instruction,
       cachedResult: field.cachedResult,
       ...(field.checkbox ? { checkbox: field.checkbox } : {}),
+      ...(field.beginEl ? { src: field.beginEl } : {}),
     });
   }
   field.mode = null;
@@ -671,6 +677,7 @@ function flushField(field: FieldState): void {
   field.carrier = null;
   field.live = false;
   field.checkbox = undefined;
+  field.beginEl = undefined;
 }
 
 /**
@@ -746,6 +753,16 @@ function parseRun(
     src: r,
   };
 
+  // A w:sym glyph is set in the font the SYM declares, not the run's rFonts,
+  // and that font's metrics govern the line: us-courts-answer's Symbol-font
+  // minus signs make Word's 11pt Times lines ~18.0px tall (the Office Symbol
+  // face's 1.225em box) where a plain line reads ~16.7 — measured line by
+  // line against the reference PDF. When a run's visible text is entirely
+  // sym-drawn, resolve the run to the sym's font so measurement charges the
+  // right box; mixed runs keep their rFonts (per-glyph fonts are unmodeled).
+  let symFont: string | undefined;
+  let nonSymText = false;
+
   for (const el of r.children) {
     const ln = localName(el.name);
     switch (ln) {
@@ -761,7 +778,10 @@ function parseRun(
         // conflated).
         const text = decodeSymbolText(el.text, run.props.font).replace(/­/g, "‑");
         if (field.mode === "result" && !field.live) field.cachedResult += text;
-        else if (field.mode !== "instr") run.content.push({ kind: "text", text, srcT: el });
+        else if (field.mode !== "instr") {
+          run.content.push({ kind: "text", text, srcT: el });
+          if (text.length) nonSymText = true;
+        }
         break;
       }
       case "delText": {
@@ -778,6 +798,7 @@ function parseRun(
           flushField(field);
           field.mode = "instr";
           field.carrier = run;
+          field.beginEl = el;
           // Legacy form fields carry their display in the fldChar begin's
           // w:ffData, not a separate/result run. FORMCHECKBOX: a ballot box
           // (U+2610) or ballot-box-with-X (U+2612) from w:checkBox/w:checked.
@@ -795,11 +816,16 @@ function parseRun(
           }
         } else if (type === "separate") {
           field.mode = "result";
-          // HYPERLINK and TOC results are verbatim styled content: let the
-          // result runs render themselves (their own rPr wins in Word, not
-          // the field carrier's - nccih p5's TOC fldChar runs carry <w:i/>
-          // but Word paints the entries upright from the result runs' rPr).
-          field.live = /^\s*(HYPERLINK|TOC)\b/i.test(field.instruction);
+          // HYPERLINK, TOC, BIBLIOGRAPHY and INDEX results are verbatim
+          // styled content: let the result runs render themselves (their own
+          // rPr wins in Word, not the field carrier's - nccih p5's TOC
+          // fldChar runs carry <w:i/> but Word paints the entries upright
+          // from the result runs' rPr). BIBLIOGRAPHY and INDEX additionally
+          // span paragraphs, so swallowing a result into one cachedResult
+          // would collapse one paragraph per entry into a single inline
+          // string. (\b keeps INDEX from matching an XE mark, which has no
+          // separate and never reaches here anyway.)
+          field.live = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i.test(field.instruction);
         } else if (type === "end") {
           if (!field.live) {
             const carrier = field.carrier ?? run;
@@ -808,6 +834,7 @@ function parseRun(
               instruction: field.instruction,
               cachedResult: field.cachedResult,
               ...(field.checkbox ? { checkbox: field.checkbox } : {}),
+              ...(field.beginEl ? { src: field.beginEl } : {}),
             };
             if (carrier === run) run.content.push(content);
             else carrier.content.push(content);
@@ -818,6 +845,7 @@ function parseRun(
           field.carrier = null;
           field.live = false;
           field.checkbox = undefined;
+          field.beginEl = undefined;
         }
         break;
       }
@@ -910,6 +938,7 @@ function parseRun(
               ? SYMBOL_CHAR_MAP[code]
               : undefined;
           run.content.push({ kind: "text", text: mapped ?? String.fromCharCode(code) });
+          if (font) symFont = symFont === undefined || symFont === font ? font : "";
         }
         break;
       }
@@ -971,6 +1000,10 @@ function parseRun(
         break;
       }
     }
+  }
+
+  if (symFont && !nonSymText) {
+    run.props = { ...run.props, font: symFont, fontHAnsi: symFont };
   }
 
   return run;
@@ -1310,19 +1343,21 @@ function parseDrawing(
         const ext = child(xfrm, "ext");
         const w = (intAttr(ext, "cx") ?? 0) * sx;
         const h = (intAttr(ext, "cy") ?? 0) * sy;
-        const d = presetPathD(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
-        if (d && w > 0 && h > 0) {
-          paths.push({
-            x: emuToPx(ox + (intAttr(off, "x") ?? 0) * sx),
-            y: emuToPx(oy + (intAttr(off, "y") ?? 0) * sy),
-            width: emuToPx(w),
-            height: emuToPx(h),
-            d,
-            viewW: w,
-            viewH: h,
-            fill,
-            stroke,
-          });
+        if (w > 0 && h > 0) {
+          const geom = presetGeomFor(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
+          for (const sub of resolvePresetPaths(geom, fill, !!stroke)) {
+            paths.push({
+              x: emuToPx(ox + (intAttr(off, "x") ?? 0) * sx),
+              y: emuToPx(oy + (intAttr(off, "y") ?? 0) * sy),
+              width: emuToPx(w),
+              height: emuToPx(h),
+              d: sub.d,
+              viewW: w,
+              viewH: h,
+              fill: sub.fill,
+              stroke: sub.stroke ? stroke : undefined,
+            });
+          }
         }
       }
       // Textboxes inside shapes are handled by the VML fallback or the
@@ -1389,7 +1424,7 @@ function parseDrawing(
   const chartRel = chartRelId ? ctx.rels.get(chartRelId) : undefined;
   if (chartRel && !chartRel.external && ctx.readPart) {
     const chartRoot = ctx.readPart(chartRel.target);
-    if (chartRoot) chart = parseChartPart(chartRoot) ?? undefined;
+    if (chartRoot) chart = parseChartPart(chartRoot, ctx.theme) ?? undefined;
   }
 
   // DrawingML text box (wps:txbx): a floating shape with fill/stroke, text
@@ -1476,19 +1511,29 @@ function parseDrawing(
     // Non-rect preset geometry (oval, diamond, flowchart shapes): paint the
     // real outline and lay the text inside the geometry's text rectangle.
     const prstA = attr(child(spPr, "prstGeom"), "prst") ?? "rect";
-    const geomD =
+    const presetGeom =
       prstA !== "rect" && cx > 0 && cy > 0
-        ? presetPathD(prstA, cx, cy, child(child(spPr, "prstGeom"), "avLst"))
+        ? presetGeomFor(prstA, cx, cy, child(child(spPr, "prstGeom"), "avLst"))
         : undefined;
-    const gIns = presetTextRectInsets(prstA);
-    const gL = gIns ? gIns.l * emuToPx(cx) : 0;
-    const gT = gIns ? gIns.t * emuToPx(cy) : 0;
-    const gR = gIns ? gIns.r * emuToPx(cx) : 0;
-    const gB = gIns ? gIns.b * emuToPx(cy) : 0;
+    const tr = presetGeom?.textRect;
+    const gL = tr ? emuToPx(tr.l) : 0;
+    const gT = tr ? emuToPx(tr.t) : 0;
+    const gR = tr ? emuToPx(cx - tr.r) : 0;
+    const gB = tr ? emuToPx(cy - tr.b) : 0;
     // a:spAutoFit grows the box height to its text. a:normAutofit stores a
     // fontScale / lnSpcReduction that shrinks the text to fit the fixed box,
     // but Word IGNORES those on import and renders at full size, clipping the
     // overflow exactly like a:noAutofit. Treat both non-grow modes as clip.
+    //
+    // Measured twice. probe3-shape-autofit pinned one authored cache; probe-
+    // shapefit (2026-08-11) then swept six text lengths at two box heights
+    // with a BARE <a:normAutofit/> plus two authored caches, exported through
+    // desktop Word twice under the self-reproduction control, and resaved as
+    // DOCX. Word painted all fourteen at the authored 11pt, clipped each at
+    // its box bottom line-for-line with the noAutofit control, and wrote every
+    // bodyPr back byte-identically — it computed no fontScale for the bare
+    // ones and consumed neither authored one. So normAutofit is a clip on the
+    // file path, and its cache is carried, never applied.
     const spAutoFit = bodyPr ? !!child(bodyPr, "spAutoFit") : false;
     const normAutofit = bodyPr ? !!child(bodyPr, "normAutofit") : false;
     const noAutofit = bodyPr ? (!!child(bodyPr, "noAutofit") || normAutofit) : false;
@@ -1529,8 +1574,11 @@ function parseDrawing(
           r: insetOf("rIns", 9.6) + gR,
           b: insetOf("bIns", 4.8) + gB,
         },
-        ...(geomD ? { geom: { d: geomD, viewW: cx, viewH: cy } } : {}),
+        ...(presetGeom
+          ? { geom: { viewW: cx, viewH: cy, paths: resolvePresetPaths(presetGeom, fill, !!strokeColor) } }
+          : {}),
         ...(noAutofit ? { clipText: true } : {}),
+        ...(normAutofit ? { shrinkText: true } : {}),
         ...(spAutoFit ? { autofitHeight: true } : {}),
         ...(warp ? { warp } : {}),
         ...(wordArt ? { wordArt: true } : {}),
@@ -1639,6 +1687,20 @@ function parseDrawing(
         vRel: rel(posV),
         hAlign,
         vAlign,
+        // Wrap mode + distances, acted on only inside frame stories
+        // (probe-headeranchor2: a wrapTopAndBottom bar in a header sets the
+        // body top to its bottom edge; body flow ignores art wrap as before).
+        wrap: child(anchor, "wrapNone")
+          ? "none"
+          : child(anchor, "wrapTopAndBottom")
+            ? "topAndBottom"
+            : "square",
+        dist: {
+          t: emuToPx(intAttr(anchor, "distT") ?? 0),
+          b: emuToPx(intAttr(anchor, "distB") ?? 0),
+          l: emuToPx(intAttr(anchor, "distL") ?? 0),
+          r: emuToPx(intAttr(anchor, "distR") ?? 0),
+        },
         behind: attr(anchor, "behindDoc") === "1",
         ...(artRot ? { rotation: artRot / 60000 } : {}),
         lines,
@@ -1727,164 +1789,50 @@ function parseDrawing(
   };
 }
 
-/** Apply a:lumMod/lumOff/shade/tint children to a hex color. */
-function applyClrTransforms(hex: string, clrEl: XmlElement): string {
-  let r = parseInt(hex.slice(1, 3), 16) / 255;
-  let g = parseInt(hex.slice(3, 5), 16) / 255;
-  let b = parseInt(hex.slice(5, 7), 16) / 255;
-  for (const t of clrEl.children) {
-    const v = (intAttr(t, "val") ?? 100000) / 100000;
-    switch (localName(t.name)) {
-      case "lumMod":
-        r *= v; g *= v; b *= v;
-        break;
-      case "lumOff":
-        r += v; g += v; b += v;
-        break;
-      case "shade":
-        r *= v; g *= v; b *= v;
-        break;
-      case "tint":
-        r = 1 - (1 - r) * v; g = 1 - (1 - g) * v; b = 1 - (1 - b) * v;
-        break;
-    }
+
+/** The a:avLst adjustment overrides of an a:prstGeom, as gd name → value. */
+function adjustValuesOf(avLst: XmlElement | undefined): Record<string, number> | undefined {
+  if (!avLst) return undefined;
+  let out: Record<string, number> | undefined;
+  for (const gd of children(avLst, "gd")) {
+    const name = attr(gd, "name");
+    const m = name ? /^val (-?[\d.]+)/.exec(attr(gd, "fmla") ?? "") : null;
+    if (m) (out ??= {})[name!] = parseFloat(m[1]);
   }
-  const c = (x: number) => Math.round(Math.max(0, Math.min(1, x)) * 255).toString(16).padStart(2, "0");
-  return `#${c(r)}${c(g)}${c(b)}`;
+  return out;
 }
 
-/** Resolve the a:solidFill inside `container` to a CSS color: srgbClr, theme
- * schemeClr, or sysClr (whose lastClr carries the rendered color), with
- * lumMod/lumOff/shade/tint transforms applied. */
-function solidFillColor(container: XmlElement | undefined, theme: Theme | undefined): string | undefined {
-  if (!container) return undefined;
-  const solid = child(container, "solidFill");
-  if (!solid) return undefined;
-  return solidColorOf(solid, theme);
-}
-
-/** Resolve the color child (srgbClr/schemeClr/sysClr) of a fill element. */
-function solidColorOf(solid: XmlElement, theme: Theme | undefined): string | undefined {
-  const clrEl = child(solid, "srgbClr") ?? child(solid, "schemeClr") ?? child(solid, "sysClr");
-  if (!clrEl) return undefined;
-  const local = localName(clrEl.name);
-  let hex: string | undefined;
-  if (local === "srgbClr") hex = "#" + (attr(clrEl, "val") ?? "000000");
-  else if (local === "sysClr") hex = "#" + (attr(clrEl, "lastClr") ?? "000000");
-  else hex = theme?.colors.get(attr(clrEl, "val") ?? "");
-  if (!hex) return undefined;
-  return applyClrTransforms(hex, clrEl);
-}
-
-/** Rounded rectangle path with per-corner radii (clockwise from top-left). */
-function roundedRectD(w: number, h: number, tl: number, tr: number, br: number, bl: number): string {
+/**
+ * Evaluate an a:prstGeom outline into SVG sub-paths in a `w x h` coordinate
+ * space (the DrawingML guide-formula evaluator over the canonical preset
+ * definitions). Anything unrecognized renders as its bounding rectangle.
+ * Text wraps inside the geometry's text rectangle (presetShapeDefinitions),
+ * not the bounding box — verified against phase23 p12's Word PDF: oval
+ * "Was 0 / B" first line top = shape top + 0.1464*h + tIns; flowChartDecision
+ * text top = apex + h/4 + tIns; both wrap at the inset width.
+ */
+function presetGeomFor(prst: string, w: number, h: number, avLst: XmlElement | undefined): PresetGeom {
   return (
-    `M ${tl} 0 L ${w - tr} 0 ` +
-    (tr ? `A ${tr} ${tr} 0 0 1 ${w} ${tr} ` : "") +
-    `L ${w} ${h - br} ` +
-    (br ? `A ${br} ${br} 0 0 1 ${w - br} ${h} ` : "") +
-    `L ${bl} ${h} ` +
-    (bl ? `A ${bl} ${bl} 0 0 1 0 ${h - bl} ` : "") +
-    `L 0 ${tl} ` +
-    (tl ? `A ${tl} ${tl} 0 0 1 ${tl} 0 ` : "") +
-    "Z"
+    presetShapeGeometry(prst, w, h, adjustValuesOf(avLst)) ?? {
+      paths: [{ d: `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`, fill: "norm", stroke: true }],
+    }
   );
 }
 
-/**
- * SVG path data for an a:prstGeom outline, in a `w x h` coordinate space.
- * Covers the presets that appear in SmartArt cached drawings and flowchart
- * groups; anything unrecognized renders as its bounding rectangle.
- */
-function presetPathD(prst: string, w: number, h: number, avLst: XmlElement | undefined): string | undefined {
-  const adj = (name: string, dflt: number): number => {
-    const gd = children(avLst, "gd").find((g) => attr(g, "name") === name);
-    const m = gd ? /^val (-?\d+)/.exec(attr(gd, "fmla") ?? "") : null;
-    return m ? parseInt(m[1], 10) : dflt;
-  };
-  const min = Math.min(w, h);
-  switch (prst) {
-    case "rect":
-    case "flowChartProcess":
-      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
-    case "roundRect": {
-      const r = (min * adj("adj", 16667)) / 100000;
-      return roundedRectD(w, h, r, r, r, r);
-    }
-    case "round2SameRect": {
-      // adj1: top corner radius, adj2: bottom corner radius (fraction of the
-      // smaller side, val/100000) — the SmartArt "tab" pill.
-      const r1 = (min * adj("adj1", 16667)) / 100000;
-      const r2 = (min * adj("adj2", 0)) / 100000;
-      return roundedRectD(w, h, r1, r1, r2, r2);
-    }
-    case "ellipse":
-      return `M 0 ${h / 2} A ${w / 2} ${h / 2} 0 1 0 ${w} ${h / 2} A ${w / 2} ${h / 2} 0 1 0 0 ${h / 2} Z`;
-    case "triangle": {
-      // Isosceles triangle; adj = apex x as a fraction of the width.
-      const ax = (w * adj("adj", 50000)) / 100000;
-      return `M 0 ${h} L ${ax} 0 L ${w} ${h} Z`;
-    }
-    case "diamond":
-    case "flowChartDecision":
-      return `M 0 ${h / 2} L ${w / 2} 0 L ${w} ${h / 2} L ${w / 2} ${h} Z`;
-    case "downArrow": {
-      // adj1: shaft width / w, adj2: arrowhead height / min(w,h).
-      const a1 = Math.max(0, Math.min(adj("adj1", 50000), 100000));
-      const maxA2 = min > 0 ? (100000 * h) / min : 100000;
-      const a2 = Math.max(0, Math.min(adj("adj2", 50000), maxA2));
-      const headTop = h - (min * a2) / 100000;
-      const half = (w * a1) / 200000;
-      const x1 = w / 2 - half;
-      const x2 = w / 2 + half;
-      return `M ${x1} 0 L ${x2} 0 L ${x2} ${headTop} L ${w} ${headTop} L ${w / 2} ${h} L 0 ${headTop} L ${x1} ${headTop} Z`;
-    }
-    case "upArrow": {
-      const a1 = Math.max(0, Math.min(adj("adj1", 50000), 100000));
-      const maxA2 = min > 0 ? (100000 * h) / min : 100000;
-      const a2 = Math.max(0, Math.min(adj("adj2", 50000), maxA2));
-      const headBot = (min * a2) / 100000;
-      const half = (w * a1) / 200000;
-      const x1 = w / 2 - half;
-      const x2 = w / 2 + half;
-      return `M ${w / 2} 0 L ${w} ${headBot} L ${x2} ${headBot} L ${x2} ${h} L ${x1} ${h} L ${x1} ${headBot} L 0 ${headBot} Z`;
-    }
-    case "leftBracket": {
-      const r = Math.min((h * adj("adj", 8333)) / 100000, h / 2);
-      return `M ${w} 0 A ${w} ${r} 0 0 0 0 ${r} L 0 ${h - r} A ${w} ${r} 0 0 0 ${w} ${h}`;
-    }
-    case "rightBracket": {
-      const r = Math.min((h * adj("adj", 8333)) / 100000, h / 2);
-      return `M 0 0 A ${w} ${r} 0 0 1 ${w} ${r} L ${w} ${h - r} A ${w} ${r} 0 0 1 0 ${h}`;
-    }
-    default:
-      return `M 0 0 L ${w} 0 L ${w} ${h} L 0 ${h} Z`;
+/** Resolve evaluated preset sub-paths against the shape's fill and stroke;
+ * sub-paths that end up with neither ink are dropped. */
+function resolvePresetPaths(
+  geom: PresetGeom,
+  fill: string | undefined,
+  hasStroke: boolean,
+): { d: string; fill?: string; stroke: boolean }[] {
+  const out: { d: string; fill?: string; stroke: boolean }[] = [];
+  for (const path of geom.paths) {
+    const resolved = presetFillColor(fill, path.fill);
+    const stroke = hasStroke && path.stroke;
+    if (resolved || stroke) out.push({ d: path.d, ...(resolved ? { fill: resolved } : {}), stroke });
   }
-}
-
-/**
- * A preset geometry's TEXT RECTANGLE insets, as fractions of the shape's
- * width/height. Word wraps and anchors shape text inside the geometry's rect
- * (presetShapeDefinitions), not the bounding box — an ellipse's text lives in
- * the inscribed rectangle, a diamond's in the middle-half rect. Verified
- * against phase23 p12's Word PDF: oval "Was 0 / B" first line top = shape top
- * + 0.1464*h + tIns; flowChartDecision text top = apex + h/4 + tIns; both
- * wrap at the inset width (the oval breaks after "B").
- */
-function presetTextRectInsets(prst: string): { l: number; t: number; r: number; b: number } | undefined {
-  switch (prst) {
-    case "ellipse": {
-      const k = 0.146447; // (1 - cos45)/2
-      return { l: k, t: k, r: k, b: k };
-    }
-    case "diamond":
-    case "flowChartDecision":
-      return { l: 0.25, t: 0.25, r: 0.25, b: 0.25 };
-    case "triangle":
-      return { l: 0.25, t: 0.5, r: 0.25, b: 0 };
-    default:
-      return undefined;
-  }
+  return out;
 }
 
 /**
@@ -1985,18 +1933,18 @@ function collectDiagramShapes(
       const nodeIndex = smartArtNodeIndex++;
       const fill = child(spPr, "noFill") ? undefined : solidFillColor(spPr, ctx.theme);
       if ((fill || stroke) && w > 0 && h > 0) {
-        const d = presetPathD(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
-        if (d) {
+        const geom = presetGeomFor(prst, w, h, child(child(spPr, "prstGeom"), "avLst"));
+        for (const sub of resolvePresetPaths(geom, fill, !!stroke)) {
           out.paths.push({
             x: dx + emuToPx(x),
             y: dy + emuToPx(y),
             width: emuToPx(w),
             height: emuToPx(h),
-            d,
+            d: sub.d,
             viewW: w,
             viewH: h,
-            fill,
-            stroke,
+            fill: sub.fill,
+            stroke: sub.stroke ? stroke : undefined,
             smartArtNodeIndex: nodeIndex,
           });
         }
@@ -2338,15 +2286,17 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const rel = rid ? ctx.rels.get(rid) : undefined;
         if (rel && !rel.external) {
           const style = parseVmlStyle(el.attrs["style"]);
-          // Word draws a VML pict at its style extent rounded to WHOLE POINTS
-          // (both axes). Measured in wild2-math-eq-as-images-word.pdf: every
-          // equation raster lands on integer pt (31.45->31, 49.65->50,
-          // 57.4->57, 120.75->121, 290.75->291, 382.8->383). The height side
-          // decides docGrid rows (31.45pt would take 3 x 15.6pt pitches, the
-          // rounded 31pt takes Word's observed 2), so round at parse time.
-          const wholePt = (px: number) => Math.round((px * 3) / 4) * (4 / 3);
-          const width = wholePt(vmlLength(style.get("width")) || 100);
-          const height = wholePt(vmlLength(style.get("height")) || 100);
+          // Word draws a VML pict at its style extent, unrounded. An earlier
+          // rule rounded both axes to whole points; it was measured against a
+          // stale wild2-math-eq-as-images reference whose Word build placed
+          // every raster on integer pt. The re-exported reference places them
+          // on quarter-points (31.45->31.50, 39.65->39.75, 15.05->14.75), and
+          // the raw style extent predicts Word's docGrid row count for every
+          // image in that file while the rounded one does not: a 31.45pt
+          // equation needs 3 x 15.6pt pitches, and rounding it to 31pt bought
+          // 2, losing a whole pitch on the document's most common equation.
+          const width = vmlLength(style.get("width")) || 100;
+          const height = vmlLength(style.get("height")) || 100;
           if (style.get("position") === "absolute") {
             // Floating VML picture — Word's picture watermark (Design >
             // Watermark > Picture). Takes NO height in the header/body flow;

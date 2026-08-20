@@ -2,6 +2,7 @@ import { DocxDocument } from "../docx.js";
 import { Block, Paragraph } from "../model.js";
 import { XmlElement, child, localName } from "../xml.js";
 import { pxToTwips } from "../units.js";
+import { RevisionMeta, appendParagraphProp, recordParagraphFormatChange } from "./suggest.js";
 
 /**
  * Block- and document-level edit commands: table insertion, paragraph
@@ -52,22 +53,29 @@ export function topLevelBlockOf(doc: DocxDocument, target: XmlElement): XmlEleme
 
 // ---------- tables ----------
 
+/** Initial content for an inserted table, filled at insert time. */
+export interface TableContent {
+  /** Cell texts, row-major. Missing entries leave their cells empty. */
+  cells?: readonly (readonly string[])[];
+  /** Bold the first row's runs and mark it a repeating header row. */
+  headerRow?: boolean;
+}
+
 /**
  * Insert a rows×cols bordered table after the paragraph containing `caretT`.
- * Column widths split the section's content width evenly.
+ * Column widths split the section's content width evenly. With `content`,
+ * cell texts and the header row are authored as part of the same insert.
  */
-export function insertTableAfter(
+/** Build a bordered rows×cols w:tbl (and the empty paragraph Word requires
+ * after a table), with optional cell content — the one table shape both
+ * insertTableAfter and convertTextToTable produce. */
+function buildContentTable(
   doc: DocxDocument,
-  caretT: XmlElement,
+  w: string,
   rows: number,
   cols: number,
-): boolean {
-  const pEl = paragraphOf(doc, caretT);
-  if (!pEl) return false;
-  const parent = doc.findParentOf(pEl);
-  if (!parent) return false;
-  const w = prefixOf(pEl);
-
+  content?: TableContent,
+): { tbl: XmlElement; after: XmlElement } {
   const sp = doc.sections[0]?.props;
   const contentPx = sp ? sp.pageWidth - sp.marginLeft - sp.marginRight : 624;
   const colTwips = Math.floor(pxToTwips(contentPx) / cols);
@@ -83,21 +91,122 @@ export function insertTableAfter(
     {},
     Array.from({ length: cols }, () => el(`${w}gridCol`, { [`${w}w`]: String(colTwips) })),
   );
-  const makeCell = () =>
-    el(`${w}tc`, {}, [
-      el(`${w}tcPr`, {}, [el(`${w}tcW`, { [`${w}w`]: String(colTwips), [`${w}type`]: "dxa" })]),
-      el(`${w}p`, {}, [el(`${w}r`, {}, [el(`${w}t`, { "xml:space": "preserve" })])]),
+  const makeCell = (row: number, col: number) => {
+    const bold = content?.headerRow === true && row === 0;
+    const run = el(`${w}r`, {}, [
+      ...(bold ? [el(`${w}rPr`, {}, [el(`${w}b`)])] : []),
+      el(`${w}t`, { "xml:space": "preserve" }, [], content?.cells?.[row]?.[col] ?? ""),
     ]);
-  const trs = Array.from({ length: rows }, () =>
-    el(`${w}tr`, {}, Array.from({ length: cols }, makeCell)),
+    return el(`${w}tc`, {}, [
+      el(`${w}tcPr`, {}, [el(`${w}tcW`, { [`${w}w`]: String(colTwips), [`${w}type`]: "dxa" })]),
+      el(`${w}p`, {}, [run]),
+    ]);
+  };
+  const trs = Array.from({ length: rows }, (_, row) =>
+    el(`${w}tr`, {}, [
+      ...(content?.headerRow === true && row === 0 ? [el(`${w}trPr`, {}, [el(`${w}tblHeader`)])] : []),
+      ...Array.from({ length: cols }, (_, col) => makeCell(row, col)),
+    ]),
   );
   const tbl = el(`${w}tbl`, {}, [tblPr, grid, ...trs]);
-
   // Word requires a paragraph between/after tables; add an empty one.
   const after = el(`${w}p`, {}, [el(`${w}r`, {}, [el(`${w}t`, { "xml:space": "preserve" })])]);
+  return { tbl, after };
+}
 
+export function insertTableAfter(
+  doc: DocxDocument,
+  caretT: XmlElement,
+  rows: number,
+  cols: number,
+  content?: TableContent,
+): boolean {
+  const pEl = paragraphOf(doc, caretT);
+  if (!pEl) return false;
+  const parent = doc.findParentOf(pEl);
+  if (!parent) return false;
+  const w = prefixOf(pEl);
+  const { tbl, after } = buildContentTable(doc, w, rows, cols, content);
   const idx = parent.children.indexOf(pEl);
   parent.children.splice(idx + 1, 0, tbl, after);
+  doc.refresh();
+  return true;
+}
+
+/** Plain text of an element's w:t descendants, in document order. */
+export function plainTextOf(elx: XmlElement): string {
+  let out = "";
+  const walk = (e: XmlElement): void => {
+    if (localName(e.name) === "t") out += e.text;
+    e.children.forEach(walk);
+  };
+  elx.children.forEach(walk);
+  return out;
+}
+
+/**
+ * Convert paragraphs into a table: each paragraph becomes a row, its text
+ * split on the separator into cells (Word's Convert Text to Table). The new
+ * table takes the first paragraph's place; the paragraphs are removed.
+ * Formatting is not carried over — the cells hold the plain text.
+ *
+ * Only paragraphs that are siblings of the first one convert, in document
+ * order — a deterministic subset every replica computes identically.
+ */
+export function convertTextToTable(
+  doc: DocxDocument,
+  paragraphs: XmlElement[],
+  separator: "tab" | "comma",
+): boolean {
+  const first = paragraphs.find((p) => localName(p.name) === "p");
+  if (!first) return false;
+  const parent = doc.findParentOf(first);
+  if (!parent) return false;
+  const wanted = new Set(paragraphs);
+  const targets = parent.children.filter((c) => wanted.has(c) && localName(c.name) === "p");
+  if (targets.length === 0) return false;
+  const sep = separator === "tab" ? "\t" : ",";
+  const cells = targets.map((p) => plainTextOf(p).split(sep));
+  const cols = Math.max(1, ...cells.map((r) => r.length));
+  const w = prefixOf(first);
+  const { tbl, after } = buildContentTable(doc, w, targets.length, cols, { cells });
+  const at = parent.children.indexOf(targets[0]);
+  parent.children.splice(at, 0, tbl, after);
+  for (const p of targets) parent.children.splice(parent.children.indexOf(p), 1);
+  doc.refresh();
+  return true;
+}
+
+/**
+ * Convert a table into paragraphs, one per row, cell texts joined by tab
+ * characters or commas (Word's Convert Table to Text). Formatting is not
+ * carried over — the paragraphs hold the plain text.
+ */
+export function convertTableToText(
+  doc: DocxDocument,
+  tblEl: XmlElement,
+  separator: "tab" | "comma",
+): boolean {
+  if (localName(tblEl.name) !== "tbl") return false;
+  const parent = doc.findParentOf(tblEl);
+  if (!parent) return false;
+  const w = prefixOf(tblEl);
+  const rows = tblEl.children.filter((c) => localName(c.name) === "tr");
+  if (rows.length === 0) return false;
+  const paras = rows.map((tr) => {
+    const texts = tr.children
+      .filter((c) => localName(c.name) === "tc")
+      .map((tc) => plainTextOf(tc));
+    const runChildren =
+      separator === "comma"
+        ? [el(`${w}t`, { "xml:space": "preserve" }, [], texts.join(","))]
+        : texts.flatMap((s, i) => [
+            ...(i > 0 ? [el(`${w}tab`)] : []),
+            el(`${w}t`, { "xml:space": "preserve" }, [], s),
+          ]);
+    return el(`${w}p`, {}, [el(`${w}r`, {}, runChildren)]);
+  });
+  parent.children.splice(parent.children.indexOf(tblEl), 1, ...paras);
   doc.refresh();
   return true;
 }
@@ -153,11 +262,14 @@ const JC_VAL: Record<ParagraphAlignment, string> = {
   justify: "both",
 };
 
-/** Set w:jc on the paragraphs containing the given (caret/selection) elements. */
+/** Set w:jc on the paragraphs containing the given (caret/selection) elements.
+ * With `meta` the change is SUGGESTED: each paragraph records the properties
+ * it had in a w:pPrChange first. */
 export function setParagraphAlignment(
   doc: DocxDocument,
   targets: XmlElement[],
   align: ParagraphAlignment,
+  meta?: RevisionMeta,
 ): boolean {
   const paragraphs = new Set<XmlElement>();
   for (const t of targets) {
@@ -167,6 +279,7 @@ export function setParagraphAlignment(
   if (paragraphs.size === 0) return false;
   for (const pEl of paragraphs) {
     const w = prefixOf(pEl);
+    if (meta) recordParagraphFormatChange(pEl, meta);
     let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
     if (!pPr) {
       pPr = el(`${w}pPr`);
@@ -175,7 +288,7 @@ export function setParagraphAlignment(
     const existing = pPr.children.findIndex((c) => localName(c.name) === "jc");
     const jc = el(`${w}jc`, { [`${w}val`]: JC_VAL[align] });
     if (existing !== -1) pPr.children[existing] = jc;
-    else pPr.children.push(jc);
+    else appendParagraphProp(pPr, jc);
   }
   doc.refresh();
   return true;
@@ -376,7 +489,15 @@ export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): bool
     return finishMerge(pEl);
   }
 
-  const moved = pEl.children.filter((c) => localName(c.name) !== "pPr");
+  // The merged paragraph's blank placeholder runs (rPr + zero-length w:t
+  // only) stay behind: spliced beside the previous paragraph's real content
+  // they become stranded zero-length runs — a structural-lint violation no
+  // load path produces (conformance finding G13). Word's merge carries no
+  // empty paragraph placeholder either.
+  const isPlaceholderRun = (c: XmlElement): boolean =>
+    localName(c.name) === "r" &&
+    c.children.every((k) => localName(k.name) === "rPr" || (localName(k.name) === "t" && k.text.length === 0));
+  const moved = pEl.children.filter((c) => localName(c.name) !== "pPr" && !isPlaceholderRun(c));
   prev.children.push(...moved);
   parent.children.splice(idx, 1);
   return finishMerge(prev);
@@ -524,11 +645,14 @@ export function paragraphStyleIdOf(doc: DocxDocument, target: XmlElement): strin
   return key ? pStyle.attrs[key] : null;
 }
 
-/** Apply (or clear, with null) a paragraph style to the target paragraphs. */
+/** Apply (or clear, with null) a paragraph style to the target paragraphs.
+ * With `meta` the change is SUGGESTED: each paragraph records the properties
+ * it had in a w:pPrChange first. */
 export function setParagraphStyle(
   doc: DocxDocument,
   targets: XmlElement[],
   styleId: string | null,
+  meta?: RevisionMeta,
 ): boolean {
   // Word's built-in styles work without a declaration; inject one if needed.
   if (styleId !== null) doc.ensureParagraphStyle(styleId);
@@ -540,6 +664,7 @@ export function setParagraphStyle(
   if (paragraphs.size === 0) return false;
   for (const pEl of paragraphs) {
     const w = prefixOf(pEl);
+    if (meta) recordParagraphFormatChange(pEl, meta);
     let pPr = pEl.children.find((c) => localName(c.name) === "pPr");
     if (!pPr) {
       pPr = el(`${w}pPr`);

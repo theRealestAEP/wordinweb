@@ -1,6 +1,6 @@
-import { Package, FIXED_ZIP_MTIME } from "./zip.js";
+import { Package, FIXED_ZIP_MTIME, resolvePartPath } from "./zip.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
-import { strToU8, zip, zipSync } from "fflate";
+import { strFromU8, strToU8, zip, zipSync } from "fflate";
 import { pxToTwips, twipsToPx } from "./units.js";
 import {
   Block,
@@ -33,6 +33,7 @@ import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
 import { extractOlePackage } from "./parse/ole.js";
+import { isSourcesRoot } from "./citations.js";
 import {
   buildSmartArtColorsXml,
   buildSmartArtDataXml,
@@ -42,6 +43,37 @@ import {
 } from "./edit/smartart.js";
 
 const REL_TYPE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
+
+/**
+ * A fresh footnotes.xml / endnotes.xml root carrying the two stock notes Word
+ * requires of the part: the separator rule drawn above the notes, and the
+ * continuation separator drawn when a note spills onto the next page. Real
+ * notes start at id 1 because these occupy -1 and 0.
+ */
+function notesPartRoot(kind: "footnote" | "endnote"): XmlElement {
+  const stock = (id: string, type: string, refEl: string): XmlElement => ({
+    name: `w:${kind}`,
+    attrs: { "w:type": type, "w:id": id },
+    children: [
+      {
+        name: "w:p",
+        attrs: {},
+        children: [
+          { name: "w:pPr", attrs: {}, children: [{ name: "w:spacing", attrs: { "w:after": "0", "w:line": "240", "w:lineRule": "auto" }, children: [], text: "" }], text: "" },
+          { name: "w:r", attrs: {}, children: [{ name: refEl, attrs: {}, children: [], text: "" }], text: "" },
+        ],
+        text: "",
+      },
+    ],
+    text: "",
+  });
+  return {
+    name: `w:${kind}s`,
+    attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+    children: [stock("-1", "separator", "w:separator"), stock("0", "continuationSeparator", "w:continuationSeparator")],
+    text: "",
+  };
+}
 
 /** Word's built-in heading/title looks (modern Office theme), injected when a
  * file uses one without declaring it. Sizes in half-points. */
@@ -53,7 +85,17 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
       <w:pPr><w:keepNext/><w:keepLines/><w:spacing w:before="${n === 1 ? 240 : 40}" w:after="0"/><w:outlineLvl w:val="${n - 1}"/></w:pPr>
       <w:rPr><w:color w:val="${color}"/><w:sz w:val="${sizeHalfPt}"/><w:szCs w:val="${sizeHalfPt}"/>${extraRpr}</w:rPr>
     </w:style>`;
+  // Word's "toc 1".."toc 9": Normal plus a per-level indent of 220 twips. A
+  // generated table of contents references these by pStyle, so a document that
+  // has never held one still needs them the moment a TOC is inserted.
+  const toc = (n: number): string =>
+    `<w:style ${W} w:type="paragraph" w:styleId="TOC${n}">
+      <w:name w:val="toc ${n}"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="39"/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="100"/>${n > 1 ? `<w:ind w:left="${(n - 1) * 220}"/>` : ""}</w:pPr>
+    </w:style>`;
   return {
+    ...Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`TOC${i + 1}`, toc(i + 1)])),
     Heading1: heading(1, 32, "2F5496"),
     Heading2: heading(2, 26, "2F5496"),
     Heading3: heading(3, 24, "1F3863"),
@@ -65,8 +107,45 @@ const BUILTIN_PARA_STYLES: Record<string, string> = (() => {
       <w:pPr><w:spacing w:after="80"/></w:pPr>
       <w:rPr><w:sz w:val="56"/><w:szCs w:val="56"/></w:rPr>
     </w:style>`,
+    // Word's built-in "Bibliography" look: Normal with the utility flags Word
+    // writes. A generated bibliography references it by pStyle, so a document
+    // that has never held one still needs it the moment one is inserted.
+    Bibliography: `<w:style ${W} w:type="paragraph" w:styleId="Bibliography">
+      <w:name w:val="Bibliography"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:uiPriority w:val="37"/><w:semiHidden/><w:unhideWhenUsed/>
+    </w:style>`,
+    // Word's caption style: italic 9pt in the theme's dark accent, keep-next
+    // so a caption never separates from its figure.
+    Caption: `<w:style ${W} w:type="paragraph" w:styleId="Caption">
+      <w:name w:val="caption"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:uiPriority w:val="35"/><w:unhideWhenUsed/><w:qFormat/>
+      <w:pPr><w:keepNext/><w:spacing w:after="200"/></w:pPr>
+      <w:rPr><w:i/><w:iCs/><w:color w:val="44546A"/><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>
+    </w:style>`,
+    // Word's "table of figures": Normal plus the TOC entries' after-spacing.
+    TableofFigures: `<w:style ${W} w:type="paragraph" w:styleId="TableofFigures">
+      <w:name w:val="table of figures"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:uiPriority w:val="99"/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="100"/></w:pPr>
+    </w:style>`,
+    // Word's "index 1"/"index 2": Normal, hanging-indented one step per
+    // level, no inter-entry spacing. A generated INDEX references them by
+    // pStyle, so a document that never held one needs them at insert.
+    Index1: `<w:style ${W} w:type="paragraph" w:styleId="Index1">
+      <w:name w:val="index 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="0"/><w:ind w:left="220" w:hanging="220"/></w:pPr>
+    </w:style>`,
+    Index2: `<w:style ${W} w:type="paragraph" w:styleId="Index2">
+      <w:name w:val="index 2"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/>
+      <w:autoRedefine/><w:uiPriority w:val="99"/><w:semiHidden/><w:unhideWhenUsed/>
+      <w:pPr><w:spacing w:after="0"/><w:ind w:left="440" w:hanging="220"/></w:pPr>
+    </w:style>`,
   };
 })();
+
+/** The two note parts a document can carry — see notePartsHolding. */
+export type NotePart = "footnotes" | "endnotes";
 
 /**
  * A fully parsed .docx: sections of blocks, styles, numbering, theme, and
@@ -94,7 +173,7 @@ export class DocxDocument {
   /** Header/footer parts keyed by relationship id from document.xml.rels. */
   readonly headers: Map<string, HeaderFooter> = new Map();
   readonly footers: Map<string, HeaderFooter> = new Map();
-  /** Note content by note id (render-only; sources stripped). */
+  /** Note content by note id. */
   readonly footnotes: Map<number, Block[]> = new Map();
   readonly endnotes: Map<number, Block[]> = new Map();
   /** The separator paragraph controls the gap between its rule and the first
@@ -107,11 +186,23 @@ export class DocxDocument {
   readonly documentRels: Relationships;
   /** settings.xml w:evenAndOddHeaders — enables the "even" header/footer variants. */
   readonly evenAndOddHeaders: boolean = false;
+  /** settings.xml w:autoHyphenation (§17.15.1.10). This engine's layout does
+   * not hyphenate automatically — the setting is round-trip state that
+   * governs Word's own rendering of the document. */
+  readonly autoHyphenation: boolean = false;
+  /** settings.xml w:hyphenationZone/@w:val in twips (§17.15.1.53); null when
+   * the document does not declare one (Word defaults to 360 = 0.25"). */
+  readonly hyphenationZoneTwips: number | null = null;
+  /** settings.xml w:doNotHyphenateCaps (§17.15.1.41). */
+  readonly doNotHyphenateCaps: boolean = false;
   /** settings.xml w:mirrorMargins — facing-page (book fold) margins: even
    * (verso) pages swap the left/right margins and place the gutter on the
    * inside (right) edge so the binding margin stays on the inner side of
    * each spread. */
   readonly mirrorMargins: boolean = false;
+  /** settings.xml w:compat w:suppressTopSpacing: the first line of a page
+   * takes its character height, not its authored (exact) line spacing. */
+  readonly suppressTopSpacing: boolean = false;
   /** settings.xml w:defaultTabStop in px (Word default 0.5"). */
   readonly defaultTabStop: number = 48;
   /** settings.xml w:compat compatibilityMode (12=Word2007, 14=Word2010,
@@ -120,6 +211,12 @@ export class DocxDocument {
    * it (nccih: a Heading1/2 after a page break sits at margin + its before).
    * Absent → treated as current (15). */
   readonly compatibilityMode: number = 15;
+  /** The compatibilityMode settings.xml actually declares, or undefined when
+   * the setting (or settings.xml itself) is missing. `compatibilityMode`
+   * defaults an omitted value to 15, but a table's percentage width needs the
+   * distinction: Word fits the horizontal cell margins inside the table box at
+   * an EXPLICIT 15 and adds them around it when the setting is absent. */
+  readonly declaredCompatibilityMode: number | undefined = undefined;
   /** settings.xml m:mathPr/m:defJc — default justification for display
    * equations whose m:oMathParaPr carries no explicit m:jc (Word default:
    * centerGroup — the rows of a broken equation left-align to each other and
@@ -155,6 +252,31 @@ export class DocxDocument {
   private footnotesRoot: XmlElement | null = null;
   private footnotesDirty = false;
   private footnotesRels: Relationships = new Map();
+  /** Retained endnotes.xml tree (endnote insertion + save round-trip). */
+  private endnotesPart: string | null = null;
+  private endnotesRoot: XmlElement | null = null;
+  private endnotesDirty = false;
+  private endnotesRels: Relationships = new Map();
+  /** Retained bibliography sources part (the customXml b:Sources data of
+   * ECMA-376 §22.6), when present. Source-management editing mutates this
+   * tree in place; a document with none gets the part on first create. */
+  private sourcesPart: string | null = null;
+  private sourcesRoot: XmlElement | null = null;
+  private sourcesDirty = false;
+  /** Companion parts written when THIS session created the sources part
+   * (itemProps + its .rels); an arriving part keeps its own companions. */
+  private sourcesAux: Record<string, string> | null = null;
+  /** Retained glossary document part (word/glossary/document.xml, ECMA-376
+   * §17.12: glossaryDocument/docParts/docPart — Word's Quick Parts / Building
+   * Blocks store), when present. Building-block editing mutates this tree in
+   * place; a document with none gets the part on first create. Unlike
+   * headers/footers, a docPart's body is never caret-editable — it is only
+   * ever cloned INTO the main document body (insertBuildingBlock) or captured
+   * OUT of a selection (createBuildingBlock) — so this part carries no
+   * editableRoots()/stable-id integration of its own. */
+  private glossaryPart: string | null = null;
+  private glossaryRoot: XmlElement | null = null;
+  private glossaryDirty = false;
   /** Serialize retained optional parts only once actually mutated, keeping
    * untouched parts byte-identical through save(). */
   private stylesDirty = false;
@@ -243,16 +365,62 @@ export class DocxDocument {
     this.repairLegacyWordInWebObjects();
     this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
 
+    // Bibliography sources: probe every customXml relationship for a
+    // b:Sources root (how Word's own packages are found without hard-coding
+    // the item1.xml file name) and retain the first, so source-management
+    // editing can mutate it and save() can serialize the mutated tree.
+    for (const rel of this.documentRels.values()) {
+      if (!rel.type.endsWith("/customXml") || rel.external) continue;
+      const text = this.pkg.text(rel.target);
+      if (!text) continue;
+      let root: XmlElement;
+      try {
+        root = parseXml(text);
+      } catch {
+        continue;
+      }
+      if (!isSourcesRoot(root)) continue;
+      this.sourcesPart = rel.target;
+      this.sourcesRoot = root;
+      break;
+    }
+
+    // Glossary document (word/glossary/document.xml, ECMA-376 §17.12): the
+    // Quick Parts / Building Blocks store. Found by relationship TYPE, unlike
+    // the sources part's content sniffing — a package holds at most one, and
+    // the type alone identifies it unambiguously.
+    for (const rel of this.documentRels.values()) {
+      if (!rel.type.endsWith("/glossaryDocument") || rel.external) continue;
+      const root = this.readXmlOptional(rel.target);
+      if (!root) continue;
+      this.glossaryPart = rel.target;
+      this.glossaryRoot = root;
+      break;
+    }
+
     if (settings) {
       this.evenAndOddHeaders = onOff(child(settings, "evenAndOddHeaders")) ?? false;
       (this as { mirrorMargins: boolean }).mirrorMargins = onOff(child(settings, "mirrorMargins")) ?? false;
+      (this as { autoHyphenation: boolean }).autoHyphenation = onOff(child(settings, "autoHyphenation")) ?? false;
+      const zone = intAttr(child(settings, "hyphenationZone"), "val");
+      (this as { hyphenationZoneTwips: number | null }).hyphenationZoneTwips =
+        zone !== undefined && zone > 0 ? zone : null;
+      (this as { doNotHyphenateCaps: boolean }).doNotHyphenateCaps = onOff(child(settings, "doNotHyphenateCaps")) ?? false;
       const tabStop = intAttr(child(settings, "defaultTabStop"), "val");
       if (tabStop !== undefined && tabStop > 0) this.defaultTabStop = twipsToPx(tabStop);
       const compat = child(settings, "compat");
+      // w:suppressTopSpacing (legacy compat option): line spacing beyond the
+      // character height is suppressed for the first line of a page. See the
+      // engine's page-top exact-line collapse for the measured behavior.
+      (this as { suppressTopSpacing: boolean }).suppressTopSpacing =
+        onOff(child(compat, "suppressTopSpacing")) ?? false;
       for (const cs of children(compat, "compatSetting")) {
         if (attr(cs, "name") === "compatibilityMode") {
           const v = Number(attr(cs, "val"));
-          if (Number.isFinite(v)) (this as { compatibilityMode: number }).compatibilityMode = v;
+          if (Number.isFinite(v)) {
+            (this as { compatibilityMode: number }).compatibilityMode = v;
+            (this as { declaredCompatibilityMode: number | undefined }).declaredCompatibilityMode = v;
+          }
         }
       }
       const mathPr = child(settings, "mathPr");
@@ -314,9 +482,9 @@ export class DocxDocument {
       this.hfParts.push({ relId: rel.id, target: rel.target, root, isHeader, rels: partRels, relsRoot: partRelsRoot ?? null });
     }
 
-    // Footnote/endnote parts. Footnotes retain their tree so insertion can
-    // mutate and serialize it; note bodies stay non-editable (source refs
-    // stripped by the parser).
+    // Footnote/endnote parts. Both retain their tree so insertion can mutate
+    // and serialize it, and both parse editable (source refs kept) so the
+    // caret can bind to note text.
     for (const rel of this.documentRels.values()) {
       const isFn = rel.type.endsWith("/footnotes");
       const isEn = rel.type.endsWith("/endnotes");
@@ -334,10 +502,12 @@ export class DocxDocument {
         if (separator) {
           this.footnoteSeparator.push(...parseBlocks(separator, { ...this.ctxBase, rels: partRels }));
         }
+      } else {
+        this.endnotesPart = rel.target;
+        this.endnotesRoot = root;
+        this.endnotesRels = partRels;
       }
-      // Footnotes are editable (sources kept, part retained + re-serialized on
-      // save); endnotes stay render-only for now.
-      const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels }, isFn);
+      const notes = parseNotesPart(root, { ...this.ctxBase, rels: partRels });
       for (const [id, blocks] of notes) (isFn ? this.footnotes : this.endnotes).set(id, blocks);
     }
 
@@ -557,6 +727,14 @@ export class DocxDocument {
   refresh(): void {
     this._layoutGlobalSig = null;
     (this as { mirrorMargins: boolean }).mirrorMargins = onOff(child(this.settingsRoot, "mirrorMargins")) ?? false;
+    (this as { evenAndOddHeaders: boolean }).evenAndOddHeaders = onOff(child(this.settingsRoot, "evenAndOddHeaders")) ?? false;
+    (this as { autoHyphenation: boolean }).autoHyphenation = onOff(child(this.settingsRoot, "autoHyphenation")) ?? false;
+    {
+      const zone = intAttr(child(this.settingsRoot, "hyphenationZone"), "val");
+      (this as { hyphenationZoneTwips: number | null }).hyphenationZoneTwips =
+        zone !== undefined && zone > 0 ? zone : null;
+    }
+    (this as { doNotHyphenateCaps: boolean }).doNotHyphenateCaps = onOff(child(this.settingsRoot, "doNotHyphenateCaps")) ?? false;
     const body = child(this.docRoot, "body");
     if (!body) throw new Error("document.xml has no w:body");
     // Some content (SmartArt cached drawings) lives in parts reachable only
@@ -587,14 +765,9 @@ export class DocxDocument {
     this.comments = this.deriveComments();
     this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
     this.numbering = parseNumbering(this.numberingRoot ?? undefined, this.ctxBase);
-    // Re-derive footnote blocks from the retained tree (editable: keep source
-    // refs) so an edit to a footnote's w:t re-measures. Endnotes are render-
-    // only, parsed once at load, and left untouched here.
-    if (this.footnotesRoot) {
-      this.footnotes.clear();
-      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels }, true);
-      for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
-    }
+    // Re-derive note blocks from the retained trees (editable: keep source
+    // refs) so an edit to a note's w:t re-measures.
+    this.rederiveNotes();
     this._modelVersion++;
     if (this.stableIds) {
       // In-place XML mutation preserves element identity across refresh, so
@@ -957,19 +1130,23 @@ export class DocxDocument {
         paraId,
       });
     }
-    // commentsExtended threading: paraIdParent links a reply to its parent.
+    // commentsExtended threading: paraIdParent links a reply to its parent,
+    // and w15:done marks the thread resolved.
     if (this.commentsExtRoot) {
       const parentOf = new Map<string, string>();
+      const doneOf = new Map<string, boolean>();
       for (const ex of this.commentsExtRoot.children) {
         if (localName(ex.name) !== "commentEx") continue;
         const pid = attr(ex, "paraId");
         const parent = attr(ex, "paraIdParent");
         if (pid && parent) parentOf.set(pid, parent);
+        if (pid) doneOf.set(pid, attr(ex, "done") === "1");
       }
       const byParaId = new Map(out.filter((c) => c.paraId).map((c) => [c.paraId!, c]));
       for (const c of out) {
         const parentPara = c.paraId ? parentOf.get(c.paraId) : undefined;
         if (parentPara) c.parentId = byParaId.get(parentPara)?.id;
+        if (c.paraId && doneOf.get(c.paraId)) c.resolved = true;
       }
     }
     return out;
@@ -1105,36 +1282,75 @@ export class DocxDocument {
     this._layoutGlobalSig = null;
   }
 
+  /** Retained styles.xml tree, or null when the package has no styles part.
+   * Style-definition editing mutates this tree in place. */
+  stylesTree(): XmlElement | null {
+    return this.stylesRoot;
+  }
+
   /**
-   * Retained footnotes tree. With create=true, a missing footnotes.xml part
-   * is created and registered (with Word's required separator footnotes) so
-   * inserted footnotes serialize and round-trip.
+   * Re-resolve the style cascade after a definition changed in place.
+   *
+   * A style definition is not addressed by any paragraph's XML, so mutating one
+   * changes how EVERY paragraph resolves without changing a single w:p. Two
+   * things therefore have to be reset by hand: the parsed Styles map every
+   * effective-props call reads, and layoutGlobalSig, which is what makes the
+   * line-break cache treat cached breaks for unchanged paragraph XML as stale.
    */
-  footnotesTree(create = false): XmlElement | null {
-    if (this.footnotesRoot || !create) return this.footnotesRoot;
-    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
-    this.footnotesPart = docDir + "footnotes.xml";
-    const sep = (id: string, type: string, refEl: string): XmlElement => ({
-      name: "w:footnote",
-      attrs: { "w:type": type, "w:id": id },
-      children: [
-        {
-          name: "w:p",
-          attrs: {},
-          children: [
-            { name: "w:pPr", attrs: {}, children: [{ name: "w:spacing", attrs: { "w:after": "0", "w:line": "240", "w:lineRule": "auto" }, children: [], text: "" }], text: "" },
-            { name: "w:r", attrs: {}, children: [{ name: refEl, attrs: {}, children: [], text: "" }], text: "" },
-          ],
-          text: "",
-        },
-      ],
+  markStylesChanged(): void {
+    this.stylesDirty = true;
+    this.styles = parseStyles(this.stylesRoot ?? undefined, this.ctxBase);
+    this._layoutGlobalSig = null;
+  }
+
+  /**
+   * Retained bibliography sources tree (b:Sources), or null when the package
+   * has no sources part. With create=true, a missing part is created and
+   * registered the way Word lays one out (ECMA-376 §22.6 + Part 2 custom XML
+   * data storage): the data itself as customXml/itemN.xml, a datastore-item
+   * properties part (itemPropsN.xml) declaring the Bibliography schema URI as
+   * its schemaRef, a .rels from the item to its properties, a customXml
+   * relationship from the main document part, and the content-type overrides.
+   *
+   * DETERMINISM. Everything written is a pure function of the package —
+   * the item number is the first free one, and the datastore itemID GUID is a
+   * fixed constant rather than Word's random draw — so two replicas creating
+   * the part through the same sequenced operation write identical bytes.
+   */
+  sourcesTree(create = false): XmlElement | null {
+    if (this.sourcesRoot || !create) return this.sourcesRoot;
+    let n = 1;
+    while (this.pkg.has(`customXml/item${n}.xml`) || this.pkg.has(`customXml/itemProps${n}.xml`)) n++;
+    this.sourcesPart = `customXml/item${n}.xml`;
+    this.sourcesRoot = {
+      name: "b:Sources",
+      attrs: {
+        SelectedStyle: "\\APASixthEditionOfficeOnline.xsl",
+        StyleName: "APA",
+        Version: "6",
+        "xmlns:b": "http://schemas.openxmlformats.org/officeDocument/2006/bibliography",
+        xmlns: "http://schemas.openxmlformats.org/officeDocument/2006/bibliography",
+      },
+      children: [],
       text: "",
-    });
-    this.footnotesRoot = {
-      name: "w:footnotes",
-      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
-      children: [sep("-1", "separator", "w:separator"), sep("0", "continuationSeparator", "w:continuationSeparator")],
-      text: "",
+    };
+    // The datastore properties part and its relationship, as Word writes
+    // them. The itemID is a GUID in Word; a FIXED one keeps replica creation
+    // byte-identical, and uniqueness only matters within this package, which
+    // holds at most one part this engine creates.
+    this.sourcesAux = {
+      [`customXml/itemProps${n}.xml`]:
+        `<?xml version="1.0" encoding="UTF-8" standalone="no"?>\r\n` +
+        `<ds:datastoreItem ds:itemID="{4AA3A060-2A83-4A31-8C77-13810E5B4FAB}" ` +
+        `xmlns:ds="http://schemas.openxmlformats.org/officeDocument/2006/customXml">` +
+        `<ds:schemaRefs><ds:schemaRef ds:uri="http://schemas.openxmlformats.org/officeDocument/2006/bibliography"/>` +
+        `</ds:schemaRefs></ds:datastoreItem>`,
+      [`customXml/_rels/item${n}.xml.rels`]:
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n` +
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rId1" ` +
+        `Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps" ` +
+        `Target="itemProps${n}.xml"/></Relationships>`,
     };
     {
       const rels = this.ensureRelsRoot();
@@ -1143,34 +1359,202 @@ export class DocxDocument {
         const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
         if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
       }
+      const relId = `rId${maxId + 1}`;
       rels.children.push({
         name: "Relationship",
         attrs: {
-          Id: `rId${maxId + 1}`,
-          Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes",
-          Target: "footnotes.xml",
+          Id: relId,
+          Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",
+          Target: `../customXml/item${n}.xml`,
         },
         children: [],
         text: "",
       });
+      this.documentRels.set(relId, {
+        id: relId,
+        type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",
+        target: this.sourcesPart,
+        external: false,
+      });
     }
     if (this.contentTypesRoot) {
-      const partName = "/" + this.footnotesPart;
+      const overrides: [string, string][] = [
+        // The item part is application/xml. Word covers it with the package's
+        // Default rule for the xml extension; declare the override only when
+        // that Default is missing, so the created package stays valid either
+        // way without touching packages that already carry the Default.
+        ...(this.contentTypesRoot.children.some(
+          (c) => localName(c.name) === "Default" && c.attrs["Extension"] === "xml",
+        )
+          ? []
+          : [["/" + this.sourcesPart, "application/xml"] as [string, string]]),
+        [`/customXml/itemProps${n}.xml`, "application/vnd.openxmlformats-officedocument.customXmlProperties+xml"],
+      ];
+      for (const [partName, contentType] of overrides) {
+        if (this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) continue;
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: { PartName: partName, ContentType: contentType },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    this.sourcesDirty = true;
+    return this.sourcesRoot;
+  }
+
+  /**
+   * Invalidate what a sources-part edit changes downstream. Like
+   * markStylesChanged, the part is addressed by no paragraph's XML: a
+   * CITATION field's painted text resolves from the part at layout, so the
+   * layout signature has to drop for unchanged paragraph XML to repaint.
+   */
+  markSourcesChanged(): void {
+    this.sourcesDirty = true;
+    this._layoutGlobalSig = null;
+  }
+
+  /**
+   * Retained glossary document tree (w:glossaryDocument), or null when the
+   * package has no glossary part. With create=true, a missing part is
+   * created and registered — package part, document relationship,
+   * content-type override — the createNotesPart discipline.
+   *
+   * The glossary part gets none of the sources part's companion machinery
+   * (no datastore item, no random itemID): it is an ordinary WordprocessingML
+   * part named by relationship TYPE, so creation just mints an empty
+   * `<w:glossaryDocument><w:docParts/></w:glossaryDocument>` and wires it up
+   * — closer to createNotesPart than to sourcesTree. A real Word-authored
+   * glossary part additionally carries its own styles.xml / settings.xml /
+   * fontTable.xml; this engine writes none of them, because a docPart's
+   * content is read once — to clone its blocks into the main document, where
+   * they resolve styles against the MAIN document's own styles.xml — and is
+   * never laid out or rendered as its own story the way a header/footer is.
+   *
+   * DETERMINISM: nothing here depends on Word's random draws (no GUID is
+   * written at all — w:docPartPr/w:guid is optional and this engine never
+   * reads it back), so two replicas creating the part through the same
+   * sequenced operation write identical bytes.
+   */
+  glossaryTree(create = false): XmlElement | null {
+    if (this.glossaryRoot || !create) return this.glossaryRoot;
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    this.glossaryPart = `${docDir}glossary/document.xml`;
+    this.glossaryRoot = {
+      name: "w:glossaryDocument",
+      attrs: { "xmlns:w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main" },
+      children: [{ name: "w:docParts", attrs: {}, children: [], text: "" }],
+      text: "",
+    };
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const r of rels.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    const relId = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: relId,
+        Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument",
+        Target: "glossary/document.xml",
+      },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(relId, {
+      id: relId,
+      type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument",
+      target: this.glossaryPart,
+      external: false,
+    });
+    if (this.contentTypesRoot) {
+      const partName = "/" + this.glossaryPart;
       if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
         this.contentTypesRoot.children.push({
           name: "Override",
           attrs: {
             PartName: partName,
-            ContentType:
-              "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+            ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml",
           },
           children: [],
           text: "",
         });
       }
     }
+    this.glossaryDirty = true;
+    return this.glossaryRoot;
+  }
+
+  /** Invalidate what a glossary-part edit changes: nothing downstream, since
+   * createBuildingBlock/deleteBuildingBlock touch only the glossary tree, not
+   * any paragraph the layout reads. Exists for the same "explicit intent to
+   * persist" reason markSourcesChanged does. */
+  markGlossaryChanged(): void {
+    this.glossaryDirty = true;
+  }
+
+  /**
+   * Retained footnotes tree. With create=true, a missing footnotes.xml part
+   * is created and registered (with Word's required separator footnotes) so
+   * inserted footnotes serialize and round-trip.
+   */
+  footnotesTree(create = false): XmlElement | null {
+    if (this.footnotesRoot || !create) return this.footnotesRoot;
+    this.footnotesPart = this.createNotesPart("footnotes");
+    this.footnotesRoot = notesPartRoot("footnote");
     this.footnotesDirty = true;
     return this.footnotesRoot;
+  }
+
+  /** Retained endnotes tree; the endnote mirror of footnotesTree. */
+  endnotesTree(create = false): XmlElement | null {
+    if (this.endnotesRoot || !create) return this.endnotesRoot;
+    this.endnotesPart = this.createNotesPart("endnotes");
+    this.endnotesRoot = notesPartRoot("endnote");
+    this.endnotesDirty = true;
+    return this.endnotesRoot;
+  }
+
+  /** Register a new notes part in document.xml.rels and [Content_Types].xml,
+   * and return the part path. The tree itself is the caller's. */
+  private createNotesPart(kind: "footnotes" | "endnotes"): string {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    const part = `${docDir}${kind}.xml`;
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const r of rels.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    rels.children.push({
+      name: "Relationship",
+      attrs: {
+        Id: `rId${maxId + 1}`,
+        Type: `http://schemas.openxmlformats.org/officeDocument/2006/relationships/${kind}`,
+        Target: `${kind}.xml`,
+      },
+      children: [],
+      text: "",
+    });
+    if (this.contentTypesRoot) {
+      const partName = "/" + part;
+      if (!this.contentTypesRoot.children.some((c) => c.attrs["PartName"] === partName)) {
+        this.contentTypesRoot.children.push({
+          name: "Override",
+          attrs: {
+            PartName: partName,
+            ContentType:
+              `application/vnd.openxmlformats-officedocument.wordprocessingml.${kind}+xml`,
+          },
+          children: [],
+          text: "",
+        });
+      }
+    }
+    return part;
   }
 
   /**
@@ -1198,9 +1582,101 @@ export class DocxDocument {
     const isHeader = kind === "header";
     const existing = this.hfParts.find((p2) => p2.isHeader === isHeader);
     if (existing) return existing.root;
+    const { relId, root } = this.createHfPart(kind);
+    // A minimal document (the blank the demo starts from) has NO sectPr at
+    // all, so the reference walk below had nowhere to put the reference: the
+    // part was created, never referenced, never laid out, and the caller found
+    // no caret target — "the header won't open". Materialize the default body
+    // section first, exactly as setPageLayout/setLineNumbering do for the same
+    // shape of document.
+    this.ensureBodySectPr();
+    // Reference from every sectPr (schema: hf references lead the sectPr).
+    const refName = isHeader ? "w:headerReference" : "w:footerReference";
+    const addRef = (e: XmlElement): void => {
+      if (localName(e.name) === "sectPr") {
+        e.children.unshift(this.hfReference(refName, "default", relId));
+        return;
+      }
+      for (const c of e.children) addRef(c);
+    };
+    addRef(this.docRoot);
+    this.refresh();
+    return root;
+  }
+
+  /** A w:headerReference / w:footerReference element. */
+  private hfReference(refName: string, type: "default" | "first" | "even", relId: string): XmlElement {
+    return {
+      name: refName,
+      attrs: {
+        "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+        "w:type": type,
+        "r:id": relId,
+      },
+      children: [],
+      text: "",
+    };
+  }
+
+  /** Materialize the default body-level sectPr when the document declares no
+   * section properties at all (schema: the body's sectPr is its LAST child). */
+  private ensureBodySectPr(): void {
+    const bodyEl = child(this.docRoot, "body");
+    if (bodyEl && !this.hasSectPr()) {
+      const w = bodyEl.name.includes(":") ? bodyEl.name.slice(0, bodyEl.name.indexOf(":") + 1) : "";
+      bodyEl.children.push({ name: `${w}sectPr`, attrs: {}, children: [], text: "" });
+    }
+  }
+
+  /**
+   * Give every section a header and footer reference of the given variant
+   * type, creating one empty part per band the way Word does the first time
+   * "different first page" (type "first") or "different odd & even pages"
+   * (type "even") is enabled. Sections that already carry a reference of the
+   * type keep it — and its part's content. True when anything was added.
+   */
+  ensureHfVariantParts(type: "first" | "even"): boolean {
+    this.ensureBodySectPr();
+    const sectPrs: XmlElement[] = [];
+    const walk = (e: XmlElement): void => {
+      if (localName(e.name) === "sectPr") sectPrs.push(e);
+      else for (const c of e.children) walk(c);
+    };
+    walk(this.docRoot);
+    if (sectPrs.length === 0) return false;
+    let changed = false;
+    for (const kind of ["header", "footer"] as const) {
+      const refLocal = kind === "header" ? "headerReference" : "footerReference";
+      const missing = sectPrs.filter(
+        (sectPr) => !sectPr.children.some(
+          (c) => localName(c.name) === refLocal && attr(c, "type") === type,
+        ),
+      );
+      if (missing.length === 0) continue;
+      const { relId } = this.createHfPart(kind);
+      for (const sectPr of missing) {
+        sectPr.children.unshift(this.hfReference(`w:${refLocal}`, type, relId));
+      }
+      changed = true;
+    }
+    if (changed) this.refresh();
+    return changed;
+  }
+
+  /** Create and register a new empty header/footer part — package part,
+   * document relationship, content-type override, hfParts entry — with no
+   * section references of its own; the caller decides which sectPrs point at
+   * it and with which w:type. */
+  private createHfPart(kind: "header" | "footer"): { relId: string; root: XmlElement } {
+    const isHeader = kind === "header";
     const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
     let n = 1;
-    while (this.pkg.has(`${docDir}${kind}${n}.xml`)) n++;
+    // A part created earlier in this session is not in the package until
+    // save(), so the numbering probe checks both stores.
+    while (
+      this.pkg.has(`${docDir}${kind}${n}.xml`) ||
+      this.hfParts.some((p) => p.target === `${docDir}${kind}${n}.xml`)
+    ) n++;
     const target = `${docDir}${kind}${n}.xml`;
     const rootName = isHeader ? "w:hdr" : "w:ftr";
     const root: XmlElement = {
@@ -1255,48 +1731,29 @@ export class DocxDocument {
       }
     }
     this.hfParts.push({ relId, target, root, isHeader, rels: new Map(), relsRoot: null });
-    // A minimal document (the blank the demo starts from) has NO sectPr at
-    // all, so the reference walk below had nowhere to put the reference: the
-    // part was created, never referenced, never laid out, and the caller found
-    // no caret target — "the header won't open". Materialize the default body
-    // section first, exactly as setPageLayout/setLineNumbering do for the same
-    // shape of document.
-    const bodyEl = child(this.docRoot, "body");
-    if (bodyEl && !this.hasSectPr()) {
-      const w = bodyEl.name.includes(":") ? bodyEl.name.slice(0, bodyEl.name.indexOf(":") + 1) : "";
-      // Schema: the body's sectPr is its LAST child.
-      bodyEl.children.push({ name: `${w}sectPr`, attrs: {}, children: [], text: "" });
-    }
-    // Reference from every sectPr (schema: hf references lead the sectPr).
-    const refName = isHeader ? "w:headerReference" : "w:footerReference";
-    const addRef = (e: XmlElement): void => {
-      if (localName(e.name) === "sectPr") {
-        e.children.unshift({
-          name: refName,
-          attrs: {
-            "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-            "w:type": "default",
-            "r:id": relId,
-          },
-          children: [],
-          text: "",
-        });
-        return;
-      }
-      for (const c of e.children) addRef(c);
-    };
-    addRef(this.docRoot);
-    this.refresh();
-    return root;
+    return { relId, root };
   }
 
   markFootnotesChanged(): void {
     this.footnotesDirty = true;
-    // Re-derive the id -> blocks map so layout sees the new note.
-    this.footnotes.clear();
-    if (this.footnotesRoot) {
-      const notes = parseNotesPart(this.footnotesRoot, { ...this.ctxBase, rels: this.footnotesRels }, true);
-      for (const [id, blocks] of notes) this.footnotes.set(id, blocks);
+    this.rederiveNotes();
+  }
+
+  markEndnotesChanged(): void {
+    this.endnotesDirty = true;
+    this.rederiveNotes();
+  }
+
+  /** Re-derive both id -> blocks maps from the retained trees, so layout sees
+   * an inserted or edited note. */
+  private rederiveNotes(): void {
+    for (const [root, rels, into] of [
+      [this.footnotesRoot, this.footnotesRels, this.footnotes],
+      [this.endnotesRoot, this.endnotesRels, this.endnotes],
+    ] as const) {
+      if (!root) continue;
+      into.clear();
+      for (const [id, blocks] of parseNotesPart(root, { ...this.ctxBase, rels })) into.set(id, blocks);
     }
   }
 
@@ -1406,17 +1863,39 @@ export class DocxDocument {
     return map;
   }
 
-  /** Flag the footnotes part dirty when `t` lives inside it, so save()
-   * re-serializes footnotes.xml. Called by the editor after a text edit; a
-   * no-op for body/header/footer targets. */
+  /** Flag a notes part dirty when `t` lives inside it, so save()
+   * re-serializes footnotes.xml / endnotes.xml. Called by the editor after a
+   * text edit; a no-op for body/header/footer targets. */
   markDirtyIfFootnote(t: XmlElement): void {
-    if (!this.footnotesRoot || this.footnotesDirty) return;
-    const contains = (el: XmlElement): boolean => {
-      if (el === t) return true;
-      for (const c of el.children) if (contains(c)) return true;
+    if (this.footnotesDirty && this.endnotesDirty) return;
+    this.markNotePartsChanged(this.notePartsHolding(t));
+  }
+
+  /**
+   * Which note parts hold `el` right now. An operation that DETACHES `el` —
+   * accepting or rejecting a revision, for one — has to ask BEFORE it mutates
+   * and mark the answer afterwards: a detached element belongs to no part, so
+   * a containment test run after the fact reports nothing and save() then
+   * leaves the stale footnotes.xml / endnotes.xml in the package.
+   */
+  notePartsHolding(el: XmlElement): NotePart[] {
+    const contains = (root: XmlElement): boolean => {
+      if (root === el) return true;
+      for (const c of root.children) if (contains(c)) return true;
       return false;
     };
-    if (contains(this.footnotesRoot)) this.footnotesDirty = true;
+    const parts: NotePart[] = [];
+    if (this.footnotesRoot && contains(this.footnotesRoot)) parts.push("footnotes");
+    if (this.endnotesRoot && contains(this.endnotesRoot)) parts.push("endnotes");
+    return parts;
+  }
+
+  /** Flag the given note parts dirty, so save() re-serializes exactly those. */
+  markNotePartsChanged(parts: readonly NotePart[]): void {
+    for (const part of parts) {
+      if (part === "footnotes") this.markFootnotesChanged();
+      else this.markEndnotesChanged();
+    }
   }
 
   /** The mutable XML roots (document body, related modeled parts, settings).
@@ -1425,30 +1904,123 @@ export class DocxDocument {
   editableRoots(): XmlElement[] {
     const roots = [this.docRoot, this.settingsRoot, ...this.hfParts.map((p) => p.root)];
     if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    if (this.endnotesRoot) roots.push(this.endnotesRoot);
     if (this.commentsRoot) roots.push(this.commentsRoot);
     if (this.commentsExtRoot) roots.push(this.commentsExtRoot);
     return roots;
   }
 
+  /** CT_Settings children that precede w:mirrorMargins in the schema sequence
+   * (§17.15.1.78). Insertions go before the first child that is not a
+   * predecessor, so Word never has to repair settings.xml. */
+  private static readonly SETTINGS_BEFORE_MIRROR = [
+    "writeProtection", "view", "zoom", "removePersonalInformation", "removeDateAndTime",
+    "doNotDisplayPageBoundaries", "displayBackgroundShape", "printPostScriptOverText",
+    "printFractionalCharacterWidth", "printFormsData", "embedTrueTypeFonts",
+    "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
+  ];
+
+  /** The schema predecessors of w:evenAndOddHeaders (§17.10.1): everything up
+   * to mirrorMargins, then the sequence through defaultTableStyle. */
+  private static readonly SETTINGS_BEFORE_EVEN_AND_ODD = [
+    ...DocxDocument.SETTINGS_BEFORE_MIRROR,
+    "mirrorMargins", "alignBordersAndEdges", "bordersDoNotSurroundHeader",
+    "bordersDoNotSurroundFooter", "gutterAtTop", "hideSpellingErrors", "hideGrammaticalErrors",
+    "activeWritingStyle", "proofState", "formsDesign", "attachedTemplate", "linkStyles",
+    "stylePaneFormatFilter", "stylePaneSortMethod", "documentType", "mailMerge", "revisionView",
+    "trackChanges", "doNotTrackMoves", "doNotTrackFormatting", "documentProtection",
+    "autoFormatOverride", "styleLockTheme", "styleLockQFSet", "defaultTabStop",
+    "autoHyphenation", "consecutiveHyphenLimit", "hyphenationZone", "doNotHyphenateCaps",
+    "showEnvelope", "summaryLength", "clickAndTypeStyle", "defaultTableStyle",
+  ];
+
+  /** Set or remove one settings.xml element at its schema position. Null
+   * removes; otherwise the element is (re)inserted before the first child
+   * that is not a schema predecessor. */
+  private setSettingsElement(local: string, predecessors: readonly string[], el: XmlElement | null): void {
+    this.settingsRoot.children = this.settingsRoot.children.filter((c) => localName(c.name) !== local);
+    if (el) {
+      const before = new Set(predecessors);
+      const index = this.settingsRoot.children.findIndex((c) => !before.has(localName(c.name)));
+      this.settingsRoot.children.splice(index === -1 ? this.settingsRoot.children.length : index, 0, el);
+    }
+    this.registerSettingsPart();
+    this.settingsDirty = true;
+  }
+
+  /** Set or remove one on/off settings.xml toggle at its schema position. */
+  private setSettingsToggle(local: string, predecessors: readonly string[], enabled: boolean): void {
+    this.setSettingsElement(
+      local,
+      predecessors,
+      enabled ? { name: `w:${local}`, attrs: {}, children: [], text: "" } : null,
+    );
+  }
+
+  /** The schema predecessors of w:autoHyphenation: everything through
+   * w:defaultTabStop (§17.15.1.78). Its cluster mates append in order. */
+  private static readonly SETTINGS_BEFORE_AUTO_HYPHENATION =
+    DocxDocument.SETTINGS_BEFORE_EVEN_AND_ODD.slice(
+      0,
+      DocxDocument.SETTINGS_BEFORE_EVEN_AND_ODD.indexOf("autoHyphenation"),
+    );
+
+  /**
+   * Patch the hyphenation settings (w:autoHyphenation §17.15.1.10,
+   * w:hyphenationZone §17.15.1.53, w:doNotHyphenateCaps §17.15.1.41). Each
+   * present key is written; `zoneTwips: null` removes the zone element. True
+   * when anything changed — the honest no-op a replicated document-scoped
+   * operation needs. This engine's layout does not hyphenate automatically;
+   * the settings govern Word's own rendering of the file.
+   */
+  setHyphenation(patch: { auto?: boolean; zoneTwips?: number | null; noCaps?: boolean }): boolean {
+    let changed = false;
+    const preds = DocxDocument.SETTINGS_BEFORE_AUTO_HYPHENATION;
+    if (patch.auto !== undefined && patch.auto !== this.autoHyphenation) {
+      this.setSettingsToggle("autoHyphenation", preds, patch.auto);
+      (this as { autoHyphenation: boolean }).autoHyphenation = patch.auto;
+      changed = true;
+    }
+    if (patch.zoneTwips !== undefined && patch.zoneTwips !== this.hyphenationZoneTwips) {
+      this.setSettingsElement(
+        "hyphenationZone",
+        [...preds, "autoHyphenation", "consecutiveHyphenLimit"],
+        patch.zoneTwips === null
+          ? null
+          : { name: "w:hyphenationZone", attrs: { "w:val": String(Math.round(patch.zoneTwips)) }, children: [], text: "" },
+      );
+      (this as { hyphenationZoneTwips: number | null }).hyphenationZoneTwips =
+        patch.zoneTwips === null ? null : Math.round(patch.zoneTwips);
+      changed = true;
+    }
+    if (patch.noCaps !== undefined && patch.noCaps !== this.doNotHyphenateCaps) {
+      this.setSettingsToggle(
+        "doNotHyphenateCaps",
+        [...preds, "autoHyphenation", "consecutiveHyphenLimit", "hyphenationZone"],
+        patch.noCaps,
+      );
+      (this as { doNotHyphenateCaps: boolean }).doNotHyphenateCaps = patch.noCaps;
+      changed = true;
+    }
+    return changed;
+  }
+
   /** Toggle the document-global facing-page margin mode in settings.xml. */
   setMirrorMargins(enabled: boolean): void {
-    this.settingsRoot.children = this.settingsRoot.children.filter((c) => localName(c.name) !== "mirrorMargins");
-    if (enabled) {
-      // CT_Settings is a sequence. mirrorMargins follows saveFormsData and
-      // precedes alignBordersAndEdges/proofState/defaultTabStop/compat. Insert
-      // before the first child that is not one of its schema predecessors so
-      // Word never has to repair settings.xml.
-      const beforeMirror = new Set([
-        "writeProtection", "view", "zoom", "removePersonalInformation", "removeDateAndTime",
-        "doNotDisplayPageBoundaries", "displayBackgroundShape", "printPostScriptOverText",
-        "printFractionalCharacterWidth", "printFormsData", "embedTrueTypeFonts",
-        "embedSystemFonts", "saveSubsetFonts", "saveFormsData",
-      ]);
-      const index = this.settingsRoot.children.findIndex((c) => !beforeMirror.has(localName(c.name)));
-      const mirror = { name: "w:mirrorMargins", attrs: {}, children: [], text: "" };
-      this.settingsRoot.children.splice(index === -1 ? this.settingsRoot.children.length : index, 0, mirror);
-    }
+    this.setSettingsToggle("mirrorMargins", DocxDocument.SETTINGS_BEFORE_MIRROR, enabled);
+    (this as { mirrorMargins: boolean }).mirrorMargins = enabled;
+  }
 
+  /** Toggle w:evenAndOddHeaders (§17.10.1) — the document-global switch that
+   * makes even pages use the "even" header/footer variants. */
+  setEvenAndOddHeaders(enabled: boolean): void {
+    this.setSettingsToggle("evenAndOddHeaders", DocxDocument.SETTINGS_BEFORE_EVEN_AND_ODD, enabled);
+    (this as { evenAndOddHeaders: boolean }).evenAndOddHeaders = enabled;
+  }
+
+  /** Register settings.xml in document.xml.rels and [Content_Types].xml when
+   * the package was born without it (a minimal document). */
+  private registerSettingsPart(): void {
     const rels = this.ensureRelsRoot();
     const settingsRelType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings";
     if (!rels.children.some((r) => r.attrs["Type"]?.endsWith("/settings"))) {
@@ -1482,8 +2054,6 @@ export class DocxDocument {
         });
       }
     }
-    this.settingsDirty = true;
-    (this as { mirrorMargins: boolean }).mirrorMargins = enabled;
   }
 
   /**
@@ -1491,10 +2061,30 @@ export class DocxDocument {
    * body, headers, footers). Linear scan — documents are small and this only
    * runs on structural edits (Enter, paragraph merge).
    */
-  /** XML roots that can carry tracked changes: body, headers/footers, footnotes. */
+  /** The header part roots, in package order. A watermark is authored into
+   * every one of them: Word paints it on every page, and a document with a
+   * first-page or even-page header has more than one header part. */
+  headerRoots(): XmlElement[] {
+    return this.hfParts.filter((p) => p.isHeader).map((p) => p.root);
+  }
+
+  /** The footer part roots, in package order — headerRoots' counterpart, for
+   * operations that walk both bands (the page-number gallery's removal
+   * sweep). */
+  footerRoots(): XmlElement[] {
+    return this.hfParts.filter((p) => !p.isHeader).map((p) => p.root);
+  }
+
+  /** XML roots that can carry tracked changes: body, headers/footers, notes. */
   revisionRoots(): XmlElement[] {
+    return this.contentRoots();
+  }
+
+  /** Body, header/footer and note roots — every tree the caret can reach. */
+  private contentRoots(): XmlElement[] {
     const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
     if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    if (this.endnotesRoot) roots.push(this.endnotesRoot);
     return roots;
   }
 
@@ -1527,8 +2117,7 @@ export class DocxDocument {
   }
 
   findParentOf(target: XmlElement): XmlElement | undefined {
-    const roots = [this.docRoot, ...this.hfParts.map((p) => p.root)];
-    if (this.footnotesRoot) roots.push(this.footnotesRoot);
+    const roots = this.contentRoots();
     const memo = this._parentMemo.get(target);
     if (memo && memo.children.includes(target) && this.memoIsLive(memo, roots)) return memo;
     // A miss walks the tree anyway, so record EVERY link the walk passes, not
@@ -1762,10 +2351,104 @@ export class DocxDocument {
     if (this.footnotesDirty && this.footnotesRoot && this.footnotesPart) {
       files[this.footnotesPart] = strToU8(serializeXml(this.footnotesRoot, true));
     }
+    if (this.endnotesDirty && this.endnotesRoot && this.endnotesPart) {
+      files[this.endnotesPart] = strToU8(serializeXml(this.endnotesRoot, true));
+    }
+    if (this.sourcesDirty && this.sourcesRoot && this.sourcesPart) {
+      files[this.sourcesPart] = strToU8(serializeXml(this.sourcesRoot, true));
+    }
+    if (this.sourcesAux) {
+      for (const [name, xml] of Object.entries(this.sourcesAux)) files[name] = strToU8(xml);
+    }
+    if (this.glossaryDirty && this.glossaryRoot && this.glossaryPart) {
+      files[this.glossaryPart] = strToU8(serializeXml(this.glossaryRoot, true));
+    }
     if (this.settingsDirty) files[this.settingsPart] = strToU8(serializeXml(this.settingsRoot, true));
+    this.dropOrphanChartParts(files);
     if (this.relsRoot) this.writeModeledXml(files, this.relsPath, this.relsRoot);
     if (this.contentTypesRoot) this.writeModeledXml(files, "[Content_Types].xml", this.contentTypesRoot);
     return files;
+  }
+
+  /**
+   * Leave out the chart parts the document no longer references.
+   *
+   * Deleting a chart splices its w:drawing out of the story, but the chart
+   * part, its rels part, its embedded workbook, the document relationship, and
+   * the two [Content_Types].xml overrides all stay. An agent that inserts a
+   * chart, deletes it, and inserts a replacement therefore saves TWO chart
+   * parts for the one chart the document shows.
+   *
+   * The release happens here, at save time, rather than when the drawing goes,
+   * because undo restores the drawing XML — r:id and all — from a snapshot
+   * that models package parts but no relationship state. Dropping the
+   * relationship early would make undo produce a chart pointing at nothing.
+   * The live tree keeps everything; only the written bytes lose the orphans,
+   * and the saveJournal puts back the two trees this touches.
+   *
+   * Relationship ids are scoped to the part that owns the rels file, so the
+   * document body is the only place that can reference these ids, and reading
+   * it is a complete check. Headers, footers, and notes carry their own rels.
+   */
+  private dropOrphanChartParts(files: Record<string, Uint8Array>): void {
+    const relsRoot = this.relsRoot;
+    if (!relsRoot) return;
+    const orphans = relsRoot.children.filter(
+      (rel) => (rel.attrs.Type ?? "").endsWith("/relationships/chart") && rel.attrs.Id !== undefined,
+    );
+    if (orphans.length === 0) return;
+
+    const used = new Set<string>();
+    const scan = (element: XmlElement): void => {
+      for (const value of Object.values(element.attrs)) {
+        if (/^rId\d+$/.test(value)) used.add(value);
+      }
+      for (const item of element.children) scan(item);
+    };
+    scan(this.docRoot);
+
+    const dropped = orphans.filter((rel) => !used.has(rel.attrs.Id!));
+    if (dropped.length === 0) return;
+
+    // Restore by replacing each child list wholesale: putting the entries back
+    // in their original order is what keeps the live tree byte-identical to
+    // before the save.
+    const contentTypesRoot = this.contentTypesRoot;
+    const relsBefore = [...relsRoot.children];
+    const overridesBefore = contentTypesRoot ? [...contentTypesRoot.children] : null;
+    if (this.saveJournal) {
+      this.saveJournal.push(() => {
+        relsRoot.children.splice(0, relsRoot.children.length, ...relsBefore);
+        if (contentTypesRoot && overridesBefore) {
+          contentTypesRoot.children.splice(0, contentTypesRoot.children.length, ...overridesBefore);
+        }
+      });
+    }
+
+    for (const rel of dropped) {
+      const part = resolvePartPath(this.docPart, rel.attrs.Target ?? "");
+      const partRels = relsPathFor(part);
+      // The chart's own rels name its embedded workbook; that part is the
+      // chart's alone, so it goes with it.
+      const satellites = [part, partRels];
+      const relsXml = files[partRels];
+      if (relsXml) {
+        for (const match of strFromU8(relsXml).matchAll(/Target="([^"]+)"/g)) {
+          satellites.push(resolvePartPath(part, match[1]));
+        }
+      }
+      for (const name of satellites) delete files[name];
+
+      if (contentTypesRoot) {
+        for (const name of satellites) {
+          const index = contentTypesRoot.children.findIndex(
+            (item) => localName(item.name) === "Override" && item.attrs.PartName === `/${name}`,
+          );
+          if (index >= 0) contentTypesRoot.children.splice(index, 1);
+        }
+      }
+      relsRoot.children.splice(relsRoot.children.indexOf(rel), 1);
+    }
   }
 
   /** Fresh unique docPr id for inserted drawings. Seeded once past the
@@ -1862,48 +2545,69 @@ export class DocxDocument {
     return true;
   }
 
-  private addImageResourceAt(bytes: Uint8Array, ext: string, source?: XmlElement): { relId: string; part: string } {
-    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
-    let n = 1;
-    while (this.pkg.has(`${docDir}media/image${n}.${ext}`)) n++;
-    const part = `${docDir}media/image${n}.${ext}`;
-    this.pkg.raw()[part] = bytes;
-
+  /** The relationships of the part that holds `source`: a header or footer
+   * part when the element is inside one, else the document part. */
+  private imageRelsOwner(source?: XmlElement): { relsRoot: XmlElement; relationships: Relationships } {
     const contains = (root: XmlElement, target: XmlElement): boolean =>
       root === target || root.children.some((item) => contains(item, target));
     const owner = source ? this.hfParts.find((candidate) => contains(candidate.root, source)) : undefined;
-    let relsRoot: XmlElement;
-    let relationships: Relationships;
-    if (owner) {
-      owner.relsRoot ??= {
-        name: "Relationships",
-        attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
-        children: [],
-        text: "",
-      };
-      relsRoot = owner.relsRoot;
-      relationships = owner.rels;
-    } else {
-      relsRoot = this.ensureRelsRoot();
-      relationships = this.documentRels;
-    }
+    if (!owner) return { relsRoot: this.ensureRelsRoot(), relationships: this.documentRels };
+    owner.relsRoot ??= {
+      name: "Relationships",
+      attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
+      children: [],
+      text: "",
+    };
+    return { relsRoot: owner.relsRoot, relationships: owner.rels };
+  }
+
+  /** Add an image relationship pointing at `part`, in the relationships of
+   * whichever part holds `source`. */
+  private addImageRel(part: string, source?: XmlElement): string {
+    const { relsRoot, relationships } = this.imageRelsOwner(source);
     let maxId = 0;
     for (const r of relsRoot.children) {
       const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
       if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
     }
     const relId = `rId${maxId + 1}`;
+    // Header, footer and document parts are all siblings in word/, so one
+    // relative target reads the same from any of their .rels files.
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
     relsRoot.children.push({
       name: "Relationship",
       attrs: {
         Id: relId,
         Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-        Target: `media/image${n}.${ext}`,
+        Target: part.startsWith(docDir) ? part.slice(docDir.length) : part,
       },
       children: [],
       text: "",
     });
     relationships.set(relId, { id: relId, type: "image", target: part, external: false });
+    return relId;
+  }
+
+  /**
+   * Point a SECOND part at an image part this document already has.
+   *
+   * Word's picture watermark is ONE media part that every header part
+   * references. Registering the image again per header would put a full copy
+   * of the bytes in the package for each one — three headers, three copies of
+   * the same logo — and give the media-install path three pending parts to
+   * fill from one upload.
+   */
+  linkImageResource(part: string, source: XmlElement): string {
+    return this.addImageRel(part, source);
+  }
+
+  private addImageResourceAt(bytes: Uint8Array, ext: string, source?: XmlElement): { relId: string; part: string } {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    while (this.pkg.has(`${docDir}media/image${n}.${ext}`)) n++;
+    const part = `${docDir}media/image${n}.${ext}`;
+    this.pkg.raw()[part] = bytes;
+    const relId = this.addImageRel(part, source);
 
     // Content type default for the extension
     const MIME: Record<string, string> = {
@@ -2215,6 +2919,17 @@ export class DocxDocument {
     meta?: { iv?: string; genesisId?: string },
     source?: XmlElement,
   ): string {
+    return this.registerPendingImagePart(sha, ext, meta, source).relId;
+  }
+
+  /** As registerPendingImage, and also names the part it made — what a second
+   * part needs to reach the same image through linkImageResource. */
+  registerPendingImagePart(
+    sha: string,
+    ext: string,
+    meta?: { iv?: string; genesisId?: string },
+    source?: XmlElement,
+  ): { relId: string; part: string } {
     // Register with a 0-byte placeholder entry so part-name scanning and
     // content-type bookkeeping behave identically to a real image…
     const { relId, part } = this.addImageResourceAt(new Uint8Array(0), ext, source);
@@ -2223,7 +2938,7 @@ export class DocxDocument {
     delete this.pkg.raw()[part];
     this.pendingMedia.set(part, { sha, ...meta });
     this.mediaMeta.set(part, { sha, ...meta });
-    return relId;
+    return { relId, part };
   }
 
   /** Install fetched bytes into a pending part (doc 05). The caller has

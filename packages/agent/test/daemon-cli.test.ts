@@ -333,9 +333,76 @@ process.stdin.on("data", (chunk) => {
       expect(agentPresence?.anchor.offset).toBe("Detached edit".length);
       expect(collectRevisions(human.doc!)).toHaveLength(1);
 
+      const projected = await cliCommand(["session", sessionId, JSON.stringify({
+        command: "project",
+        request: { mode: "md" },
+      })]);
+      const projection = projected.result as { revision: string; text: string; lines: number };
+      expect(projection.text).toContain("Detached edit");
+      expect(projection.lines).toBe(1);
+      const suggested = await cliCommand(["session", sessionId, JSON.stringify({
+        command: "patch",
+        request: {
+          revision: projection.revision,
+          mode: "md",
+          edits: [{ startLine: 1, endLine: 1, newText: `${projection.text} reviewed` }],
+        },
+      })]);
+      expect(suggested).toMatchObject({ ok: true, result: { status: "submitted", operations: ["insertText"] } });
+      expect((suggested.result as { projection: { text: string } }).projection.text).toContain("reviewed");
+      await until(() => documentText(human.doc!.docRoot).includes("reviewed"), "human receives the suggested patch");
+      // Suggestion mode forces the tracked form, so the patched text arrives
+      // inside a w:ins rather than as a direct rewrite.
+      const trackedText = collectRevisions(human.doc!)
+        .filter((revision) => revision.kind === "insertion")
+        .map((revision) => documentText(revision.el))
+        .join("");
+      expect(trackedText).toContain("reviewed");
+      // A paragraph-property change has a tracked form now, so suggestion mode
+      // sends it with the flag and the engine records a w:pPrChange. The patch
+      // above moved the revision on, so address the one it handed back.
+      const trackedRevision = (suggested.result as { projection: { revision: string } }).projection.revision;
+      expect(await cliCommand(["session", sessionId, JSON.stringify({
+        command: "edit",
+        request: {
+          revision: trackedRevision,
+          operations: [{ kind: "formatParagraph", blockRef: first.ref, styleId: "Heading1" }],
+        },
+      })])).toMatchObject({ ok: true, result: { status: "submitted", operations: ["formatParagraph"] } });
+      await until(
+        () => collectRevisions(human.doc!).some((revision) => revision.kind === "paragraphFormat"),
+        "human receives the tracked paragraph-property change",
+      );
+      // A STRUCTURAL table operation still has no tracked form, so it stays
+      // refused. The cell-property ones record a w:tcPrChange now and are sent
+      // with the flag instead; this address is a plain paragraph, so what comes
+      // back is the engine's ordinary "names no cell" no-op, not a refusal.
+      expect(await cliCommand(["session", sessionId, JSON.stringify({
+        command: "edit",
+        request: {
+          revision: trackedRevision,
+          operations: [{ kind: "tableOp", cellRef: first.ref, op: "deleteRow" }],
+        },
+      })])).toMatchObject({ ok: false, error: expect.stringContaining("unavailable in suggestion mode") });
+      // The tracked formatParagraph above moved the revision on, and a mode
+      // refusal never reaches the revision check, so this one has to re-sync.
+      const shadingSync = await cliCommand(["session", sessionId, JSON.stringify({ command: "sync" })]);
+      const shading = await cliCommand(["session", sessionId, JSON.stringify({
+        command: "edit",
+        request: {
+          revision: String((shadingSync.result as { revision: string }).revision),
+          operations: [{ kind: "tableOp", cellRef: first.ref, op: { kind: "cellShading", fill: "FF0000" } }],
+        },
+      })]);
+      // This document has no table, so the operation still fails — but on the
+      // ADDRESS, having passed the mode gate that used to stop every tableOp.
+      expect(String(shading.error ?? "")).not.toContain("suggestion mode");
+
       await sendPrivateMessage("message_mode_edit", "\u0000wordinweb-agent-mode:edit");
       let modeEvent: Record<string, unknown> = {};
-      for (let attempt = 0; attempt < 6; attempt++) {
+      // Each edit and patch above queued a document_changed event, so drain
+      // the queue rather than assuming the mode event is near the front.
+      for (let attempt = 0; attempt < 20; attempt++) {
         modeEvent = await cliCommand(["session", sessionId, JSON.stringify({ command: "wait", timeoutMs: 2_000 })]);
         if ((modeEvent.result as { event?: string } | undefined)?.event === "mode_changed") break;
       }
@@ -346,6 +413,7 @@ process.stdin.on("data", (chunk) => {
       expect(editSync).toMatchObject({ ok: true, result: { mode: "edit" } });
       const editInspect = await cliCommand(["session", sessionId, JSON.stringify({ command: "inspect", request: { kind: "read" } })]);
       const editFirst = (editInspect.result as { blocks: Array<{ ref: string; runs: Array<{ ref: string }> }> }).blocks[0];
+      const trackedBeforeDirectEdits = collectRevisions(human.doc!).length;
       await cliCommand(["session", sessionId, JSON.stringify({
         command: "edit",
         request: {
@@ -354,7 +422,25 @@ process.stdin.on("data", (chunk) => {
         },
       })]);
       await until(() => documentText(human.doc!.docRoot).includes("Direct edit"), "human receives direct edit");
-      expect(collectRevisions(human.doc!)).toHaveLength(1);
+      expect(collectRevisions(human.doc!)).toHaveLength(trackedBeforeDirectEdits);
+
+      const editProjection = (await cliCommand(["session", sessionId, JSON.stringify({
+        command: "project",
+        request: { mode: "text" },
+      })])).result as { revision: string; text: string };
+      const patched = await cliCommand(["session", sessionId, JSON.stringify({
+        command: "patch",
+        request: {
+          revision: editProjection.revision,
+          mode: "text",
+          edits: [{ startLine: 1, endLine: 1, newText: `${editProjection.text} and filed` }],
+        },
+      })]);
+      expect(patched).toMatchObject({ ok: true, result: { status: "submitted", operations: ["insertText"] } });
+      await until(() => documentText(human.doc!.docRoot).includes("and filed"), "human receives the direct patch");
+      // Editing mode patches straight into the text, so the tracked-change
+      // count the suggested patch left behind stays where it was.
+      expect(collectRevisions(human.doc!)).toHaveLength(trackedBeforeDirectEdits);
     } finally {
       if (sessionId) {
         await cliCommand(["session", sessionId, JSON.stringify({ command: "close" })]).catch(() => undefined);
@@ -365,5 +451,5 @@ process.stdin.on("data", (chunk) => {
       httpServer.close();
       await rm(fakeBin, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 45_000);
 });

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { strToU8, zipSync } from "fflate";
 import { DocxDocument, localName, type XmlElement } from "@wordinweb/core";
 import { INTENT_KINDS } from "@wordinweb/collab/client";
 import { AgentDocument, validateAgentOperationShape } from "../src/index.js";
@@ -50,6 +51,36 @@ describe("AgentDocument local tools", () => {
       expect.objectContaining({ ref: paragraph.ref, level: 1, text: "Architecture Options", styleId: "Heading1" }),
     ]);
     expect(DocxDocument.load(agent.save()).styles.byId.has("Heading1")).toBe(true);
+  });
+
+  it("authors a whole table, content and header included, in one insertTable operation", async () => {
+    const agent = AgentDocument.load(makeDocx(body(`<w:p><w:r><w:t>intro</w:t></w:r></w:p>`)));
+    const read = agent.inspect({ kind: "read" });
+    if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
+    const paragraph = read.blocks[0];
+    await agent.edit({
+      revision: agent.revision,
+      operations: [{
+        kind: "insertTable",
+        runRef: paragraph.runs[0].ref,
+        rows: 2,
+        cols: 3,
+        cells: [["Quarter", "Region", "Sales"], ["Q1", "West", "100"]],
+        headerRow: true,
+      }],
+    });
+    const overview = agent.inspect({ kind: "overview" });
+    expect(overview).toMatchObject({ blocks: { tables: 1 } });
+    const saved = textOf(DocxDocument.load(agent.save()));
+    for (const text of ["Quarter", "Region", "Sales", "Q1", "West", "100"]) expect(saved).toContain(text);
+    expect(validateAgentOperationShape({ kind: "insertTable", runRef: "run:1", rows: 2, cols: 2, cells: [[1]] })).toContain("cells");
+  });
+
+  it("advertises the compose tool only where compose can succeed", () => {
+    const created = AgentDocument.create().tools().map((tool) => tool.name);
+    expect(created).toContain("word_document_compose");
+    const loaded = AgentDocument.load(makeDocx(body(`<w:p><w:r><w:t>x</w:t></w:r></w:p>`)));
+    expect(loaded.tools().map((tool) => tool.name)).not.toContain("word_document_compose");
   });
 
   it("composes a rich new document in one schema-enforced request", async () => {
@@ -487,17 +518,123 @@ describe("AgentDocument local tools", () => {
       "word_document_compose",
       "word_document_inspect",
       "word_document_edit",
+      "word_document_project",
+      "word_document_patch",
       "word_document_asset",
       "word_document_save",
     ]);
+    const projectSchema = agent.tools().find((tool) => tool.name === "word_document_project")?.inputSchema;
+    expect(projectSchema).toMatchObject({ type: "object", additionalProperties: false });
+    const patchSchema = agent.tools().find((tool) => tool.name === "word_document_patch")?.inputSchema;
+    expect(patchSchema).toMatchObject({ type: "object", additionalProperties: false, required: ["revision"] });
     const composeSchema = agent.tools().find((tool) => tool.name === "word_document_compose")?.inputSchema;
     expect(composeSchema).toMatchObject({ type: "object", additionalProperties: false });
     const inspectSchema = agent.tools().find((tool) => tool.name === "word_document_inspect")?.inputSchema;
-    expect(inspectSchema).toMatchObject({ anyOf: expect.any(Array) });
-    expect((inspectSchema?.anyOf as Array<Record<string, unknown>>)).toHaveLength(6);
-    expect((inspectSchema?.anyOf as Array<Record<string, unknown>>).every((schema) => schema.additionalProperties === false)).toBe(true);
+    expect(inspectSchema).toMatchObject({ type: "object", additionalProperties: false, required: ["kind"] });
+    expect((inspectSchema?.properties as Record<string, Record<string, unknown>>).kind.enum).toHaveLength(7);
     const editSchema = agent.tools().find((tool) => tool.name === "word_document_edit")?.inputSchema;
     const operationSchemas = (((editSchema?.properties as Record<string, unknown>).operations as Record<string, unknown>).items as Record<string, unknown>).anyOf;
     expect(operationSchemas).toHaveLength(INTENT_KINDS.length);
+    // The Messages API rejects anyOf/oneOf/allOf at the TOP level of
+    // input_schema (nested, like the operations items above, is fine). Every
+    // advertised tool must satisfy that, or the first real request 400s.
+    for (const tool of agent.tools()) {
+      expect(tool.inputSchema.type, `${tool.name} root type`).toBe("object");
+      for (const key of ["anyOf", "oneOf", "allOf"]) {
+        expect(tool.inputSchema[key], `${tool.name} top-level ${key}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("edits the second equation in a paragraph by index", async () => {
+    // A paragraph can hold several equations, and inspection shows every one.
+    // mathIndex is what lets an agent edit the one it just read instead of
+    // always landing on the first.
+    const agent = AgentDocument.create();
+    const target = () => {
+      const read = agent.inspect({ kind: "read" });
+      if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
+      const paragraph = read.blocks[0];
+      const run = paragraph.runs.find((candidate) => /^run:\d+$/.test(candidate.ref));
+      if (!run) throw new Error("no editable run");
+      return { blockRef: paragraph.ref, runRef: run.ref };
+    };
+    await agent.edit({
+      revision: agent.revision,
+      operations: [{ kind: "insertText", at: { ...target(), offset: 0 }, text: "Both hold:" }],
+    });
+    for (const mathText of ["c+d", "a+b"]) {
+      await agent.edit({ revision: agent.revision, operations: [{ kind: "insertMath", runRef: target().runRef, mathText }] });
+    }
+    const { blockRef } = target();
+    const equationsOf = () => DocxDocument.load(agent.save()).pkg.text("word/document.xml").split("<m:oMath>").slice(1);
+    expect(equationsOf()).toHaveLength(2);
+
+    // Each insert lands ahead of the last, so document order is "a+b" then
+    // "c+d" — index 1 names "c+d".
+    await agent.edit({ revision: agent.revision, operations: [{ kind: "setMathLinear", blockRef, mathIndex: 1, mathText: "z^2" }] });
+    const equations = equationsOf();
+    expect(equations[0]).toContain("<m:t>a+b</m:t>");
+    expect(equations[1]).toContain("<m:t>z</m:t>");
+    expect(equations[1]).not.toContain("c+d");
+
+    // Omitting the index still means the first equation.
+    await agent.edit({ revision: agent.revision, operations: [{ kind: "setMathLinear", blockRef, mathText: "q" }] });
+    expect(equationsOf()[0]).toContain("<m:t>q</m:t>");
+
+    // The schema takes the field and rejects a negative one.
+    expect(validateAgentOperationShape({ kind: "deleteMath", blockRef: "block:1", mathIndex: 2 })).toBeNull();
+    expect(validateAgentOperationShape({ kind: "deleteMath", blockRef: "block:1", mathIndex: -1 })).toContain("minimum");
+  });
+
+  it("exposes insertMergeField and insertCitation, and applies both", async () => {
+    // Capability rows come straight from the core registry declaration.
+    const capabilities = AgentDocument.create().capabilities();
+    const byKind = new Map(capabilities.map((capability) => [capability.kind, capability]));
+    expect(byKind.get("insertMergeField")).toMatchObject({ category: "insert", required: ["runRef", "name"] });
+    expect(byKind.get("insertCitation")).toMatchObject({ category: "insert", required: ["runRef", "tag"] });
+    expect(validateAgentOperationShape({ kind: "insertCitation", runRef: "run:1", tag: "Doe03" })).toBeNull();
+    expect(validateAgentOperationShape({ kind: "insertCitation", runRef: "run:1", tag: "no spaces" })).not.toBeNull();
+
+    const agent = AgentDocument.load(
+      zipSync({
+        "[Content_Types].xml": strToU8(
+          `<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">` +
+            `<Default Extension="xml" ContentType="application/xml"/>` +
+            `<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>` +
+            `<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+        ),
+        "_rels/.rels": strToU8(
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+            `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
+        ),
+        "word/_rels/document.xml.rels": strToU8(
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+            `<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>`,
+        ),
+        "customXml/item1.xml": strToU8(
+          `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+            `<b:Sources xmlns:b="http://schemas.openxmlformats.org/officeDocument/2006/bibliography" StyleName="APA">` +
+            `<b:Source><b:Tag>Doe03</b:Tag>` +
+            `<b:Author><b:Author><b:NameList><b:Person><b:Last>Doe</b:Last></b:Person></b:NameList></b:Author></b:Author>` +
+            `<b:Title>A Study of Things</b:Title><b:Year>2003</b:Year></b:Source></b:Sources>`,
+        ),
+        "word/document.xml": strToU8(body(`<w:p><w:r><w:t xml:space="preserve">anchor</w:t></w:r></w:p>`)),
+      }),
+    );
+    const read = agent.inspect({ kind: "read" });
+    if (!("blocks" in read) || read.blocks[0].type !== "paragraph") throw new Error("missing paragraph");
+    const runRef = read.blocks[0].runs[0].ref;
+    const result = await agent.edit({
+      revision: agent.revision,
+      operations: [
+        { kind: "insertMergeField", runRef, name: "First Name" },
+        { kind: "insertCitation", runRef, tag: "Doe03" },
+      ],
+    });
+    expect(result.status).toBe("applied");
+    const saved = DocxDocument.load(agent.save());
+    expect(textOf(saved)).toContain("«First Name»");
+    expect(textOf(saved)).toContain("(Doe, 2003)");
   });
 });

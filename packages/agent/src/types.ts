@@ -219,13 +219,41 @@ export interface AgentSpatialResult {
   overlaps: AgentOverlap[];
 }
 
+/** One text-bearing drawing's frame measured against its own laid-out text. */
+export interface AgentDrawingFit {
+  objectRef: AgentReference;
+  page: number;
+  /** The frame the shape draws, px. */
+  boxPx: { w: number; h: number };
+  /** The extent the text actually laid into, px. */
+  textPx: { w: number; h: number };
+  /** The text is taller than the box's insets leave room for. */
+  overflow: boolean;
+  /** Lines the box hides because they fall past its bottom. */
+  clippedLines: number;
+  /** The shape's bodyPr autofit mode. Only "resizeShape" makes an overflow
+   * resolve itself: Word paints "shrinkText" at full size and clips it. */
+  autofit: "none" | "resizeShape" | "shrinkText";
+}
+
+export interface AgentFitResult {
+  revision: string;
+  layout: { quality: "exact" | "approximate"; profile: string };
+  totalPages: number;
+  /** How full each requested page is: where its lowest body content ends, and
+   * where the body box ends. */
+  pages: Array<{ page: number; contentBottomPx: number; pageBottomPx: number }>;
+  drawings: AgentDrawingFit[];
+}
+
 export type AgentInspectRequest =
   | { kind: "overview" }
   | { kind: "context"; stories?: string[]; maxBlocks?: number; maxCharacters?: number; include?: Array<"bookmarks" | "objects">; includeEmpty?: boolean }
   | { kind: "read"; story?: string; cursor?: AgentCursor; maxBlocks?: number; maxCharacters?: number }
   | { kind: "search"; query: string; maxResults?: number }
   | { kind: "object"; ref: AgentReference }
-  | { kind: "spatial"; pages?: { start: number; count: number }; includeOverlaps?: boolean };
+  | { kind: "spatial"; pages?: { start: number; count: number }; includeOverlaps?: boolean }
+  | { kind: "fit"; pages?: { start: number; count: number } };
 
 export type AgentInspectResult =
   | AgentOverview
@@ -233,7 +261,82 @@ export type AgentInspectResult =
   | AgentReadResult
   | AgentSearchResult
   | AgentObjectResult
-  | AgentSpatialResult;
+  | AgentSpatialResult
+  | AgentFitResult;
+
+export type AgentProjectionMode = "text" | "md" | "outline";
+
+/** One run of projected characters that came from one place in the document.
+ * `start`/`end` are columns in the projection line; `wireStart`/`wireEnd` are
+ * offsets in the run's wire space. An editable segment is backed by a `w:t`,
+ * so the two spaces line up one-to-one across it and a patch can address any
+ * column inside it. Everything else is an atom the patch path treats as
+ * opaque. */
+export interface AgentAnchorSegment {
+  start: number;
+  end: number;
+  runRef: AgentReference;
+  wireStart: number;
+  wireEnd: number;
+  editable: boolean;
+}
+
+export interface AgentAnchorLine {
+  line: number;
+  role: "paragraph" | "table" | "structure";
+  blockRef?: AgentReference;
+  /** Leading characters of the line that are markdown structure rather than
+   * document text (`## `, `- `, `1. `). Always 0 in `text` mode. */
+  marker: number;
+  editable: boolean;
+  segments: AgentAnchorSegment[];
+}
+
+export interface AgentProjectRequest {
+  story?: string;
+  mode?: AgentProjectionMode;
+  cursor?: AgentCursor;
+  maxBlocks?: number;
+  maxCharacters?: number;
+}
+
+export interface AgentProjectResult {
+  revision: string;
+  story: string;
+  mode: AgentProjectionMode;
+  text: string;
+  lines: number;
+  window: { cursor: string | null; startBlock: number; endBlock: number; maxBlocks: number; maxCharacters: number };
+  anchors: AgentAnchorLine[];
+  next?: AgentCursor;
+  truncated: boolean;
+}
+
+export interface AgentPatchHunk {
+  startLine: number;
+  endLine: number;
+  newText: string;
+}
+
+export interface AgentPatchRequest {
+  revision: string;
+  story?: string;
+  mode?: AgentProjectionMode;
+  cursor?: AgentCursor;
+  maxBlocks?: number;
+  maxCharacters?: number;
+  edits?: AgentPatchHunk[];
+  diff?: string;
+  suggest?: boolean;
+}
+
+export interface AgentPatchResult {
+  revision: string;
+  status: "applied" | "submitted";
+  operations: string[];
+  connection?: "local" | "live" | "offline" | "reconnecting";
+  projection: AgentProjectResult;
+}
 
 export type AgentOperation = Record<string, unknown> & { kind: string };
 
@@ -283,10 +386,10 @@ export type AgentComposeBlock =
   | { type: "heading"; level: 1 | 2 | 3; text: string }
   | { type: "table"; rows: Array<Array<string | AgentComposeCell>>; headerRows?: number; headerFill?: string; headerTextColor?: string; columnWidths?: number[] }
   | { type: "equation"; mathText: string; align?: "left" | "center" | "right" }
-  | { type: "chart"; chart: { type: "column" | "bar" | "line" | "pie"; title?: string; categories: string[]; series: Array<{ name: string; values: number[] }> }; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
+  | { type: "chart"; chart: { type: "column" | "bar" | "line" | "pie" | "doughnut" | "area" | "scatter"; title?: string; categories: string[]; series: Array<{ name: string; values: number[] }>; grouping?: "clustered" | "stacked" | "percentStacked" }; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "smartArt"; smartArt: { layout: "process" | "cycle" | "hierarchy" | "list"; items: string[] }; widthPx?: number; heightPx?: number; align?: "left" | "center" | "right" }
   | { type: "image"; assetRef: string; widthPx: number; heightPx: number; alt?: string; align?: "left" | "center" | "right"; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; position?: { xPx: number; yPx: number } }
-  | { type: "shape"; preset: "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox"; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" } | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
+  | { type: "shape"; preset: string; text?: string; textStyle?: AgentComposeTextStyle; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; fill?: string | null; line?: { color: string; widthPx: number; dash: "solid" | "dashed" | "dotted" } | null; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
   | { type: "wordArt"; text: string; preset: "plain" | "archUp" | "archDown" | "wave" | "chevron"; widthPx?: number; heightPx?: number; position?: { xPx: number; yPx: number }; rotation?: number; fill?: string; opacity?: number; wrap?: "inline" | "square" | "topAndBottom" | "none" | "behind"; order?: "front" | "back" }
   | { type: "pageNumber"; fieldKind: "page" | "pageOfTotal"; align?: "left" | "center" | "right"; color?: string; fontSizePt?: number; fontFamily?: string; bold?: boolean }
   | { type: "pageBreak" };

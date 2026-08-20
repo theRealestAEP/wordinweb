@@ -3,9 +3,11 @@ import {
   Block,
   Border,
   DrawingTextShape,
+  FieldContent,
   HeaderFooter,
   NumberingLevel,
   Paragraph,
+  ParagraphBorders,
   ParaProps,
   Run,
   RunProps,
@@ -25,6 +27,9 @@ import {
   tableCondOrder,
 } from "../parse/styles.js";
 import { mergeRunProps } from "../parse/properties.js";
+import { bodyStyleRefText } from "../style-ref.js";
+import { citationText, documentBibliography, type Bibliography } from "../citations.js";
+import { documentTextStatistics, type TextStatistics } from "../word-count.js";
 import { ptToPx } from "../units.js";
 import { child, serializeXml, cyrb53, XmlElement } from "../xml.js";
 import {
@@ -34,12 +39,54 @@ import {
   breakParagraph,
   fontOf,
   resolveField,
+  setBreakCacheWindowed,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
-import { FontSpec, LaidOutPage, LayoutResult, PageItem, TextItem } from "./types.js";
+import {
+  DrawingHitItem,
+  FontSpec,
+  LaidOutPage,
+  LayoutFontSample,
+  LayoutResult,
+  LayoutWindow,
+  PageItem,
+  TextItem,
+} from "./types.js";
+
+const INITIAL_MODEL_WINDOW_PAGES = 12;
+
+/** Break options for a lookahead simulation. These sites sum line heights to
+ * decide whether a following block fits, and never paint what they break, so
+ * the break cache's metrics tier can answer them — which also keeps them from
+ * evicting the full entries the paragraphs actually being painted need. */
+const LOOKAHEAD_BREAK = { cache: true, metricsOnly: true } as const;
+const PAINTED_LOOKAHEAD_BREAK = { cache: true } as const;
+
+/** One mail-merge data record: column name → this record's value. The host
+ * parses the data file and hands over plain strings; the engine never learns a
+ * path, a connection string or a query. */
+export type MergeRecord = Readonly<Record<string, string>>;
+
+/** Identity of a merge record for the incremental-reuse gate below.
+ *
+ * Content, not object identity: a React host rebuilds the record object on
+ * every render, and gating on identity would defeat incremental layout for
+ * every keystroke typed while preview is on. Two records with equal content lay
+ * out identically, so equal keys are always safe to reuse. Key order follows
+ * the CSV's column order, which is stable for one file; if it ever were not,
+ * the only cost is a full layout that was not needed. */
+function mergeRecordKey(record: MergeRecord | undefined): string {
+  return record ? JSON.stringify(record) : "";
+}
 
 export interface LayoutOptions {
   measurer?: TextMeasurer;
+  /** Retain positioned items only for a viewport-sized page window. */
+  windowModel?: boolean;
+  /** Mail-merge PREVIEW: the active record's column values, substituted into
+   * MERGEFIELD fields as they are painted. Nothing is written to the document —
+   * see FieldContext.mergeField. Absent renders the «Name» placeholders. */
+  mergeRecord?: MergeRecord;
   /** Previous layout result (from an earlier layoutDocument call on the same
    * document). Enables incremental relayout: pages whose input blocks and
    * lead-in state are unchanged are reused instead of re-laid. The engine falls
@@ -70,10 +117,16 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
   if (options.prev && options.prev._incr) {
     // Incremental attempt uses its own engine; if it can't prove reuse is safe
     // it returns null and a fresh engine does a clean full layout.
-    const attempt = new Engine(doc, measurer).runIncremental(options.prev, options.dirtyHint, options.dirtySource);
+    const attempt = new Engine(
+      doc,
+      measurer,
+      undefined,
+      options.windowModel === true,
+      options.mergeRecord,
+    ).runIncremental(options.prev, options.dirtyHint, options.dirtySource);
     if (attempt) return attempt;
   }
-  return layoutWithBodyPageTotal(doc, measurer);
+  return layoutWithBodyPageTotal(doc, measurer, options.windowModel === true, options.mergeRecord);
 }
 
 function bodyHasPageTotal(el: XmlElement): boolean {
@@ -83,13 +136,18 @@ function bodyHasPageTotal(el: XmlElement): boolean {
   return el.children.some(bodyHasPageTotal);
 }
 
-function layoutWithBodyPageTotal(doc: DocxDocument, measurer: TextMeasurer): LayoutResult {
-  let result = new Engine(doc, measurer).run();
+function layoutWithBodyPageTotal(
+  doc: DocxDocument,
+  measurer: TextMeasurer,
+  windowModel: boolean,
+  mergeRecord?: MergeRecord,
+): LayoutResult {
+  let result = new Engine(doc, measurer, undefined, windowModel, mergeRecord).run();
   if (!bodyHasPageTotal(doc.docRoot)) return result;
 
   for (let pass = 0; pass < 2; pass++) {
     const total = result.totalPages;
-    result = new Engine(doc, measurer, total).run();
+    result = new Engine(doc, measurer, total, windowModel, mergeRecord).run();
     if (result.totalPages === total) break;
   }
   return result;
@@ -103,8 +161,9 @@ export function relayoutHeadersFooters(
   doc: DocxDocument,
   prev: LayoutResult,
   measurer: TextMeasurer = createMeasurer(),
+  mergeRecord?: MergeRecord,
 ): LayoutResult | null {
-  return new Engine(doc, measurer).runHeadersFootersOnly(prev);
+  return new Engine(doc, measurer, undefined, false, mergeRecord).runHeadersFootersOnly(prev);
 }
 
 /** Full layout that yields between top-level blocks for large interactive
@@ -116,7 +175,7 @@ export async function layoutDocumentAsync(
 ): Promise<LayoutResult> {
   options.signal?.throwIfAborted();
   const measurer = options.measurer ?? createMeasurer();
-  const engine = new Engine(doc, measurer);
+  const engine = new Engine(doc, measurer, undefined, options.windowModel === true, options.mergeRecord);
   if (!engine.canRunAsync()) {
     await yieldToMain(options.signal);
     return layoutDocument(doc, options);
@@ -128,7 +187,13 @@ export async function layoutDocumentAsync(
   for (let pass = 0; pass < 2; pass++) {
     options.signal?.throwIfAborted();
     const total = result.totalPages;
-    result = await new Engine(doc, measurer, total).runAsync(options.signal, sliceMs);
+    result = await new Engine(
+      doc,
+      measurer,
+      total,
+      options.windowModel === true,
+      options.mergeRecord,
+    ).runAsync(options.signal, sliceMs);
     if (result.totalPages === total) break;
   }
   return result;
@@ -165,6 +230,11 @@ type ResolvedFrame = NonNullable<ParaProps["frame"]> & {
 
 interface InternalPage {
   items: PageItem[];
+  /** Text-box lines hidden past a noAutofit box's bottom edge; see
+   * LaidOutPage.hiddenText. */
+  hiddenText?: TextItem[];
+  /** The page shell remains, but positioned items can be rematerialized. */
+  discarded?: boolean;
   sp: SectionProps;
   physIndex: number;
   displayNumber: number;
@@ -217,6 +287,7 @@ interface LayoutSnapshot {
   pagesLen: number;
   page: InternalPage;
   itemsLen: number;
+  hiddenTextLen: number;
   bandTop: number;
   bannerTop: number | undefined;
   colXs: number[];
@@ -261,7 +332,7 @@ interface IncrState {
   lastParaSpacingAfter: number;
   lastParaAfterPad: number;
   lastParaWasEmpty: boolean;
-  trailingSectionBreakMarkGap: number;
+  sectionCloserBreakAfter: number | undefined;
   suppressNextSpaceBefore: boolean;
   docGridDropBefore: boolean;
   gridResyncPending: boolean;
@@ -293,11 +364,22 @@ interface IncrState {
 
 interface IncrPoint {
   blockIdx: number;
+  /** Which section `blockIdx` indexes into. The incremental relay only ever
+   * runs on single-section documents and always sees 0; the page window also
+   * covers multi-section documents, and rebuilds resume inside this section
+   * and then continue through the ones after it. */
+  sectionIndex: number;
   pageCount: number;
   /** Number of body items already emitted before this block. This lets an
    * edit resume at a clean block boundary inside a dense page instead of
    * replaying every earlier block on that page. */
   pageItemCount: number;
+  /** The page was paginated but not painted (see canPaginateOnly), so
+   * pageItemCount is 0 for want of items rather than for want of content: once
+   * the window rebuilds that page it will hold items this block sits after.
+   * A reader that only needs the carry state may resume here; one that needs
+   * the page's item prefix must not. */
+  paintless?: true;
   state: IncrState;
 }
 
@@ -320,6 +402,15 @@ export interface IncrData {
   seqAssigned: WeakMap<object, string>;
   refFieldPosition: WeakMap<object, "above" | "below">;
   refFieldParaNumber: WeakMap<object, string>;
+  /** Mail-merge record this layout painted (mergeRecordKey; "" for none).
+   *
+   * Stepping to the next record changes NO blocks — the document XML is
+   * byte-identical, which is the whole point of resolving merge values at
+   * layout time. So every other signal the incremental path checks says
+   * "reuse is safe", and it would repaint the PREVIOUS record's values under a
+   * counter reading "Record 3 of 40". This is the one input to the painted
+   * output that lives outside the document, so it has to be gated explicitly. */
+  mergeKey: string;
 }
 
 interface HeaderFooterData {
@@ -390,6 +481,7 @@ function laidOutPage(p: InternalPage): LaidOutPage {
     index: p.physIndex,
     number: p.displayNumber,
     items: p.items,
+    ...(p.hiddenText ? { hiddenText: p.hiddenText } : {}),
     bodyTop: p.bodyTop,
     bodyBottom: p.bodyBottom,
     hfStart: p.hfStart ?? p.items.length,
@@ -485,10 +577,13 @@ class Engine {
    * paragraph closing a section must not swallow the next section heading's
    * spacing-before). */
   private lastParaWasEmpty = false;
-  /** A legacy section-closing paragraph whose only line ends in a page break
-   * leaves its paragraph-mark line and spacing-after on the fresh page when
-   * the following section is continuous (NCCIH p4). */
-  private trailingSectionBreakMarkGap = 0;
+  /** Spacing-after of a section-closing paragraph that ended with a hard page
+   * break (a w:sectPr paragraph whose last line carries w:br type="page"),
+   * undefined when the closer did not break the page. The break itself opened
+   * the next section's page, so that page starts at the body top and the
+   * closer's after survives only in the collapse chain with the new page's
+   * first paragraph (NCCIH p4 - see layoutSectionWithBoundary). */
+  private sectionCloserBreakAfter: number | undefined;
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
   private bookmarkPageIndices = new Map<string, number>();
@@ -591,6 +686,7 @@ class Engine {
   private incrConvergePageIdx = -1;
   private incrConvergeItemDelta = 0;
   private incrConvergePrevPointPageIdx = -1;
+  private incrPrevWindow?: LayoutWindow;
   private incrPageShift = 0;
   /** New block indices are old indices plus this value after a structural
    * split, so convergence compares the same semantic suffix boundary. */
@@ -600,23 +696,100 @@ class Engine {
    * this block (before it, the relay trivially matches prev at the resume point
    * and would wrongly splice the edit away). */
   private incrFirstDirty = -1;
+  /** Stop a page-window relay at the first block boundary after this page. */
+  private materializeEndPage = -1;
+  private windowFullRun = false;
+  /** Section currently being laid; stamped onto each capture point. */
+  private curSectionIndex = 0;
+  private windowActive = false;
+  /** This run is an edit relay whose result inherits the previous run's page
+   * window, so its pages past the window are discarded exactly as a full run's
+   * are and may be paginated without being painted. */
+  private windowRelay = false;
+  private windowPointPages = 0;
+  private windowLastPointPage = -1;
+  /** Page of the last captured resume point, so capturePoint can keep at least
+   * one point per page whatever the block size is. */
+  private incrLastPointPage = -1;
+  private windowFontSamples = new Map<string, LayoutFontSample>();
+  private windowHasModel3D = false;
 
   constructor(
     private doc: DocxDocument,
     private measurer: TextMeasurer,
     private knownTotalPages?: number,
+    private windowModel = false,
+    private mergeRecord?: MergeRecord,
   ) {}
 
   run(): LayoutResult {
     this.startRun();
-    const sections = this.doc.sections;
-    let prevSp: SectionProps | null = null;
-    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
-      prevSp = this.layoutSectionWithBoundary(sections, sectionIndex, prevSp);
-    }
+    this.layoutSectionsFrom(0, null);
     return this.finishRun();
   }
 
+  /** Lay sections `from` onward, carrying the previous section's props across
+   * each boundary. Shared by a full run and by a windowed rebuild, which enters
+   * partway through so the boundary handling stays in one place. */
+  private layoutSectionsFrom(from: number, prevSp: SectionProps | null): void {
+    const sections = this.doc.sections;
+    for (let sectionIndex = from; sectionIndex < sections.length; sectionIndex++) {
+      prevSp = this.layoutSectionWithBoundary(sections, sectionIndex, prevSp);
+    }
+  }
+
+  /** Rebuild a contiguous page range from the closest page-top resume point. */
+  materializeRange(data: IncrData, startPage: number, endPage: number): InternalPage[] {
+    let resume: IncrPoint | undefined;
+    for (const point of data.points) {
+      // A point on an EARLIER page only supplies carry state — its own page is
+      // laid but never returned — so a paintless one serves as well as any. On
+      // the start page itself the zero must mean a genuine page top, or the
+      // rebuild would begin mid-page and drop everything above the block.
+      if (
+        point.pageCount < startPage ||
+        (point.pageCount === startPage && point.pageItemCount === 0 && !point.paintless)
+      ) resume = point;
+      if (point.pageCount > startPage) break;
+    }
+    if (!resume) throw new Error(`No layout resume point for page ${startPage + 1}`);
+
+    this.physBase = resume.pageCount;
+    this.displayBase = resume.state.page.displayNumber - 1;
+    this.materializeEndPage = endPage;
+    this.bookmarkPages = new Map(data.bookmarks);
+    this.bookmarkPageIndices = new Map(data.bookmarkPageIndices);
+    this.seqCounters = new Map(data.seqCounters);
+    this.seqAssigned = data.seqAssigned;
+    this.refFieldPosition = data.refFieldPosition;
+    this.refFieldParaNumber = data.refFieldParaNumber;
+    this.restoreIncrState(resume.state, []);
+    // Finish the section the point sits in, then lay the ones after it through
+    // the normal boundary path. Entering below layoutSection is what the
+    // single-column bar in windowEligible buys: there is no balancing pass
+    // wrapped around the section for this to skip.
+    const sections = this.doc.sections;
+    this.curSectionIndex = resume.sectionIndex;
+    this.layoutBlocks(sections[resume.sectionIndex].blocks, resume.blockIdx);
+    this.layoutSectionsFrom(resume.sectionIndex + 1, sections[resume.sectionIndex].props);
+
+    if (resume.pageCount === 0 && resume.blockIdx === 0) this.applyOpeningFlowOverlap();
+    this.emitColumnSeparators();
+    this.finalizeHeadersFooters();
+    this.rewritePageRefs(this.pages);
+    this.applySectionVAlign();
+    if (this.windowModel) {
+      sampleHeap();
+    }
+    return this.pages;
+  }
+
+  /** A windowed document is handled too. Discarded pages carry no body items
+   * to retain, and finalizeHeadersFooters already leaves them alone; they pick
+   * the new header/footer up from the current document when the window
+   * rebuilds them. The height check below still runs over every page including
+   * the discarded ones — it reads only page geometry, never body items — so a
+   * header that grows on a page outside the window is still caught. */
   runHeadersFootersOnly(prev: LayoutResult): LayoutResult | null {
     const prior = prev._hf as HeaderFooterData | undefined;
     if (!prior || prior.modelVersion !== this.doc.modelVersion || !this.hfFastPathEligible()) return null;
@@ -661,6 +834,26 @@ class Engine {
     };
     const incremental = prev._incr as IncrData | undefined;
     if (incremental) result._incr = { ...incremental, pages: this.pages } satisfies IncrData;
+    // The pages above are fresh objects, so the previous window controller
+    // still points at the old ones. Hand the window to a controller over the
+    // new array; it re-derives which pages are retained from their own
+    // `discarded` flags, so the window keeps the extent it already had.
+    if (prev._window && result._incr) {
+      const fontSamples = new Map(
+        (prev._fontSamples ?? []).map((sample) => [fontSampleKey(sample), sample]),
+      );
+      result._fontSamples = [...fontSamples.values()];
+      result._hasModel3D = prev._hasModel3D;
+      result._window = new LayoutWindowController(
+        this.doc,
+        this.measurer,
+        result,
+        result._incr as IncrData,
+        this.pages,
+        fontSamples,
+        this.mergeRecord,
+      );
+    }
     return result;
   }
 
@@ -693,12 +886,20 @@ class Engine {
   }
 
   private startRun(): void {
-    if (this.incrEligible()) {
+    // The relay and the window both run off capture points, but they do not
+    // need the same document. The relay diffs block signatures against one
+    // section's block list, so it stays single-section; the window only ever
+    // replays forward from a point, which works across section boundaries.
+    const relayOk = this.incrEligible();
+    const windowOk = this.windowModel && this.windowEligible();
+    if (relayOk || windowOk) { this.incrPoints = []; this.incrLastPointPage = -1; }
+    if (relayOk) {
       const blocks = this.doc.sections[0].blocks;
       this.incrSigs = blocks.map((b) => this.blockSig(b));
       this.incrLastNumberingUse = this.lastNumberingUse(blocks);
-      this.incrPoints = [];
     }
+    this.windowFullRun = windowOk;
+    setBreakCacheWindowed(this.measurer, windowOk);
     this.assignNoteNumbers();
     this.assignSeqNumbers();
     this.assignRefContext();
@@ -712,6 +913,7 @@ class Engine {
   ): SectionProps {
       const section = sections[sectionIndex];
       const sp = section.props;
+      this.curSectionIndex = sectionIndex;
       // A continuous section shares the page: restart the column band at the
       // current cursor. (Requires matching page geometry, and the previous
       // band must have ended in its first column - Word balances columns
@@ -755,13 +957,14 @@ class Engine {
           ? (this.doc.effectiveParaProps(closer).spacingAfter ?? 0)
           : undefined;
       const opener = section.blocks[0]?.type === "paragraph" ? section.blocks[0] : undefined;
-      const trailingSectionBreakMarkGap =
-        prevSp !== null &&
-        sp.type === "continuous" &&
-        this.doc.compatibilityMode < 15
-          ? this.trailingSectionBreakMarkGap
-          : 0;
-      this.trailingSectionBreakMarkGap = 0;
+      // Set when the previous section ended with a hard page break inside its
+      // w:sectPr paragraph. That break already opened the page this section
+      // starts on, so the section starts at the BODY TOP: the closer's
+      // paragraph-mark line and its spacing-after stay behind on the old page
+      // (nccih p4 probe - continuous and nextPage behave identically once the
+      // break happened).
+      const closerBreakAfter = prevSp !== null ? this.sectionCloserBreakAfter : undefined;
+      this.sectionCloserBreakAfter = undefined;
       const keepEmptyAfter =
         prevSp !== null &&
         emptyCloserAfter !== undefined &&
@@ -775,13 +978,22 @@ class Engine {
       // section's opener - Word does not zero it just because the mark line is
       // empty (probe3-field-switches p2: the section closer's 8pt after leaves
       // the Heading1 before=12pt opener 4pt below the margin, not the full 12pt).
+      // A closer that broke the page carries its after the same way, in both
+      // modes: the opener of the broken-to page gets max(0, before - after)
+      // (nccih p4 probe, mode 14 - after/before 6/12 -> 6pt, 6/24 -> 18pt,
+      // 24/12 -> 0pt). Such a closer is not "empty" (the w:br run is content),
+      // so its after has to come from the closer itself. A section start with
+      // no preceding break keeps the old behaviour - probe-sectionboundary
+      // shows we already match Word on those.
       const carryAfter = keepEmptyAfter
         ? (emptyCloserAfter ?? 0)
-        : this.doc.compatibilityMode >= 15 && !canContinue && emptyCloserAfter !== undefined
-          ? emptyCloserAfter
-          : this.lastParaWasEmpty
-            ? 0
-            : this.lastParaSpacingAfter;
+        : closerBreakAfter !== undefined
+          ? closerBreakAfter
+          : this.doc.compatibilityMode >= 15 && !canContinue && emptyCloserAfter !== undefined
+            ? emptyCloserAfter
+            : this.lastParaWasEmpty
+              ? 0
+              : this.lastParaSpacingAfter;
       // A new section's first paragraph governs its own spacing-before through
       // the cross-section carry-remainder rule (max(before, carriedAfter) -
       // carriedAfter), NOT the page-break drop. When the previous section ended
@@ -800,7 +1012,6 @@ class Engine {
         if (keepEmptyAfter) this.newPage(false);
         else this.newBand();
       } else this.newPage(true);
-      if (trailingSectionBreakMarkGap > 0) this.y += trailingSectionBreakMarkGap;
       if (prevSp !== null) {
         if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
         this.lastParaSpacingAfter = carryAfter;
@@ -856,6 +1067,7 @@ class Engine {
     this.finalizeHeadersFooters();
     this.rewritePageRefs(this.pages);
     this.applySectionVAlign();
+    this.releaseDiscardedPages();
     const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
     const result: LayoutResult = {
       pages,
@@ -864,9 +1076,11 @@ class Engine {
     };
     if (this.incrPoints && !this.incrAbort) {
       result._incr = {
-        sigs: this.incrSigs!,
+        // Empty on a window-only run: those are the relay's inputs, and
+        // runIncremental turns itself away (incrEligible) before reading them.
+        sigs: this.incrSigs ?? [],
         points: this.incrPoints,
-        lastNumberingUse: this.incrLastNumberingUse!,
+        lastNumberingUse: this.incrLastNumberingUse ?? new Map(),
         pages: this.pages,
         bookmarks: this.bookmarkPages,
         bookmarkPageIndices: this.bookmarkPageIndices,
@@ -875,15 +1089,36 @@ class Engine {
         seqAssigned: this.seqAssigned,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
+        mergeKey: mergeRecordKey(this.mergeRecord),
       } satisfies IncrData;
+    }
+    if (this.windowActive && result._incr && pages.length > 20) {
+      const incremental = result._incr as IncrData;
+      const pointPages = new Set(incremental.points.map((point) => point.pageCount));
+      if (pointPages.size > 1) {
+        result._fontSamples = [...this.windowFontSamples.values()];
+        result._hasModel3D = this.windowHasModel3D;
+        result._window = new LayoutWindowController(
+          this.doc,
+          this.measurer,
+          result,
+          incremental,
+          this.pages,
+          this.windowFontSamples,
+          this.mergeRecord,
+        );
+      }
+    }
+    if (this.windowActive) {
+      sampleHeap();
     }
     return result;
   }
 
-  /** Some document-opening empty paragraphs reserve a second mark line for
-   * pagination while the following content paints over it on page one. Keep
-   * the reservation in flow so later page breaks stay unchanged, then lift
-   * only the painted first-page body. */
+  /** A document-opening empty paragraph under a grown header reserves a second
+   * mark line for pagination while the following content paints over it on
+   * page one. Keep the reservation in flow so later page breaks stay
+   * unchanged, then lift only the painted first-page body. */
   private applyOpeningFlowOverlap(): void {
     const opening = this.doc.sections[0]?.blocks[0];
     const next = this.doc.sections[0]?.blocks[1];
@@ -897,8 +1132,6 @@ class Engine {
     ) {
       return;
     }
-    const beforeNegativeTable =
-      next?.type === "table" && (next.props.indent ?? 0) < 0;
     const header = this.doc.headers.get(page.headerRel ?? "");
     const headerAnchors = header?.blocks.flatMap((block) =>
       block.type === "paragraph" ? this.collectAnchors(block) : [],
@@ -910,19 +1143,16 @@ class Engine {
       headerAnchors.every(
         (shape) => !("wrap" in shape) || shape.wrap === undefined || shape.wrap === "none",
       );
-    if (!beforeNegativeTable && !beforeParagraphUnderUnwrappedHeader) return;
+    if (!beforeParagraphUnderUnwrappedHeader) return;
     const firstBodyItem = page.items.findIndex(
       (item) => item.kind !== "text" || item.text.length > 0,
     );
     if (firstBodyItem < 0) return;
     const paraProps = this.doc.effectiveParaProps(opening);
     const markProps = this.doc.effectiveRunProps(opening, paraProps.markRunProps ?? {});
-    let overlap = this.measurer.metrics(
-      fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
-    ).lineHeight;
-    if (beforeParagraphUnderUnwrappedHeader) {
-      overlap += paraProps.spacingAfter ?? 0;
-    }
+    const overlap =
+      this.measurer.metrics(fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"))
+        .lineHeight + (paraProps.spacingAfter ?? 0);
     for (let i = firstBodyItem; i < page.items.length; i++) {
       offsetItem(page.items[i], 0, -overlap);
     }
@@ -948,6 +1178,37 @@ class Engine {
     if (sp.textDirection === "tbRl") return false;
     if (sp.vAlign && sp.vAlign !== "top") return false;
     if (sp.lineNumbering) return false;
+    if (this._incrFeatureOk === null) {
+      this._incrFeatureOk =
+        !this.hasDisqualifyingFeature(this.doc.docRoot) && !this.hfHasTotalField() && !this.hfHasStyleRef();
+    }
+    return this._incrFeatureOk;
+  }
+
+  /** Whether the page window can rebuild this document from capture points.
+   *
+   * Same envelope as the incremental relay except for the section count: a
+   * rebuild resumes inside one section and then lays the sections after it
+   * through the ordinary boundary path, so several sections are fine. Every
+   * section has to clear the per-section bars, though — the relay only ever
+   * checked section 0 because that was the only one it could see.
+   *
+   * Single-column is the load-bearing one. A rebuild re-enters the flow at a
+   * block, below the column-balancing pass that layoutSection wraps around a
+   * whole section, so a balanced section could not be reproduced from a point
+   * inside it. balanceEligible is false without a second column, which keeps
+   * that pass out of the picture entirely. */
+  private windowEligible(): boolean {
+    if (this.incrAbort) return false;
+    if (this.doc.footnotes.size > 0 || this.doc.endnotes.size > 0) return false;
+    if (this.doc.mirrorMargins) return false;
+    for (const section of this.doc.sections) {
+      const sp = section.props;
+      if (sp.columns.count > 1) return false;
+      if (sp.textDirection === "tbRl") return false;
+      if (sp.vAlign && sp.vAlign !== "top") return false;
+      if (sp.lineNumbering) return false;
+    }
     if (this._incrFeatureOk === null) {
       this._incrFeatureOk =
         !this.hasDisqualifyingFeature(this.doc.docRoot) && !this.hfHasTotalField() && !this.hfHasStyleRef();
@@ -1073,15 +1334,42 @@ class Engine {
       p.footnotes.length !== 0
     ) return;
     const atPageTop = p.items.length === 0 && Math.abs(this.y - p.bodyTop) < 1e-6;
-    // Numbering state grows throughout long legal documents. Keep every page
-    // top plus a bounded sample of intra-page block points so the retained
-    // counter snapshots stay modest while replay remains capped at 15 blocks.
-    if (!atPageTop && blockIdx % 16 !== 0) return;
     const globalPageIdx = this.pages.length - 1 + this.physBase;
+    // Numbering state grows throughout long legal documents. Keep every page
+    // top, a bounded sample of intra-page block points, AND at least one point
+    // per page, so the retained counter snapshots stay modest while the replay
+    // stays near the edit.
+    //
+    // THE PER-PAGE CLAUSE IS NOT REDUNDANT with the page-top one. A page-top
+    // point needs a block to START exactly at the top of a page; a document
+    // whose paragraphs are each two-thirds of a page almost never does that,
+    // so it captured nothing there and fell back to one point per 16 blocks —
+    // which on that document is one point per ELEVEN PAGES. A keystroke then
+    // replayed eleven pages of layout and handed the renderer eleven fresh
+    // page objects to rebuild (measured: 108ms per keystroke on a 164-page
+    // document, against 16ms for the same text in ordinary paragraphs). The
+    // block sample alone silently assumed many blocks per page; bounding by
+    // page as well holds whatever the block size is.
+    if (
+      !atPageTop &&
+      blockIdx % 16 !== 0 &&
+      globalPageIdx === this.incrLastPointPage
+    ) return;
+    if (this.windowFullRun && globalPageIdx !== this.windowLastPointPage) {
+      this.windowLastPointPage = globalPageIdx;
+      this.windowPointPages++;
+      if (this.windowPointPages > 1 && this.pages.length > 20) {
+        this.windowActive = true;
+        this.pruneFullRunPages();
+      }
+    }
     const snapshot = (): IncrPoint => ({
       blockIdx,
+      sectionIndex: this.curSectionIndex,
       pageCount: globalPageIdx,
       pageItemCount: p.items.length,
+      // Not "no items yet" but "no items at all": see IncrPoint.paintless.
+      ...(p.discarded && !atPageTop ? { paintless: true as const } : {}),
       state: {
         col: this.col,
         y: this.y,
@@ -1089,7 +1377,7 @@ class Engine {
         lastParaSpacingAfter: this.lastParaSpacingAfter,
         lastParaAfterPad: this.lastParaAfterPad,
         lastParaWasEmpty: this.lastParaWasEmpty,
-        trailingSectionBreakMarkGap: this.trailingSectionBreakMarkGap,
+        sectionCloserBreakAfter: this.sectionCloserBreakAfter,
         suppressNextSpaceBefore: this.suppressNextSpaceBefore,
         docGridDropBefore: this.docGridDropBefore,
         gridResyncPending: this.gridResyncPending,
@@ -1123,12 +1411,18 @@ class Engine {
     if (this.incrPrevPoints && blockIdx > this.incrFirstDirty) {
       const pp = this.incrPrevPoints.get(blockIdx);
       const pageShift = pp ? globalPageIdx - pp.pageCount : 0;
-      if (pp && this.statesMatch(pp.state, pageShift, blockIdx)) {
+      // Converging mid-page splices the old page's body from pp.pageItemCount,
+      // which a paintless point cannot supply. At a page top the count is a
+      // true zero either way and the whole old page is reused, so only the
+      // mid-page form has to wait for the next point.
+      const ppUsable = pp !== undefined && (!pp.paintless || atPageTop);
+      if (pp && ppUsable && this.statesMatch(pp.state, pageShift, blockIdx)) {
         __incrStats.convergedBlock = blockIdx;
         __incrStats.convergedPage = globalPageIdx;
         __incrStats.pageShift = pageShift;
         this.incrPageShift = pageShift;
         this.incrConvergePrevPointPageIdx = pp.pageCount;
+        this.incrLastPointPage = globalPageIdx;
         this.incrPoints.push(snapshot());
         const reuseWholePage =
           p.items.length === 0 &&
@@ -1138,6 +1432,7 @@ class Engine {
           this.incrConvergePrevPageIdx = pp.pageCount;
           this.pages.pop();
         } else {
+          this.incrPrevWindow?.materialize([pp.pageCount]);
           const oldPage = this.incrPrevPages?.[pp.pageCount];
           if (!oldPage) return;
           const freshCount = p.items.length;
@@ -1151,6 +1446,7 @@ class Engine {
         return;
       }
     }
+    this.incrLastPointPage = globalPageIdx;
     this.incrPoints.push(snapshot());
   }
 
@@ -1166,7 +1462,7 @@ class Engine {
       this.lastParaSpacingAfter !== s.lastParaSpacingAfter ||
       this.lastParaAfterPad !== s.lastParaAfterPad ||
       this.lastParaWasEmpty !== s.lastParaWasEmpty ||
-      this.trailingSectionBreakMarkGap !== s.trailingSectionBreakMarkGap ||
+      this.sectionCloserBreakAfter !== s.sectionCloserBreakAfter ||
       this.suppressNextSpaceBefore !== s.suppressNextSpaceBefore ||
       this.docGridDropBefore !== s.docGridDropBefore ||
       this.gridResyncPending !== s.gridResyncPending ||
@@ -1237,7 +1533,7 @@ class Engine {
     this.lastParaSpacingAfter = s.lastParaSpacingAfter;
     this.lastParaAfterPad = s.lastParaAfterPad;
     this.lastParaWasEmpty = s.lastParaWasEmpty;
-    this.trailingSectionBreakMarkGap = s.trailingSectionBreakMarkGap;
+    this.sectionCloserBreakAfter = s.sectionCloserBreakAfter;
     this.suppressNextSpaceBefore = s.suppressNextSpaceBefore;
     this.docGridDropBefore = s.docGridDropBefore;
     this.gridResyncPending = s.gridResyncPending;
@@ -1245,6 +1541,86 @@ class Engine {
     this.bannerSlotUsed = s.bannerSlotUsed;
     this.counters = new Map(s.counters.map(([k, v]) => [k, [...v]]));
     this.seenNumIds = new Set(s.seenNumIds);
+  }
+
+  /** Drop positioned items for pages behind the opening window, keeping the
+   * page shells so the window can rebuild them from capture points.
+   *
+   * The measurer's break cache is deliberately NOT dropped alongside them, and
+   * it cannot be windowed the way these items are. The relay itself converges
+   * fine past the shifted block indices a splitParagraph creates (see
+   * packages/core/test/incremental-convergence.test.ts). What it cannot do is
+   * converge in continuous prose, because there the reflow is real: the added
+   * line pushes the last line of the page onto the next page, and so on to the
+   * end of the document. That relay re-lays every later block by necessity and
+   * asks this cache for each one's line breaks, so its working set is the whole
+   * document tail. Measured on 3,500 paragraphs: an Enter costs 361 measure
+   * calls served from cache, against 382,897 once the entries it walks are
+   * evicted. Scoping the cache to the page window would evict exactly those. */
+  private pruneFullRunPages(): void {
+    sampleHeap();
+    for (let index = INITIAL_MODEL_WINDOW_PAGES; index < this.pages.length - 1; index++) {
+      const page = this.pages[index];
+      if (!page.discarded) this.discardPage(page);
+    }
+  }
+
+  /** Whether a paragraph starting at the cursor may be paginated without being
+   * painted, taking its line breaks from the cache's metrics tier.
+   *
+   * Once the window is active, every page from INITIAL_MODEL_WINDOW_PAGES on is
+   * discarded the moment a later capture point passes it, so the items laid on
+   * it are thrown away — and keeping them layable is exactly what forces the
+   * break cache to retain a full span set per paragraph. Skipping the emission
+   * lets those paragraphs live in the metrics tier instead.
+   *
+   * windowActive is the gate rather than windowFullRun because it is also what
+   * finishRun installs the window controller on: a page nobody paints must be
+   * one the controller can rebuild. A rematerializing run (materializeEndPage
+   * >= 0) is the rebuild, so it always paints.
+   *
+   * The page count is the count for THIS run, not the document: a relay paints
+   * the window's worth of pages from where it resumes, which is where the edit
+   * (and so the caret, and so the viewport) is. */
+  private canPaginateOnly(): boolean {
+    return (
+      (this.windowActive || this.windowRelay) &&
+      this.materializeEndPage < 0 &&
+      !this.balMeasuring &&
+      this.cur.physIndex !== -1 &&
+      this.pages.length - 1 >= INITIAL_MODEL_WINDOW_PAGES
+    );
+  }
+
+  /** Font samples a paginate-only paragraph contributes in place of the page
+   * items collectPageMetadata would otherwise have read them from. */
+  private mergeWindowFontSamples(samples: LayoutFontSample[] | undefined): void {
+    for (const sample of samples ?? []) mergeFontSample(this.windowFontSamples, sample);
+  }
+
+  /** Clear every page the run flagged as outside the window. Runs after the
+   * post-passes, which may push items (page borders, column separators) onto a
+   * flagged page, and after a paginate-only paragraph left one holding only the
+   * items a resume point restored ahead of it. */
+  private releaseDiscardedPages(): void {
+    for (const page of this.pages) {
+      if (!page.discarded) continue;
+      this.discardPage(page);
+      for (const note of page.footnotes) note.items = [];
+    }
+  }
+
+  private discardPage(page: InternalPage): void {
+    collectPageMetadata(
+      page,
+      this.windowFontSamples,
+      () => {
+        this.windowHasModel3D = true;
+      },
+    );
+    page.items = [];
+    page.hfStart = 0;
+    page.discarded = true;
   }
 
   private bodyHasPageField(el: XmlElement = this.doc.docRoot): boolean {
@@ -1326,6 +1702,10 @@ class Engine {
     // undo replaces the XML descendants). Plain in-place text edits keep the
     // generation stable and are the incremental fast path.
     if (!sameModel) return fallback("model-version");
+    // Mail-merge preview: the active record is an input to the painted text
+    // that is NOT in the document, so no block signature can see it change.
+    // Stepping records must therefore force a full layout. See IncrData.mergeKey.
+    if (inc.mergeKey !== mergeRecordKey(this.mergeRecord)) return fallback("merge-record");
     // A retained incremental result proves the previous model was eligible.
     // An in-place text edit cannot introduce a disqualifying structural field,
     // frame, section, or note, so avoid rescanning the complete XML tree.
@@ -1458,7 +1838,7 @@ class Engine {
       }
     }
 
-    // Latest captured page top at or before the first changed block.
+    // Latest captured point at or before the first changed block.
     let rp: IncrPoint | undefined;
     for (const pt of inc.points) {
       if (pt.blockIdx <= firstDirty) rp = pt;
@@ -1466,6 +1846,14 @@ class Engine {
     }
     if (!rp || rp.pageCount >= inc.pages.length) return fallback("resume-point");
     const prefixCount = rp.pageCount;
+    // A paintless point cannot say how much of its page precedes the resume
+    // block, so the relay cannot seed the page with that prefix — it resumes
+    // mid-page holding nothing, and hands the page to the window to rebuild
+    // whole. Resuming from the last PAINTED point instead would mean walking
+    // back to the window itself, which for an edit late in a long document is
+    // most of the document (measured: 3,341 blocks against 109).
+    const prefixItems = rp.paintless ? [] : inc.pages[prefixCount].items.slice(0, rp.pageItemCount);
+    if (!rp.paintless) prev._window?.materialize([prefixCount]);
 
     this.seqCounters = new Map(inc.seqCounters);
     this.seqAssigned = inc.seqAssigned;
@@ -1476,10 +1864,16 @@ class Engine {
     this.displayBase = prefixCount > 0 ? inc.pages[prefixCount - 1].displayNumber : 0;
     this.incrSigs = newSigs;
     this.incrPoints = [];
+    this.incrLastPointPage = -1;
     const shiftedBlockIdx = (blockIdx: number): number =>
       blockIdx > this.incrBlockShiftAfter ? blockIdx + this.incrBlockDelta : blockIdx;
     this.incrPrevPoints = new Map(inc.points.map((pt) => [shiftedBlockIdx(pt.blockIdx), pt]));
     this.incrPrevPages = inc.pages;
+    this.incrPrevWindow = prev._window;
+    // The window controller below is rebuilt only when prev had one; without it
+    // nothing could rematerialize a page this run declines to paint.
+    this.windowRelay = prev._window !== undefined;
+    setBreakCacheWindowed(this.measurer, this.windowRelay);
     this.incrFirstDirty = firstDirty;
     __incrStats.resumeBlock = rp.blockIdx;
     __incrStats.resumePage = rp.pageCount;
@@ -1487,7 +1881,11 @@ class Engine {
     __incrStats.convergedPage = -1;
     __incrStats.pageShift = 0;
     __incrStats.blocksLaid = 0;
-    this.restoreIncrState(rp.state, inc.pages[rp.pageCount].items.slice(0, rp.pageItemCount));
+    this.restoreIncrState(rp.state, prefixItems);
+    // The resume page is missing everything above the resume block, so it is
+    // not a page anyone may read; releaseDiscardedPages empties it and the
+    // window controller lays it again in full on demand.
+    if (rp.paintless) this.cur.discarded = true;
     this.layoutBlocks(blocks, rp.blockIdx);
     if (this.incrAbort) return fallback("layout-abort");
 
@@ -1569,6 +1967,7 @@ class Engine {
     }
     this.rewritePageRefs(this.pages);
     if (this.incrAbort) return fallback("postpass-abort");
+    this.releaseDiscardedPages();
 
     const middle = this.pages.slice(0, middleCount).map((p) => laidOutPage(p));
     // A dirty block can begin on the preceding page with a leading page break,
@@ -1622,7 +2021,7 @@ class Engine {
       );
     const perf = (globalThis as { __dxwPerf?: { incr?: typeof __incrStats } }).__dxwPerf;
     if (perf) perf.incr = { ...__incrStats };
-    return {
+    const result: LayoutResult = {
       pages: outPages,
       totalPages: outPages.length,
       _hf: { pages: outInternal, modelVersion: this.doc.modelVersion } satisfies HeaderFooterData,
@@ -1638,10 +2037,31 @@ class Engine {
         seqAssigned: this.seqAssigned,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
+        mergeKey: mergeRecordKey(this.mergeRecord),
       } satisfies IncrData,
       _incremental: true,
       _incrementalStructuralPrefixEnd: structuralPrefixEnd,
     };
+    if (prev._window) {
+      const fontSamples = new Map(
+        (prev._fontSamples ?? []).map((sample) => [fontSampleKey(sample), sample]),
+      );
+      result._fontSamples = [...fontSamples.values()];
+      result._hasModel3D = prev._hasModel3D;
+      result._window = new LayoutWindowController(
+        this.doc,
+        this.measurer,
+        result,
+        result._incr as IncrData,
+        outInternal,
+        fontSamples,
+        this.mergeRecord,
+      );
+    }
+    if (result._window) {
+      sampleHeap();
+    }
+    return result;
   }
 
   /**
@@ -1705,11 +2125,7 @@ class Engine {
   private layoutVerticalSection(section: Section): void {
     const sp = this.sp;
     const page = this.cur;
-    // newPage drops the first line 4 grid rows below the top margin for
-    // docGrid sections (a horizontal-writing rule); vertical text starts at
-    // the top margin, so undo that bump for the column-length axis.
-    const gridBump = sp.docGridLinePitch ? 4 * sp.docGridLinePitch : 0;
-    const bodyTop = page.bodyTop - gridBump;
+    const bodyTop = page.bodyTop;
     const frameWidth = Math.max(4, page.bodyBottom - bodyTop);
     const bodyRight = sp.pageWidth - sp.marginRight;
     this.verticalGridFlow = true;
@@ -1794,13 +2210,22 @@ class Engine {
       displayNumber,
       headerHeight: 0,
       footerHeight: 0,
-      // Legacy Word keeps a 3pt printable-edge inset when a signed negative
-      // top margin fixes body flow independently of the header. California
-      // pleading paper exposes this exactly: the 24pt body grid begins 3pt
-      // below the raw -66.25pt margin while the header stays at headerDist.
-      bodyTop: sp.marginTop < 0 ? sp.marginTop + ptToPx(3) : sp.marginTop,
-      bandTop: sp.marginTop < 0 ? sp.marginTop + ptToPx(3) : sp.marginTop,
+      // A negative w:top is an ABSOLUTE distance, not a signed one: Word puts
+      // the body top |w:top| below the top of the page, a fixed position that
+      // ignores the header. probe-negmargin sweeps six negative w:top settings
+      // against two header heights and two w:header distances; the body top is
+      // linear in |w:top| with slope 1 and a constant +0.18px residual, and
+      // both header variables are inert (parity ca7493d). Above zero the
+      // header does govern and the block below rebuilds bodyTop, so abs() only
+      // ever bites for a negative margin. bodyBottom reads its own sign the
+      // same way.
+      bodyTop: Math.abs(sp.marginTop),
+      bandTop: Math.abs(sp.marginTop),
       softTop: !sectionStart,
+      // Same absolute reading for a negative w:bottom, which fixes the body
+      // bottom |w:bottom| above the page edge and lets text run over the
+      // footer. ECMA-consistent and symmetric with bodyTop, but no probe row
+      // pins it yet.
       bodyBottom: sp.pageHeight - Math.abs(sp.marginBottom),
       colXs,
       colWidths,
@@ -1842,29 +2267,37 @@ class Engine {
     page.footerHeight = footerH;
 
     if (sp.marginTop >= 0) {
-      const headerBodyHeight =
-        this.doc.compatibilityMode < 15 &&
-        header?.blocks.every((block) => block.type === "paragraph" && !paragraphHasContent(block))
-          ? ptToPx(7)
-          : headerH;
-      page.bodyTop = Math.max(
-        sp.marginTop,
-        headerBodyHeight > 0 ? sp.headerDistance + headerBodyHeight : 0,
-      );
+      // An all-empty-paragraph header charges its measured height like any
+      // other: us-courts-answer (compat 11, empty header, headerDistance 48px
+      // = marginTop 48px) puts Word's caption row top at 70.87 = 48 + the
+      // empty paragraph's full 18.55px default-12pt line + tcMar 3.87 + the
+      // 8pt glyph offset, to 0.1pt. The flat 7pt this branch used to charge
+      // carried no probe and was canceling against the hidden-SEQ strut
+      // oversizing the caption line (see inline.ts solidSpans).
+      page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
       page.bandTop = page.bodyTop;
       page.headerGrown = page.bodyTop > sp.marginTop;
     }
-    // w:docGrid: Word reserves four grid rows at a section opening. Heading 1
-    // uses the first row plus its 1.5pt leading; placeParagraph narrows the
-    // reserve once it can inspect the opening paragraph style.
+    // w:docGrid: a section opening under a lines grid starts AT the body top.
+    // Word reserves no grid rows for it (probe-docgrid, six sections: Word's
+    // first line sits at 98.90 against a 96.00 body top under every pitch in
+    // the sweep, where our old four-row reserve put it at 184.52). Two
+    // authored openings do sit lower; placeParagraph drops those once it can
+    // inspect the opening paragraph.
     if (sp.docGridLinePitch && isFirstOfSection) {
-      page.bodyTop += 4 * sp.docGridLinePitch;
       this.docGridDropBefore = true;
     }
     if (sp.marginBottom >= 0) {
+      // A footer PART reserves at least its w:footer distance even when its
+      // flow height is zero: us-courts-answer (footer = a page-anchored frame
+      // + one empty paragraph, footerDistance 38.4px > marginBottom 28.8px)
+      // paginates on a 1017.6px bottom — Word moves the spacer row that
+      // would end at ~1023 and keeps the one ending at 992, and the corpus
+      // 7x0.00 baseline was reproduced only at exactly this bottom. With no
+      // footer part at all the margin alone governs, as before.
       page.bodyBottom = Math.min(
         sp.pageHeight - sp.marginBottom,
-        footerH > 0 ? sp.pageHeight - sp.footerDistance - footerH : sp.pageHeight,
+        footer ? sp.pageHeight - sp.footerDistance - footerH : sp.pageHeight,
       );
     }
 
@@ -2036,6 +2469,7 @@ class Engine {
       pagesLen: this.pages.length,
       page: p,
       itemsLen: p.items.length,
+      hiddenTextLen: p.hiddenText?.length ?? 0,
       bandTop: p.bandTop,
       bannerTop: p.bannerTop,
       colXs: [...p.colXs],
@@ -2076,6 +2510,7 @@ class Engine {
     for (const rp of removed) this.floats.delete(rp);
     const p = s.page;
     p.items.length = s.itemsLen;
+    if (p.hiddenText) p.hiddenText.length = s.hiddenTextLen;
     p.bandTop = s.bandTop;
     p.bannerTop = s.bannerTop;
     p.colXs = s.colXs;
@@ -2222,7 +2657,66 @@ class Engine {
       refText: (bookmark) => engine.refBookmarkText(bookmark),
       refPosition: (key) => engine.refFieldPosition.get(key),
       refParaNumber: (key) => engine.refFieldParaNumber.get(key),
+      styleRefBody: (_name, key) => engine.resolveBodyStyleRef(key),
+      citation: (instruction) => engine.resolveCitation(instruction),
+      textStats: () => engine.resolveTextStats(),
+      // Mail-merge preview. Own-property lookup, so a column named
+      // "constructor" or "toString" reads as absent rather than as a function
+      // off Object.prototype. Absent column -> undefined -> the «Name»
+      // placeholder survives; present-but-empty -> "" -> renders empty.
+      mergeField: (name) => {
+        const record = engine.mergeRecord;
+        return record && Object.prototype.hasOwnProperty.call(record, name) ? record[name] : undefined;
+      },
     };
+  }
+
+  /**
+   * NUMWORDS/NUMCHARS statistics, built on first use like the bibliography
+   * above: a document with neither field never pays for the body walk.
+   * src/word-count.ts holds the rule and the update pass reads that same one,
+   * so the painted text and the written cache cannot disagree.
+   */
+  private textStats: TextStatistics | undefined;
+  private resolveTextStats(): TextStatistics {
+    this.textStats ??= documentTextStatistics(this.doc);
+    return this.textStats;
+  }
+
+  /**
+   * A CITATION's display text from the document's sources part, in its
+   * citation style. Built on first use like bodyStyleRefs below: a document
+   * with no CITATION field never reads the part. src/citations.ts holds the
+   * rule and the update pass reads that same one, so the painted text and the
+   * written cache cannot disagree.
+   */
+  private bibliography: Bibliography | null | undefined;
+  private resolveCitation(instruction: string): string | undefined {
+    if (this.bibliography === undefined) this.bibliography = documentBibliography(this.doc);
+    return this.bibliography ? citationText(instruction, this.bibliography) : undefined;
+  }
+
+  /**
+   * A body STYLEREF's text: the nearest paragraph of the named style at or
+   * before the field, in document order. src/style-ref.ts holds the rule, and
+   * the update pass reads that same one, so what the screen paints and what a
+   * save writes into the cache cannot disagree.
+   *
+   * Built ON FIRST USE rather than in startRun beside the other document-order
+   * pre-passes. inline.ts consults this hook only for a STYLEREF outside a
+   * header, so a document without one never pays for the walk — and proving
+   * "this document has no body STYLEREF" would cost the same walk that builds
+   * the map.
+   *
+   * Keyed by field identity and derived from the whole model, so neither the
+   * page window nor an incremental relay's reused prefix can change an answer:
+   * a field resolves against the paragraphs before it whether or not those
+   * pages were laid out this time.
+   */
+  private bodyStyleRefs: Map<FieldContent, string> | null = null;
+  private resolveBodyStyleRef(key: object): string | undefined {
+    this.bodyStyleRefs ??= bodyStyleRefText(this.doc);
+    return this.bodyStyleRefs.get(key as FieldContent);
   }
 
   /** Current text of a `_Ref` cross-reference bookmark range (REF fields).
@@ -2529,13 +3023,20 @@ class Engine {
 
   // ---------- footnotes / endnotes ----------
 
-  /** Marks are numbered by document order of their references, not layout order. */
+  /**
+   * Marks are numbered by document order of their references, not layout
+   * order. w:numRestart's "eachSect" value resets the running counter to
+   * that section's own numStart when the section begins — cheap to honor
+   * here since sections are already visited in order. "eachPage" is NOT
+   * honored: numbers are assigned in this one document-order pass before
+   * pagination runs, so which page a note lands on isn't known yet; the
+   * value round-trips (parse/section.ts, setFootnoteOptions/
+   * setEndnoteOptions) but the layout keeps counting continuously.
+   */
   private assignNoteNumbers(): void {
-    let fn = 0;
-    let en = 0;
     const sp0 = this.doc.sections[0]?.props;
-    const fnStart = sp0?.footnoteNumStart ?? 1;
-    const enStart = sp0?.endnoteNumStart ?? 1;
+    let fnCounter = (sp0?.footnoteNumStart ?? 1) - 1;
+    let enCounter = (sp0?.endnoteNumStart ?? 1) - 1;
     const visit = (blocks: Block[]) => {
       for (const b of blocks) {
         if (b.type === "paragraph") {
@@ -2545,9 +3046,9 @@ class Engine {
               for (const rc of r.content) {
                 if (rc.kind !== "noteRef" || rc.self || rc.customMarkFollows) continue;
                 if (rc.noteType === "footnote" && this.doc.footnotes.has(rc.id) && !this.footnoteNumbers.has(rc.id)) {
-                  this.footnoteNumbers.set(rc.id, fnStart + fn++);
+                  this.footnoteNumbers.set(rc.id, ++fnCounter);
                 } else if (rc.noteType === "endnote" && this.doc.endnotes.has(rc.id) && !this.endnoteNumbers.has(rc.id)) {
-                  this.endnoteNumbers.set(rc.id, enStart + en++);
+                  this.endnoteNumbers.set(rc.id, ++enCounter);
                 }
               }
             }
@@ -2557,7 +3058,14 @@ class Engine {
         }
       }
     };
-    for (const s of this.doc.sections) visit(s.blocks);
+    const sections = this.doc.sections;
+    for (const s of sections) {
+      if (s !== sections[0]) {
+        if (s.props.footnoteNumRestart === "eachSect") fnCounter = (s.props.footnoteNumStart ?? 1) - 1;
+        if (s.props.endnoteNumRestart === "eachSect") enCounter = (s.props.endnoteNumStart ?? 1) - 1;
+      }
+      visit(s.blocks);
+    }
   }
 
   private footnoteMark(id: number): string {
@@ -2748,6 +3256,10 @@ class Engine {
   private layoutBlocks(blocks: Block[], startIdx = 0): void {
     this.prepareBlockFlow(startIdx);
     for (let i = startIdx; i < blocks.length; i++) {
+      if (
+        this.materializeEndPage >= 0 &&
+        this.pages.length - 1 + this.physBase > this.materializeEndPage
+      ) return;
       if (this.incrPoints) this.capturePoint(i);
       if (this.incrConvergePrevPageIdx >= 0) return; // tail re-converged; suffix reused
       this.layoutBlock(blocks, i);
@@ -2802,28 +3314,35 @@ class Engine {
           }
           return;
         }
-        // PDF-measured (wild2-legal p1, wild2-med-phase23 p1): the empty
-        // paragraph that OPENS the document can take two slots in Word.
-        // Before a table this reserves two mark lines for pagination; a
-        // negatively-indented table visually overlaps the second line (handled
-        // when the table is painted below). Before a paragraph the doubling
-        // only happens when the HEADER OUTGREW the top margin, and then
-        // includes the mark's spacing-after too:
-        // phase23's first body baseline is at grown bodyTop + 2 x (13.4 line
-        // + 6 after) + ascent (179.05), while its continuation pages start
-        // exactly at bodyTop (140.30). An empty opener before a paragraph
-        // under a NORMAL header takes ONE slot (wild-athabasca p1), and the
-        // same construct mid-flow takes ONE line (wild2-legal's p15/p23
-        // signature tables match at a single mark line) - gate on the true
-        // document start: first page, nothing placed yet.
+        // PDF-measured (wild2-med-phase23 p1): the empty paragraph that OPENS
+        // the document takes two slots in Word when the HEADER OUTGREW the top
+        // margin, and then includes the mark's spacing-after too: phase23's
+        // first body baseline is at grown bodyTop + 2 x (13.4 line + 6 after)
+        // + ascent (179.05), while its continuation pages start exactly at
+        // bodyTop (140.30). An empty opener before a paragraph under a NORMAL
+        // header takes ONE slot (wild-athabasca p1), and the same construct
+        // mid-flow takes ONE line (wild2-legal-ca-agreement's p14/p22 signature
+        // tables match at a single mark line) - gate on the true document
+        // start: first page, nothing placed yet.
+        //
+        // A doubling BEFORE A TABLE used to be applied here too, cited to
+        // wild2-legal-ca-agreement p1. That is retracted: the reference it was
+        // read from was the stale 23-page export, and the current-build one
+        // puts the opener at ONE line. Word's own letterhead table on that
+        // page starts at 114.38 - the row-2 cell-top rule sits at 131.71 and
+        // the exact row above it is 260tw = 17.33px - against a body top of
+        // 96, so Word charges 18.38px where the opener's mark line is 18.40.
+        // The second line was never painted either: applyOpeningFlowOverlap
+        // lifted the whole first-page body back up by exactly the same amount,
+        // so the reservation only ever moved the FLOW, and it moved it far
+        // enough to spill the document's break-only paragraph onto a 23rd page.
         const docStartEmpty =
           this.pages.length === 1 &&
           this.cur.items.length === 0 &&
           i === 0 &&
           !block.sectionBreak &&
           !paragraphHasContent(block);
-        const beforeTable = blocks[i + 1]?.type === "table";
-        const doubled = docStartEmpty && (beforeTable || this.cur.headerGrown === true);
+        const doubled = docStartEmpty && this.cur.headerGrown === true;
         // A page/margin-anchored floating table LATER in the flow reflows the
         // content before it: register its wrap rect now so this paragraph (and
         // following ones) flow around the absolute footprint (probe3-table-
@@ -2853,9 +3372,7 @@ class Engine {
           this.y += this.measurer.metrics(
             fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
           ).lineHeight;
-          // The table case is pinned WITHOUT the after (wild2-legal's 2 x 13.8
-          // exactly); the paragraph case needs it (phase23's 2 x 19.4).
-          if (!beforeTable) this.y += paraProps.spacingAfter ?? 0;
+          this.y += paraProps.spacingAfter ?? 0; // phase23's 2 x 19.4
         }
       } else {
         this.placeTable(block);
@@ -2946,7 +3463,7 @@ class Engine {
       const code = lvl.text.codePointAt(0) ?? 0;
       // Word sizes the bullet's LINE from the label's true (fallback) face
       // while the painted glyph maps through Unicode substitution. Face
-      // routing measured from Word PDFs (phase23 + wild2-legal p3): a literal
+      // routing measured from Word PDFs (phase23 + wild2-legal-ca-agreement p2): a literal
       // Unicode bullet declared in a symbol-encoded face falls back to
       // Microsoft JhengHei (17.0pt lines at 11pt); a PUA bullet in Symbol
       // keeps Symbol's hhea 1.2734em (14.0pt lines among 13.5pt Calibri;
@@ -3003,10 +3520,13 @@ class Engine {
       const y0 = paraTop + yOffset;
       const y1 = y0 + estHeight;
       const floats = this.floats.get(page) ?? [];
-      // Boundary-touching counts as overlap: Word narrows the line whose top
-      // sits exactly at the float's bottom (parity-wrapmodes: a 72px image
-      // over 18px lines wraps five rows, not four).
-      const overlaps = (f: { y0: number; y1: number }) => f.y1 >= y0 - 0.25 && f.y0 <= y1 - 0.25;
+      // A float's BOTTOM edge is exclusive: a line whose top sits exactly at
+      // the float's bottom runs full width (probe-wrapclear groups A/C — Word
+      // resumes cleared text with its line top exactly at the float bottom and
+      // gives it the whole column). parity-wrapmodes' fifth beside-row is not a
+      // counter-example: its top sits 0.30pt ABOVE the float bottom, a real
+      // overlap. The top edge keeps its slack for float-position noise.
+      const overlaps = (f: { y0: number; y1: number }) => f.y1 > y0 + 0.01 && f.y0 <= y1 - 0.25;
       // A top-and-bottom float pushes the whole line below it. When the
       // paragraph's FIRST line is displaced, Word re-applies the paragraph's
       // space-before below the band (parity2-textboxes p1: the Heading1 after
@@ -3055,14 +3575,18 @@ class Engine {
         for (const f of floats) {
           if (f.mode === "square" && f.y1 > y0 && f.y0 < y1) bottom = Math.max(bottom, f.y1);
         }
-        if (bottom > y0) return { x: 0, width: colW, skipTo: bottom - paraTop + 2 };
+        if (bottom > y0) return { x: 0, width: colW, skipTo: bottom - paraTop };
         return { x: 0, width: colW };
       }
+      // Text driven below a square float resumes with its line top at exactly
+      // the float bottom (the wrap distance is already folded into f.y1) — no
+      // padding, and no snapping to the line grid: probe-wrapclear sweeps the
+      // box height in 3pt steps and Word's cleared line tracks it 1:1.
       let clearY: number | undefined;
       let exactTextEdge = false;
       for (const f of floats) {
         if (f.mode === "square" && overlaps(f)) {
-          clearY = Math.max(clearY ?? 0, f.y1 - paraTop + 2);
+          clearY = Math.max(clearY ?? 0, f.y1 - paraTop);
           exactTextEdge ||= f.exactTextEdge === true;
         }
       }
@@ -3315,15 +3839,10 @@ class Engine {
     const sameBorders = (nb?: Block): boolean => {
       if (!nb || nb.type !== "paragraph") return false;
       const np = this.doc.effectiveParaProps(nb);
-      return (
-        JSON.stringify(np.borders ?? null) === JSON.stringify(props.borders ?? null) &&
-        (np.indentLeft ?? 0) - (np.indentHanging ?? 0) ===
-          (props.indentLeft ?? 0) - (props.indentHanging ?? 0) &&
-        (np.indentRight ?? 0) === (props.indentRight ?? 0)
-      );
+      return sameParagraphBorders(np.borders, props.borders) && sameParagraphBorderBox(np, props);
     };
-    const mergeTop = props.borders !== undefined && sameBorders(prev);
-    const mergeBottom = props.borders !== undefined && sameBorders(next);
+    const mergeTop = sameBorders(prev);
+    const mergeBottom = sameBorders(next);
 
     let breakBeforeForced = false;
     // A leading page/column break (the paragraph opens with w:br, content
@@ -3454,6 +3973,12 @@ class Engine {
       if (fl) fl.length = anchorMark.floats;
       anchorMark = null;
     };
+    // Pages only advance, so a paragraph that starts beyond the window cannot
+    // end inside it: the decision is safe to take once, here.
+    const mayPaginateOnly = this.canPaginateOnly();
+    // Inside the window the simulated paragraph is about to be painted, so let
+    // the lookahead leave a full entry behind rather than break it twice.
+    const lookaheadOpts = mayPaginateOnly ? LOOKAHEAD_BREAK : PAINTED_LOOKAHEAD_BREAK;
     const breakNow = (paraTop: number) =>
       breakParagraph(
         this.doc,
@@ -3466,7 +3991,7 @@ class Engine {
           ? this.makeBoundsAt(paraTop, undefined, rawSpacingBefore)
           : undefined,
         this.sp.docGridLinePitch,
-        { cache: true },
+        { cache: true, metricsOnly: mayPaginateOnly },
       );
 
     // The first paragraph on a page reached by a hard page break lands at the
@@ -3493,29 +4018,26 @@ class Engine {
     // mode <= 14 (nccih WORA: Heading1 before=18pt lands 18pt below the margin).
     const isLeadingPageBreak = leadBreak?.type === "page" && !props.pageBreakBefore;
     if (breakBeforeForced && !(isLeadingPageBreak && keepSpBeforeAtPageTop)) dropSpaceBefore = true;
-    if (this.docGridDropBefore) {
-      // An explicit w:snapToGrid="0" keeps its own spacing-before; a spaced
-      // opening consumes the reserve, while an unspaced opening uses half of
-      // it. Heading 1 instead starts on the first row plus Word's 1.5pt grid
-      // leading. Keep bodyTop aligned with the actual cursor so page-top fit
-      // checks use the same origin.
-      if (props.snapToGrid === false && this.sp.docGridLinePitch) {
-        const reduction =
-          (props.spacingBefore ?? 0) > 0
-            ? 4 * this.sp.docGridLinePitch
-            : 2 * this.sp.docGridLinePitch;
-        this.cur.bodyTop -= reduction;
-        this.y -= reduction;
-      } else if (para.props.styleId === "Heading1" && this.sp.docGridLinePitch) {
-        const reduction = 3 * this.sp.docGridLinePitch - ptToPx(1.5);
-        this.cur.bodyTop -= reduction;
-        this.y -= reduction;
-        dropSpaceBefore = true;
-      } else {
-        dropSpaceBefore = true;
-      }
-      this.docGridDropBefore = false;
-    }
+    // The opening paragraph of a lines-grid section is an ORDINARY paragraph.
+    // It opens at the body top, it keeps its space-before, and the only thing
+    // the grid adds is the snap of its own first line - which the line advance
+    // already applies. Nothing is owed here, so this flag now only has to be
+    // cleared (probe-gridopen, six openers on one grid, Word's L01 top against
+    // the plain case: plain 0.00, w:before=12pt +16.00 exactly, snapToGrid="0"
+    // -2.33, snapToGrid="0" with a before +13.67, Heading1 0.00, Heading1 with
+    // snapToGrid="0" -2.33).
+    //
+    // Three rules that used to live here are refuted by that sweep and gone:
+    //  - a `w:snapToGrid="0"` opener without a space-before dropped TWO grid
+    //    rows. Word drops none; -2.33 is simply the first line's grid snap NOT
+    //    being taken, which is what turning the grid off means. We were 39.33px
+    //    low.
+    //  - a `Heading1` opener took a grid row plus 1.5pt of "grid leading". Word
+    //    puts it exactly where a plain paragraph goes. We were 23.59px low.
+    //  - every other opener had its space-before DROPPED. Word applies it in
+    //    full, on top of the snap. We were 16.00px high. probe-docgrid could
+    //    not see this: all six of its cases author `w:before="0"`.
+    this.docGridDropBefore = false;
     const rawSpacingBefore = dropSpaceBefore ? 0 : (props.spacingBefore ?? 0);
 
     let paraTopEstimate = this.y + rawSpacingBefore;
@@ -3631,7 +4153,7 @@ class Engine {
           undefined,
           undefined,
           this.sp.docGridLinePitch,
-          { cache: true },
+          lookaheadOpts,
         );
         simY += nb.lines.reduce((sum, line) => sum + line.height, 0);
         if (
@@ -3762,7 +4284,7 @@ class Engine {
           const np = this.doc.effectiveParaProps(blk);
           simY += Math.max(prevAfter, np.spacingBefore ?? 0);
           if (idx === lastIdx) break; // reached the anchor paragraph's top
-          const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, { cache: true });
+          const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, lookaheadOpts);
           simY += nb.lines.reduce((a, l) => a + l.height, 0);
           prevAfter = np.spacingAfter ?? 0;
         }
@@ -3795,8 +4317,14 @@ class Engine {
     // A paragraph border reserves vertical room for its rule + space, so the
     // rule sits in the gap instead of overlapping the neighbor (pleading
     // footer: the caption's top border must clear the page number above).
-    const borderPadTop = this.borderPadImpl(props.borders?.top);
-    const borderPadBottom = this.borderPadImpl(props.borders?.bottom);
+    // A merged interior boundary claims NO reserve: the shared edge does not
+    // paint there, so Word charges neither its rule nor its space, and the two
+    // paragraphs sit exactly as far apart as their plain spacing puts them
+    // (wild2-legal-ca-agreement p1: the two `bottom sz=6 space=1` clauses are
+    // 15.3px apart - the same gap as every unbordered sibling on the page -
+    // where charging the pad gives 17.7px).
+    const borderPadTop = mergeTop ? 0 : this.borderPadImpl(props.borders?.top);
+    const borderPadBottom = mergeBottom ? 0 : this.borderPadImpl(props.borders?.bottom);
     spacingBefore += borderPadTop;
     spacingAfter += borderPadBottom;
     // Border reserves sit OUTSIDE the before/after collapse: Word first
@@ -3804,17 +4332,14 @@ class Engine {
     // edges clear the gap (wild-doerfp p31/p27 section pages: H1 after=360
     // -> boxed Heading1 with before=0 sits 18pt + 1.5pt below, not
     // max(18, 1.5); below the box the 14pt autospacing gap gains the box's
-    // 1.5pt bottom reserve). Between MERGED identical-border paragraphs no
-    // rule paints and the pads stay in the max, where they cancel (Alex
-    // Pickett cover: the RECIPIENT/ADDRESS box rows stay abutted).
+    // 1.5pt bottom reserve).
     // lastParaAfterPad carries the previous paragraph's surviving bottom
     // reserve: the collapse base is the PLAIN previous after, while the
     // cursor has already advanced by the full amount (the pad cancels
     // between target and cursor, so only the base changes here).
     const collapseBefore = (sb: number): number => {
       const base = this.lastParaSpacingAfter - this.lastParaAfterPad;
-      const pad = mergeTop ? 0 : borderPadTop;
-      return Math.max(sb - pad, base) - base + pad;
+      return Math.max(sb - borderPadTop, base) - base + borderPadTop;
     };
 
     let lines = broken.lines;
@@ -3832,6 +4357,54 @@ class Engine {
       child(prev.src, "pPr") === undefined &&
       index !== undefined &&
       siblings?.[index - 2]?.type === "table";
+
+    // To fit at the foot of a page, an EMPTY paragraph whose only run content
+    // is a hard page break demands exactly its SINGLE-SPACED LINE HEIGHT: not
+    // its space-before, not its w:line multiple, and regardless of any w:sectPr
+    // its pPr carries. Every other paragraph demands space-before plus its full
+    // line, as before.
+    //
+    // Bracketed by a five-shape probe sweeping the room under the paragraph in
+    // two documents, one with a sectPr on every target and one with no sections
+    // at all (parity 2ba4f98, scripts/generate-sectadvance-probe.mjs). Word
+    // fits a 10pt break-only paragraph at 17 CSS px of room and spills it at
+    // 16; at 20pt it fits at 33 and spills at 32. The demand DOUBLES with the
+    // font size, so it is a line height and not a constant, and the two
+    // brackets intersect at 1.60..1.65 px/pt - the bare ~1.221em line. That
+    // excludes the w:line="276" multiple (18.72px at 10pt, where Word fits at
+    // 17) and the space-before (32.05px, which is exactly what the
+    // text-carrying controls demand and get). The no-sectPr control gives the
+    // identical thresholds, so Word does not read the section break here.
+    //
+    // Only the FIT decision uses this demand. Placement and painting keep the
+    // paragraph's real space-before and real line height.
+    //
+    // TWO THINGS DELIBERATELY LEFT ALONE HERE.
+    // 1. The ordinary test's effective bottom for a line can sit ~14px above
+    //    the nominal 960: a line at 931.05..945.82 spills although fitHeight
+    //    is capped at the line height and keepNextTail is 0. Measured headless
+    //    on both documents that showed it, the bottom is NOT where it goes
+    //    wrong: on every page of eq-as-images and ca-agreement, updateBottom
+    //    returns the nominal bodyBottom exactly, and paragraphOverhang, the
+    //    banner reserve and both note reserves read 0. eq-as-images' half was
+    //    the DEMAND - a docGrid text line charging its whole snapped pitch
+    //    where Word charges only its glyph box (fixed; see fitHeight in
+    //    inline.ts and test/docgrid-snap-fit.test.ts). ca-agreement's half
+    //    remains open and is browser-only: headless it has no deficit at all
+    //    and every overflow there is genuine. The leading suspect is the
+    //    bodyBottom footer clamp above, whose footerH is measurer-dependent -
+    //    36.80px headless on its tallest footer against the ~62px that would
+    //    put the bottom at 945.8.
+    // 2. Whether newPage's section-start coalesce should keep a page a break
+    //    created. Suppressing it for the break-only+sectPr shape took BOTH
+    //    ca-agreement and nccih to 24, one page over each document's own Word
+    //    count (22 and 23), so today's coalesce is right for every case we can
+    //    currently lay out; the open part is only reachable once an inserted
+    //    TOC renders at all.
+    const pageBreakOnlyPara =
+      lines.length === 1 &&
+      lines[0].forcedBreakAfter === "page" &&
+      isPageBreakOnlyParagraph(para);
 
     // HTML-style automatic paragraph spacing (w:beforeAutospacing /
     // afterAutospacing, produced by web/HTML-pasted content): Word discards
@@ -3991,7 +4564,7 @@ class Engine {
           this.numberingLabel(np, blk),
           undefined,
           this.sp.docGridLinePitch,
-          { cache: true },
+          lookaheadOpts,
         );
         // Collapsed gap from the end of the previous member's lines.
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
@@ -4104,7 +4677,7 @@ class Engine {
           this.numberingLabel(np, blk),
           undefined,
           this.sp.docGridLinePitch,
-          { cache: true },
+          lookaheadOpts,
         );
         const gap = Math.max(prevAfter, np.spacingBefore ?? 0);
         if (!paragraphHasContent(blk)) {
@@ -4164,7 +4737,8 @@ class Engine {
     // Adjacent before/after collapse: the larger of the previous paragraph's
     // spacing-after (already advanced) and this spacing-before wins; a top
     // border reserve then adds on top (see collapseBefore above).
-    this.y += collapseBefore(spacingBefore);
+    const collapsedBefore = collapseBefore(spacingBefore);
+    this.y += collapsedBefore;
 
     // docGrid(lines) re-sync: after a paragraph containing a MULTI-ROW line
     // (a line taller than the pitch: the JhengHei-fallback 2-row lines of
@@ -4180,6 +4754,15 @@ class Engine {
       if (snapped > rel) this.y = this.cur.bodyTop + snapped;
     }
     this.gridResyncPending = false;
+
+    // The break-only demand described above, restated against a cursor that has
+    // ALREADY advanced by the collapsed space-before: taking that advance back
+    // out charges the bare line from the paragraph's TOP, which is where Word
+    // measures the room. Such a paragraph is one line by construction, so this
+    // single value serves both the break plan and the emit-time test.
+    const pageBreakOnlyDemand = pageBreakOnlyPara
+      ? lines[0].naturalHeight - collapsedBefore
+      : undefined;
 
     // Plan natural page-break indices with widow/orphan control (Word default: on).
     const widow = props.widowControl !== false;
@@ -4266,12 +4849,13 @@ class Engine {
         const baseNotes = simOnCurrentPage ? (this.cur.footnoteH[simCol] ?? 0) : 0;
         const simSep =
           simNotes + noteAdd > 0 && baseNotes === 0 ? this.noteSeparatorReserve(this.cur) : 0;
+        const demand =
+          pageBreakOnlyDemand ?? lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0);
         const overflowsHere =
           !postTablePageBreak &&
           (simBalancing
             ? simY > bottom + 0.01
-            : simY + lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0) >
-              bottom - simNotes - noteAdd - simSep + paragraphOverhang + 0.01);
+            : simY + demand > bottom - simNotes - noteAdd - simSep + paragraphOverhang + 0.01);
         // The paragraph's VERY FIRST line does not fit on the current partial
         // page: the whole paragraph moves to the next column/page. This is a
         // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
@@ -4341,7 +4925,17 @@ class Engine {
     let fragPage = this.cur;
     let fragCol = this.col;
 
+    // The break cache answered with line geometry and no spans, so this
+    // paragraph is paginated but not painted (see canPaginateOnly). Everything
+    // below that advances the cursor, breaks pages or records document state
+    // still runs; only the item-emitting half is skipped. Each page a line lands
+    // on is marked discarded, so the window controller rebuilds it in full when
+    // the viewport reaches it.
+    const paintless = broken.metricsOnly === true;
+    if (paintless) this.mergeWindowFontSamples(broken.fontSamples);
+
     const closeFragment = (endLine: number, isLast: boolean) => {
+      if (paintless) return;
       if (endLine > fragStartLine) {
         this.emitParagraphDecorations(
           props,
@@ -4352,6 +4946,7 @@ class Engine {
           this.y,
           fragStartLine === 0 && !mergeTop,
           isLast && !mergeBottom,
+          isLast && mergeBottom,
         );
       }
     };
@@ -4401,7 +4996,7 @@ class Engine {
         !postTablePageBreak &&
         (balancing
           ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
-          : this.y + line.fitHeight >
+          : this.y + (pageBreakOnlyDemand ?? line.fitHeight) >
             this.bodyBottom - pendingNotes +
               (this.customNoteBannerFit ? CUSTOM_NOTE_BANNER_OVERHANG : 0) +
               0.01) &&
@@ -4428,20 +5023,44 @@ class Engine {
       floatOffset = clearBannerForLine(line, li, floatOffset);
 
       this.y += floatOffset;
+      // w:suppressTopSpacing (settings.xml w:compat): the FIRST line of a
+      // page whose EXACT line spacing exceeds its character height takes the
+      // natural line instead - Word charges min(exact, natural). Measured by
+      // probe-emptyexact (every export self-reproducing): the 12 empty
+      // exact-480 (32px) paragraphs of wild3-template-caed-pleading span
+      // 19.32 + 11 x 32 = 371.32px in Word's PDF; the probe reads the same
+      // collapse at a positive top margin (P12), for 9/12/18pt runs alike
+      // (M9/M18), and an exact-240 line UNDER its natural stays 16px (Q6) -
+      // the suppression only shrinks. Our Arial 12pt natural is 18.40 where
+      // Word's collapsed line measures 19.32, so ~0.9px per suppressed line
+      // stays open. The break PLAN does not mirror this: only caed-pleading
+      // and probe-negmargin carry the flag, and neither has a fit decision
+      // within 13px of a page bottom.
+      let placedLine = line;
+      if (
+        this.doc.suppressTopSpacing &&
+        props.lineSpacing?.rule === "exact" &&
+        line.height > line.naturalHeight + 0.01 &&
+        this.cur.physIndex !== -1 &&
+        this.y <= this.cur.bodyTop + 0.01
+      ) {
+        placedLine = { ...line, height: line.naturalHeight, baselineH: line.naturalHeight };
+      }
       const lineItemStart = this.cur.items.length;
-      this.emitLine(line, this.cur, this.colX, this.y);
+      if (paintless) this.cur.discarded = true;
+      else this.emitLine(placedLine, this.cur, this.colX, this.y);
       // w:tab val="bar": not a tab stop — a vertical rule painted at the bar
       // position on EVERY line of the paragraph, spanning the line box, and
       // through the paragraph's after-spacing band on the last line
       // (parity2-tabs: Word's bars at 2880/5760tw run 29.5px tall for an
       // 18.5px single line + 8pt spacing-after; the tab characters
       // themselves advance past bars to the next real stop).
-      if (props.tabs) {
+      if (props.tabs && !paintless) {
         for (const t of props.tabs) {
           if (t.align === "bar" && !t.clear) {
             const bx = this.colX + t.pos;
             const barBottom =
-              this.y + line.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
+              this.y + placedLine.height + (li === lines.length - 1 ? (props.spacingAfter ?? 0) : 0);
             this.cur.items.push({
               kind: "edge",
               x1: bx,
@@ -4453,7 +5072,7 @@ class Engine {
           }
         }
       }
-      this.emitLineNumber(line, this.cur, this.colX, this.y);
+      if (!paintless) this.emitLineNumber(line, this.cur, this.colX, this.y);
       // Bookmark targets resolve to the page carrying the paragraph's first
       // line (PAGEREF rewrite pass). Frame-laid content (fake page) records
       // against the engine's current real page.
@@ -4481,7 +5100,7 @@ class Engine {
         const pg = this.cur.physIndex === -1 ? this.lastRealPage : this.cur;
         if (pg) this.recordStyleRef(para, pg.physIndex);
       }
-      this.y += line.height;
+      this.y += placedLine.height;
 
       if (line.forcedBreakAfter) {
         closeFragment(li + 1, li === lines.length - 1);
@@ -4504,16 +5123,15 @@ class Engine {
     // blank next page (wild-multicolumn: an empty <w:br type="page"/> paragraph
     // between the section-2 table and the section-3 columns forced a blank page).
     const endedWithBreak = lines.length > 0 && lines[lines.length - 1].forcedBreakAfter !== undefined;
-    this.trailingSectionBreakMarkGap =
+    this.sectionCloserBreakAfter =
       para.sectionBreak !== undefined &&
-      lines.length === 1 &&
-      lines[0].forcedBreakAfter === "page" &&
-      lines[0].width === 0
-        ? lines[0].height + spacingAfter
-        : 0;
+      lines.length > 0 &&
+      lines[lines.length - 1].forcedBreakAfter === "page"
+        ? spacingAfter
+        : undefined;
     if (!endedWithBreak) this.y += spacingAfter;
     this.lastParaSpacingAfter = endedWithBreak ? 0 : spacingAfter;
-    this.lastParaAfterPad = endedWithBreak || mergeBottom ? 0 : borderPadBottom;
+    this.lastParaAfterPad = endedWithBreak ? 0 : borderPadBottom;
     if (this.sp.docGridLinePitch) {
       // Only a multi-row line whose height comes from the tall CHINESE
       // FALLBACK profile (a Japanese eastAsia face lacking the glyphs -
@@ -4579,7 +5197,9 @@ class Engine {
       this.lnResetEpoch = this.lnSectionEpoch;
     }
     this.lnCounter++;
-    const n = ln.start - 1 + this.lnCounter;
+    // ln.start is already the raw offset (0 when w:start was absent; see
+    // model.ts), so the printed number is just offset + running count.
+    const n = ln.start + this.lnCounter;
     // countBy N prints only every Nth line (but every line is still counted).
     if (ln.countBy > 1 && n % ln.countBy !== 0) return;
     const font = this.lineNumberFont();
@@ -4784,10 +5404,12 @@ class Engine {
           // (by + tIns + bw) — using bw/2 there floats page-bottom callouts ~2px
           // high (wild-gatech p7 bottom box).
           const bw = tb.stroke ? tb.stroke.weight : 0;
-          const inner = this.layoutFrame(tb.blocks, Math.max(w - ins.l - ins.r - bw, 1), this.fieldCtx(), {
+          const innerWidth = Math.max(w - ins.l - ins.r - bw, 1);
+          const inner = this.layoutFrame(tb.blocks, innerWidth, this.fieldCtx(), {
             x: bx + ins.l + bw / 2,
             y: by + ins.t + bw,
           });
+          const textW = measuredTextWidth(inner.items);
           let innerTop = by + ins.t + bw;
           if (tb.textAnchor === "middle") innerTop = by + (h - inner.height) / 2;
           else if (tb.textAnchor === "bottom") innerTop = by + h - ins.b - inner.height;
@@ -4796,7 +5418,25 @@ class Engine {
             page.items.push(it);
           }
           if (span.drawing.srcDrawing) {
-            page.items.push({ kind: "drawingHit", x: bx, y: by, width: w, height: h, src: span.drawing.srcDrawing, anchored: false });
+            page.items.push({
+              kind: "drawingHit",
+              x: bx,
+              y: by,
+              width: w,
+              height: h,
+              src: span.drawing.srcDrawing,
+              anchored: false,
+              // An inline box never clips and never autofits: its extent is
+              // the space it reserved in the line, and overflowing text is
+              // simply painted past the bottom edge.
+              textFit: {
+                textW,
+                textH: inner.height,
+                overflow: inner.height > h - ins.t - ins.b + 0.5,
+                clippedLines: 0,
+                autofit: "none",
+              },
+            });
           }
           continue;
         }
@@ -5122,6 +5762,10 @@ class Engine {
     bottom: number,
     isFirstFrag: boolean,
     isLastFrag: boolean,
+    /** This fragment ends at an INTERIOR boundary of a merged border run -
+     * where the shared top/bottom rules are suppressed and a declared
+     * w:between draws instead. */
+    betweenBelow = false,
   ): void {
     // Word anchors paragraph borders/shading at the paragraph's leftmost text
     // extent: a hanging indent pulls the box left so the outdented first line
@@ -5153,6 +5797,17 @@ class Engine {
       const y = bottom + b.bottom.space + b.bottom.width / 2;
       const xPad = this.paragraphBorderOverhang(b.bottom);
       page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.bottom });
+    }
+    // w:between: when a merged run DECLARES a between border, that rule draws
+    // at each interior boundary in place of the suppressed top/bottom pair. It
+    // sits below the upper paragraph at its own w:space - the offset a bottom
+    // border uses - and only that paragraph emits it, so each boundary paints
+    // one rule. It claims no vertical room: a merged boundary charges no
+    // reserve, and we have no measurement of a between rule to say it differs.
+    if (b.between && b.between.style !== "none" && betweenBelow) {
+      const y = bottom + b.between.space + b.between.width / 2;
+      const xPad = this.paragraphBorderOverhang(b.between);
+      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.between });
     }
     if (b.left && b.left.style !== "none") {
       const x = left - b.left.space - this.borderPaintWidth(b.left) + b.left.width / 2;
@@ -5227,22 +5882,22 @@ class Engine {
     const frameSameBorders = (a: ParaProps, nb?: Block): boolean => {
       if (!nb || nb.type !== "paragraph") return false;
       const np = this.doc.effectiveParaProps(nb);
-      return (
-        JSON.stringify(np.borders ?? null) === JSON.stringify(a.borders ?? null) &&
-        (np.indentLeft ?? 0) - (np.indentHanging ?? 0) ===
-          (a.indentLeft ?? 0) - (a.indentHanging ?? 0) &&
-        (np.indentRight ?? 0) === (a.indentRight ?? 0)
-      );
+      return sameParagraphBorders(np.borders, a.borders) && sameParagraphBorderBox(np, a);
     };
     for (let i = 0; i < blocks.length; i++) {
       const block = blocks[i];
       if (block.type === "paragraph") {
-        // The mandatory empty paragraph OOXML places after a table (and before
-        // the cell/frame end) collapses to zero height in Word - it does NOT
+        // The mandatory empty paragraph OOXML places after a nested table
+        // (before the cell end) collapses to zero height in Word - it does NOT
         // add a blank line under a nested table (parity2-nestedtables: the
         // trailing <w:p/> after the L3 and L2 tables). A non-empty paragraph
-        // after a table renders normally.
+        // after a table renders normally. CELLS ONLY: in a header story Word
+        // charges the same construct its full paragraph height
+        // (parity-hftemplates p2, Ion Light: body top = headerDistance 35.4pt
+        // + table row 36.0pt + trailing empty <w:p/> ~22.5pt = 93.9pt; the
+        // arithmetic closes to 0.1pt only with the paragraph charged).
         if (
+          inCell &&
           i > 0 &&
           blocks[i - 1].type === "table" &&
           !block.sectionBreak &&
@@ -5299,21 +5954,56 @@ class Engine {
           if (styleOf(blocks[i - 1]) === myStyle) spacingBefore = 0;
           if (styleOf(blocks[i + 1]) === myStyle) spacingAfter = 0;
         }
-        spacingBefore += this.borderPadImpl(props.borders?.top);
-        spacingAfter += this.borderPadImpl(props.borders?.bottom);
+        // Same merge rule as the body flow: an interior boundary of a run of
+        // identically bordered paragraphs paints no rule and claims no room.
+        const mergeTop = frameSameBorders(props, blocks[i - 1]);
+        const mergeBottom = frameSameBorders(props, blocks[i + 1]);
+        if (!mergeTop) spacingBefore += this.borderPadImpl(props.borders?.top);
+        if (!mergeBottom) spacingAfter += this.borderPadImpl(props.borders?.bottom);
         y += Math.max(spacingBefore, framePrevAfter) - framePrevAfter;
         framePrevAfter = spacingAfter;
         const top = y;
         // Cell-anchored floats are emitted BEFORE the paragraph breaks so the
         // paragraph's own lines wrap around them (Box 202 in
-        // staging-tblextreme). Other frames keep the emit-after order.
-        const preAnchors = inCell ? this.collectAnchors(block) : [];
+        // staging-tblextreme). Other frames keep the emit-after order for
+        // shapes anchored to their own paragraph - probe-headeranchor2:
+        // a paragraph-positioned wrapTopAndBottom bar leaves its carrier's
+        // text at the header top (HDT40/HDT72 paint at 48.64 beside the
+        // band), so the carrier must not wrap around its own anchor. A
+        // PAGE/MARGIN-positioned wrapped shape is the exception Word makes:
+        // parity-hftemplates p3/p4 headers are a single carrier paragraph
+        // whose full-width (p3, wrapSquare behindDoc) or right-edge (p4,
+        // wrapTopAndBottom) bar is positioned from the page, and Word lays
+        // the carrier's own line BELOW the bar - body top = bar bottom
+        // (+distB) + the line + its spacing-after, closing to 0.6px on p3
+        // and 0.2px on p4 against the reference PDF.
+        const allAnchors = this.collectAnchors(block);
+        const preAnchors = inCell
+          ? allAnchors
+          : allAnchors.filter(
+              (s) =>
+                (s.vRel === "page" || s.vRel === "margin") &&
+                "wrap" in s &&
+                s.wrap !== undefined &&
+                s.wrap !== "none",
+            );
         if (preAnchors.length > 0) {
           this.emitAnchors(preAnchors, fake, fields, 0, top, origin);
         }
-        const cellBounds =
-          inCell && (this.floats.get(fake)?.length ?? 0) > 0
-            ? this.makeBoundsAt(top, { page: fake, colX: 0, colW: width })
+        // Floats present on the frame page (a previous paragraph's, or this
+        // paragraph's own page-positioned ones) bound the line breaker in
+        // every frame story, not only cells: a header paragraph wraps below
+        // a page-positioned bar exactly like body text would. paraTop and
+        // colX shift by the frame's page origin because header floats are
+        // registered in page coordinates (cells pass no origin, so this is
+        // the identity there).
+        const frameBounds =
+          (this.floats.get(fake)?.length ?? 0) > 0
+            ? this.makeBoundsAt(top + (origin?.y ?? 0), {
+                page: fake,
+                colX: origin?.x ?? 0,
+                colW: width,
+              })
             : undefined;
         const broken = breakParagraph(
           this.doc,
@@ -5322,14 +6012,16 @@ class Engine {
           width,
           fields,
           label,
-          cellBounds,
+          frameBounds,
           this.sp?.docGridLinePitch,
           inCell || this.verticalGridFlow
             ? { inTableCell: inCell === true, verticalGridResync: this.verticalGridFlow }
             : undefined,
         );
         if (!inCell && broken.anchors.length > 0) {
-          this.emitAnchors(broken.anchors, fake, fields, 0, top, origin);
+          const pre = new Set<object>(preAnchors);
+          const rest = broken.anchors.filter((s) => !pre.has(s));
+          if (rest.length > 0) this.emitAnchors(rest, fake, fields, 0, top, origin);
         }
         for (const line of broken.lines) {
           // A line pushed down by a cell-anchored float (skipTo/clearY in the
@@ -5355,8 +6047,9 @@ class Engine {
           width,
           top,
           y,
-          !(props.borders && frameSameBorders(props, blocks[i - 1])),
-          !(props.borders && frameSameBorders(props, blocks[i + 1])),
+          !mergeTop,
+          !mergeBottom,
+          mergeBottom,
         );
         if (overlayPageFrame && props.alignment === "right") {
           const content = block.children.flatMap((child) =>
@@ -5497,8 +6190,15 @@ class Engine {
         ? Math.max(bottom, itemEnd)
         : bottom;
     }, 0);
+    // Only a topAndBottom float's band extends the frame's content bottom: a
+    // SQUARE float hanging below the header's text does not move the body
+    // top (probe-headeranchor2 S40/S72: Word's marker stays at 64.64 with
+    // the bar reaching 40/72pt below, while T40/T72 sit exactly at the bar
+    // bottom). A square bar that displaces the header's own LINE below it
+    // (hftemplates p3) is already covered by `y`.
     const wrappedBottom = (this.floats.get(fake) ?? []).reduce(
-      (bottom, float) => Math.max(bottom, float.y1 - (origin?.y ?? 0)),
+      (bottom, float) =>
+        float.mode === "topAndBottom" ? Math.max(bottom, float.y1 - (origin?.y ?? 0)) : bottom,
       0,
     );
     this.floats.delete(fake);
@@ -5657,6 +6357,25 @@ class Engine {
         for (const ts of shape.texts ?? []) {
           this.emitDrawingText(ts, ox - fx, oy - fy, page, fields, !shape.behind, rotate, shape.z);
         }
+        // FRAME stories only: a wrapped art shape excludes its band like a
+        // text box does. probe-headeranchor2 (Word-exported twice, byte
+        // identical): a wrapTopAndBottom bar in a header puts the body top
+        // exactly at the bar's bottom (+distB) at both 40pt and 72pt extents,
+        // and hftemplates p3/p4 lay the header's own line below their
+        // page-positioned bars. Body flow ignores art wrap, as before - no
+        // body-flow fixture measures a wrapped art shape.
+        if (page.physIndex === -1 && shape.wrap && shape.wrap !== "none") {
+          const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
+          const list = this.floats.get(page) ?? [];
+          list.push({
+            x0: ox - d.l,
+            x1: ox + shape.width + d.r,
+            y0: oy - d.t,
+            y1: oy + shape.height + d.b,
+            mode: shape.wrap === "topAndBottom" ? "topAndBottom" : "square",
+          });
+          this.floats.set(page, list);
+        }
         continue;
       }
       if (shape.type === "line") {
@@ -5790,22 +6509,26 @@ class Engine {
         // real outline+fill as a path; the rect fill/edges below stay for
         // plain text boxes.
         if (shape.geom && (shape.fill || shape.stroke)) {
-          page.items.push({
-            kind: "path",
-            x: ox - fx,
-            y: oy - fy,
-            width,
-            height,
-            d: shape.geom.d,
-            viewW: shape.geom.viewW,
-            viewH: shape.geom.viewH,
-            fill: shape.fill,
-            ...(shape.stroke ? { stroke: { color: shape.stroke.color, width: shape.stroke.weight } } : {}),
-            ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
-            ...(behind ? { behind: true } : {}),
-            ...(front ? { front: true } : {}),
-            z: shape.z,
-          });
+          for (const sub of shape.geom.paths) {
+            page.items.push({
+              kind: "path",
+              x: ox - fx,
+              y: oy - fy,
+              width,
+              height,
+              d: sub.d,
+              viewW: shape.geom.viewW,
+              viewH: shape.geom.viewH,
+              fill: sub.fill,
+              ...(sub.stroke && shape.stroke
+                ? { stroke: { color: shape.stroke.color, width: shape.stroke.weight } }
+                : {}),
+              ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
+              ...(behind ? { behind: true } : {}),
+              ...(front ? { front: true } : {}),
+              z: shape.z,
+            });
+          }
         }
         if (shape.fill && !shape.geom) {
           page.items.push({
@@ -5859,7 +6582,8 @@ class Engine {
         // even without noAutofit.
         const chained = shape.chainId !== undefined;
         const capacity = height - ins.t - ins.b;
-        const inner = this.layoutFrame(storyBlocks, Math.max(width - ins.l - ins.r, 1), fields, { x: ox + ins.l, y: oy + ins.t });
+        const innerWidth = Math.max(width - ins.l - ins.r, 1);
+        const inner = this.layoutFrame(storyBlocks, innerWidth, fields, { x: ox + ins.l, y: oy + ins.t });
         // a:prstTxWarp — the shape's text is bent onto a preset envelope filling
         // the box, not flowed as ordinary lines. Reuse the frame's resolved font
         // and color (theme/style resolution already applied), then hand the box
@@ -5900,6 +6624,8 @@ class Engine {
               italic: f.italic,
               fill: shape.wordArtFill ?? (col && col !== "auto" ? col : "#000000"),
               ...(shape.wordArtOpacity !== undefined ? { opacity: shape.wordArtOpacity } : {}),
+              ...(texts[0].props.textOutline ? { outline: texts[0].props.textOutline } : {}),
+              ...(texts[0].props.textShadow ? { shadow: true } : {}),
               warp: shape.warp,
               ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
               ...(behind ? { behind: true } : {}),
@@ -5926,8 +6652,13 @@ class Engine {
         // story text so glyph clicks can enter text editing while blank parts
         // of the box still select the object.
         const independentStory = !!shape.textboxStory && !shape.wordArt;
+        // Held so the measured text extent can be recorded on it once the
+        // emit loop below has counted the lines the box hides. The width is
+        // read here, while the items are still frame-local.
+        const textW = measuredTextWidth(inner.items);
+        let hit: DrawingHitItem | undefined;
         if (shape.srcDrawing) {
-          page.items.push({
+          hit = {
             kind: "drawingHit",
             x: ox - fx,
             y: oy - fy,
@@ -5940,17 +6671,27 @@ class Engine {
             ...(independentStory ? { textboxStory: true } : {}),
             ...(rotate ? { rotate: rotate(ox - fx, oy - fy) } : {}),
             z: shape.wordArt ? (shape.z ?? 0) + 1 : shape.z,
-          });
+          };
+          page.items.push(hit);
         }
+        let clippedLines = 0;
+        // A noAutofit line past the box bottom is not painted, but the story
+        // is still editable, so it keeps its geometry in page.hiddenText —
+        // otherwise a caret pushed onto that line (Enter on the last line that
+        // fits) has no binding to sit on and vanishes.
         for (const it of inner.items) {
+          let clipped = false;
           if (it.kind === "text") {
             if (shape.wordArtOpacity !== undefined) it.opacity = shape.wordArtOpacity;
             if (independentStory && shape.srcDrawing) it.textboxStory = shape.srcDrawing;
             // Chained boxes hide whole lines outside their own [skipTopY,
-            // content-bottom] window (overflow flows to the next box); a plain
-            // noAutofit box clips at the box bottom edge (unchanged).
-            if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) continue;
-            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) continue;
+            // content-bottom] window (overflow flows to the next box, which
+            // paints them and owns their caret); a plain noAutofit box clips
+            // at the box bottom edge with nowhere else for the line to go.
+            if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; continue; }
+            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) { clippedLines++; clipped = true; }
+            // Content above skipTopY was PAINTED by an earlier box in the
+            // chain, so skipping it here hides nothing.
             if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
           }
           offsetItem(it, ox + ins.l - fx, innerTop - skipTopY - fy);
@@ -5963,11 +6704,30 @@ class Engine {
           if (behind && (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit")) it.behind = true;
           if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
           if (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit") it.z = shape.z;
-          page.items.push(it);
+          if (clipped && it.kind === "text") {
+            it.hidden = true;
+            (page.hiddenText ??= []).push(it);
+          } else {
+            page.items.push(it);
+          }
+        }
+        if (hit) {
+          hit.textFit = {
+            textW,
+            textH: inner.height,
+            overflow: inner.height > capacity + 0.5,
+            clippedLines,
+            autofit: shape.autofitHeight ? "resizeShape" : shape.shrinkText ? "shrinkText" : "none",
+          };
         }
 
         // Body text flows around a wrapping text box (square / tight / topAndBottom).
-        if (shape.wrap && shape.wrap !== "none" && !shape.behind) {
+        // In a FRAME story (header/footer/cell, physIndex -1) an explicit wrap
+        // registers even on a behindDoc shape: parity-hftemplates p3's Banded
+        // bar is behindDoc="1" WITH wrapSquare, and Word still lays the
+        // header's own line below it. Body flow keeps the old behind gate -
+        // no body-flow fixture measures a behind+wrapped shape.
+        if (shape.wrap && shape.wrap !== "none" && (!shape.behind || page.physIndex === -1)) {
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           const list = this.floats.get(page) ?? [];
           list.push({
@@ -6058,8 +6818,23 @@ class Engine {
     const origin = reserveBodyClearance
       ? { x: page.sp.marginLeft + page.sp.gutter, y: page.sp.headerDistance }
       : undefined;
+    // A FOOTER paragraph framed to the PAGE (w:framePr vAnchor="page") is
+    // positioned absolutely and consumes no footer flow, so it must not
+    // enter the height that clamps the body bottom. us-courts-answer's
+    // footer is a page-anchored 'Page N of M' frame plus one empty
+    // paragraph; charging the frame put our clamp at 986.9px where every
+    // Word row decision on that fixture brackets the bottom in [992, 1005]
+    // — the empty paragraph's own line (~16.9px off the 1017.6 footer
+    // distance) is what remains charged.
+    const measureBlocks = reserveBodyClearance
+      ? hf.blocks
+      : hf.blocks.filter(
+          (block) =>
+            !(block.type === "paragraph" && this.doc.effectiveParaProps(block).frame?.vAnchor === "page"),
+        );
+    if (measureBlocks.length === 0) return 0;
     const { height, contentBottom } = this.layoutFrame(
-      hf.blocks,
+      measureBlocks,
       contentWidth,
       fields,
       origin,
@@ -6068,25 +6843,23 @@ class Engine {
     );
     this.counters = snapshot;
     this.seenNumIds = seenSnapshot;
-    const anchors = hf.blocks.flatMap((block) =>
-      block.type === "paragraph" ? this.collectAnchors(block) : [],
-    );
-    const hasOnlyUnwrappedAnchors =
-      anchors.length > 0 &&
-      anchors.every(
-        (shape) => !("wrap" in shape) || shape.wrap === undefined || shape.wrap === "none",
-      );
-    const complexHeader =
-      anchors.length > 0 || hf.blocks.some((block) => block.type === "table");
-    // Word keeps 22.5pt between complex header content (tables and positioned
-    // shapes) and the body. Plain header text uses its natural height even
-    // with a tight top margin. A header made only of unwrapped page decoration
-    // (watermarks, logos, pleading-paper rails and line numbers) reserves no
-    // gap, including when ordinary header text accompanies it.
-    return reserveBodyClearance
-      ? Math.max(height, contentBottom) +
-          (!hasOnlyUnwrappedAnchors && complexHeader ? ptToPx(22.5) : 0)
-      : height;
+    // Word puts the body at `w:header` plus the header's height and reserves
+    // NOTHING extra, whatever the header holds. A 22.5pt clearance used to be
+    // added here for a header carrying a table or a positioned shape; two
+    // Word-exported probes say it has no case. On the same geometry, with
+    // `w:top="0"` so the header governs the body top, Word's body top is 64.64
+    // for a one-line paragraph header AND for a table row of the same content
+    // height, and 64.64 again for an anchored shape at wrapNone, wrapSquare and
+    // wrapTopAndBottom (parity scripts/generate-headerheight-probe.mjs and
+    // generate-headeranchor-probe.mjs). It also tracks line count at exactly
+    // 16.00px per 12pt line and includes the last paragraph's space-after in
+    // full, both of which Math.max(height, contentBottom) already gives.
+    //
+    // The anchor half was unreachable in any case: layoutFrame above places the
+    // header's paragraphs and consumes their anchors, so the collectAnchors
+    // that used to run here always saw an empty list and only the table
+    // disjunct could ever fire.
+    return reserveBodyClearance ? Math.max(height, contentBottom) : height;
   }
 
   private pageFieldFrameOverlay(hf: HeaderFooter | undefined): boolean {
@@ -6119,6 +6892,10 @@ class Engine {
   private finalizeHeadersFooters(emitBorders = true): void {
     const total = this.pages.length;
     for (const page of this.pages) {
+      if (page.discarded) {
+        page.hfStart = 0;
+        continue;
+      }
       const sp = page.sp;
       this.sp = sp; // frames built here must resolve anchors against this page's section
       if (emitBorders) this.emitPageBorders(page);
@@ -6135,6 +6912,12 @@ class Engine {
         totalPages: () => total,
         formatPageNumber: (n) => formatNumber(n, PAGE_FMT[sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
         styleRef: (name, lastOnPage) => this.resolveStyleRef(name, lastOnPage, page.physIndex),
+        // A REF names a body bookmark, so it reads the same on every page the
+        // header paints on. Word recomputes it on open here just as it does in
+        // the body, and the update pass caches the value it resolves to.
+        refText: (bookmark) => this.refBookmarkText(bookmark),
+        // Body statistics read the same on every page too.
+        textStats: () => this.resolveTextStats(),
       };
       const header = this.doc.headers.get(page.headerRel ?? "");
       if (header && header.blocks.length > 0) {
@@ -6204,12 +6987,31 @@ class Engine {
     nested = false,
     confineToAvailable = false,
   ): number[] {
-    const edgeMargins = this.cellMarginsOf(tbl);
+    // RAW margins: both percentage rules below are width MEASUREMENT, so the
+    // 0.75pt side floor cellMarginsOf applies to content placement must stay
+    // out of them — a zero-margin table has to measure as zero.
+    const edgeMargins = this.cellMarginsOf(tbl, false);
+    // Word 2013 (an EXPLICIT compatibilityMode 15) fits a table's horizontal
+    // cell margins inside its percentage width; every older mode, and a file
+    // that declares no mode at all, adds them around it. Probed through
+    // desktop Word with three settings.xml variants on Letter and A4
+    // (probe-compat15/12/nocompat.docx in the parity repo, built by
+    // scripts/generate-pctwidth-compat-probe.mjs):
+    //
+    //   compatibilityMode 15   -> allowance 0
+    //   compatibilityMode 12   -> allowance 0.240in
+    //   no compatibilityMode   -> allowance 0.240in
+    //
+    // against 0.250in of declared margins — the 0.010in shortfall is the
+    // border stroke. Page size makes no difference.
+    const declaredMode = this.doc.declaredCompatibilityMode;
+    const pctFitsMarginsInside = declaredMode !== undefined && declaredMode >= 15;
     const base = resolveGrid(
       tbl,
       available,
       !nested && !confineToAvailable,
       (edgeMargins.left ?? 0) + (edgeMargins.right ?? 0),
+      !pctFitsMarginsInside,
     );
     if (tbl.props.layout === "fixed") return base;
     const gridTotal = tbl.grid.reduce((a, b) => a + b, 0);
@@ -6657,12 +7459,22 @@ class Engine {
     // or the NBSP-glued "Wej 7426" gets a spurious raise).
     const fudge = allow(margins.left, margins.right);
     const pad = inset(margins.left) + inset(margins.right) + fudge;
-    const minW = new Array<number>(nCols).fill(pad + 8);
-    const prefW = new Array<number>(nCols).fill(pad + 8);
+    // A column with no content demands its padding and nothing else. Word
+    // collapses an empty column to the rule plus the cell margins: in a pct
+    // autofit table it renders 4 device px at 192dpi next to a wide neighbour,
+    // and still only 22 when the table has width to spare. Seeding a content
+    // stub on top of `pad` let a freshly inserted column claim a share of the
+    // table it never earned.
+    const minW = new Array<number>(nCols).fill(pad);
+    const prefW = new Array<number>(nCols).fill(pad);
     // Hard (non-negotiable) minimum: the demand of nested tables only. Word
     // squeezes TEXT below its longest word when a cell must shrink, but never
     // squeezes a nested table below its own minimum (grid4 L2/L3).
     const hardMinW = new Array<number>(nCols).fill(0);
+    // Cells covering more than one column are held back and applied after the
+    // single-column pass, because their share depends on what the covered
+    // columns demand on their own. See spreadSpan below.
+    const spans: { at: number; span: number; min: number; pref: number; hard: number }[] = [];
     for (const row of tbl.rows) {
       let gridPos = 0;
       for (const cell of row.cells) {
@@ -6739,14 +7551,21 @@ class Engine {
             );
           }
           const span2 = Math.min(span, nCols - gridPos);
-          for (let k = 0; k < span2; k++) {
-            minW[gridPos + k] = Math.max(minW[gridPos + k], cellMin / span2);
-            prefW[gridPos + k] = Math.max(prefW[gridPos + k], cellPref / span2);
-            hardMinW[gridPos + k] = Math.max(hardMinW[gridPos + k], cellHard / span2);
+          if (span2 === 1) {
+            minW[gridPos] = Math.max(minW[gridPos], cellMin);
+            prefW[gridPos] = Math.max(prefW[gridPos], cellPref);
+            hardMinW[gridPos] = Math.max(hardMinW[gridPos], cellHard);
+          } else if (span2 > 1) {
+            spans.push({ at: gridPos, span: span2, min: cellMin, pref: cellPref, hard: cellHard });
           }
         }
         gridPos += span;
       }
+    }
+    for (const s of spans) {
+      spreadSpan(minW, pad, s.at, s.span, s.min);
+      spreadSpan(prefW, pad, s.at, s.span, s.pref);
+      spreadSpan(hardMinW, 0, s.at, s.span, s.hard);
     }
     return { minW, prefW, hardMinW, fudge };
   }
@@ -6812,22 +7631,34 @@ class Engine {
   /** Effective default cell margins: direct tblCellMar, else the table
    * style chain, else the default table style, else 0 (the spec default —
    * Word's usual 108-twip side margins come from the TableNormal style). */
+  /** A row's bottom cell margin: the table default, raised by any cell's own
+   * tcMar override. */
+  private rowBottomPad(tbl: Table, row: TableRow): number {
+    let pad = this.cellMarginsOf(tbl).bottom ?? 0;
+    for (const cell of row.cells) {
+      if (cell.props.margins?.bottom !== undefined) pad = Math.max(pad, cell.props.margins.bottom);
+    }
+    return pad;
+  }
+
   /**
    * Word treats trHeight as the height of the cell CONTENT box, not the full
    * row: hRule=atLeast rows measure trHeight + top/bottom cell margins + the
    * row's border share, and hRule=exact rows measure trHeight + the top
    * margin only (probe-trheight: atLeast 785.9tw + 100tw margins + sz8
-   * borders -> 50.25pt row; exact 800tw -> 45pt).
+   * borders -> 50.25pt row; exact 800tw -> 45pt). A compat-15 exact row's
+   * height is that authored value whatever its borders say: its rules live
+   * INSIDE the row and charge the content inset instead (see exactInsetRow,
+   * rowTopLead and paintRow).
    */
   private rowHeightFromTrHeight(tbl: Table, row: TableRow, ri: number, contentHeight: number): number {
     const trHeight = row.props.height!;
     const defaults = this.cellMarginsOf(tbl);
     let topPad = defaults.top ?? 0;
-    let bottomPad = defaults.bottom ?? 0;
     for (const cell of row.cells) {
       if (cell.props.margins?.top !== undefined) topPad = Math.max(topPad, cell.props.margins.top);
-      if (cell.props.margins?.bottom !== undefined) bottomPad = Math.max(bottomPad, cell.props.margins.bottom);
     }
+    const bottomPad = this.rowBottomPad(tbl, row);
     if (row.props.heightRule === "exact") {
       if (this.doc.compatibilityMode < 15) {
         const hasHairlineBottom = (r: TableRow) =>
@@ -6850,20 +7681,100 @@ class Engine {
         // Legacy form templates commonly repeat exact-height label/underline
         // rows. Word keeps the first row at its declared height, then includes
         // half the cell-top inset in every continuation row.
-        return trHeight + (isLegacyFormLine(row) && isLegacyFormLine(tbl.rows[ri - 1]) ? topPad / 2 : 0);
+        if (isLegacyFormLine(row) && isLegacyFormLine(tbl.rows[ri - 1])) return trHeight + topPad / 2;
+        // A pre-15 exact row's flow charges its BOTTOM cell margin - and only
+        // that: the top margin adds nothing. Measured on the us-courts caption
+        // table's exact-115 spacer (parity probe-exactpad: the exact row's
+        // tcMar varied one side at a time over the fixture's own rows, each
+        // package exported twice): against the (top 0, bottom 0) control the
+        // 'for the'->'Rewugofi of' gap moves +1.52pt at (58,29), +3.00pt at
+        // (29,58), 0.00pt at (58,0) and +1.25pt at (0,29) - it tracks the
+        // bottom value alone. The compat-15 branch below charges topPad
+        // instead (probe-trheight); the regimes really do disagree. Every
+        // zero-margin variant (probe-exactnil11, probe-exactclip: 115-495tw
+        // rows, sz-8/sz-12 rules, nil or live) reads plain trHeight in both.
+        return trHeight + bottomPad;
       }
-      return trHeight + topPad;
+      return Math.max(0, trHeight + topPad);
     }
     if (this.doc.compatibilityMode < 15) {
-      const legacyBottomPad = bottomPad >= ptToPx(1) ? bottomPad : 0;
-      const legacyTopPad =
-        row.props.heightRule === "atLeast" && (row.props.height ?? 0) >= ptToPx(30)
-          ? Math.max(topPad - ptToPx(0.25), 0)
-          : topPad;
-      return Math.max(contentHeight, trHeight + legacyTopPad + legacyBottomPad);
+      // A pre-15 atLeast floor charges BOTH cell margins in full, exactly
+      // like the compat-15 formula minus the border share. Measured on the
+      // us-courts spacer verbatim (probe-uscourtsblock2 S0: trHeight 624tw
+      // + tcMar top 58 / bottom 29->14tw reads 46.40px = 41.60 + 3.87 +
+      // 0.93 in compat 11 and 15 alike, each package exported twice). The
+      // haircuts this branch used to take — topPad-0.25pt on atLeast>=30pt
+      // rows, bottomPad dropped under 1pt — carried no probe and this
+      // construct contradicts both.
+      return Math.max(contentHeight, trHeight + topPad + bottomPad);
     }
     const borderPad = this.rowBorderShare(tbl, ri);
     return Math.max(contentHeight, trHeight + topPad + bottomPad + borderPad);
+  }
+
+  /**
+   * A compat-15 hRule="exact" row occupies exactly trHeight + top margin of
+   * flow. A rule at its TOP (outer or interior, tblBorders or tcBorders)
+   * comes out of its CONTENT in full — no half-rule flow lead — and charges
+   * zero at a both-nil boundary; a rule at its BOTTOM edge of the table sits
+   * wholly below the row and adds its full width to the flow. This is the one
+   * model consistent with every measurement:
+   *
+   *  - probe-sidedness (#51b): a lone exact row's tcBorders TOP pushes the
+   *    content down its whole 2.00px from the outside mark; a BOTTOM border
+   *    moves the content top nothing. The top rule is not split
+   *    half-lead/half-inset around the row edge — it is all inset.
+   *  - probe-exactnil (parity 02dff8a): two exact rows under a tblBorders
+   *    insideH sz-12 read 35.00 mark-to-mark where the authored row is 33.00 —
+   *    the FULL rule charged to the row below the boundary — and 33.00
+   *    exactly when both cells declare nil (a one-sided nil suppresses
+   *    nothing, RO = RU = 35.00).
+   *  - probe-exactrow: rows 495/110/1089 with tblBorders everywhere read the
+   *    same mark span as with no borders at all (the full inset above row 0
+   *    cancels the full inset above row 2), and adding ca-agreement's own
+   *    tcBorders — a sz-12 pair at one boundary and a both-nil pair at the
+   *    next — drops the span by exactly one 2.00px rule, which is the
+   *    both-nil boundary's inset going to zero. The earlier reading of that
+   *    drop as a HEIGHT reduction (exactRowCellBorderShare, engine b0b8e2f)
+   *    fit the same in-table marks but contradicts probe-exactnil's inset
+   *    numbers; the share is gone and exact heights are authored, full stop.
+   *  - probe-exactoverflow: TOP to MARK across a bordered one-row exact table
+   *    is 34.33px = 16 (line) + 17.33 (authored row) + 1.00 (one whole sz-6
+   *    rule) — the bottom rule's full width in the flow, the top rule's
+   *    none.
+   *
+   * A boundary between an exact row and a content-sized row keeps the content
+   * row's half-share and charges the exact row's full inset; no probe measures
+   * that mixed case. The convention is compat-INVARIANT: probe-exactouter11
+   * reads digit-identical to probe-exactouter15 on every case — a live outer
+   * rule above an exact first row charges the flow nothing (XFR/YFR = the
+   * no-border control) while the same rule below an exact last row charges
+   * its full 1.5pt (XLR/YLR = control + 1.52pt) — so the pre-15 half-lead
+   * convention this method used to keep charged +0.75pt at the top edge and
+   * -0.75pt at the bottom against Word. probe-exactnil11's full 2.00px inset
+   * of the row below a live insideH pins the inset half in compat 11 too.
+   */
+  private exactInsetRow(row: TableRow): boolean {
+    return row.props.heightRule === "exact";
+  }
+
+  /** Flow lead above row `ri` when it starts a table segment: half the
+   * boundary rule, except an exact row, which takes none — its top rule is
+   * all content inset (see exactInsetRow). */
+  private rowTopLead(tbl: Table, ri: number): number {
+    if (this.exactInsetRow(tbl.rows[ri])) return 0;
+    return this.rowBorderWidths(tbl, ri).top / 2;
+  }
+
+  /** Flow lead below row `ri` when it ends a table segment: half the boundary
+   * rule, except an exact row, whose bottom rule sits wholly BELOW the fixed
+   * row box and so adds its FULL width (probe-exactoverflow: TOP to MARK is
+   * 34.33px = a 16px line + the authored 17.33px row + one whole sz-6 rule;
+   * the sz-6 top rule adds nothing to the flow because it came out of the
+   * row's content). */
+  private rowBottomLead(tbl: Table, ri: number): number {
+    const w = this.rowBorderWidths(tbl, ri).bottom;
+    return this.exactInsetRow(tbl.rows[ri]) ? w : w / 2;
   }
 
   /** Widths of the horizontal rules above and below a row. A rule can be
@@ -6891,24 +7802,61 @@ class Engine {
     // LightGrid's firstRow bottom rule is sz-18 (2.25pt) against a sz-8
     // insideH, and Word makes the header and first body row each taller by
     // half the difference (wild-multicolumn p30).
-    const condEdge = (r: number, edge: "top" | "bottom"): number => {
-      let w = 0;
+    // A boundary is resolved per GRID COLUMN, and the table-wide rule enters
+    // only through a side whose cell is SILENT there. A cell that declares
+    // its edge — w:val="nil" (zero) or any width — replaces the table rule
+    // on its side; a silent side falls back to its conditional table-style
+    // edge, then to the table-wide rule. A column's charge is the wider of
+    // its two sides, and the boundary charges the widest column.
+    //
+    // Evidence, one case per branch:
+    //  - both sides nil -> 0 (probe-nilborder B, probe-exactnil RN);
+    //  - nil vs SILENT -> the silent side's insideH in full (probe-nilborder
+    //    C, probe-exactnil RO/RU, probe-mixedbound ECU/ECL/CEU/CEL: one-sided
+    //    nil suppresses nothing);
+    //  - declared width vs silent -> the wider of it and insideH
+    //    (probe-nilborder E/F: sz-12 restating the rule adds nothing, sz-24
+    //    adds exactly 2.00px over it);
+    //  - insideH does NOT contend when BOTH sides declare:
+    //    probe-uscourtsblock SN vs CN (the us-courts spacer construct,
+    //    compat 11 and 15, each package exported twice) reads the
+    //    spacer/spacer boundary at 0.01px under a live sz-8 insideH — cell 0
+    //    nil/nil, cell 1 sz-1/nil — where charging the insideH would read
+    //    1.33px. Its round-1 sweep V2 (insideH removed) leaves the fixture's
+    //    block pitch unchanged for the same reason.
+    //  - conditional style edges charge through silent sides: LightGrid's
+    //    firstRow bottom sz-18 against a sz-8 insideH (wild-multicolumn p30).
+    //
+    // Outer edges take the same per-column resolution against the table's
+    // top/bottom rule (probe-exactouter11/15: a live outer rule charges in
+    // full, an all-nil row zeroes it, compat-invariant).
+    const colWidths = (r: number, side: "top" | "bottom", fallback?: Border): number[] => {
+      const out: number[] = [];
       let colStart = 0;
       for (const c of rows[r].cells) {
-        const cond = this.condFor(tbl, r, colStart, c.props.gridSpan, nRows, nCols);
-        w = Math.max(w, bw(cond?.borders?.[edge]));
+        const own = c.props.borders?.[side];
+        let w: number;
+        if (own !== undefined) w = bw(own);
+        else {
+          const cond = this.condFor(tbl, r, colStart, c.props.gridSpan, nRows, nCols)?.borders?.[side];
+          w = cond !== undefined ? bw(cond) : bw(fallback);
+        }
+        for (let i = 0; i < Math.max(1, c.props.gridSpan); i++) out.push(w);
         colStart += c.props.gridSpan;
       }
-      return w;
+      while (out.length < nCols) out.push(bw(fallback));
+      return out;
     };
-    const cellTop = (r: number) =>
-      Math.max(0, condEdge(r, "top"), ...rows[r].cells.map((c) => bw(c.props.borders?.top)));
-    const cellBot = (r: number) =>
-      Math.max(0, condEdge(r, "bottom"), ...rows[r].cells.map((c) => bw(c.props.borders?.bottom)));
     const boundary = (k: number): number => {
-      if (k === 0) return Math.max(bw(tb?.top), cellTop(0));
-      if (k === rows.length) return Math.max(bw(tb?.bottom), cellBot(rows.length - 1));
-      return Math.max(bw(tb?.insideH), cellBot(k - 1), cellTop(k));
+      if (k === 0) return Math.max(0, ...colWidths(0, "top", tb?.top));
+      if (k === rows.length)
+        return Math.max(0, ...colWidths(rows.length - 1, "bottom", tb?.bottom));
+      const above = colWidths(k - 1, "bottom", tb?.insideH);
+      const below = colWidths(k, "top", tb?.insideH);
+      const n = Math.max(above.length, below.length);
+      let w = 0;
+      for (let i = 0; i < n; i++) w = Math.max(w, Math.max(above[i] ?? 0, below[i] ?? 0));
+      return w;
     };
     return { top: boundary(ri), bottom: boundary(ri + 1) };
   }
@@ -6922,10 +7870,26 @@ class Engine {
    * table-wide (tblBorders insideH/top/bottom) OR only per cell (tcBorders):
    * doerfp's roster tables draw sz-4 rules purely via cell bottom borders and
    * no tblBorders, so the share must also see the adjacent cells' borders or
-   * every row runs 0.5pt short and the 22-row grid drifts ~15px. */
+   * every row runs 0.5pt short and the 22-row grid drifts ~15px.
+   *
+   * A MIXED exact/content boundary is not split. Word gives the whole rule
+   * to the row BELOW the boundary: below an exact row a content row grows by
+   * the FULL rule and insets its content the same amount, and above an exact
+   * row a content row takes NOTHING — the rule belongs to the exact row,
+   * which absorbs it into its fixed height (probe-mixedbound, compat 11 and
+   * 15 digit-identical, each package exported twice: ECR/ECU/ECL read
+   * MK-UP +2.00 and flow +2.00 for a sz-12 rule against our half; ECW
+   * doubles both with sz-24; CER/CEW read flow ZERO with the full width as
+   * the exact row's content inset; one-sided nils suppress nothing;
+   * both-nil charges nothing. Content/content keeps the half/half split —
+   * CCR's marks agree with it exactly, and the corpus is calibrated on
+   * it.) */
   private rowBorderShare(tbl: Table, ri: number): number {
     const { top, bottom } = this.rowBorderWidths(tbl, ri);
-    return (top + bottom) / 2;
+    const rows = tbl.rows;
+    const topShare = ri > 0 && this.exactInsetRow(rows[ri - 1]) ? top : top / 2;
+    const bottomShare = ri < rows.length - 1 && this.exactInsetRow(rows[ri + 1]) ? 0 : bottom / 2;
+    return topShare + bottomShare;
   }
 
   private cellMarginsOf(
@@ -7016,7 +7980,7 @@ class Engine {
   private tableLeadHeight(tbl: Table): number {
     this.ensureTableBorders(tbl);
     const widths = this.resolveGridWidths(tbl, this.colWidth);
-    let lead = tbl.rows.length > 0 ? this.rowBorderWidths(tbl, 0).top / 2 : 0;
+    let lead = tbl.rows.length > 0 ? this.rowTopLead(tbl, 0) : 0;
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const laid = this.layoutRow(tbl, tbl.rows[ri], ri, widths);
       let h = laid.height + this.rowBorderShare(tbl, ri);
@@ -7094,10 +8058,10 @@ class Engine {
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
     const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
     const tableHeight =
-      (s2 || this.rowBorderWidths(tbl, 0).top / 2) +
+      (s2 || this.rowTopLead(tbl, 0)) +
       rowHeights.reduce((sum, height) => sum + height, 0) +
       Math.max(0, tbl.rows.length - 1) * s2 +
-      (s2 || this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2);
+      (s2 || this.rowBottomLead(tbl, tbl.rows.length - 1));
 
     // A normal table cannot wrap beside a floating exclusion rectangle. If
     // its footprint would intersect one, Word moves the whole table below the
@@ -7121,7 +8085,7 @@ class Engine {
     // (wild2-legal-nih-contract p29/30: only the 2-line header row of the
     // HANEGABE table fit at the page bottom — Word moves the entire table).
     if (headerRows.length > 0 && headerRows.length < tbl.rows.length && !this.pageIsEmptyAtCursor()) {
-      let lead = this.rowBorderWidths(tbl, 0).top / 2;
+      let lead = this.rowTopLead(tbl, 0);
       for (let ri = 0; ri <= headerRows.length; ri++) lead += rowHeights[ri];
       if (this.y + lead > this.bodyBottom + 0.01) this.nextColumn();
     }
@@ -7151,7 +8115,7 @@ class Engine {
     // the first row. The matching bottom half is added after the final row.
     // Separated-border tables advance 2*spacing instead (outline to first
     // cell box).
-    if (tbl.rows.length > 0) this.y += s2 || this.rowBorderWidths(tbl, 0).top / 2;
+    if (tbl.rows.length > 0) this.y += s2 || this.rowTopLead(tbl, 0);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -7182,7 +8146,16 @@ class Engine {
         segPage = this.cur;
         segHasRows = false;
         const firstRowIdx = !row.props.tblHeader && headerRows.length > 0 ? 0 : ri;
-        this.y += this.rowBorderWidths(tbl, firstRowIdx).top / 2;
+        // A repeated-header continuation top takes the table's TRUE outer-top
+        // arithmetic, nils included: probe-repeathdr (11 and 15, exported
+        // twice each) reads every continuation page's repeated row 0 at the
+        // body top exactly — a live sz-12/sz-24 top rule charges the flow its
+        // full width above a content row 0 and nothing above an exact row 0,
+        // and a row-0 all-nil zeroes it, digit-identical to the first-page
+        // instance. The fixture-calibrated nilSuppressedOuterTop charge this
+        // path used to keep contradicted all four nil cases by exactly its
+        // own width.
+        this.y += this.rowTopLead(tbl, firstRowIdx);
         // Repeat header rows at the top of the continuation page. A repeated
         // header advances by its FULL row height — content + border share +
         // any trHeight floor — exactly like its first-page instance (Word's
@@ -7194,6 +8167,16 @@ class Engine {
             const hIdx = tbl.rows.indexOf(hr);
             const hLaid = this.layoutRow(tbl, hr, hIdx, widths);
             const hH = rowHeights[hIdx];
+            // A repeated exact row charges its FULL height, bottom cell
+            // margin included. probe-repeathdr3 (us-courts base, compat 11,
+            // exported twice, ink-identical) sweeps the follower row's tcMar
+            // top (0/29/58) against the exact row's tcMar bottom (0/29/58):
+            // the continuation stack equals the first-page stack to 0.03px
+            // in every one of the five cases. The half-bottom-margin charge
+            // this path used to take was read off the fixture's Vop-to-
+            // first-data gap (probe-exactpad), where the continuation page's
+            // first data row is a DIFFERENT row from p1's — a confound, not
+            // a rule.
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             segHasRows = true;
@@ -7223,15 +8206,18 @@ class Engine {
       // EXACT-height row has no leading — its box bottom is hard content —
       // so it gets no allowance (staging-longtable p8/p9: Word moves the
       // 240-exact row #195 that would overhang the body bottom by 1pt).
+      // A cantSplit row gets NO allowance: probe-rowfit11 (us-courts base,
+      // compat 11, exported twice) sweeps the room under a 32.00px cantSplit
+      // row in 2px steps and Word moves it at room 30 and keeps it at room
+      // 32 — the threshold is the row's full height, with and without a
+      // footer, so the old footer-height allowance kept rows Word moves
+      // (us-courts-answer p6's signature row overhangs ~19px and Word moves
+      // it). The probe's splittable control also splits a two-line row 1+1
+      // at rooms 26..30, so the whole-row fit rarely decides those.
       const overhang =
-        noteReserve > 0 || row.props.heightRule === "exact"
+        noteReserve > 0 || row.props.heightRule === "exact" || row.props.cantSplit
           ? 0
-          : row.props.cantSplit
-            ? this.doc.compatibilityMode < 15 &&
-              (row.props.heightRule !== "atLeast" || (row.props.height ?? 0) >= ptToPx(2))
-              ? this.cur.footerHeight
-              : 0
-            : ROW_OVERHANG_TOL;
+          : ROW_OVERHANG_TOL;
       while (this.y + rowHeight > this.bodyBottom - this.rowNoteHeight(laid) + overhang + 0.01 && guard++ < 50) {
         // w:cantSplit is honored only while the row CAN fit on one page:
         // a row taller than the page body must split regardless (Word does —
@@ -7243,7 +8229,7 @@ class Engine {
         // advance() and the split happens from the page top.
         const atColumnTop =
           this.pageIsEmptyAtCursor() ||
-          this.y <= this.cur.bodyTop + this.rowBorderWidths(tbl, ri).top / 2 + 0.01;
+          this.y <= this.cur.bodyTop + this.rowTopLead(tbl, ri) + 0.01;
         const cantSplitHolds =
           row.props.cantSplit === true &&
           (rowHeight <= this.cur.bodyBottom - this.cur.bodyTop + 0.01 || !atColumnTop);
@@ -7288,7 +8274,7 @@ class Engine {
         }
         // Nothing splittable: at the top of a page the row simply overflows
         // (old behavior); mid-page it moves whole and gets one more chance.
-        const topHalf = this.rowBorderWidths(tbl, ri).top / 2;
+        const topHalf = this.rowTopLead(tbl, ri);
         if (this.pageIsEmptyAtCursor() || this.y <= this.cur.bodyTop + topHalf + 0.01) break;
         advance();
       }
@@ -7317,7 +8303,7 @@ class Engine {
     }
     // Separated-border tables close with a 2*spacing bottom inset then the outer
     // table outline box; ordinary tables add the final half rule.
-    if (tbl.rows.length > 0) this.y += s2 || this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
+    if (tbl.rows.length > 0) this.y += s2 || this.rowBottomLead(tbl, tbl.rows.length - 1);
     if (s2) this.paintTableOutline(this.cur, tbl, x0, segTop, this.y, tableWidth);
     this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
   }
@@ -7374,8 +8360,8 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
     const nRows = tbl.rows.length;
-    const topLead = nRows > 0 ? s2 || this.rowBorderWidths(tbl, 0).top / 2 : 0;
-    const botLead = nRows > 0 ? s2 || this.rowBorderWidths(tbl, nRows - 1).bottom / 2 : 0;
+    const topLead = nRows > 0 ? s2 || this.rowTopLead(tbl, 0) : 0;
+    const botLead = nRows > 0 ? s2 || this.rowBottomLead(tbl, nRows - 1) : 0;
     const tableHeight =
       topLead + rowHeights.reduce((a, b) => a + b, 0) + Math.max(0, nRows - 1) * s2 + botLead;
 
@@ -7585,7 +8571,7 @@ class Engine {
     this.col = 0;
     this.y = y;
     const frameTop = this.y;
-    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, 0).top / 2;
+    if (tbl.rows.length > 0) this.y += this.rowTopLead(tbl, 0);
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths, fields));
     const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
     for (const [key, ph] of spanPaint) {
@@ -7613,7 +8599,7 @@ class Engine {
         });
       }
     }
-    if (tbl.rows.length > 0) this.y += this.rowBorderWidths(tbl, tbl.rows.length - 1).bottom / 2;
+    if (tbl.rows.length > 0) this.y += this.rowBottomLead(tbl, tbl.rows.length - 1);
     // Nested tables are resizable too (the cover-letter layout puts every
     // user table inside a layout cell).
     if (tbl.src) this.emitTableGrips(tbl, fake, x0 + (tbl.props.indent ?? 0), widths, frameTop, this.y);
@@ -8024,14 +9010,14 @@ class Engine {
     // height already established by its ordinary/nested cells.
     let maxH = 0;
     let measuredContentH = 0;
-    const effectiveBottomPad = (bottom: number | undefined) =>
-      this.doc.compatibilityMode < 15 &&
-      row.props.heightRule === "atLeast" &&
-      (row.props.height ?? 0) < ptToPx(2)
-        ? (bottom ?? 0) >= ptToPx(2)
-          ? (bottom ?? 0) / 2
-          : (bottom ?? 0) / 4
-        : (bottom ?? 0);
+    // The bottom cell margin is charged in FULL in every measured regime.
+    // A compat-11 haircut here (half for margins over 2pt, quarter under,
+    // on sub-2pt atLeast rows) was canceling the insideH overcharge that
+    // rowBorderWidths' per-pair rule has since removed: us-courts-answer's
+    // signature rows (trHeight 20tw, tcMar top 58 / bottom 43) measure
+    // 23.6px in Word = line + both margins exactly, and probe-uscourtsblock2
+    // CN pins the same for a plain content row's (58, 14).
+    const effectiveBottomPad = (bottom: number | undefined) => bottom ?? 0;
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
       const { x, width: w, margins: m } = geometry[ci];
@@ -8221,13 +9207,32 @@ class Engine {
         });
       }
 
-      // Row height reserves half of each horizontal boundary rule. Place cell
-      // content inside those halves; previously it started on the top rule's
-      // centerline and left both shares below the content, making each table's
-      // paragraph-to-first-line boundary one border width too short.
+      // A content-sized row's height reserves half of each horizontal
+      // boundary rule; place cell content inside those halves (previously it
+      // started on the top rule's centerline and left both shares below the
+      // content, making each table's paragraph-to-first-line boundary one
+      // border width too short).
+      //
+      // An hRule="exact" row does not grow for the boundary at all — the rule
+      // shows up ONLY as this content inset — and Word charges it the FULL
+      // rule width, not half (probe-exactnil, parity 02dff8a: two exact 495tw
+      // rows under a sz-12 insideH read 35.00 mark to mark where the authored
+      // row is 33.00; a both-nil boundary reads 33.00, which rowBorderWidths
+      // already returns as a zero width). The full inset applies at the outer
+      // table edge too — probe-sidedness measured a lone exact row's top
+      // border pushing its content down the whole 2.00px — and the exact row
+      // takes no half-rule flow lead in exchange (see exactInsetRow).
       const rowSpan = cell.props.vMerge === "restart" ? this.vMergeRowSpan(tbl, rowIdx, colStart) : 1;
-      const topInset = this.rowBorderWidths(tbl, rowIdx).top / 2;
-      const bottomInset = this.rowBorderWidths(tbl, rowIdx + rowSpan - 1).bottom / 2;
+      const topWidth = this.rowBorderWidths(tbl, rowIdx).top;
+      // A content row bordering an exact row takes the whole boundary on the
+      // exact row's terms (probe-mixedbound; see rowBorderShare): BELOW an
+      // exact row it insets the full rule, and ABOVE one it insets nothing —
+      // the rule went to the exact row's fixed height.
+      const belowExact = rowIdx > 0 && this.exactInsetRow(tbl.rows[rowIdx - 1]);
+      const topInset = this.exactInsetRow(row) || belowExact ? topWidth : topWidth / 2;
+      const lastIdx = rowIdx + rowSpan - 1;
+      const aboveExact = lastIdx < tbl.rows.length - 1 && this.exactInsetRow(tbl.rows[lastIdx + 1]);
+      const bottomInset = aboveExact ? 0 : this.rowBorderWidths(tbl, lastIdx).bottom / 2;
       const contentH = Math.max(0, cellH - topInset - bottomInset);
       let dy = topInset;
       if (!cellLay.rotated && cell.props.verticalAlign === "center") {
@@ -8241,6 +9246,16 @@ class Engine {
       // For Sale flyer's full-page fixed cell). Drop items whose top starts
       // below the row bottom. A vertical-merge restart clips at the end of
       // its full merged cell, not at the end of its first source row.
+      //
+      // probe-exactoverflow sweeps 1..160 paragraphs in a 260tw exact row, plus
+      // a TOC field, w:cantSplit, and the row at the page foot. Word's export
+      // wraps EVERY text operator the row emits in one clip rectangle of the
+      // row box - `72.025 694.97 468.2 12.25 re W* n`, all 119 of them on the
+      // 90-paragraph page - and its raster carries exactly one row line in all
+      // 16 cases. Word emits operators until the content runs off the paper, so
+      // a PDF reader that ignores `W* n` reports 59 painted lines there and 12
+      // at the page foot; that reading is what filed #56 as a defect. The row
+      // box wins - table-boundary.test.ts pins it.
       const clip = row.props.heightRule === "exact";
       const rowBottom = y + (cell.props.vMerge === "restart" ? cellH : rowHeight);
       for (const it of cellLay.items) {
@@ -8340,7 +9355,131 @@ class Engine {
   }
 }
 
+class LayoutWindowController implements LayoutWindow {
+  private retained: Set<number>;
+
+  constructor(
+    private doc: DocxDocument,
+    private measurer: TextMeasurer,
+    private result: LayoutResult,
+    private data: IncrData,
+    private pages: InternalPage[],
+    private fontSamples = new Map<string, LayoutFontSample>(),
+    private mergeRecord?: MergeRecord,
+  ) {
+    this.retained = new Set(
+      pages.flatMap((page, index) => page.discarded ? [] : [index]),
+    );
+  }
+
+  materialize(pageIndexes: Iterable<number>): void {
+    const wanted = this.normalize(pageIndexes);
+    const missing = [...wanted].filter((index) => !this.retained.has(index)).sort((a, b) => a - b);
+    let cursor = 0;
+    while (cursor < missing.length) {
+      const start = missing[cursor];
+      let end = start;
+      while (cursor + 1 < missing.length && missing[cursor + 1] === end + 1) {
+        cursor++;
+        end = missing[cursor];
+      }
+      const rebuilt = new Engine(
+        this.doc,
+        this.measurer,
+        undefined,
+        true,
+        this.mergeRecord,
+      ).materializeRange(this.data, start, end);
+      const byIndex = new Map(rebuilt.map((page) => [page.physIndex - 1, page]));
+      for (let index = start; index <= end; index++) {
+        const page = byIndex.get(index);
+        if (!page) throw new Error(`Layout relay did not produce page ${index + 1}`);
+        const target = this.pages[index];
+        target.items = page.items;
+        target.hfStart = page.hfStart;
+        target.footnotes = page.footnotes;
+        target.footnoteH = page.footnoteH;
+        target.discarded = false;
+        this.result.pages[index].items = page.items;
+        this.result.pages[index].hfStart = page.hfStart ?? page.items.length;
+        this.retained.add(index);
+      }
+      cursor++;
+    }
+  }
+
+  releaseExcept(pageIndexes: Iterable<number>): void {
+    const wanted = this.normalize(pageIndexes);
+    for (const index of this.retained) {
+      if (wanted.has(index)) continue;
+      const page = this.pages[index];
+      collectPageMetadata(
+        page,
+        this.fontSamples,
+        () => {
+          this.result._hasModel3D = true;
+        },
+      );
+      page.items = [];
+      for (const note of page.footnotes) note.items = [];
+      page.hfStart = 0;
+      page.discarded = true;
+      this.result.pages[index].items = page.items;
+      this.result.pages[index].hfStart = 0;
+    }
+    this.retained = wanted;
+    this.result._fontSamples = [...this.fontSamples.values()];
+  }
+
+  retainedPages(): Set<number> {
+    return new Set(this.retained);
+  }
+
+  private normalize(pageIndexes: Iterable<number>): Set<number> {
+    const wanted = new Set<number>();
+    for (const pageIndex of pageIndexes) {
+      if (pageIndex < 0 || pageIndex >= this.pages.length) continue;
+      wanted.add(pageIndex);
+    }
+    return wanted;
+  }
+}
+
 // ---------- helpers ----------
+
+function collectPageMetadata(
+  page: InternalPage,
+  fontSamples: Map<string, LayoutFontSample>,
+  foundModel3D: () => void,
+): void {
+  const items = page.items.concat(page.footnotes.flatMap((note) => note.items));
+  for (const item of items) {
+    if (item.kind === "image" && item.model3D) foundModel3D();
+    if (item.kind !== "text" || !item.text.trim()) continue;
+    mergeFontSample(fontSamples, { font: item.font, text: item.text.trim().slice(0, 40) });
+  }
+}
+
+/** Keep one sample per face, preferring one that exercises it past Latin
+ * Extended-B so the host's preload list has the widest witness available. */
+function mergeFontSample(fontSamples: Map<string, LayoutFontSample>, sample: LayoutFontSample): void {
+  const key = fontSampleKey(sample);
+  const existing = fontSamples.get(key);
+  if (!existing || (!NON_LATIN_SAMPLE.test(existing.text) && NON_LATIN_SAMPLE.test(sample.text))) {
+    fontSamples.set(key, sample);
+  }
+}
+
+const NON_LATIN_SAMPLE = /[^\u0000-\u024f]/;
+
+function fontSampleKey(sample: LayoutFontSample): string {
+  return `${sample.font.family}\u0000${sample.font.bold ? 1 : 0}${sample.font.italic ? 1 : 0}`;
+}
+
+function sampleHeap(): void {
+  const perf = (globalThis as { __dxwPerf?: { heapSample?: () => void } }).__dxwPerf;
+  perf?.heapSample?.();
+}
 
 /** A custom-mark footnote attached through an otherwise blank paragraph is a
  * zero-height anchor. IEEE templates use this to place the author footnote
@@ -8387,6 +9526,88 @@ function isEmptyParagraph(p: Paragraph): boolean {
     }
   }
   return true;
+}
+
+/** A paragraph whose ONLY rendered content is one or more hard page breaks:
+ * empty text is allowed, everything else (text, tabs, images, drawings, math,
+ * fields, note references, anchors, line and column breaks) disqualifies it.
+ * Such a paragraph demands only its single-spaced line height to fit at the
+ * foot of a page - see pageBreakOnlyPara. */
+function isPageBreakOnlyParagraph(p: Paragraph): boolean {
+  let sawBreak = false;
+  for (const child of p.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const rc of r.content) {
+        if (rc.kind === "text") {
+          if (rc.text.length > 0) return false;
+        } else if (rc.kind === "break" && rc.breakType === "page") {
+          sawBreak = true;
+        } else {
+          return false;
+        }
+      }
+    }
+  }
+  return sawBreak;
+}
+
+/** Do these two paragraphs carry the SAME pBdr, in Word's sense?
+ *
+ * Word treats a run of adjacent paragraphs with identical borders as one
+ * bordered block: the shared edges do not paint and no reserve is charged for
+ * them, so the box closes once at the top of the first paragraph and once
+ * under the last.
+ *
+ * The comparison is on the RESOLVED border set, not on the XML: a pBdr a
+ * paragraph inherits from its style counts exactly like a direct one. That is
+ * safe to compare edge-by-edge because mergeParaProps replaces `borders`
+ * wholesale (pBdr is a replace-not-merge element), so a resolved set always
+ * comes from one pBdr.
+ *
+ * Two edges match when both paint nothing, or when all four properties that
+ * reach the page agree: style, DECLARED width, w:space and colour. An absent
+ * edge and an explicit `w:val="none"` are the same thing here - neither paints
+ * and neither claims room. `between` counts as an edge: paragraphs that declare
+ * different between rules are not one block.
+ *
+ * The width test is on `rawWidth`, not `width`. `width` floors at 0.75px, so it
+ * SATURATES below w:sz="6" and reports w:sz="2" (0.25pt) and w:sz="4" (0.5pt)
+ * as the same edge. That merged two visibly different rules into one block and
+ * suppressed the boundary between them: probe-rulewidth's sz2 paragraph paints
+ * no rule at all, because the sz4 paragraph below it swallows the shared edge.
+ * Harmless while renderEdge snapped both weights to one painted width; a live
+ * defect once each is painted at its own.
+ */
+function sameParagraphBorders(a: ParagraphBorders | undefined, b: ParagraphBorders | undefined): boolean {
+  // A paragraph with no pBdr at all never merges with anything.
+  if (!a || !b) return false;
+  const painted = (e: Border | undefined) => (e && e.style !== "none" ? e : undefined);
+  const declared = (e: Border) => e.rawWidth ?? e.width;
+  return (["top", "bottom", "left", "right", "between"] as const).every((side) => {
+    const x = painted(a[side]);
+    const y = painted(b[side]);
+    if (!x || !y) return !x && !y;
+    return (
+      x.style === y.style &&
+      declared(x) === declared(y) &&
+      x.space === y.space &&
+      x.color === y.color
+    );
+  });
+}
+
+/** The two paragraphs also need the same border BOX to merge into one: Word
+ * draws the box across [indentLeft - hanging, right - indentRight], and two
+ * boxes of different widths cannot be one. Whether Word really refuses to
+ * merge on an indent difference alone is UNTESTED - we have no measurement of
+ * that case, so this keeps the conservative reading (differing indents stay
+ * separate boxes, each with its own rules and reserves). */
+function sameParagraphBorderBox(a: ParaProps, b: ParaProps): boolean {
+  return (
+    (a.indentLeft ?? 0) - (a.indentHanging ?? 0) === (b.indentLeft ?? 0) - (b.indentHanging ?? 0) &&
+    (a.indentRight ?? 0) === (b.indentRight ?? 0)
+  );
 }
 
 function isPageFieldFrame(p: Paragraph, props: ParaProps): boolean {
@@ -8439,11 +9660,121 @@ function computeColumns(sp: SectionProps, contentWidth: number): { colXs: number
   return { colXs, colWidths };
 }
 
+/**
+ * Give a spanning cell's demand to the columns it covers.
+ *
+ * Word hands the shortfall to those columns in proportion to what each already
+ * demands on its OWN (single-column) content, NOT in equal shares. Measured by
+ * exporting autofit tables (tblW pct, no tcW) through desktop Word at 192dpi:
+ *
+ *   "Status" spanning [ok | (empty)]         -> Word 96 / 10 device px
+ *   "Status" spanning [ok | alsoContent]     -> Word 39 / 182
+ *   long header spanning [ok | zz]           -> Word 310 / 254
+ *
+ * An equal split reproduces none of those; it renders the first two as 55/55
+ * and 299/299. Weighing by content means a column holding nothing of its own
+ * takes almost none of the span, which is what makes a freshly inserted (empty)
+ * column stay a sliver instead of stealing half of its neighbour's width.
+ *
+ * `floor` is the per-column padding already baked into `target`; it is excluded
+ * from the weights so an empty column weighs zero. When no covered column has
+ * content of its own there is nothing to weigh by, so the shortfall splits
+ * evenly.
+ */
+function spreadSpan(target: number[], floor: number, at: number, span: number, demand: number): void {
+  if (demand <= 0) return;
+  let covered = 0;
+  for (let k = 0; k < span; k++) covered += target[at + k];
+  const short = demand - covered;
+  if (short <= 0) return;
+  const weights: number[] = [];
+  let sum = 0;
+  for (let k = 0; k < span; k++) {
+    const weight = Math.max(0, target[at + k] - floor);
+    weights.push(weight);
+    sum += weight;
+  }
+  for (let k = 0; k < span; k++) {
+    target[at + k] += sum > 0 ? (short * weights[k]) / sum : short / span;
+  }
+}
+
+/**
+ * Split a percentage table's width across its authored grid the way Word does.
+ *
+ * Word reads each gridCol as a FULL column width with the horizontal cell
+ * margins already inside it, so only the CONTENT part of a column takes part
+ * in the scaling, and no column paints narrower than its margins plus 1pt:
+ *
+ *   inner[i]   = max(grid[i] − margins, 0)
+ *   painted[i] = max(margins + inner[i] / Σ(inner) × (tableWidth − n × margins),
+ *                    margins + 20tw)
+ *
+ * with what a floored column takes over its share coming out of the columns
+ * still above the floor. `margins` is the table's total horizontal cell margin
+ * per column.
+ *
+ * Probed through desktop Word: 10 percentage tables for the split
+ * (probe-pctcolumn.docx and its generator in the parity repo, commit ffba22b)
+ * and a two-margin sweep for the floor (commit 4a37be5), exact within 1px on
+ * every case across both. Strict proportional scaling, which this replaces, is
+ * out by as much as 45px. Cell CONTENT plays no part — an empty middle cell and
+ * a wrapping one paint identically. At zero margins the split collapses to the
+ * proportional one, which is why the zero-margin fixtures were right all along.
+ *
+ * The floor rides on the margins rather than being an absolute width: the sweep
+ * plateaus at 420tw under 400tw margins and 818tw under 800tw. The 20tw here
+ * takes the first reading exactly and the second within 2tw, a quarter of a
+ * device pixel at 192dpi and so under the sweep's own resolution.
+ */
+function distributePctColumns(grid: number[], tableWidth: number, margins: number): number[] {
+  const room = tableWidth - grid.length * margins;
+  if (room <= 0) {
+    // Too narrow to seat even the margins: fall back to a proportional split.
+    const total = grid.reduce((a, b) => a + b, 0);
+    return grid.map((w) => (w * tableWidth) / total);
+  }
+  const floorRoom = 20 / 15; // the 1pt a floored column keeps for its content
+  const inner = grid.map((w) => Math.max(0, w - margins));
+  const floored = new Array<boolean>(grid.length).fill(false);
+  let widths = grid.map(() => margins);
+  // Each pass splits the room left over from the already-floored columns; a
+  // column that lands under the floor joins them and the pass repeats.
+  for (let pass = 0; pass < grid.length; pass++) {
+    let freeRoom = room;
+    let freeInner = 0;
+    let freeCols = 0;
+    for (let i = 0; i < grid.length; i++) {
+      if (floored[i]) freeRoom -= floorRoom;
+      else {
+        freeInner += inner[i];
+        freeCols++;
+      }
+    }
+    if (freeCols === 0) return grid.map(() => margins + floorRoom);
+    widths = grid.map((_, i) =>
+      floored[i]
+        ? margins + floorRoom
+        : margins + (freeInner > 0 ? (inner[i] * freeRoom) / freeInner : freeRoom / freeCols),
+    );
+    let sank = false;
+    for (let i = 0; i < grid.length; i++) {
+      if (!floored[i] && widths[i] < margins + floorRoom) {
+        floored[i] = true;
+        sank = true;
+      }
+    }
+    if (!sank) break;
+  }
+  return widths;
+}
+
 function resolveGrid(
   tbl: Table,
   available: number,
   overflowAllowed = false,
-  edgeCellMargins = 0,
+  cellMargins = 0,
+  pctBoxAddsMargins = false,
 ): number[] {
   // A body-level tblLayout=fixed table renders at its declared grid width
   // even when that exceeds the text column: Word lets it run into the right
@@ -8452,14 +9783,20 @@ function resolveGrid(
   // the right margin, not shrunk to fit).
   const fixedOverflow = overflowAllowed && tbl.props.layout === "fixed";
   const cap = fixedOverflow ? Number.POSITIVE_INFINITY : available;
-  // Word measures a body-level FIXED-layout table's PCT width against the
-  // text column PLUS the table's own left+right cell margins: the table box
-  // starts a cell margin left of the text column so the first/last column
-  // TEXT aligns with the column edges while the borders overhang. Measured
-  // on nccih p14 (tblW 5000 pct, 12960tw landscape column, default 108tw
-  // margins): Word renders the authored 13176tw = 12960 + 216 grid raw,
-  // rules at margin - 7.2px and margin + 7.2px.
-  const pctBase = fixedOverflow ? available + edgeCellMargins : available;
+  // A tblW pct width resolves against the text column, plus the table's own
+  // horizontal cell margins when `pctBoxAddsMargins` says the file follows
+  // Word's legacy table metrics (see resolveGridWidths).
+  //
+  // With the allowance the box starts a cell margin left of the text column,
+  // so the first and last column's TEXT aligns with the column edges while the
+  // borders overhang: nccih p14 (tblW 5000 pct, 12960tw landscape column,
+  // default 108tw margins, declared mode 14 — an earlier probe misread it as
+  // absent; both take the legacy branch) renders the authored 13176tw =
+  // 12960 + 216 grid raw, rules at margin - 7.2px and margin + 7.2px. Without
+  // it the margins sit inside the box: on A4 with 1in margins (a 1203px column
+  // at 192dpi), tblW 4500 pct with 10pt left + right margins under mode 15
+  // paints 1083px = 0.90 × 1203, not 0.90 × (1203 + 53.3).
+  const pctBase = fixedOverflow && pctBoxAddsMargins ? available + cellMargins : available;
   const target = Math.min(
     cap,
     tbl.props.width ?? (tbl.props.widthPct !== undefined ? tbl.props.widthPct * pctBase : available),
@@ -8474,11 +9811,16 @@ function resolveGrid(
         : Math.max(1, ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)));
     return new Array(cols).fill(Math.min(target, available) / cols);
   }
-  // Scale the grid to an explicit table width, or shrink to fit the column.
+  // Scale the grid to an explicit table width, or shrink to fit the column. A
+  // PERCENTAGE table splits by content share (distributePctColumns); every
+  // other width scales the columns proportionally, which is what the dxa
+  // fixtures measure.
   const wantsExplicit = tbl.props.width !== undefined || tbl.props.widthPct !== undefined;
   if ((wantsExplicit && Math.abs(total - target) > 1) || total > cap) {
-    const scale = target / total;
-    widths = widths.map((w) => w * scale);
+    widths =
+      tbl.props.widthPct !== undefined
+        ? distributePctColumns(widths, target, cellMargins)
+        : widths.map((w) => (w * target) / total);
   }
   return widths;
 }
@@ -8539,6 +9881,15 @@ function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } 
   return undefined; // break with nothing after it (break-only paragraph)
 }
 
+/** The widest laid line in a shape's freshly measured frame, px. Must be read
+ * BEFORE the items are offsetItem'd into page space, while their x is still
+ * relative to the text origin. */
+function measuredTextWidth(items: PageItem[]): number {
+  let widest = 0;
+  for (const item of items) if (item.kind === "text") widest = Math.max(widest, item.x + item.width);
+  return widest;
+}
+
 function offsetItem(item: PageItem, dx: number, dy: number): void {
   switch (item.kind) {
     case "text":
@@ -8564,6 +9915,12 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       break;
     case "grip":
       item.x += dx;
+      // x2 is the grip's far edge, in the same space as x. Leaving it behind
+      // moved a nested table's grips without moving their right-hand end, so
+      // a row grip came out with x2 BEHIND x — a negative width, which paints
+      // as nothing and can never be pressed, and a move grip whose bounds the
+      // editor uses for hit-testing pointed at the inner frame's coordinates.
+      if (item.x2 !== undefined) item.x2 += dx;
       item.y1 += dy;
       item.y2 += dy;
       break;

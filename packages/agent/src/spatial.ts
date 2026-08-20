@@ -2,6 +2,8 @@ import {
   layoutDocument,
   type Block,
   type DocxDocument,
+  type LaidOutPage,
+  type LayoutResult,
   type PageItem,
   type Paragraph,
   type Run,
@@ -9,7 +11,14 @@ import {
   type XmlElement,
 } from "@wordinweb/core";
 import { blockRef, runRef } from "./refs.js";
-import type { AgentOverlap, AgentSpatialObject, AgentSpatialResult, SpatialBounds } from "./types.js";
+import type {
+  AgentDrawingFit,
+  AgentFitResult,
+  AgentOverlap,
+  AgentSpatialObject,
+  AgentSpatialResult,
+  SpatialBounds,
+} from "./types.js";
 import type { SemanticInspector } from "./inspect.js";
 
 interface Point { x: number; y: number }
@@ -210,6 +219,29 @@ function topObject(a: InternalObject, b: InternalObject): string | undefined {
   return a.paintOrder === b.paintOrder ? undefined : a.paintOrder > b.paintOrder ? a.ref : b.ref;
 }
 
+/** The requested window of laid-out pages, defaulting to the first ten. */
+function selectPages(
+  result: LayoutResult,
+  pageRange?: { start: number; count: number },
+): LaidOutPage[] {
+  const start = pageRange?.start ?? 1;
+  const count = pageRange?.count ?? Math.min(result.totalPages, 10);
+  if (!Number.isInteger(start) || start < 1 || !Number.isInteger(count) || count < 1 || count > 100) throw new Error("Invalid page range");
+  return result.pages.filter((page) => page.index >= start && page.index < start + count);
+}
+
+/** Headless layout approximates text metrics; a browser measures them. */
+function layoutQuality(): { quality: "exact" | "approximate"; profile: string } {
+  return typeof document === "undefined"
+    ? { quality: "approximate", profile: "headless-approx" }
+    : { quality: "exact", profile: "browser-canvas" };
+}
+
+/** Sub-pixel precision is noise to a model reasoning about whether text fits. */
+function px(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
 export function spatialInspect(
   doc: DocxDocument,
   ids: StableIds,
@@ -219,10 +251,7 @@ export function spatialInspect(
   includeOverlaps = true,
 ): AgentSpatialResult {
   const result = layoutDocument(doc);
-  const start = pageRange?.start ?? 1;
-  const count = pageRange?.count ?? Math.min(result.totalPages, 10);
-  if (!Number.isInteger(start) || start < 1 || !Number.isInteger(count) || count < 1 || count > 100) throw new Error("Invalid page range");
-  const wanted = result.pages.filter((page) => page.index >= start && page.index < start + count);
+  const wanted = selectPages(result, pageRange);
   const maps = sourceMaps(doc, ids);
   const objects: InternalObject[] = [];
   const occurrences = new Map<string, number>();
@@ -304,10 +333,59 @@ export function spatialInspect(
 
   return {
     revision,
-    layout: { quality: typeof document === "undefined" ? "approximate" : "exact", profile: typeof document === "undefined" ? "headless-approx" : "browser-canvas" },
+    layout: layoutQuality(),
     totalPages: result.totalPages,
     pages: wanted.map((page) => ({ index: page.index, width: page.width, height: page.height })),
     objects: objects.map(({ polygon: _polygon, paintOrder: _paintOrder, ...object }) => object),
     overlaps,
   };
+}
+
+/**
+ * Text-fit inspection: for every text-bearing drawing on the requested pages,
+ * the frame it draws beside the extent its text actually laid into.
+ *
+ * The layout already measures shape text in order to place it (that is how
+ * a:spAutoFit recomputes a box height), so nothing is measured a second time
+ * here — the layout records the measurement on the drawing's hit item and this
+ * walk reads it off, exactly as spatialInspect reads bounds off page items.
+ *
+ * Page fill rides along because the same question — "did what I just inserted
+ * fit?" — is asked of the page as often as of the box.
+ */
+export function fitInspect(
+  doc: DocxDocument,
+  ids: StableIds,
+  revision: string,
+  inspector: SemanticInspector,
+  pageRange?: { start: number; count: number },
+): AgentFitResult {
+  const result = layoutDocument(doc);
+  const wanted = selectPages(result, pageRange);
+  const maps = sourceMaps(doc, ids);
+  const drawings: AgentDrawingFit[] = [];
+  const pages = wanted.map((page) => {
+    let contentBottom = 0;
+    page.items.forEach((item, index) => {
+      // Items from hfStart on belong to the header and footer, which do not
+      // say anything about how full the body is.
+      if (index >= page.hfStart) return;
+      const bounds = itemBounds(item);
+      if (bounds && itemRole(item) !== "ui") contentBottom = Math.max(contentBottom, bounds.y + bounds.height);
+      if (item.kind !== "drawingHit" || !item.textFit) return;
+      const target = maps.drawingRuns.get(item.src);
+      if (!target) return;
+      drawings.push({
+        objectRef: inspector.objectRefForRun(target.runId, target.objectIndex) ?? runRef(target.runId),
+        page: page.index,
+        boxPx: { w: px(item.width), h: px(item.height) },
+        textPx: { w: px(item.textFit.textW), h: px(item.textFit.textH) },
+        overflow: item.textFit.overflow,
+        clippedLines: item.textFit.clippedLines,
+        autofit: item.textFit.autofit,
+      });
+    });
+    return { page: page.index, contentBottomPx: px(contentBottom), pageBottomPx: px(page.bodyBottom) };
+  });
+  return { revision, layout: layoutQuality(), totalPages: result.totalPages, pages, drawings };
 }

@@ -1,5 +1,7 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, localName } from "../xml.js";
+import { nextRelativeHeight } from "./images.js";
+import { isKnownShapeGeometry } from "../preset-geometry.js";
 
 const EMU_PER_PX = 9525;
 const NS_WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
@@ -7,8 +9,43 @@ const NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main";
 const NS_WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
 const NS_W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
 
-export type ShapePreset = "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox";
-export type WordArtPreset = "plain" | "archUp" | "archDown" | "wave" | "chevron";
+/** The legacy named presets, or any DrawingML ST_ShapeType name the preset
+ * geometry table knows (isValidShapePreset). */
+export type ShapePreset =
+  | "line" | "verticalLine" | "rectangle" | "roundedRectangle" | "ellipse" | "diamond" | "textBox"
+  | (string & {});
+
+/** Map an accepted preset to the a:prstGeom name it authors. */
+export function shapePresetGeometry(preset: ShapePreset): string | undefined {
+  switch (preset) {
+    case "line":
+    case "verticalLine":
+      return "line";
+    case "rectangle":
+    case "textBox":
+      return "rect";
+    case "roundedRectangle":
+      return "roundRect";
+    default:
+      return isKnownShapeGeometry(preset) ? preset : undefined;
+  }
+}
+
+export function isValidShapePreset(preset: string): boolean {
+  return shapePresetGeometry(preset) !== undefined;
+}
+export type WordArtPreset =
+  | "plain" | "archUp" | "archDown" | "wave" | "chevron"
+  | "circle" | "button" | "chevronDown";
+
+/** A WordArt gallery style: glyph fill plus optional outline and shadow
+ * (w14:textFill / w14:textOutline / w14:shadow run effects). */
+export interface WordArtStyle {
+  /** 6-hex-digit RGB, with or without "#". */
+  fill: string;
+  outline?: { color: string; widthPt: number };
+  shadow?: boolean;
+}
 export type DrawingLineDash = "solid" | "dashed" | "dotted";
 export interface InkPoint { x: number; y: number }
 export type DrawingTool =
@@ -55,20 +92,23 @@ export function insertShapeAt(
   const parent = caretRun && doc.findParentOf(caretRun);
   if (!caretRun || !parent || localName(caretRun.name) !== "r") return null;
 
+  const geometry = shapePresetGeometry(preset);
+  if (!geometry) return null;
   const w = prefixOf(caretRun);
   const id = String(doc.nextDrawingId());
   const isLine = preset === "line" || preset === "verticalLine";
   const isVerticalLine = preset === "verticalLine";
-  const width = isVerticalLine ? 2 : isLine ? 240 : preset === "textBox" ? 240 : 192;
-  const height = isVerticalLine ? 240 : isLine ? 2 : preset === "textBox" ? 72 : 96;
+  const legacyBox = ["rectangle", "roundedRectangle", "ellipse", "diamond"].includes(preset);
+  // Legacy presets keep their historical sizes; gallery presets insert as a
+  // Word-like 1.33in square.
+  const width = isVerticalLine ? 2 : isLine ? 240 : preset === "textBox" ? 240 : legacyBox ? 192 : 128;
+  const height = isVerticalLine ? 240 : isLine ? 2 : preset === "textBox" ? 72 : legacyBox ? 96 : 128;
   const cx = String(Math.round(width * EMU_PER_PX));
   const cy = String(Math.round(height * EMU_PER_PX));
   // Keep the line geometry horizontal while the outer extent retains enough
   // height to provide a usable selection target and resize handles.
   const shapeCx = isVerticalLine ? "0" : cx;
   const shapeCy = isLine && !isVerticalLine ? "0" : cy;
-  const geometry =
-    isLine ? "line" : preset === "roundedRectangle" ? "roundRect" : preset === "rectangle" || preset === "textBox" ? "rect" : preset;
   const isTextBox = preset === "textBox";
   const shapeName = isLine ? `Line ${id}` : isTextBox ? `Text Box ${id}` : `Shape ${id}`;
 
@@ -110,7 +150,7 @@ export function insertShapeAt(
     el("wp:anchor", {
       "xmlns:wp": NS_WP,
       distT: "0", distB: "0", distL: "114300", distR: "114300",
-      simplePos: "0", relativeHeight: "251658240", behindDoc: "0",
+      simplePos: "0", relativeHeight: nextRelativeHeight(doc, caretRun), behindDoc: "0",
       locked: "0", layoutInCell: "1", allowOverlap: "1",
     }, [
       el("wp:simplePos", { x: "0", y: "0" }),
@@ -140,6 +180,7 @@ export function insertWordArtAt(
   caretT: XmlElement,
   text: string,
   preset: WordArtPreset = "plain",
+  style?: WordArtStyle,
 ): XmlElement | null {
   if (!text) return null;
   const drawing = insertShapeAt(doc, caretT, "textBox", text);
@@ -151,6 +192,9 @@ export function insertWordArtAt(
     archDown: "textArchDown",
     wave: "textWave1",
     chevron: "textChevron",
+    circle: "textCircle",
+    button: "textButton",
+    chevronDown: "textChevronInverted",
   }[preset];
   const docPr = descendant(drawing, "docPr");
   if (docPr) docPr.attrs.name = `WordArt ${docPr.attrs.id}`;
@@ -187,6 +231,7 @@ export function insertWordArtAt(
     const size = rPr.children.find((child) => localName(child.name) === "sz");
     if (color) color.attrs[Object.keys(color.attrs).find((key) => localName(key) === "val") ?? `${prefixOf(color)}val`] = "2E74B5";
     if (size) size.attrs[Object.keys(size.attrs).find((key) => localName(key) === "val") ?? `${prefixOf(size)}val`] = "40";
+    if (style) applyWordArtStyle(rPr, style);
   }
 
   const paragraphProperties = descendant(drawing, "pPr");
@@ -229,6 +274,82 @@ export function insertWordArtAt(
   }
   doc.refresh();
   return drawing;
+}
+
+const EMU_PER_PT = 12700;
+
+/** Write a WordArt gallery style's run effects: the legacy w:color fallback
+ * plus w14:shadow / w14:textOutline / w14:textFill (Word's element order). */
+function applyWordArtStyle(rPr: XmlElement, style: WordArtStyle): void {
+  const hex = style.fill.replace(/^#/, "").toUpperCase();
+  const color = rPr.children.find((child) => localName(child.name) === "color");
+  if (color) color.attrs[Object.keys(color.attrs).find((key) => localName(key) === "val") ?? `${prefixOf(color)}val`] = hex;
+  if (style.shadow) {
+    // Word's WordArt gallery offset-shadow: 3pt blur, 1.5pt at 45°, 60% black.
+    rPr.children.push(el("w14:shadow", {
+      "xmlns:w14": NS_W14,
+      "w14:blurRad": "38100", "w14:dist": "19050", "w14:dir": "2700000",
+      "w14:sx": "100000", "w14:sy": "100000", "w14:kx": "0", "w14:ky": "0", "w14:algn": "bl",
+    }, [el("w14:srgbClr", { "w14:val": "000000" }, [el("w14:alpha", { "w14:val": "60000" })])]));
+  }
+  if (style.outline) {
+    rPr.children.push(el("w14:textOutline", {
+      "xmlns:w14": NS_W14,
+      "w14:w": String(Math.max(1, Math.round(style.outline.widthPt * EMU_PER_PT))),
+      "w14:cap": "flat", "w14:cmpd": "sng", "w14:algn": "ctr",
+    }, [
+      el("w14:solidFill", {}, [el("w14:srgbClr", { "w14:val": style.outline.color.replace(/^#/, "").toUpperCase() })]),
+      el("w14:prstDash", { "w14:val": "solid" }),
+      el("w14:round"),
+    ]));
+  }
+  rPr.children.push(el("w14:textFill", { "xmlns:w14": NS_W14 }, [
+    el("w14:solidFill", {}, [el("w14:srgbClr", { "w14:val": hex })]),
+  ]));
+}
+
+/** Outline/shadow for an ordinary run — Word's Home-tab "Text Effects and
+ * Typography" gallery, distinct from inserting a WordArt object. */
+export interface RunTextEffectPatch {
+  outline?: { color: string; widthPt: number } | null;
+  shadow?: boolean;
+}
+
+/**
+ * Apply (or clear, when `effect` is null) the w14 outline/shadow run-effects
+ * vocabulary directly on an ordinary run's rPr. Same element shapes and
+ * "Word's element order" as applyWordArtStyle's outline/shadow above, minus
+ * the fill: text-effect presets keep the run's existing color (a preset that
+ * wants a specific one sets it through the ordinary `color` run-format field
+ * in the same patch — commands.ts's setRunProps already handles w:color).
+ */
+export function applyRunTextEffect(rPr: XmlElement, effect: RunTextEffectPatch | null): void {
+  // w14:shadow shares its local name with the legacy w:shadow toggle
+  // (§17.3.2.36, an unrelated engrave-style effect) — strip only the w14 one.
+  // textFill is also stripped so "clear" fully undoes a run that picked up
+  // one some other way (arriving Word content, say).
+  rPr.children = rPr.children.filter((child) =>
+    !(child.name.startsWith("w14:") && ["textOutline", "shadow", "textFill"].includes(localName(child.name))));
+  if (!effect) return;
+  if (effect.shadow) {
+    // Word's WordArt gallery offset-shadow: 3pt blur, 1.5pt at 45°, 60% black.
+    rPr.children.push(el("w14:shadow", {
+      "xmlns:w14": NS_W14,
+      "w14:blurRad": "38100", "w14:dist": "19050", "w14:dir": "2700000",
+      "w14:sx": "100000", "w14:sy": "100000", "w14:kx": "0", "w14:ky": "0", "w14:algn": "bl",
+    }, [el("w14:srgbClr", { "w14:val": "000000" }, [el("w14:alpha", { "w14:val": "60000" })])]));
+  }
+  if (effect.outline) {
+    rPr.children.push(el("w14:textOutline", {
+      "xmlns:w14": NS_W14,
+      "w14:w": String(Math.max(1, Math.round(effect.outline.widthPt * EMU_PER_PT))),
+      "w14:cap": "flat", "w14:cmpd": "sng", "w14:algn": "ctr",
+    }, [
+      el("w14:solidFill", {}, [el("w14:srgbClr", { "w14:val": effect.outline.color.replace(/^#/, "").toUpperCase() })]),
+      el("w14:prstDash", { "w14:val": "solid" }),
+      el("w14:round"),
+    ]));
+  }
 }
 
 export function isDrawingWordArt(drawing: XmlElement): boolean {
@@ -471,7 +592,7 @@ export function insertInkAt(
     el("wp:anchor", {
       "xmlns:wp": NS_WP,
       distT: "0", distB: "0", distL: "0", distR: "0",
-      simplePos: "0", relativeHeight: "251658240", behindDoc: "0",
+      simplePos: "0", relativeHeight: nextRelativeHeight(doc, caretRun), behindDoc: "0",
       locked: "0", layoutInCell: "1", allowOverlap: "1",
     }, [
       el("wp:simplePos", { x: "0", y: "0" }),
@@ -512,4 +633,54 @@ export function insertInkAt(
   parent.children.splice(parent.children.indexOf(caretRun) + 1, 0, el(`${w}r`, {}, [drawing]));
   if (refreshModel) doc.refresh();
   return drawing;
+}
+
+/** bodyPr's autofit choice: grow the shape, shrink the text, or neither. */
+export type DrawingTextFitMode = "none" | "resizeShape" | "shrinkText";
+
+/** The three members of CT_TextBodyProperties' autofit choice group. */
+const AUTOFIT_ELEMENTS = ["noAutofit", "normAutofit", "spAutoFit"];
+
+/**
+ * Set a shape's bodyPr autofit mode (ECMA-376 CT_TextBodyProperties).
+ *
+ * "resizeShape" writes a:spAutoFit, which Word honors: it grows the box to the
+ * text and ignores the cached cy. "shrinkText" writes a:normAutofit with an
+ * optional fontScale. That one is a CACHE, not an instruction — probe-shapefit
+ * put fourteen normAutofit shapes through desktop Word (six text lengths at
+ * two box heights with a bare <a:normAutofit/>, plus two authored scales), and
+ * Word painted every one at its authored font size, clipped each at its box
+ * bottom line for line with the a:noAutofit control, and wrote every bodyPr
+ * back byte-identically. It computed no scale for the bare ones, so there is
+ * no ladder to quantize onto, and it consumed neither authored one. The
+ * percentage is therefore written through exactly as given, in ECMA-376's
+ * thousandths of a percent, and the layout keeps clipping — matching Word.
+ *
+ * A drawing with no bodyPr (a VML text box, a picture) is a clean no-op.
+ */
+export function setDrawingTextFit(
+  doc: DocxDocument,
+  drawingEl: XmlElement,
+  mode: DrawingTextFitMode,
+  fontScalePct?: number,
+): boolean {
+  const bodyPr = descendant(drawingEl, "bodyPr");
+  if (!bodyPr) return false;
+  const autofit =
+    mode === "resizeShape"
+      ? el("a:spAutoFit")
+      : mode === "shrinkText"
+        ? el("a:normAutofit", fontScalePct === undefined ? {} : { fontScale: String(Math.round(fontScalePct * 1000)) })
+        : el("a:noAutofit");
+  const existing = bodyPr.children.findIndex((child) => AUTOFIT_ELEMENTS.includes(localName(child.name)));
+  if (existing !== -1) {
+    bodyPr.children.splice(existing, 1, autofit);
+  } else {
+    // The choice group follows a:prstTxWarp and precedes everything else in
+    // the sequence, so it goes directly after the warp when there is one.
+    const warp = bodyPr.children.findIndex((child) => localName(child.name) === "prstTxWarp");
+    bodyPr.children.splice(warp + 1, 0, autofit);
+  }
+  doc.refresh();
+  return true;
 }

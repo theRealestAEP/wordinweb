@@ -157,7 +157,15 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     const restart = attr(lnNum, "restart");
     props.lineNumbering = {
       countBy: intAttr(lnNum, "countBy") ?? 1,
-      start: intAttr(lnNum, "start") ?? 1,
+      // w:start is an OFFSET added to the running count, not the first
+      // printed number: Word prints (start + 1) on the scope's first line
+      // whenever the attribute is written at all, even w:start="1" (probe
+      // -linenum2: explicit start="1" prints 2,3,4... same as start="10"
+      // printing 11,12,13...). Only an ABSENT attribute prints the bare
+      // count (1,2,3...), so the parsed default is 0, not the schema's
+      // nominal "1" — that nominal default describes what start MEANS, not
+      // what Word does when you omit it.
+      start: intAttr(lnNum, "start") ?? 0,
       // w:distance is in twips; default ~0.25in when absent.
       distance: twipsToPx(intAttr(lnNum, "distance") ?? 360),
       restart: restart === "continuous" || restart === "newSection" ? restart : "newPage",
@@ -183,6 +191,12 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     if (fmt) props.footnoteNumFmt = fmt;
     const start = intAttr(child(fnPr, "numStart"), "val");
     if (start !== undefined) props.footnoteNumStart = start;
+    const restart = attr(child(fnPr, "numRestart"), "val");
+    if (restart === "continuous" || restart === "eachSect" || restart === "eachPage") {
+      props.footnoteNumRestart = restart;
+    }
+    const pos = attr(child(fnPr, "pos"), "val");
+    if (pos === "pageBottom" || pos === "beneathText") props.footnotePos = pos;
   }
   const enPr = child(sectPr, "endnotePr");
   if (enPr) {
@@ -190,6 +204,12 @@ export function parseSectionProps(sectPr: XmlElement | undefined): SectionProps 
     if (fmt) props.endnoteNumFmt = fmt;
     const start = intAttr(child(enPr, "numStart"), "val");
     if (start !== undefined) props.endnoteNumStart = start;
+    const restart = attr(child(enPr, "numRestart"), "val");
+    if (restart === "continuous" || restart === "eachSect" || restart === "eachPage") {
+      props.endnoteNumRestart = restart;
+    }
+    const pos = attr(child(enPr, "pos"), "val");
+    if (pos === "sectEnd" || pos === "docEnd") props.endnotePos = pos;
   }
 
   return props;

@@ -123,6 +123,38 @@ async function audit(bytes: Uint8Array, label: string): Promise<void> {
   const expectedObjects = Object.entries(overview.components).reduce((sum, [kind, count]) => sum + (kind === "text" ? 0 : count), 0);
   expect(componentRefs.size, `${label}: every non-text component needs an inspectable reference`).toBe(expectedObjects);
 
+  // Every story projects deterministically in every mode, and an identity
+  // patch of a projected window is a fixed point.
+  const projectable = new Set(["body", "header", "footer", "footnote", "endnote"]);
+  for (const story of overview.stories) {
+    if (!projectable.has(story.kind)) continue;
+    for (const mode of ["text", "md", "outline"] as const) {
+      let cursor: { value: string } | undefined;
+      let windows = 0;
+      do {
+        const window = { story: story.id, mode, cursor, maxBlocks: 200, maxCharacters: 100_000 };
+        const projection = agent.project(window);
+        assertSerializable(projection, `${label} projection ${story.id} ${mode}`);
+        expect(projection.text, `${label}: ${story.id} ${mode} must project byte-identically`).toBe(agent.project(window).text);
+        expect(projection.revision, `${label}: every projection window carries its revision`).toBe(agent.revision);
+        expect(projection.anchors.length, `${label}: ${story.id} ${mode} anchors must cover every line`).toBe(projection.lines);
+        if (windows === 0 && mode !== "outline") {
+          const edits = projection.text.split("\n")
+            .map((newText, index) => ({ startLine: index + 1, endLine: index + 1, newText }))
+            .filter((_, index) => projection.anchors[index].role === "paragraph" && projection.anchors[index].editable)
+            .slice(0, 100);
+          if (edits.length > 0) {
+            const patched = await agent.patch({ revision: projection.revision, story: story.id, mode, edits });
+            expect(patched.operations, `${label}: ${story.id} ${mode} identity patch must be a no-op`).toEqual([]);
+            expect(patched.projection.text, `${label}: ${story.id} ${mode} must be a projection fixed point`).toBe(projection.text);
+          }
+        }
+        cursor = projection.next;
+        windows++;
+      } while (cursor);
+    }
+  }
+
   const assets = new Set<string>();
   for (const ref of componentRefs) {
     const object = agent.inspect({ kind: "object", ref });

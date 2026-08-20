@@ -22,11 +22,29 @@ import {
   TableOp,
   applyRunFormat,
   applyTableOp,
+  attr,
+  localName,
+  cellContextOf,
   cellShadingAt,
+  listTableStyles,
+  readTableProperties,
+  setTableBorders,
+  setTableCellMargins,
+  setTableColumnWidth,
+  setTableHeaderRows,
+  setTableLayoutMode,
+  setTableLook,
+  sortTableRows,
+  insertTableFormula,
+  setTableStyle,
+  setTableWidth,
+  tableLookOf,
   addComment,
   adjustIndent,
   paragraphDividerAt,
   deleteComment,
+  compileReplaceAll,
+  compileReplaceMatch,
   findAll,
   linkAt,
   removeLink,
@@ -36,20 +54,65 @@ import {
   setLink,
   setParagraphDivider,
   setParagraphSpacing,
+  setTabStops,
+  tabStopsAt,
+  type TabStopSpec,
+  setParagraphBorders,
+  paragraphBordersAt,
+  type ParagraphBorderEdge,
+  type ParagraphBordersPatch,
   setDropCapAt,
   transformCase,
   exactLineHeightAt,
   replyToComment,
   insertImageAt,
   setImageWrap,
+  insertEndnote,
   insertFootnote,
   insertField,
+  insertCitationField,
   insertDateTimeField,
   insertPageField,
+  bibliographyEntryCount,
+  citationText,
+  documentBibliography,
+  documentMergeFieldNames,
+  findBibliographyFields,
+  insertBibliography,
+  refreshBibliographies,
+  findIndexFields,
+  indexEntryCount,
+  markedIndexEntryCount,
+  insertIndex,
+  insertIndexEntry,
+  isValidIndexEntry,
+  refreshIndexes,
+  createCitationSource,
+  editCitationSource,
+  deleteCitationSource,
+  setCitationStyle,
+  type BibliographySource,
+  type CitationSourcePatch,
+  type CitationSourceSpec,
+  type CitationStyle,
+  listBuildingBlocks,
+  createBuildingBlock,
+  insertBuildingBlock,
+  deleteBuildingBlock,
+  buildingBlockNodeCount,
+  selectionClipboardBlocks,
+  encodeClipboardOoxml,
+  type BuildingBlockInfo,
   listBookmarks,
+  bookmarkTextTarget,
   insertBookmarkAroundSelection,
   insertBookmarkAt,
   insertCrossReference,
+  insertCaptionAt,
+  listCrossRefTargets,
+  ensureRefBookmark,
+  nextRefBookmarkName,
+  type CrossRefTarget,
   insertMathAt,
   insertShapeAt,
   setDrawingLineStyle,
@@ -69,25 +132,73 @@ import {
   sectionContextAt,
   setLineNumbering,
   lineNumberingAt,
+  setTitlePage,
+  titlePageEnabled,
+  setEvenOddHeaders,
+  setPageNumberFormat,
+  pageNumberFormatAt,
+  setFootnoteOptions,
+  footnoteOptionsAt,
+  setEndnoteOptions,
+  endnoteOptionsAt,
+  setCommentResolved,
+  editCommentText,
+  documentTextStatistics,
+  type PageNumberFormat,
+  type PageNumberFormatPatch,
+  type FootnoteOptionsPatch,
+  type EndnoteOptionsPatch,
   type XmlElement,
   type EncodedCaret,
+  type WireRange,
+  resolveWireRange,
   type ShapePreset,
   type WordArtPreset,
+  type WordArtStyle,
   type DrawingTool,
   type DrawingLineDash,
   type CoverPageContent,
+  type PageNumberGalleryPosition,
+  type PageNumberGalleryAlign,
+  type HeaderFooterPreset,
+  insertPageNumberPosition,
+  removePageNumberFields,
+  insertHeaderFooterPreset,
   type ObjectArrangeAction,
   type SelectedObjectCommand,
   type SelectedObjectKind,
   type ParagraphDivider,
+  type FindOptions,
+  type ReplaceAllResult,
   type ChartData,
   type SmartArtData,
   type SmartArtTextFormat,
   insertTableAfter,
+  convertTextToTable,
+  convertTableToText,
+  plainTextOf,
+  operationBody,
+  documentOperationBody,
+  type RegisteredOperationArgs,
+  type RegisteredOperationKind,
+  applyFieldResults,
+  computeFieldResults,
+  findTocFields,
+  insertToc,
+  insertPictureWatermark,
+  insertWatermark,
+  removeWatermark,
+  type WatermarkSpec,
+  mergeRecordIntoCopy,
+  tocEntryCount,
+  tocHeadingCount,
+  rebuildToc,
+  type TocOptions,
   createMeasurer,
   type TextMeasurer,
   layoutDocument,
   layoutDocumentAsync,
+  type MergeRecord,
   relayoutHeadersFooters,
   detectMissingFonts,
   type MissingFont,
@@ -96,6 +207,7 @@ import {
   topLevelBlockOf,
   paragraphOf,
   printPages,
+  buildPrintHtml,
   setListType,
   paragraphStyleIdOf,
   renderToDom,
@@ -103,9 +215,33 @@ import {
   setPageLayout,
   setParagraphAlignment,
   setParagraphStyle,
+  createStyle,
+  modifyStyle,
+  deleteStyle,
+  listStyles,
+  setNumberingLevelAt,
+  NUMBERING_PRESETS,
+  type NumberingPresetId,
+  restartNumberingAt,
+  continueNumberingAt,
+  formatPatchFrom,
   summarizeSelection,
+  suggestMeta,
   runWireLength,
   wireOffsetOf,
+  type HostCommand,
+} from "@wordinweb/core";
+import type {
+  StyleGalleryEntry,
+  StyleSpec,
+  StylePatch,
+  LevelPatch,
+  CellMarginsPt,
+  TableBorderEdge,
+  TableBorderSpec,
+  TableLookToggles,
+  TablePropertiesPt,
+  RevisionMeta,
 } from "@wordinweb/core";
 
 async function objectPoster(title: string, subtitle: string, glyph: string): Promise<Blob> {
@@ -139,6 +275,8 @@ export interface DocxViewApi {
   addComment(text: string): boolean;
   /** Insert a footnote at the caret. False without a caret. */
   addFootnote(text: string): boolean;
+  /** Insert an endnote at the caret. False without a caret. */
+  addEndnote(text: string): boolean;
   /** Insert a dynamic page-number field at the caret (body, header or footer). */
   insertPageNumber(kind?: "page" | "pageOfTotal"): boolean;
   /** Insert any Word field instruction supported by the renderer. */
@@ -147,10 +285,127 @@ export interface DocxViewApi {
   insertDateTime(kind: "date" | "time", picture?: string): boolean;
   /** Named bookmarks in document order. */
   listBookmarks(): string[];
+  /**
+   * How many entries a table of contents would find right now, and how many
+   * index entries have been marked.
+   *
+   * A TOC and an INDEX are both built from something the user has to do first —
+   * apply heading styles, or mark entries — and inserting one before that puts
+   * Word's own "No table of contents entries found." into the document, which
+   * is accurate and explains nothing. A surface that can ask beforehand can say
+   * what is missing instead.
+   */
+  contentsAvailability(): { headings: number; indexEntries: number };
   /** Add a bookmark around the selection, or a zero-length bookmark at the caret. */
   addBookmark(name: string): boolean;
   /** Insert a live text or page reference to a bookmark. */
   insertCrossReference(bookmark: string, kind: "text" | "page"): boolean;
+  /**
+   * Cross-reference targets beyond plain bookmarks, in document order:
+   * headings, captions (SEQ paragraphs), and numbered list items — what
+   * Word's Cross-reference dialog lists per reference type. The keys stay
+   * valid until the next call (or a document change).
+   */
+  listCrossRefTargets(): { key: string; kind: "heading" | "caption" | "numberedItem"; text: string }[];
+  /**
+   * Insert a live text or page reference to a listed target. A target with
+   * no hidden `_Ref` bookmark gets one first (Word's own mechanism), so the
+   * REF/PAGEREF has something durable to point at.
+   */
+  insertCrossRefToTarget(key: string, kind: "text" | "page"): boolean;
+  /**
+   * Insert a Word caption — "<label> <n>" in the Caption style, the number a
+   * live SEQ field — below or above the selected object (or the caret's
+   * block; a caret inside a table captions the table). updateFields
+   * renumbers the whole label sequence.
+   */
+  insertCaption(label: string, text?: string, position?: "below" | "above"): boolean;
+  /**
+   * Recompute every supported field's cached result — Word's F9, and what a
+   * host calls before printing or exporting so the file it hands on carries
+   * current page numbers, dates and cross-references. False when nothing
+   * changed.
+   *
+   * `fileName` and `author` are the host's to supply: the engine has no
+   * filesystem of its own, so FILENAME and AUTHOR fields keep their cached
+   * results without them.
+   */
+  updateFields(values?: { fileName?: string; author?: string }): boolean;
+  /**
+   * Insert a native Word table of contents at the caret.
+   *
+   * Outside a room the page numbers are filled in immediately, from a layout
+   * this call runs. IN a room the entries land with placeholders: page numbers
+   * come from a layout, a layout depends on the host's font metrics, and that
+   * is precisely the value `updateFields` carries as data instead of letting
+   * each replica recompute it. Run the update pass to fill them.
+   */
+  insertToc(options?: TocOptions): boolean;
+  /**
+   * Rebuild every table of contents from the document's current headings, then
+   * repage it. Use after headings are added, removed or retitled; repaging an
+   * unchanged heading set needs only updateFields. False in a shared document,
+   * for the reason insertToc gives.
+   */
+  refreshTocs(): boolean;
+  /**
+   * Every data column this document's MERGEFIELD fields name, in document
+   * order, once each — headers and footers included.
+   *
+   * A mail-merge UI compares this against its data source's headers to report
+   * which fields the data does not supply. Those keep their «Name» placeholder
+   * while previewing, so the user sees an unbound field instead of a blank.
+   *
+   * Read-only, like the whole preview path: no operation, no undo entry, no
+   * collab traffic. Set the values through the `mergeRecord` prop.
+   */
+  listMergeFieldNames(): string[];
+  /** The bibliography sources the document's sources part declares, in part
+   * order — what a citation picker and the source manager list. */
+  listCitationSources(): BibliographySource[];
+  /** The selected citation style (b:Sources/@StyleName — "APA", "MLA", or
+   * whatever an arriving document declares), or null with no sources part. */
+  getCitationStyle(): string | null;
+  /** Select the citation style (APA or MLA) for citations and the
+   * bibliography, creating the sources part when the document has none.
+   * Refreshes citation displays and bibliographies in the same call. */
+  setCitationStyle(style: CitationStyle): boolean;
+  /** Add a bibliography source (book, article, website, or report), creating
+   * the sources part on first use. False when the tag is already taken. */
+  createCitationSource(spec: CitationSourceSpec): boolean;
+  /** Change a source's fields, by tag. Refreshes citation displays and
+   * bibliographies in the same call. */
+  editCitationSource(tag: string, patch: CitationSourcePatch): boolean;
+  /** Delete a source. False while a CITATION field still cites it — remove
+   * the citations first. */
+  deleteCitationSource(tag: string): boolean;
+  /** Insert a citation to an existing source at the caret, displayed in the
+   * document's citation style. False for a tag the sources part lacks. */
+  insertCitation(tag: string): boolean;
+  /** Insert a bibliography at the caret: a BIBLIOGRAPHY field whose entries
+   * are generated from the document's sources (regenerated by updateFields). */
+  insertBibliography(): boolean;
+  /** The Quick Parts (building blocks) the document's glossary part declares,
+   * name and category, in part order — what the gallery lists. */
+  listBuildingBlocks(): BuildingBlockInfo[];
+  /** Save the current selection as a named Quick Part, creating the glossary
+   * part on first use. False with nothing selected, a name already taken, or
+   * a selection the paste-fragment gate refuses (the pasteBlocks gate). */
+  createBuildingBlock(name: string, category?: string): boolean;
+  /** Insert a named Quick Part at the caret, cloning its stored content.
+   * False for a name the glossary part lacks. */
+  insertBuildingBlock(name: string): boolean;
+  /** Delete a Quick Part from the glossary part, by name. False when the name
+   * names none. */
+  deleteBuildingBlock(name: string): boolean;
+  /** Mark an index entry: an invisible XE field after the selection (or the
+   * caret). With no `entry` the selected text is the entry; a colon makes a
+   * subentry ("Widgets:assembly"). False with nothing to mark. */
+  addIndexEntry(entry?: string): boolean;
+  /** Insert an index at the caret, built from the document's XE entry marks
+   * (alphabetized; page numbers filled by the update pass). Rebuilt from the
+   * current marks by updateFields. */
+  insertIndex(): boolean;
   /** Insert an editable inline equation from WordInWeb's linear math syntax. */
   insertEquation(linear: string): boolean;
   /** Insert a Unicode symbol through the normal undo/suggestion-aware typing path. */
@@ -162,7 +417,7 @@ export interface DocxViewApi {
     lineStyle?: { color: string; width: number; dash: DrawingLineDash },
   ): boolean;
   /** Insert editable DrawingML WordArt at the caret. */
-  insertWordArt(text: string, preset?: WordArtPreset): boolean;
+  insertWordArt(text: string, preset?: WordArtPreset, style?: WordArtStyle): boolean;
   /** Insert a native editable ChartML chart at the caret. */
   insertChart(data: ChartData): boolean;
   /** Replace the selected native chart's type and data. */
@@ -201,12 +456,79 @@ export interface DocxViewApi {
   redo(): void;
   canUndo(): boolean;
   canRedo(): boolean;
+  /**
+   * Record the document's current state as an undo boundary.
+   *
+   * For a host that mutates the document THROUGH SOMETHING OTHER THAN THIS API
+   * — an agent session applying intents to the same DocxDocument — and still
+   * wants Cmd+Z to reach those changes. Every editing method here checkpoints
+   * on its own; nothing outside can, so without this an external edit is
+   * invisible to undo and leaves the history's shadow describing a document
+   * that no longer exists.
+   */
+  checkpoint(): void;
+  /**
+   * MAIL MERGE OUTPUT: this document with one record's values baked into its
+   * MERGEFIELD results, as bytes. The open document is NOT modified — the
+   * merge runs against a fresh parse of its serialized form, so a hundred
+   * records produce a hundred files and leave the template on screen alone.
+   */
+  mergeRecordToBytes(record: MergeRecord): Uint8Array;
   /** Insert a rows×cols table at the caret's paragraph. */
   insertTable(rows: number, cols: number): void;
   /** Row/column/table operations on the table containing the caret. */
   tableOp(op: TableOp): void;
   /** Current table-cell fill, undefined when the caret is outside a table. */
   getTableCellFill(): string | null | undefined;
+  /** What a Table Properties dialog prefills from — the table's width, its
+   * grid columns, the caret's column, the default cell margins and the header
+   * band, in points. Undefined when the caret is outside a table. */
+  getTableProperties(): TablePropertiesPt | undefined;
+  /** Set or clear border edges on the caret's cell or its whole table. A null
+   * `border` removes the edges so they inherit again; `{ style: "none" }`
+   * instead suppresses them, which is Word's No Border. */
+  setTableBorders(scope: "cell" | "table", edges: TableBorderEdge[], border: TableBorderSpec | null): void;
+  /** The table styles this document's styles.xml defines — the whole valid
+   * domain for setTableStyle, since an undefined id renders nothing. */
+  listTableStyles(): { id: string; name: string }[];
+  /** Style id of the table containing the caret: null when it has none,
+   * undefined when the caret is outside a table. */
+  getTableStyleId(): string | null | undefined;
+  /** Apply a table style, or with null remove the reference. */
+  setTableStyle(styleId: string | null): void;
+  /** Word's six table style options for the caret's table, undefined outside
+   * a table. */
+  getTableLook(): TableLookToggles | undefined;
+  /** Set some of the six table style options. */
+  setTableLook(patch: Partial<TableLookToggles>): void;
+  /** Set the table's preferred width. `value` is points for "pt", 0-100 for
+   * "pct", and ignored for "auto". */
+  setTableWidth(unit: "pt" | "pct" | "auto", value?: number): void;
+  /** Set one column to an exact width in points. */
+  setTableColumnWidth(colIdx: number, widthPt: number): void;
+  /** Switch the table between fixed column widths and autofit. Switching to
+   * fixed freezes the columns as currently RENDERED, which is what the user
+   * is looking at; switching to autofit measures them from content again. */
+  setTableLayout(layout: "fixed" | "autofit"): void;
+  /** Set the table's default cell margins, or the caret cell's override, in
+   * points. A null patch drops the override. */
+  setTableCellMargins(scope: "cell" | "table", margins: CellMarginsPt | null): void;
+  /** Repeat the first `count` rows as a header band on every page. */
+  setTableHeaderRows(count: number): void;
+  /** Sort the caret table's body rows by one grid column, as text or as
+   * numbers. The repeating header band always stays in place; `hasHeader`
+   * additionally pins the first row. Refuses tables with merged cells. */
+  sortTableRows(colIdx: number, order: "asc" | "desc", compare: "text" | "number", hasHeader?: boolean): void;
+  /** Convert the selected paragraphs (or the caret paragraph) into a table,
+   * one row per paragraph, cells split on the separator. */
+  convertTextToTable(separator: "tab" | "comma"): boolean;
+  /** Convert the caret's table into paragraphs, one per row, cell texts
+   * joined by the separator. */
+  convertTableToText(separator: "tab" | "comma"): boolean;
+  /** Insert a table formula field ("=SUM(ABOVE)", "=A1+B2", …) at the caret's
+   * cell paragraph, with an optional \# number format like "#,##0.00". The
+   * result is evaluated immediately; updateFields recomputes it. */
+  insertTableFormula(formula: string, numFmt?: string): boolean;
   /** Insert an image file at the caret (inline, natural size clamped to column).
    * The result is REPORTED rather than swallowed: a picker that accepts a file
    * and then does nothing is indistinguishable from a broken button. */
@@ -242,24 +564,98 @@ export interface DocxViewApi {
   setParagraphDivider(divider: ParagraphDivider | null): boolean;
   /** Direct bottom-border divider on the caret paragraph. */
   getParagraphDivider(): ParagraphDivider | null;
+  /** Replace the selected paragraphs' direct tab stops (w:tabs). An empty
+   * list removes them, so style stops and the default grid apply again. */
+  setTabStops(stops: TabStopSpec[]): boolean;
+  /** Direct tab stops on the caret paragraph, sorted by position. */
+  getTabStops(): TabStopSpec[];
+  /** Patch the selected paragraphs' border edges (w:pBdr) and/or shading
+   * fill (w:shd). Each named edge is set (spec) or cleared (null); absent
+   * edges stay. `shading: null` removes the fill. */
+  setParagraphBorders(patch: ParagraphBordersPatch): boolean;
+  /** Direct borders and shading on the caret paragraph. */
+  getParagraphBorders(): { borders: Partial<Record<ParagraphBorderEdge, TableBorderSpec>>; shading: string | null };
   /** Apply or remove a native Word drop cap on the caret paragraph. */
   setDropCap(mode: "drop" | "margin" | null, lines?: number): boolean;
   /** Remove direct character formatting from the selection. */
   clearFormatting(): void;
   /** Change the selection's case. */
   changeCase(mode: "upper" | "lower" | "title"): void;
-  /** Find matches for a query; selects the first and returns the count. */
-  find(query: string, opts?: { matchCase?: boolean }): number;
+  /** Find matches for a query across every story (body, headers, footers,
+   * footnotes, endnotes); selects the first and returns the count. */
+  find(query: string, opts?: FindOptions): number;
   /** Select the next/previous match; returns 1-based index or 0. */
   findStep(delta: 1 | -1): number;
   /** Replace the current match; returns remaining match count. */
   replaceCurrent(replacement: string): number;
-  /** Replace every match; returns how many were replaced. */
-  replaceAll(query: string, replacement: string): number;
+  /** Replace every match; reports how many were replaced, per story. */
+  replaceAll(query: string, replacement: string, opts?: FindOptions): ReplaceAllResult;
+  /** Go To: scroll the given 1-based page into view. */
+  goToPage(page: number): boolean;
+  /** Go To: move the caret to a named bookmark and scroll it into view. */
+  goToBookmark(name: string): boolean;
+  /**
+   * Select an exact text range by stable address — the `{blockId, runId,
+   * start, end}` shape the wire, presence, and suggestRevision already use
+   * (offsets in the run's wire basis; see getEncodedCaret for the caret
+   * half). Several ranges select together, for a word split across runs.
+   * Selection and scroll ride find-navigation's machinery; the view only
+   * scrolls when the range is off screen. In a local document the first call
+   * populates the stable-id table (enableStableIds), so hosts — the desktop
+   * spellcheck's select-and-replace — can address text without a collab
+   * mount. False when no range resolves to text.
+   */
+  selectRange(range: WireRange | WireRange[]): boolean;
   /** Paragraph styles for the style menu (declared + Word built-ins). */
   listParagraphStyles(): { id: string; name: string }[];
   /** pStyle id of the caret paragraph (null = Normal). */
   getParagraphStyleId(): string | null;
+  /**
+   * Every declared style with the data a gallery entry needs: identity,
+   * cascade parent, quick-style flag, usage count, and resolved preview props.
+   * Richer than listParagraphStyles, which is the flat menu the toolbar's
+   * existing style dropdown reads.
+   */
+  listStyles(filter?: { type?: StyleGalleryEntry["type"]; quickStyleOnly?: boolean }): StyleGalleryEntry[];
+  /** Add a paragraph or character style definition. */
+  createStyle(spec: StyleSpec): boolean;
+  /** Patch an existing style definition; the cascade re-resolves live. */
+  modifyStyle(styleId: string, patch: StylePatch): boolean;
+  /** Delete a style definition; its users fall back to its basedOn. */
+  deleteStyle(styleId: string): boolean;
+  /**
+   * Stamp a text watermark across every page. Word keeps a watermark in the
+   * header parts, so a document with none gets one first.
+   */
+  insertWatermark(spec: WatermarkSpec): boolean;
+  /**
+   * Stamp a PICTURE across every page — Word's Watermark > Picture. Replaces
+   * whichever watermark is already there, text or picture.
+   *
+   * The picture is washed out (Word's own recolor) and fitted to the page.
+   * Takes the same formats a shared document can carry, so SVG is refused;
+   * `imageAccept()` is the list to hand a file picker.
+   */
+  insertPictureWatermark(file: Blob): Promise<ImageInsertResult>;
+  /** Take the watermark back off every page. False when there was none. */
+  removeWatermark(): boolean;
+  /** Apply (or with null remove) a character style over the selection. */
+  setCharacterStyle(styleId: string | null): void;
+  /** Change a list level's number format, label text, or indent. */
+  setNumberingLevel(ilvl: number | null, patch: LevelPatch): boolean;
+  /**
+   * Apply a preset multilevel definition (Word's multilevel gallery) to the
+   * caret's list — the paragraphs join a numbered list first when they are
+   * not in one. Compiles onto the existing per-level patch operation, so it
+   * rides the same wire ops and converges like any level edit.
+   */
+  applyNumberingPreset(preset: NumberingPresetId): boolean;
+  /** Restart list numbering at the caret, or (null) continue the preceding list. */
+  setNumberingRestart(start: number | null): boolean;
+  /** Format painter, half one: the selection's formatting, or null. */
+  copyFormatting(): SelectionFormat | null;
+  /** Format painter, half two: paint a copied format over the selection. */
+  applyCopiedFormatting(format: SelectionFormat): void;
   /** Change margins / page size / orientation (inches). */
   setPageLayout(patch: PageLayoutPatch, scope?: "document" | "section"): void;
   /** One-based logical section containing the caret or selection. */
@@ -279,10 +675,73 @@ export interface DocxViewApi {
   closeHeaderFooter(): void;
   /** Enter and, if needed, create the header or footer on the caret's page. */
   openHeaderFooter(kind: "header" | "footer"): boolean;
+  /** Word's "Different First Page" (w:titlePg). Enabling creates the empty
+   * first-page header/footer parts; disabling keeps them for re-enable. */
+  setDifferentFirstPage(on: boolean): boolean;
+  /** Whether any section requests a different first page. */
+  getDifferentFirstPage(): boolean;
+  /** Word's "Different Odd & Even Pages" (settings.xml w:evenAndOddHeaders).
+   * Enabling creates the empty even-page header/footer parts. */
+  setOddEvenHeaders(on: boolean): boolean;
+  getOddEvenHeaders(): boolean;
+  /** Page-number format and start-at (w:pgNumType): decimal / roman / letter
+   * numbering, restart value. scope "section" targets the caret's section;
+   * "document" (and any shared document) every section. */
+  setPageNumberFormat(patch: PageNumberFormatPatch, scope?: "document" | "section"): boolean;
+  /** Current page-number settings for the caret's section. */
+  getPageNumberFormat(): { fmt: PageNumberFormat; start: number | null };
+  /** Patch the automatic-hyphenation settings (w:autoHyphenation,
+   * w:hyphenationZone in points, w:doNotHyphenateCaps). Round-trip state:
+   * this engine's layout does not hyphenate automatically — the settings
+   * govern Word's own rendering of the document. */
+  setHyphenation(patch: { auto?: boolean; zonePt?: number | null; noCaps?: boolean }): boolean;
+  /** Current hyphenation settings (zonePt null = Word's default 18pt). */
+  getHyphenation(): { auto: boolean; zonePt: number | null; noCaps: boolean };
+  /** Word's page-number position gallery: a single live PAGE field in the
+   * header (top) or footer (bottom), aligned left/center/right. Creates the
+   * part on demand and replaces its content — a gallery pick, not a merge. */
+  insertPageNumberPosition(position: PageNumberGalleryPosition, align: PageNumberGalleryAlign): boolean;
+  /** Word's "Remove Page Numbers": strips PAGE/NUMPAGES fields from every
+   * header and footer part. */
+  removePageNumbers(): boolean;
+  /** The Header & Footer preset gallery: replace a header or footer's
+   * content with a preset layout (blank / centered title / title + date /
+   * three-column). */
+  insertHeaderFooterPreset(kind: "header" | "footer", preset: HeaderFooterPreset): boolean;
+  /** Footnote options (w:footnotePr): number format, restart rule, start-at,
+   * and position (§17.11.17/19/21). scope "section" targets the caret's
+   * section; "document" (and any shared document) every section. Format and
+   * start drive the painted marks; restart honors "eachSect" only; position
+   * round-trips without changing where footnotes lay out (always page
+   * bottom in this engine). */
+  setFootnoteOptions(patch: FootnoteOptionsPatch, scope?: "document" | "section"): boolean;
+  /** Current footnote options for the caret's section. */
+  getFootnoteOptions(): ReturnType<typeof footnoteOptionsAt>;
+  /** Same as setFootnoteOptions, for endnotes — position vocabulary differs
+   * (sectEnd / docEnd). */
+  setEndnoteOptions(patch: EndnoteOptionsPatch, scope?: "document" | "section"): boolean;
+  getEndnoteOptions(): ReturnType<typeof endnoteOptionsAt>;
+  /** Resolve (true) or reopen (false) a comment thread. */
+  resolveComment(id: string, resolved: boolean): boolean;
+  /** Replace a comment's body text (Word's edit-my-comment). */
+  editComment(id: string, text: string): boolean;
+  /** Select and scroll to the next/previous commented range (Review-tab
+   * navigation). Returns the focused thread's comment id, or null when the
+   * document has no anchored comments. */
+  stepComment(delta: 1 | -1): string | null;
+  /** Word Count: body text statistics from the model plus the page count
+   * from the latest layout. */
+  wordCount(): { words: number; characters: number; charactersWithSpaces: number; paragraphs: number; pages: number };
   /** Effective formatting of the current selection (toolbar state), or null. */
   getSelectionFormat(): SelectionFormat | null;
   /** Print the rendered pages (browser print dialog / save as PDF). */
   print(): void;
+  /**
+   * The standalone print document (all pages plus styles) as an HTML string,
+   * for hosts that produce the PDF themselves (e.g. a desktop shell).
+   * Null before the first render.
+   */
+  exportPrintHtml(): string | null;
   /** Serialize the (edited) document back to .docx bytes. */
   save(): Uint8Array;
   /** Page count after the latest layout. */
@@ -300,14 +759,21 @@ export interface DocxViewApi {
   /** Reject the tracked change at the caret (drop insertion / restore deletion). */
   rejectRevisionAtCaret(): boolean;
   /** How many tracked changes (suggestions) the document currently holds. */
-  revisionCount(): number;
+  /** Tracked changes in the document, or only `author`'s when given. */
+  revisionCount(author?: string): number;
   /** Accept every tracked change (one undo step). Returns how many applied. */
-  acceptAllRevisions(): number;
+  /** Accept every tracked change, or only `author`'s. A surface that owns some
+   * of the document's revisions must pass its own author, or it resolves work
+   * it never made. */
+  acceptAllRevisions(author?: string): number;
   /** Reject every tracked change (one undo step). Returns how many applied. */
-  rejectAllRevisions(): number;
-  /** Current caret as stable-id addresses (collab), or null. The encoding
-   * survives a reconciliation reload, so it can be captured from a view
-   * about to remount and restored into its replacement. */
+  /** Reject every tracked change, or only `author`'s. See acceptAllRevisions. */
+  rejectAllRevisions(author?: string): number;
+  /** Current caret as stable-id addresses, or null. The encoding survives a
+   * reconciliation reload, so it can be captured from a view about to
+   * remount and restored into its replacement. In a local document the first
+   * call populates the stable-id table (like selectRange), so hosts can
+   * capture addresses outside a collab mount too. */
   getEncodedCaret(): EncodedCaret | null;
   /** Restore a caret captured by getEncodedCaret. False when the position no
    * longer resolves (or outside collab mode). */
@@ -334,6 +800,13 @@ export interface DocxViewApi {
 export type ScreenshotInsertResult = "inserted" | "unsupported" | "cancelled" | "error" | "no-caret";
 
 /**
+ * Word's multilevel-list gallery, expressed as per-level patches over the
+ * existing deep numbering ops. One entry per preset; index = ilvl.
+ */
+export { NUMBERING_PRESETS } from "@wordinweb/core";
+export type { NumberingPresetId } from "@wordinweb/core";
+
+/**
  * Image formats a SHARED document accepts, and the single source of truth for
  * both halves of that promise: the guard that declines an intent and the
  * `accept` attribute of the file picker that offers one.
@@ -348,9 +821,28 @@ export type ScreenshotInsertResult = "inserted" | "unsupported" | "cancelled" | 
  * it is an intent-shape change with an ENGINE_VERSION bump, not a UI edit.
  */
 export const COLLAB_IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "bmp", "webp"] as const;
-const COLLAB_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/bmp,image/webp";
+/** File-picker accept list for the raster formats. Also the picture
+ * watermark's whole list: a VML `v:imagedata` cannot carry an SVG, in a
+ * shared document or a local one. */
+export const RASTER_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/bmp,image/webp";
+const COLLAB_IMAGE_ACCEPT = RASTER_IMAGE_ACCEPT;
 /** Local documents additionally take SVG — nothing has to agree with them. */
 const LOCAL_IMAGE_ACCEPT = `${COLLAB_IMAGE_ACCEPT},image/svg+xml`;
+
+/**
+ * Lowercase hex sha256 — a blob's address.
+ *
+ * Spelled out here rather than imported from @wordinweb/collab: this bundle
+ * keeps the collab client in its own chunk, and a value import would pull all
+ * of it into the base one. In a room the relay's uploadMedia returns the sha,
+ * so this runs only for a local document filling its own media part.
+ */
+async function blobSha256(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  let hex = "";
+  for (const b of new Uint8Array(digest)) hex += b.toString(16).padStart(2, "0");
+  return hex;
+}
 
 /**
  * Why an image insert did not happen, so the caller can SAY so. Every one of
@@ -479,6 +971,12 @@ export interface DocxViewProps {
      * stack would edit this replica with nothing on the wire. Absent ⇒ undo
      * declines rather than mutating. */
     undoLast?: () => void;
+    /** Single-process session marker (useAgentDocumentSession over a
+     * LocalDocumentSession). Its presence tells the editor there are NO peers,
+     * so undo/redo replay the local history stack; it fires after each applied
+     * undo/redo so the session can bump its revision. A REAL room must leave
+     * this unset, or Cmd+Z would fork it. */
+    noteLocalHistory?: () => void;
   };
   /** Author name stamped on comment replies (default "You"). */
   commentAuthor?: string;
@@ -492,6 +990,22 @@ export interface DocxViewProps {
    * render (unavailable, or lacking the document's script) — the page is
    * silently substituting and may differ from Word. Empty array = all good. */
   onMissingFonts?: (missing: MissingFont[]) => void;
+  /**
+   * Mail-merge PREVIEW: the active record's column values, painted into the
+   * document's MERGEFIELD fields. Absent (or undefined) shows the «Name»
+   * placeholders — that is preview "off".
+   *
+   * Nothing is written to the document. The values are resolved as the pages
+   * are laid out, so they cannot reach a saved file, an undo entry or the
+   * collab wire; preview is per-viewer state by construction. Changing this
+   * prop relays the pages without re-parsing the .docx.
+   *
+   * A column the record does NOT carry keeps its «Name» placeholder, so the
+   * user can see which fields the data leaves unbound. Word renders such a
+   * field blank; this is a deliberate divergence. A column that IS present but
+   * empty renders empty and suppresses the field's \b and \f switch texts.
+   */
+  mergeRecord?: MergeRecord;
 }
 
 export interface AgentDocumentViewBinding {
@@ -502,6 +1016,9 @@ export interface AgentDocumentViewBinding {
   submitOp(intent: { kind: string } & Record<string, unknown>): void;
   allocIds(count: number): number[];
   uploadMedia?(bytes: Uint8Array): Promise<{ blobSha: string; bytesLen: number; iv?: string } | null>;
+  /** Bump the session revision after a local history undo/redo mutated the
+   * document outside the intent path. See collab.noteLocalHistory. */
+  noteHistory?(): void;
   takeRenderScope():
     | { kind: "doc" }
     | { kind: "block"; blocks: XmlElement[] }
@@ -524,6 +1041,9 @@ export function useAgentDocumentSession(binding: AgentDocumentViewBinding): Pick
       allocIds: binding.allocIds,
       uploadMedia: binding.uploadMedia,
       takeRenderScope: binding.takeRenderScope,
+      // A local session has no peers: undo/redo replay the editor's own
+      // history stack, and the session only needs its revision bumped.
+      noteLocalHistory: binding.noteHistory,
     },
   };
 }
@@ -540,6 +1060,105 @@ async function toBytes(source: DocxViewProps["source"]): Promise<Uint8Array> {
 }
 
 const BACKGROUND_LAYOUT_PAGE_THRESHOLD = 50;
+
+/** Word's font-size ladder, which grow/shrink steps along. */
+const FONT_SIZE_STEPS = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
+
+function steppedFontSize(current: number, direction: 1 | -1): number {
+  if (direction === 1) return FONT_SIZE_STEPS.find((size) => size > current) ?? Math.min(current + 10, 1638);
+  return [...FONT_SIZE_STEPS].reverse().find((size) => size < current) ?? Math.max(current - 1, 1);
+}
+
+/**
+ * Run a keyboard command through the public API.
+ *
+ * Every case calls exactly what the matching toolbar button calls, which is
+ * what makes a shortcut and its button emit the same collaboration intent and
+ * record the same tracked change in suggesting mode. `painter` is the format
+ * painter's clipboard, shared with nothing else — the toolbar keeps its own.
+ */
+function runHostCommand(
+  api: DocxViewApi,
+  command: Exclude<HostCommand, "link" | "comment" | "goToPage">,
+  painter: { current: SelectionFormat | null },
+): void {
+  const format = api.getSelectionFormat();
+  switch (command) {
+    case "bullet":
+    case "number":
+      api.toggleList(command);
+      break;
+    case "alignLeft":
+      api.setAlignment("left");
+      break;
+    case "alignCenter":
+      api.setAlignment("center");
+      break;
+    case "alignRight":
+      api.setAlignment("right");
+      break;
+    case "justify":
+      api.setAlignment("justify");
+      break;
+    case "indentIn":
+      api.adjustIndent(1);
+      break;
+    case "indentOut":
+      api.adjustIndent(-1);
+      break;
+    case "lineSpacingSingle":
+      api.setParagraphSpacing({ lineMultiple: 1 });
+      break;
+    case "lineSpacingOneAndHalf":
+      api.setParagraphSpacing({ lineMultiple: 1.5 });
+      break;
+    case "lineSpacingDouble":
+      api.setParagraphSpacing({ lineMultiple: 2 });
+      break;
+    case "strikethrough":
+      api.applyFormat({ strike: !format?.strike });
+      break;
+    case "superscript":
+      api.applyFormat({ verticalAlign: format?.verticalAlign === "superscript" ? null : "superscript" });
+      break;
+    case "subscript":
+      api.applyFormat({ verticalAlign: format?.verticalAlign === "subscript" ? null : "subscript" });
+      break;
+    case "clearFormatting":
+      api.applyFormat({ clear: true });
+      break;
+    case "copyFormatting":
+      painter.current = api.copyFormatting();
+      break;
+    case "pasteFormatting":
+      if (painter.current) api.applyCopiedFormatting(painter.current);
+      break;
+    case "growFont":
+    case "shrinkFont":
+      // A selection of mixed sizes reports none, and there is no one size to
+      // step from — Word would grow each run separately, which no single
+      // patch expresses. Declining beats picking a size the user never had.
+      if (format?.fontSizePt !== undefined) {
+        api.applyFormat({ fontSizePt: steppedFontSize(format.fontSizePt, command === "growFont" ? 1 : -1) });
+      }
+      break;
+    case "nextComment":
+      api.stepComment(1);
+      break;
+    case "previousComment":
+      api.stepComment(-1);
+      break;
+    case "trackChanges":
+      api.setSuggesting(!api.isSuggesting());
+      break;
+    case "tableRowBelow":
+      api.tableOp("rowBelow");
+      break;
+  }
+  // Tell the toolbar its buttons may have changed state (the same
+  // announcement the editor makes after a selection-changing edit).
+  document.dispatchEvent(new CustomEvent("dxw-selection"));
+}
 
 /**
  * High-fidelity paginated DOCX viewer (and, with `editable`, editor).
@@ -566,11 +1185,19 @@ export function DocxView({
   showComments = true,
   revisions = "final",
   onMissingFonts,
+  mergeRecord,
   collab,
 }: DocxViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const commentMentionsRef = useRef(commentMentions);
   commentMentionsRef.current = commentMentions;
+  /** Mail-merge preview record, read by every layout call below. Held in a ref
+   * so a record step never re-runs the load effect (which would re-parse the
+   * .docx); the repaint effect further down relays the pages instead. */
+  const mergeRecordRef = useRef(mergeRecord);
+  mergeRecordRef.current = mergeRecord;
+  /** The keyboard format painter's clipboard (⌥⌘C copies, ⌥⌘V pastes). */
+  const painterRef = useRef<SelectionFormat | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [layoutBusy, setLayoutBusy] = useState(false);
   // Fit-to-width scale (page-width / container-width) recomputed on resize, and
@@ -701,7 +1328,8 @@ export function DocxView({
     let detachPresenceSender: (() => void) | null = null;
     let onDeleteComment: ((id: string) => void) | undefined;
     let onReplyComment: ((id: string, text: string) => void) | undefined;
-    let applyStyleShortcut: ((styleId: string | null) => void) | undefined;
+    let onResolveComment: ((id: string, resolved: boolean) => void) | undefined;
+    let onEditComment: ((id: string, text: string) => void) | undefined;
     // Mutable current zoom for this document's lifetime: rerender() reads it and
     // applyZoomRef updates it in place, so a zoom change re-paints without
     // re-running this effect (which would reparse and drop editor/undo state).
@@ -769,7 +1397,8 @@ export function DocxView({
       if (
         editable
         && !customElements.get("model-viewer")
-        && layout.pages.some((page) => page.items.some((item) => item.kind === "image" && item.model3D))
+        && (layout._hasModel3D ||
+          layout.pages.some((page) => page.items.some((item) => item.kind === "image" && item.model3D)))
       ) {
         void import("@google/model-viewer");
       }
@@ -788,6 +1417,9 @@ export function DocxView({
         comments: showComments,
         onDeleteComment,
         onReplyComment,
+        onResolveComment,
+        onEditComment,
+        commentAuthor,
         onViewportChange: () => editor?.afterViewportChange(),
       }, prev ?? undefined);
       const tDom = perf ? performance.now() : 0;
@@ -848,7 +1480,7 @@ export function DocxView({
         if (cancelled || job !== layoutJob || abort.signal.aborted) return;
         const started = performance.now();
         if (preferHeadersOnly && prevLayout) {
-          const fast = relayoutHeadersFooters(doc, prevLayout, measurer);
+          const fast = relayoutHeadersFooters(doc, prevLayout, measurer, mergeRecordRef.current);
           if (fast) {
             if (doc.modelVersion === modelVersion) paintLayout(doc, fast, performance.now() - started);
             layoutAbort = null;
@@ -861,7 +1493,12 @@ export function DocxView({
         layoutRunning = true;
         layoutDirty = false;
         setLayoutPending(true);
-        void layoutDocumentAsync(doc, { measurer, signal: abort.signal }).then((layout) => {
+        void layoutDocumentAsync(doc, {
+          measurer,
+          signal: abort.signal,
+          windowModel: true,
+          mergeRecord: mergeRecordRef.current,
+        }).then((layout) => {
           if (cancelled || job !== layoutJob || abort.signal.aborted) return;
           if (doc.modelVersion !== startModelVersion || layoutDirty) {
             /**
@@ -875,7 +1512,12 @@ export function DocxView({
              * job LANDS instead of being thrown away and restarted forever.
              */
             countJob("bgRepaired");
-            layout = layoutDocument(doc, { measurer, prev: layout });
+            layout = layoutDocument(doc, {
+              measurer,
+              windowModel: true,
+              prev: layout,
+              mergeRecord: mergeRecordRef.current,
+            });
           }
           layoutDirty = false;
           paintLayout(doc, layout, performance.now() - started);
@@ -925,6 +1567,24 @@ export function DocxView({
       }
     };
 
+    // Collaboration: emit ONE intent covering every distinct paragraph the
+    // targets belong to (in selection order). setListType uses this instead of
+    // emitBlockIntents because its apply MINTS a numbering definition: one
+    // intent per paragraph mints one per apply, so replicas diverge from the
+    // originator's single shared-definition mutation (see toggleList).
+    const emitListIntent = (targets: XmlElement[], make: (blockIds: number[]) => EditorIntent): void => {
+      const d = docCacheRef.current?.doc;
+      const current = collabRef.current;
+      if (!current || !d?.stableIds) return;
+      const blockIds: number[] = [];
+      for (const t of targets) {
+        const p = paragraphOf(d, t);
+        const blockId = p ? d.stableIds.idOf(p) : undefined;
+        if (blockId !== undefined && !blockIds.includes(blockId)) blockIds.push(blockId);
+      }
+      if (blockIds.length > 0) current.submit(make(blockIds));
+    };
+
     // Draw remote participants' carets over the current render (collab mode).
     const drawCollabPresence = (): void => {
       const handle = handleRef.current;
@@ -971,9 +1631,12 @@ export function DocxView({
       const started = performance.now();
       const layout =
         headerFooterOnly && prevLayout
-          ? relayoutHeadersFooters(doc, prevLayout, measurer) ?? layoutDocument(doc, { measurer })
+          ? relayoutHeadersFooters(doc, prevLayout, measurer, mergeRecordRef.current) ??
+            layoutDocument(doc, { measurer, windowModel: true, mergeRecord: mergeRecordRef.current })
           : layoutDocument(doc, {
               measurer,
+              windowModel: true,
+              mergeRecord: mergeRecordRef.current,
               prev: globalChange ? undefined : prevLayout ?? undefined,
               dirtyHint: globalChange ? undefined : dirtyBlock,
               dirtySource: globalChange ? undefined : dirtySource,
@@ -1191,14 +1854,24 @@ export function DocxView({
             // run and prunes the original id), then emit via the shared
             // helper so the shortcut and the toolbar behave identically.
             const preIds = captureFormatIds(segs);
-            const formatted = applyRunFormat(doc, segs, patch);
-            emitFormatIntents(segs, preIds, formatted, patch as Record<string, unknown>);
+            // One draw per gesture: the same author+date go into the local
+            // w:rPrChange and into the intent every replica applies.
+            const suggest = editor?.suggestionMeta();
+            const formatted = applyRunFormat(doc, segs, patch, suggestMeta(doc, suggest));
+            emitFormatIntents(segs, preIds, formatted, patch as Record<string, unknown>, suggest);
             pages = rerender(doc);
             if (selectedAll) editor?.selectAll();
             else if (formatted.length > 0) editor?.selectRanges(formatted);
             document.dispatchEvent(new CustomEvent("dxw-selection"));
           },
-          onStyleShortcut: (styleId) => applyStyleShortcut?.(styleId),
+          // Through the public API, exactly like the style gallery button.
+          // A private copy of the mutation used to run here instead, and it
+          // emitted NO intent — ⌘⌥1 changed the heading for the person who
+          // pressed it and nobody else.
+          onStyleShortcut: (styleId) => {
+            apiRef.current?.setParagraphStyle(styleId);
+            document.dispatchEvent(new CustomEvent("dxw-selection"));
+          },
           // Collaboration: forward each local edit as an intent. The editor
           // emits only when doc.stableIds is populated, so enable it here.
           onIntent: collab ? (intent) => collabRef.current?.submit(intent) : undefined,
@@ -1206,6 +1879,10 @@ export function DocxView({
           // without this hook the editor declines rather than replaying local
           // history (which would fork the room silently).
           onCollabUndo: collab?.undoLast ? () => collabRef.current?.undoLast?.() : undefined,
+          // A single-process session (LocalDocumentSession) instead replays
+          // the local history stack; this tells the editor so and lets the
+          // session bump its revision after each applied undo/redo.
+          onLocalHistory: collab?.noteLocalHistory ? () => collabRef.current?.noteLocalHistory?.() : undefined,
           // Presence: broadcast the local caret so remote participants can
           // draw this user's cursor (the anchor mirrors the intent addressing).
           // The caret is recorded here and sent by flushPresence together with
@@ -1245,34 +1922,38 @@ export function DocxView({
               }).then((text) => {
                 if (text?.trim()) current.addComment(text.trim());
               });
-            } else if (command === "bullet" || command === "number") {
-              current.toggleList(command);
+            } else if (command === "goToPage") {
+              const anchor = containerRef.current;
+              if (!anchor) return;
+              void requestTextInputDialog(anchor, {
+                title: "Go to page",
+                label: `Page number (1–${current.pageCount()})`,
+                value: "",
+              }).then((text) => {
+                const page = Number(text?.trim());
+                if (Number.isInteger(page) && page > 0) current.goToPage(page);
+              });
             } else {
-              current.setAlignment(
-                command === "alignLeft" ? "left" :
-                command === "alignCenter" ? "center" :
-                command === "alignRight" ? "right" : "justify",
-              );
+              runHostCommand(current, command, painterRef);
             }
           },
         };
         editor = new DocxEditor(editorConfig);
         editor.attach();
-        applyStyleShortcut = (styleId) => {
-          const caret = editor?.getCaretTarget();
-          const segs = editor?.getSelectionSegments() ?? [];
-          const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
-          if (targets.length === 0) return;
-          history.checkpoint();
-          if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId)) {
-            pages = rerender(doc);
-            document.dispatchEvent(new CustomEvent("dxw-selection"));
-          }
-        };
         onDeleteComment = (id) => {
           if (collabDocOp(() => ({ kind: "deleteComment", commentId: id }))) return;
           history.checkpoint();
           if (deleteComment(doc, id)) pages = rerender(doc);
+        };
+        onResolveComment = (id, resolved) => {
+          if (collabDocOp(() => ({ kind: "resolveComment", commentId: id, resolved, paraId: hex8() }))) return;
+          history.checkpoint();
+          if (setCommentResolved(doc, id, resolved)) pages = rerender(doc);
+        };
+        onEditComment = (id, text) => {
+          if (collabDocOp(() => ({ kind: "editComment", commentId: id, text }))) return;
+          history.checkpoint();
+          if (editCommentText(doc, id, text)) pages = rerender(doc);
         };
         onReplyComment = (id, text) => {
           if (collabDocOp(() => ({
@@ -1293,6 +1974,10 @@ export function DocxView({
         };
         pages = rerender(doc); // re-render with the delete affordance wired
         let findState: { matches: ReturnType<typeof findAll>; index: number } = { matches: [], index: 0 };
+        // Cross-reference dialog targets (listCrossRefTargets), keyed by index.
+        let crossRefTargets: CrossRefTarget[] = [];
+        // Review-tab comment navigation cursor (-1 = not started).
+        let commentNav = -1;
         const selectMatch = (i: number) => {
           const m = findState.matches[i];
           if (!m || !editor) return;
@@ -1366,6 +2051,62 @@ export function DocxView({
           current.submitOp(intent);
           return true;
         };
+        /** Submit a REGISTERED run-addressed operation. The wire field the
+         * address goes in, and the number of carried ids the mutation needs,
+         * both come from the registry declaration — so this call site restates
+         * neither, and it cannot drift from the agent compiler, which sizes
+         * its allocation from that same declaration. */
+        const collabRunOperation = <K extends RegisteredOperationKind>(
+          kind: K,
+          args: RegisteredOperationArgs<K>,
+        ): boolean =>
+          collabOp((anchor, alloc) => operationBody(kind, anchor.runId, args, alloc) as never);
+        /** The w:tbl the caret is in, or null when it is outside a table. */
+        const caretTable = (): XmlElement | null => {
+          const caret = editor?.getCaretTarget();
+          if (!caret) return null;
+          return cellContextOf(doc, caret.t)?.tbl ?? null;
+        };
+        /** The column widths a table was last PAINTED at, read off its resize
+         * grips. An autofit table's grid rarely agrees with them, which is
+         * exactly why freezing to fixed widths needs these and not the grid. */
+        const renderedColumnWidths = (tblEl: XmlElement): number[] | undefined => {
+          for (const page of prevLayout?.pages ?? []) {
+            for (const item of page.items) {
+              if (item.kind === "grip" && item.axis === "col" && item.tbl === tblEl && item.renderedWidths) {
+                return item.renderedWidths;
+              }
+            }
+          }
+          return undefined;
+        };
+        /** Submit a REGISTERED cell-addressed operation, falling back to the
+         * local mutation outside a room. The caret's paragraph is the address;
+         * the registry decides whether the operation reads the cell or widens
+         * to the table. */
+        const runTableOperation = <K extends RegisteredOperationKind>(
+          kind: K,
+          args: RegisteredOperationArgs<K>,
+          local: (caretT: XmlElement, meta: RevisionMeta | undefined) => boolean,
+        ): void => {
+          const caret = editor?.getCaretTarget();
+          if (!caret) return;
+          // One draw per gesture (doc 05 rule a): the same author+date go into
+          // the local *PrChange and into the intent every replica applies.
+          // Every kind routed here declares an optional suggest payload.
+          const suggest = editor?.suggestionMeta();
+          const payload = (suggest ? { ...args, suggest } : args) as RegisteredOperationArgs<K>;
+          if (
+            collabOp(
+              (anchor, alloc) => operationBody(kind, anchor.blockId, payload, alloc) as never,
+              { t: caret.t, offset: 0 },
+            )
+          ) {
+            return;
+          }
+          history.checkpoint();
+          if (local(caret.t, suggestMeta(doc, suggest))) pages = rerender(doc);
+        };
         /** Document-level ops (page layout, line numbering, cover page). */
         const collabDocOp = (
           make: (alloc: (n: number) => number[]) => ({ kind: string } & Record<string, unknown>) | null,
@@ -1425,6 +2166,7 @@ export function DocxView({
           preIds: { runId?: number; blockId?: number; runLen: number; cumStart: number }[],
           formatted: { t: XmlElement | null }[],
           patch: Record<string, unknown>,
+          suggest?: { author: string; date: string },
         ): void => {
           const current = collabRef.current;
           if (!current || !doc.stableIds) return;
@@ -1462,7 +2204,7 @@ export function DocxView({
             // matches the local mutation exactly.
             const whole = !seg.t || (span.lo <= 0 && span.hi >= runLen) || (segCountByRun.get(runId) ?? 1) > 1;
             if (whole) {
-              current.submit({ kind: "formatRun", blockId, runId, patch } as never);
+              current.submit({ kind: "formatRun", blockId, runId, patch, ...(suggest ? { suggest } : {}) } as never);
               return;
             }
             const before = cumStart > 0;
@@ -1473,7 +2215,7 @@ export function DocxView({
             const middleId = alloc[k++];
             const afterId = after ? alloc[k++] : undefined;
             if (middleId === undefined) return;
-            current.submit({ kind: "formatRange", blockId, runId, start: cumStart, end: cumEnd, patch, beforeId, middleId, afterId } as never);
+            current.submit({ kind: "formatRange", blockId, runId, start: cumStart, end: cumEnd, patch, beforeId, middleId, afterId, ...(suggest ? { suggest } : {}) } as never);
             const middleT = formatted[i]?.t;
             const middleRun = middleT ? doc.findParentOf(middleT) : null;
             const parent = middleRun ? doc.findParentOf(middleRun) : null;
@@ -1504,7 +2246,15 @@ export function DocxView({
           pageCount: () => pages,
           getSelectionFormat: () => {
             const segs = editor?.getSelectionSegments() ?? [];
-            return summarizeSelection(segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : []);
+            if (segs.length > 0) return summarizeSelection(segs);
+            const dom = handle ? selectionToSegments(handle.bindings) : [];
+            if (dom.length > 0) return summarizeSelection(dom);
+            // A COLLAPSED CARET still has formatting — what the next typed
+            // character would take — and the toolbar has to show it, or
+            // clicking into a paragraph blanks the font box, the size box and
+            // every toggle until a range happens to be selected.
+            const caret = editor?.caretFormatSegment();
+            return caret ? summarizeSelection([caret]) : null;
           },
           applyFormat: (patch) => {
             if (!handle) return;
@@ -1514,8 +2264,9 @@ export function DocxView({
             const selectedAll = editor?.isEntireDocumentSelected() ?? false;
             history.checkpoint();
             const preIds = captureFormatIds(segments);
-            const formatted = applyRunFormat(doc, segments, patch);
-            emitFormatIntents(segments, preIds, formatted, patch as Record<string, unknown>);
+            const suggest = editor?.suggestionMeta();
+            const formatted = applyRunFormat(doc, segments, patch, suggestMeta(doc, suggest));
+            emitFormatIntents(segments, preIds, formatted, patch as Record<string, unknown>, suggest);
             pages = rerender(doc);
             // Keep the formatted text selected so toolbar actions compose.
             if (selectedAll) editor?.selectAll();
@@ -1527,6 +2278,17 @@ export function DocxView({
             if (!target) return false;
             history.checkpoint();
             if (insertFootnote(doc, target.t, target.offset, text) !== null) {
+              pages = rerender(doc);
+              return true;
+            }
+            return false;
+          },
+          addEndnote: (text) => {
+            if (collabRunOperation("insertEndnote", { text })) return true;
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (insertEndnote(doc, target.t, target.offset, text) !== null) {
               pages = rerender(doc);
               return true;
             }
@@ -1564,6 +2326,13 @@ export function DocxView({
             return true;
           },
           listBookmarks: () => listBookmarks(doc),
+          contentsAvailability: () => ({
+            // The SOURCE counts, not tocEntryCount/indexEntryCount — those are
+            // paragraph budgets floored at 1 for the empty placeholder line,
+            // and reported "1 heading" for a document with none.
+            headings: tocHeadingCount(doc),
+            indexEntries: markedIndexEntryCount(doc),
+          }),
           addBookmark: (name) => {
             {
               // Collab: a selection becomes a range bookmark on its first
@@ -1599,6 +2368,317 @@ export function DocxView({
             pages = rerender(doc);
             return true;
           },
+          listCrossRefTargets: () => {
+            crossRefTargets = listCrossRefTargets(doc);
+            return crossRefTargets.map((target, i) => ({
+              key: String(i),
+              kind: target.kind,
+              text: target.text.length > 80 ? `${target.text.slice(0, 79)}…` : target.text,
+            }));
+          },
+          insertCrossRefToTarget: (key, kind) => {
+            const target = crossRefTargets[Number(key)];
+            if (!target) return false;
+            let name = target.bookmark;
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // The hidden bookmark rides its own registered intent first;
+              // the REF then names it like any user bookmark. Both carry the
+              // originator's values, so every replica writes the same XML.
+              if (!name) {
+                name = nextRefBookmarkName(doc);
+                const blockId = doc.stableIds.idOf(target.paragraph);
+                if (blockId === undefined) return true; // honest no-op (see collabOp)
+                history.checkpoint();
+                current.submitOp(operationBody("ensureRefBookmark", blockId, { name }) as never);
+              }
+              const bookmark = name;
+              return collabOp((a, ids) => ({ kind: "insertCrossRef", runId: a.runId, bookmark, refKind: kind, nodeIds: ids(8) }));
+            }
+            const at = insertionTarget();
+            if (!at) return false;
+            history.checkpoint();
+            if (!name) {
+              name = nextRefBookmarkName(doc);
+              if (!ensureRefBookmark(doc, target.paragraph, name)) return false;
+            }
+            if (!insertCrossReference(doc, at.t, at.offset, name, kind)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertCaption: (label, text = "", position = "below") => {
+            // The caption anchors at the SELECTED OBJECT's paragraph when an
+            // object is selected, else at the caret's block (a caret inside a
+            // table captions the table — the mutation hoists).
+            const drawing = editor?.getSelectedDrawingSource();
+            const caret = editor?.getCaretTarget();
+            const anchorTarget = drawing ?? caret?.t;
+            if (!anchorTarget) return false;
+            let pEl: XmlElement | null = null;
+            for (let cur: XmlElement | null = anchorTarget; cur; cur = doc.findParentOf(cur) ?? null) {
+              if (localName(cur.name) === "p") {
+                pEl = cur;
+                break;
+              }
+            }
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              const blockId = pEl ? doc.stableIds.idOf(pEl) : undefined;
+              if (blockId === undefined) return true; // honest no-op (see collabOp)
+              history.checkpoint();
+              current.submitOp(operationBody(
+                "insertCaption",
+                blockId,
+                { label, ...(text ? { text } : {}), position },
+                (n) => current.allocIds?.(n) ?? [],
+              ) as never);
+              return true;
+            }
+            history.checkpoint();
+            if (!insertCaptionAt(doc, anchorTarget, label, text, position)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          updateFields: (values) => {
+            // Bibliographies first — Word's F9 regenerates them too. Their
+            // rebuild is STRUCTURAL (paragraphs replaced), so it is its own
+            // operation rather than part of the string-carrying result pass;
+            // the entries derive from the sources part on every replica, so
+            // unlike TOC rebuilds it works in a room.
+            const bibliographies = findBibliographyFields(doc).length;
+            // Indexes rebuild the same way: structural, entries derived from
+            // the XE marks on every replica; only the page numbers travel
+            // (as PAGEREF results in the pass below). A structurally
+            // unchanged index applies nothing and keeps its numbers.
+            const indexes = findIndexFields(doc).length;
+            if (collabRef.current?.submitOp) {
+              if (bibliographies > 0) {
+                collabDocOp((ids) =>
+                  documentOperationBody(
+                    "refreshBibliography",
+                    { entryCount: Math.min(10000, bibliographyEntryCount(doc) * bibliographies) },
+                    ids,
+                  ),
+                );
+              }
+              if (indexes > 0) {
+                collabDocOp((ids) =>
+                  documentOperationBody(
+                    "refreshIndex",
+                    { entryCount: Math.min(10000, indexEntryCount(doc) * indexes) },
+                    ids,
+                  ),
+                );
+              }
+              // The results are computed HERE, on the acting client, and
+              // carried on the wire. Page numbers come out of a layout and
+              // layout depends on the host's font metrics, so a replica that
+              // recomputed could install different text; see the registry's
+              // updateFields comment. (A bibliography contributes no field
+              // site — its result renders verbatim. An index DOES contribute
+              // sites — its PAGEREF placeholders — but submitOp applies the
+              // refresh optimistically and synchronously, so the site walk
+              // below already sees the refreshed document, exactly as every
+              // replica will at its sequenced position.)
+              const results = computeFieldResults(doc, {
+                layout: prevLayout ?? undefined,
+                now: new Date(),
+                ...values,
+              });
+              return collabDocOp(() => documentOperationBody("updateFields", { results }));
+            }
+            history.checkpoint();
+            const rebuilt = bibliographies > 0 && refreshBibliographies(doc);
+            const rebuiltIndex = indexes > 0 && refreshIndexes(doc);
+            const results = computeFieldResults(doc, {
+              layout: prevLayout ?? undefined,
+              now: new Date(),
+              ...values,
+            });
+            const applied = applyFieldResults(doc, results);
+            if (!rebuilt && !rebuiltIndex && !applied) return false;
+            pages = rerender(doc, undefined, "global");
+            if (rebuiltIndex) {
+              // A rebuilt index landed fresh PAGEREF placeholders; the layout
+              // the rerender above produced is what fills them.
+              if (applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }))) {
+                pages = rerender(doc, undefined, "global");
+              }
+            }
+            return true;
+          },
+          insertToc: (options) => {
+            // In a room the entries land with PLACEHOLDER page numbers. The
+            // real ones come from a layout, which depends on this host's font
+            // metrics, so they are the value updateFields carries as data
+            // rather than a value a replica may recompute for itself.
+            if (
+              collabRunOperation("insertToc", {
+                entryCount: tocEntryCount(doc, options),
+                ...(options?.levels ? { levels: options.levels } : {}),
+                ...(options?.leader ? { leader: options.leader } : {}),
+                ...(options?.captionLabel ? { captionLabel: options.captionLabel } : {}),
+              })
+            ) {
+              return true;
+            }
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertToc(doc, target.t, options)) return false;
+            // The entries land with placeholder page numbers; the layout this
+            // rerender produces is what the update pass reads the real ones from.
+            pages = rerender(doc, undefined, "global");
+            if (applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }))) {
+              pages = rerender(doc, undefined, "global");
+            }
+            return true;
+          },
+          refreshTocs: () => {
+            if (collabRef.current?.submitOp) return false;
+            const tocs = findTocFields(doc);
+            if (tocs.length === 0) return false;
+            history.checkpoint();
+            // Rebuilding replaces paragraphs, so each pass invalidates the
+            // element handles the previous one found: re-find between rebuilds.
+            let rebuilt = false;
+            for (let i = 0; i < tocs.length; i++) {
+              const current = findTocFields(doc)[i];
+              if (current && rebuildToc(doc, current)) rebuilt = true;
+            }
+            if (!rebuilt) return false;
+            pages = rerender(doc, undefined, "global");
+            if (applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }))) {
+              pages = rerender(doc, undefined, "global");
+            }
+            return true;
+          },
+          listMergeFieldNames: () => documentMergeFieldNames(doc),
+          listCitationSources: () => [...(documentBibliography(doc)?.sources.values() ?? [])],
+          getCitationStyle: () => documentBibliography(doc)?.styleName ?? null,
+          setCitationStyle: (style) => {
+            if (collabDocOp(() => documentOperationBody("setCitationStyle", { style }))) return true;
+            history.checkpoint();
+            if (!setCitationStyle(doc, style)) return false;
+            // The switch changes every CITATION's painted text and the
+            // bibliography entries; the same call refreshes both, so the user
+            // never sees a half-switched document.
+            refreshBibliographies(doc);
+            applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }));
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          createCitationSource: (spec) => {
+            if (collabDocOp(() => documentOperationBody("createCitationSource", { source: spec }))) return true;
+            history.checkpoint();
+            if (!createCitationSource(doc, spec)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          editCitationSource: (tag, patch) => {
+            if (collabDocOp(() => documentOperationBody("editCitationSource", { tag, patch }))) return true;
+            history.checkpoint();
+            if (!editCitationSource(doc, tag, patch)) return false;
+            // An edited source changes its citations' display and its
+            // bibliography entry — refresh both, the setCitationStyle reason.
+            refreshBibliographies(doc);
+            applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }));
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          deleteCitationSource: (tag) => {
+            if (collabDocOp(() => documentOperationBody("deleteCitationSource", { tag }))) return true;
+            history.checkpoint();
+            if (!deleteCitationSource(doc, tag)) return false;
+            refreshBibliographies(doc);
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertCitation: (tag) => {
+            if (collabRunOperation("insertCitation", { tag })) return true;
+            const target = insertionTarget();
+            if (!target) return false;
+            // The same predicate the registered apply uses: the tag must name
+            // a source, and the display text derives from the sources part.
+            const bibliography = documentBibliography(doc);
+            if (!bibliography || !bibliography.sources.has(tag)) return false;
+            history.checkpoint();
+            const display = citationText(`CITATION ${tag} \\l 1033`, bibliography) ?? "";
+            if (!insertCitationField(doc, target.t, target.offset, tag, display)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertBibliography: () => {
+            if (collabRunOperation("insertBibliography", { entryCount: bibliographyEntryCount(doc) })) return true;
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertBibliography(doc, target.t)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          listBuildingBlocks: () => listBuildingBlocks(doc),
+          createBuildingBlock: (name, category) => {
+            const segments = (editor?.getSelectionSegments() ?? []).filter((s) => s.t);
+            const blocks = selectionClipboardBlocks(doc, segments);
+            if (blocks.length === 0) return false;
+            const blocksXml = encodeClipboardOoxml(blocks);
+            if (collabDocOp(() => documentOperationBody("createBuildingBlock", { name, category, blocksXml }))) {
+              return true;
+            }
+            history.checkpoint();
+            return createBuildingBlock(doc, { name, category, blocksXml });
+          },
+          insertBuildingBlock: (name) => {
+            if (collabRunOperation("insertBuildingBlock", { name, blockCount: buildingBlockNodeCount(doc, name) })) {
+              return true;
+            }
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertBuildingBlock(doc, target.t, name)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          deleteBuildingBlock: (name) => {
+            if (collabDocOp(() => documentOperationBody("deleteBuildingBlock", { name }))) return true;
+            history.checkpoint();
+            return deleteBuildingBlock(doc, name);
+          },
+          addIndexEntry: (entry) => {
+            const segments = (editor?.getSelectionSegments() ?? []).filter((s) => s.t);
+            const text = (entry ?? segments.map((s) => s.t!.text.slice(s.start, s.end)).join("")).trim();
+            if (!isValidIndexEntry(text)) return false;
+            // The mark lands AFTER the selection (Word's placement), else at
+            // the caret.
+            const last = segments[segments.length - 1];
+            const at = last
+              ? { t: last.t!, offset: Math.min(last.end, last.t!.text.length) }
+              : insertionTarget();
+            if (!at) return false;
+            if (collabOp((a, ids) => operationBody("insertIndexEntry", a.runId, { entry: text }, ids) as never, at)) {
+              return true;
+            }
+            history.checkpoint();
+            if (!insertIndexEntry(doc, at.t, at.offset, text)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          insertIndex: () => {
+            // In a room the page numbers land as placeholders — they come out
+            // of a layout, the insertToc reason; updateFields carries the
+            // real ones as data.
+            if (collabRunOperation("insertIndex", { entryCount: indexEntryCount(doc) })) return true;
+            const target = insertionTarget();
+            if (!target) return false;
+            history.checkpoint();
+            if (!insertIndex(doc, target.t)) return false;
+            pages = rerender(doc, undefined, "global");
+            if (applyFieldResults(doc, computeFieldResults(doc, { layout: prevLayout ?? undefined }))) {
+              pages = rerender(doc, undefined, "global");
+            }
+            return true;
+          },
           insertEquation: (linear) => {
             if (collabOp((a, ids) => ({ kind: "insertMath", runId: a.runId, mathText: linear, nodeIds: ids(24) }))) return true;
             const target = insertionTarget();
@@ -1623,12 +2703,12 @@ export function DocxView({
             editor?.reselectDrawing(drawing);
             return true;
           },
-          insertWordArt: (text, preset = "plain") => {
-            if (collabOp((a, ids) => ({ kind: "insertWordArt", runId: a.runId, text, preset, nodeIds: ids(12) }))) return true;
+          insertWordArt: (text, preset = "plain", style) => {
+            if (collabOp((a, ids) => ({ kind: "insertWordArt", runId: a.runId, text, preset, ...(style ? { style } : {}), nodeIds: ids(12) }))) return true;
             const target = insertionTarget();
             if (!target) return false;
             history.checkpoint();
-            if (!insertWordArtAt(doc, target.t, text, preset)) return false;
+            if (!insertWordArtAt(doc, target.t, text, preset, style)) return false;
             pages = rerender(doc, undefined, "global");
             return true;
           },
@@ -1729,9 +2809,6 @@ export function DocxView({
           getSelectedSmartArtTextFormat: () => editor?.getSelectedSmartArtTextFormat() ?? null,
           setSelectedSmartArtTextFormat: (patch) => editor?.setSelectedSmartArtTextFormat(patch) ?? false,
           addComment: (text) => {
-            // Collab: selected-object updates are not intent-anchored yet;
-            // no-op rather than make a local-only (diverging) edit.
-            if (collabRef.current?.submitOp) return false;
             const segs = editor?.getSelectionSegments() ?? [];
             const segments = segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : [];
             if (segments.length === 0) return false;
@@ -1762,8 +2839,10 @@ export function DocxView({
           redo: () => editor?.applyHistory("redo"),
           canUndo: () => history.canUndo,
           canRedo: () => history.canRedo,
+          checkpoint: () => history.checkpoint(),
+          mergeRecordToBytes: (record) => mergeRecordIntoCopy(doc.save(), record),
           insertTable: (rows, cols) => {
-            if (collabOp((a, ids) => ({ kind: "insertTable", runId: a.runId, rows, cols, nodeIds: ids(rows * cols * 2 + 8) }))) return;
+            if (collabRunOperation("insertTable", { rows, cols })) return;
             const caret = editor?.getCaretTarget();
             if (!caret) return;
             history.checkpoint();
@@ -1772,13 +2851,167 @@ export function DocxView({
           tableOp: (op) => {
             const caret = editor?.getCaretTarget();
             if (!caret) return;
-            if (collabOp((a, ids) => ({ kind: "tableOp", cellParagraphId: a.blockId, op, nodeIds: ids(16) }), { t: caret.t, offset: 0 })) return;
+            // One draw per gesture, as for the run and paragraph commands: the
+            // same author+date reach the local *PrChange and the intent every
+            // replica applies. The structural ops have no tracked form and
+            // core's applyTableOp ignores the meta for them, so this passes it
+            // unconditionally rather than restating which kinds honour it.
+            const suggest = editor?.suggestionMeta();
+            if (collabOp((a, ids) => ({ kind: "tableOp", cellParagraphId: a.blockId, op, nodeIds: ids(16), ...(suggest ? { suggest } : {}) }), { t: caret.t, offset: 0 })) return;
             history.checkpoint();
-            if (applyTableOp(doc, caret.t, op)) pages = rerender(doc);
+            if (applyTableOp(doc, caret.t, op, suggestMeta(doc, suggest))) pages = rerender(doc);
           },
           getTableCellFill: () => {
             const caret = editor?.getCaretTarget();
             return caret ? cellShadingAt(doc, caret.t) : undefined;
+          },
+          getTableProperties: () => {
+            const caret = editor?.getCaretTarget();
+            return caret ? readTableProperties(doc, caret.t) : undefined;
+          },
+          setTableBorders: (scope, edges, border) =>
+            runTableOperation("setTableBorders", { scope, edges, border }, (caret, meta) =>
+              setTableBorders(doc, caret, scope, edges, border, meta),
+            ),
+          listTableStyles: () => listTableStyles(doc),
+          getTableStyleId: () => {
+            const tbl = caretTable();
+            if (!tbl) return undefined;
+            const tblPr = tbl.children.find((c) => localName(c.name) === "tblPr");
+            const style = tblPr?.children.find((c) => localName(c.name) === "tblStyle");
+            return style ? attr(style, "val") ?? null : null;
+          },
+          setTableStyle: (styleId) =>
+            runTableOperation("setTableStyle", { styleId }, (_caret, meta) => {
+              const tbl = caretTable();
+              return tbl ? setTableStyle(doc, tbl, styleId, meta) : false;
+            }),
+          getTableLook: () => {
+            const tbl = caretTable();
+            return tbl ? tableLookOf(tbl) : undefined;
+          },
+          setTableLook: (patch) =>
+            runTableOperation("setTableLook", { look: patch }, (_caret, meta) => {
+              const tbl = caretTable();
+              return tbl ? setTableLook(doc, tbl, patch, meta) : false;
+            }),
+          setTableWidth: (unit, value) =>
+            runTableOperation("setTableWidth", { unit, value }, (_caret, meta) => {
+              const tbl = caretTable();
+              return tbl ? setTableWidth(doc, tbl, unit, value ?? 0, meta) : false;
+            }),
+          setTableColumnWidth: (colIdx, widthPt) =>
+            runTableOperation("setTableColumnWidth", { colIdx, widthPt }, (_caret, meta) => {
+              const tbl = caretTable();
+              return tbl ? setTableColumnWidth(doc, tbl, colIdx, widthPt, meta) : false;
+            }),
+          setTableLayout: (layout) => {
+            const tbl = caretTable();
+            if (!tbl) return;
+            // Measured on THIS replica, then sent as data: freezing an autofit
+            // table has to keep the columns the user can see, and a replica
+            // that re-measured them itself could freeze a different table.
+            const renderedWidths = layout === "fixed" ? renderedColumnWidths(tbl) : undefined;
+            runTableOperation("setTableLayout", { layout, renderedWidths }, (_caret, meta) =>
+              setTableLayoutMode(doc, tbl, layout, renderedWidths, meta),
+            );
+          },
+          setTableCellMargins: (scope, margins) =>
+            runTableOperation("setTableCellMargins", { scope, margins }, (caret, meta) =>
+              setTableCellMargins(doc, caret, scope, margins, meta),
+            ),
+          setTableHeaderRows: (count) =>
+            runTableOperation("setTableHeaderRows", { count }, (_caret, meta) => {
+              const tbl = caretTable();
+              return tbl ? setTableHeaderRows(doc, tbl, count, meta) : false;
+            }),
+          sortTableRows: (colIdx, order, compare, hasHeader) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return;
+            // STRUCTURAL like insertTable: no tracked form, so no suggest
+            // payload rides along — the sort applies untracked in any mode.
+            const args = { colIdx, order, compare, ...(hasHeader !== undefined ? { hasHeader } : {}) };
+            if (collabOp((a) => operationBody("sortTableRows", a.blockId, args) as never, { t: caret.t, offset: 0 })) return;
+            history.checkpoint();
+            const tbl = caretTable();
+            if (tbl && sortTableRows(doc, tbl, colIdx, order, compare, hasHeader ?? false)) pages = rerender(doc);
+          },
+          insertTableFormula: (formula, numFmt) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            const p = paragraphOf(doc, caret.t);
+            // Refuse outside a table BEFORE the collab gate: the wire apply
+            // would be an honest no-op there anyway, and a false return is
+            // what lets the dialog say so.
+            if (!p || !cellContextOf(doc, caret.t)) return false;
+            const args = { formula, ...(numFmt !== undefined ? { numFmt } : {}) };
+            if (
+              collabOp(
+                (a, alloc) => operationBody("insertTableFormula", a.blockId, args, alloc) as never,
+                { t: caret.t, offset: 0 },
+              )
+            ) return true;
+            history.checkpoint();
+            if (!insertTableFormula(doc, p, formula, numFmt)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          convertTextToTable: (separator) => {
+            const caret = editor?.getCaretTarget();
+            const segs = editor?.getSelectionSegments() ?? [];
+            const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
+            if (targets.length === 0) return false;
+            const paras: XmlElement[] = [];
+            for (const t of targets) {
+              const p = paragraphOf(doc, t);
+              if (p && !paras.includes(p)) paras.push(p);
+            }
+            if (paras.length === 0) return false;
+            // The id budget rides as data: rows × columns as THIS replica
+            // computed them (the insertToc entryCount pattern).
+            const sep = separator === "tab" ? "\t" : ",";
+            const cols = Math.max(1, ...paras.map((p) => plainTextOf(p).split(sep).length));
+            const cellCount = Math.min(paras.length * cols, 10_000);
+            const blockIds = doc.stableIds
+              ? paras.map((p) => doc.stableIds!.idOf(p)).filter((n): n is number => n !== undefined)
+              : [];
+            if (
+              collabOp(
+                (anchor, alloc) =>
+                  blockIds.length === 0
+                    ? null
+                    : (operationBody("convertTextToTable", blockIds[0], {
+                        separator,
+                        cellCount,
+                        ...(blockIds.length > 1 ? { moreBlockIds: blockIds.slice(1) } : {}),
+                      }, alloc) as never),
+                { t: targets[0], offset: 0 },
+              )
+            ) return true;
+            history.checkpoint();
+            if (!convertTextToTable(doc, paras, separator)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          convertTableToText: (separator) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            const tbl = caretTable();
+            if (!tbl) return false;
+            const rowCount = Math.min(
+              Math.max(tbl.children.filter((c) => localName(c.name) === "tr").length, 1),
+              10_000,
+            );
+            if (
+              collabOp(
+                (anchor, alloc) => operationBody("convertTableToText", anchor.blockId, { separator, rowCount }, alloc) as never,
+                { t: caret.t, offset: 0 },
+              )
+            ) return true;
+            history.checkpoint();
+            if (!convertTableToText(doc, tbl, separator)) return false;
+            pages = rerender(doc);
+            return true;
           },
           imageAccept: () => (collabRef.current?.submitOp && doc.stableIds ? COLLAB_IMAGE_ACCEPT : LOCAL_IMAGE_ACCEPT),
           imageMaxBytes: () => (collabRef.current?.submitOp && doc.stableIds ? collabRef.current.mediaMaxBlobBytes ?? null : null),
@@ -1920,21 +3153,171 @@ export function DocxView({
             }
           },
           setAlignment: (align) => {
-            if (!handle) return;
+            // The EDITOR's selection, like every other paragraph command. The
+            // editor paints its own highlight and keeps the DOM selection in
+            // its hidden input sink, so window.getSelection() is empty while a
+            // range is selected — reading it here aligned whatever paragraph
+            // the caret was left in by the PREVIOUS gesture instead.
             const caret = editor?.getCaretTarget();
-            const segTs = selectionToSegments(handle.bindings)
-              .map((s) => s.t)
-              .filter((t): t is NonNullable<typeof t> => !!t);
+            const segs = editor?.getSelectionSegments() ?? [];
+            const segTs = segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t);
             const targets = segTs.length > 0 ? segTs : caret ? [caret.t] : [];
             if (targets.length === 0) return;
             history.checkpoint();
-            if (setParagraphAlignment(doc, targets as Parameters<typeof setParagraphAlignment>[1], align)) {
-              emitBlockIntents(targets, (blockId) => ({ kind: "formatParagraph", blockId, align }));
+            const suggest = editor?.suggestionMeta();
+            if (setParagraphAlignment(doc, targets as Parameters<typeof setParagraphAlignment>[1], align, suggestMeta(doc, suggest))) {
+              emitBlockIntents(targets, (blockId) => ({ kind: "formatParagraph", blockId, align, ...(suggest ? { suggest } : {}) }));
               pages = rerender(doc);
             }
           },
           closeHeaderFooter: () => editor?.exitHeaderFooter(),
           openHeaderFooter: (kind) => editor?.enterHeaderFooter(kind) ?? false,
+          setDifferentFirstPage: (on) => {
+            if (collabDocOp((ids) => documentOperationBody("setTitlePage", { enabled: on }, ids))) return true;
+            history.checkpoint();
+            if (!setTitlePage(doc, on)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getDifferentFirstPage: () => titlePageEnabled(doc),
+          setOddEvenHeaders: (on) => {
+            if (collabDocOp((ids) => documentOperationBody("setEvenOddHeaders", { enabled: on }, ids))) return true;
+            history.checkpoint();
+            if (!setEvenOddHeaders(doc, on)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getOddEvenHeaders: () => doc.evenAndOddHeaders,
+          setPageNumberFormat: (patch, scope) => {
+            // Collab: document-level; a "section" scope falls back to all
+            // sections (consistent everywhere, demo limitation — see
+            // setPageLayout).
+            if (collabDocOp(() => documentOperationBody("setPageNumberFormat", patch))) return true;
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (!setPageNumberFormat(doc, patch, target)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getPageNumberFormat: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
+            return t ? pageNumberFormatAt(doc, t) : { fmt: "decimal", start: null };
+          },
+          setHyphenation: (patch) => {
+            if (collabDocOp(() => documentOperationBody("setHyphenation", patch))) return true;
+            history.checkpoint();
+            // Settings-only state: this engine's layout does not hyphenate,
+            // so nothing painted changes and no rerender is needed.
+            return doc.setHyphenation({
+              ...(patch.auto !== undefined ? { auto: patch.auto } : {}),
+              ...(patch.zonePt !== undefined
+                ? { zoneTwips: patch.zonePt === null ? null : Math.round(patch.zonePt * 20) }
+                : {}),
+              ...(patch.noCaps !== undefined ? { noCaps: patch.noCaps } : {}),
+            });
+          },
+          getHyphenation: () => ({
+            auto: doc.autoHyphenation,
+            zonePt: doc.hyphenationZoneTwips === null ? null : doc.hyphenationZoneTwips / 20,
+            noCaps: doc.doNotHyphenateCaps,
+          }),
+          insertPageNumberPosition: (position, align) => {
+            if (collabDocOp((ids) => documentOperationBody("insertPageNumberPosition", { position, align }, ids))) return true;
+            history.checkpoint();
+            if (!insertPageNumberPosition(doc, position, align)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          removePageNumbers: () => {
+            if (collabDocOp(() => documentOperationBody("removePageNumbers", {}))) return true;
+            history.checkpoint();
+            if (!removePageNumberFields(doc)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertHeaderFooterPreset: (kind, preset) => {
+            if (collabDocOp((ids) => documentOperationBody("insertHeaderFooterPreset", { hfKind: kind, preset }, ids))) return true;
+            history.checkpoint();
+            if (!insertHeaderFooterPreset(doc, kind, preset)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          setFootnoteOptions: (patch, scope) => {
+            // Same document/section-scope shape as setPageNumberFormat.
+            if (collabDocOp(() => documentOperationBody("setFootnoteOptions", patch))) return true;
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (!setFootnoteOptions(doc, patch, target)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getFootnoteOptions: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
+            return t ? footnoteOptionsAt(doc, t) : { fmt: "decimal", start: null, restart: "continuous", pos: "pageBottom" };
+          },
+          setEndnoteOptions: (patch, scope) => {
+            if (collabDocOp(() => documentOperationBody("setEndnoteOptions", patch))) return true;
+            history.checkpoint();
+            let target: XmlElement | undefined;
+            if (scope === "section") {
+              const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t;
+              if (t) target = sectPrAt(doc, t) ?? undefined;
+            }
+            if (!setEndnoteOptions(doc, patch, target)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          getEndnoteOptions: () => {
+            const t = editor?.getCaretTarget()?.t ?? editor?.getSelectionSegments()?.[0]?.t ?? documentStart()?.t;
+            return t ? endnoteOptionsAt(doc, t) : { fmt: "lowerRoman", start: null, restart: "continuous", pos: "docEnd" };
+          },
+          resolveComment: (id, resolved) => {
+            if (collabDocOp(() => ({ kind: "resolveComment", commentId: id, resolved, paraId: hex8() }))) return true;
+            history.checkpoint();
+            if (!setCommentResolved(doc, id, resolved)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          editComment: (id, text) => {
+            if (collabDocOp(() => ({ kind: "editComment", commentId: id, text }))) return true;
+            history.checkpoint();
+            if (!editCommentText(doc, id, text)) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          stepComment: (delta) => {
+            const anchors = doc.commentAnchors();
+            const threads = doc.comments.filter(
+              (c) => !c.parentId && (anchors.get(c.id)?.length ?? 0) > 0,
+            );
+            if (threads.length === 0) return null;
+            commentNav = commentNav < 0
+              ? (delta === 1 ? 0 : threads.length - 1)
+              : (commentNav + delta + threads.length) % threads.length;
+            const comment = threads[commentNav];
+            const ranges = anchors.get(comment.id)!.map((t) => ({ t, start: 0, end: t.text.length }));
+            if (editor && ranges.length > 0) {
+              // Bring the anchor into view (same dance as find's selectMatch:
+              // a virtualized page must be mounted before it can scroll).
+              const restore = handle?._virtualized ? handle.materializeAll?.() : undefined;
+              editor.selectRanges(ranges);
+              const el = handle?.bindingsByText.get(ranges[0].t)?.[0]?.el;
+              el?.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+              restore?.();
+              handle?.updateViewport?.();
+              editor.selectRanges(ranges);
+            }
+            return comment.id;
+          },
+          wordCount: () => ({ ...documentTextStatistics(doc), pages }),
           insertBreak: (kind) => {
             let target = editor?.getCaretTarget() ?? null;
             if (!target) {
@@ -2019,17 +3402,19 @@ export function DocxView({
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
             if (targets.length === 0) return;
-            if (collabBlockOp(targets, (blockId) => ({ kind: "adjustIndent", blockId, direction }))) return;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => ({ kind: "adjustIndent", blockId, direction, ...(suggest ? { suggest } : {}) }))) return;
             history.checkpoint();
-            if (adjustIndent(doc, targets as Parameters<typeof adjustIndent>[1], direction)) pages = rerender(doc);
+            if (adjustIndent(doc, targets as Parameters<typeof adjustIndent>[1], direction, suggestMeta(doc, suggest))) pages = rerender(doc);
           },
           setParagraphSpacing: (patch) => {
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : editor?.getCaretTarget() ? [editor.getCaretTarget()!.t] : [];
             if (targets.length === 0) return;
-            if (collabBlockOp(targets, (blockId) => ({ kind: "setSpacing", blockId, patch: patch as Record<string, unknown> }))) return;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => ({ kind: "setSpacing", blockId, patch: patch as Record<string, unknown>, ...(suggest ? { suggest } : {}) }))) return;
             history.checkpoint();
-            if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch)) pages = rerender(doc);
+            if (setParagraphSpacing(doc, targets as Parameters<typeof setParagraphSpacing>[1], patch, suggestMeta(doc, suggest))) pages = rerender(doc);
           },
           setParagraphDivider: (divider) => {
             const segs = editor?.getSelectionSegments() ?? [];
@@ -2049,6 +3434,46 @@ export function DocxView({
           getParagraphDivider: () => {
             const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
             return target ? paragraphDividerAt(doc, target) : null;
+          },
+          setTabStops: (stops) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const caret = editor?.getCaretTarget();
+            const targets = segs.length > 0
+              ? segs.map((segment) => segment.t).filter((target): target is NonNullable<typeof target> => !!target)
+              : caret
+                ? [caret.t]
+                : [];
+            if (targets.length === 0) return false;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => operationBody("setTabStops", blockId, { stops, suggest }) as never)) return true;
+            history.checkpoint();
+            if (!setTabStops(doc, targets, stops, suggestMeta(doc, suggest))) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          getTabStops: () => {
+            const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
+            return target ? tabStopsAt(doc, target) : [];
+          },
+          setParagraphBorders: (patch) => {
+            const segs = editor?.getSelectionSegments() ?? [];
+            const caret = editor?.getCaretTarget();
+            const targets = segs.length > 0
+              ? segs.map((segment) => segment.t).filter((target): target is NonNullable<typeof target> => !!target)
+              : caret
+                ? [caret.t]
+                : [];
+            if (targets.length === 0) return false;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => operationBody("setParagraphBorders", blockId, { patch, suggest }) as never)) return true;
+            history.checkpoint();
+            if (!setParagraphBorders(doc, targets, patch, suggestMeta(doc, suggest))) return false;
+            pages = rerender(doc);
+            return true;
+          },
+          getParagraphBorders: () => {
+            const target = editor?.getSelectionSegments()?.find((segment) => segment.t)?.t ?? editor?.getCaretTarget()?.t;
+            return target ? paragraphBordersAt(doc, target) : { borders: {}, shading: null };
           },
           setDropCap: (mode, lines = 3) => {
             if (collabOp((a, ids) => ({ kind: "setDropCap", blockId: a.blockId, mode, nodeIds: ids(8) }))) return true;
@@ -2088,20 +3513,93 @@ export function DocxView({
           replaceCurrent: (replacement) => {
             const m = findState.matches[findState.index];
             if (!m) return 0;
-            history.checkpoint();
-            replaceMatch(doc, m, replacement);
-            pages = rerender(doc);
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // In a room the replacement rides the wire as the canonical
+              // deleteText/insertText intents (strike-then-insert while
+              // suggesting) — the local mutation below never replicates. An
+              // unaddressable match is an honest no-op (see collabOp).
+              const intents = compileReplaceMatch(doc, m, replacement, editor?.suggestionMeta());
+              if (intents) {
+                history.checkpoint();
+                for (const intent of intents) current.submitOp(intent);
+              }
+            } else {
+              history.checkpoint();
+              replaceMatch(doc, m, replacement);
+              pages = rerender(doc);
+            }
             findState.matches.splice(findState.index, 1);
             if (findState.index >= findState.matches.length) findState.index = 0;
             if (findState.matches.length > 0) selectMatch(findState.index);
             return findState.matches.length;
           },
-          replaceAll: (query, replacement) => {
+          replaceAll: (query, replacement, opts) => {
+            const current = collabRef.current;
+            if (current?.submitOp && doc.stableIds) {
+              // One fixed find pass compiled to per-match intents, submitted
+              // back-to-front (the compiled order) so every offset encoded
+              // against the pre-replace tree stays valid as the optimistic
+              // applies land. One checkpoint: the whole sweep is one gesture.
+              const { intents, result } = compileReplaceAll(doc, query, replacement, opts, editor?.suggestionMeta());
+              if (intents.length > 0) {
+                history.checkpoint();
+                for (const intent of intents) current.submitOp(intent);
+              }
+              findState = { matches: [], index: 0 };
+              return result;
+            }
             history.checkpoint();
-            const n = replaceAll(doc, query, replacement);
-            if (n > 0) pages = rerender(doc);
+            const result = replaceAll(doc, query, replacement, opts);
+            if (result.total > 0) pages = rerender(doc);
             findState = { matches: [], index: 0 };
-            return n;
+            return result;
+          },
+          goToPage: (page) => {
+            if (!handle) return false;
+            // A far page may be virtualized out: mount all pages, scroll,
+            // restore the window — find navigation's pattern (selectMatch).
+            const restore = handle._virtualized ? handle.materializeAll?.() : undefined;
+            const el = handle.root.querySelectorAll<HTMLElement>(".dxw-page")[page - 1];
+            el?.scrollIntoView({ block: "start", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle.updateViewport?.();
+            return !!el;
+          },
+          goToBookmark: (name) => {
+            const target = bookmarkTextTarget(doc, name);
+            if (!target || !handle) return false;
+            const restore = handle._virtualized ? handle.materializeAll?.() : undefined;
+            editor?.selectRanges([{ t: target.t, start: target.offset, end: target.offset }]);
+            const el = handle.bindingsByText.get(target.t)?.[0]?.el;
+            el?.scrollIntoView({ block: "center", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle.updateViewport?.();
+            return !!el;
+          },
+          selectRange: (range) => {
+            if (!editor) return false;
+            const ids = doc.stableIds ?? doc.enableStableIds();
+            const resolved: { t: XmlElement; start: number; end: number }[] = [];
+            for (const r of Array.isArray(range) ? range : [range]) {
+              if (!Number.isInteger(r.start) || !Number.isInteger(r.end) || r.end <= r.start || r.start < 0) continue;
+              const runEl = ids.elOf(r.runId);
+              if (!runEl) continue;
+              resolved.push(...resolveWireRange(runEl, r.start, r.end));
+            }
+            if (resolved.length === 0) return false;
+            // Find-navigation's materialize dance (selectMatch): a far range
+            // may live on a virtualized-out page. "nearest" instead of
+            // "center" so a range already on screen — the spellcheck's word
+            // under the pointer — never jumps the view.
+            const restore = handle?._virtualized ? handle.materializeAll?.() : undefined;
+            editor.selectRanges(resolved);
+            const el = handle?.bindingsByText.get(resolved[0].t)?.[0]?.el;
+            el?.scrollIntoView({ block: "nearest", behavior: "instant" as ScrollBehavior });
+            restore?.();
+            handle?.updateViewport?.();
+            editor.selectRanges(resolved);
+            return true;
           },
           toggleList: (kind) => {
             const caret = editor?.getCaretTarget();
@@ -2112,8 +3610,19 @@ export function DocxView({
             const dirtyBlock = targets.length === 1 ? topLevelBlockOf(doc, targets[0]) ?? undefined : undefined;
             history.checkpoint();
             const listKind = current === kind ? null : kind;
-            if (setListType(doc, targets as Parameters<typeof setListType>[1], listKind)) {
-              emitBlockIntents(targets, (blockId) => ({ kind: "setListType", blockId, listKind }));
+            const suggest = editor?.suggestionMeta();
+            if (setListType(doc, targets as Parameters<typeof setListType>[1], listKind, suggestMeta(doc, suggest))) {
+              // ONE intent for the whole selection (moreBlockIds carries the
+              // paragraphs beyond the first): per-paragraph intents each
+              // minted a fresh numbering definition at apply, so the server
+              // numbered a multi-paragraph toggle 1,2,3 (three restarting
+              // lists) while this client's single mutation above shared one
+              // definition (1,1,1) — byte divergence and wrong semantics.
+              emitListIntent(targets, (blockIds) =>
+                operationBody("setListType", blockIds[0], {
+                  listKind, suggest,
+                  ...(blockIds.length > 1 ? { moreBlockIds: blockIds.slice(1) } : {}),
+                }));
               pages = rerender(doc, dirtyBlock);
               document.dispatchEvent(new CustomEvent("dxw-selection"));
             }
@@ -2128,9 +3637,10 @@ export function DocxView({
             const segs = editor?.getSelectionSegments() ?? [];
             const targets = segs.length > 0 ? segs.map((sg) => sg.t).filter((t): t is NonNullable<typeof t> => !!t) : caret ? [caret.t] : [];
             if (targets.length === 0) return;
-            if (collabBlockOp(targets, (blockId) => ({ kind: "formatParagraph", blockId, styleId }))) return;
+            const suggest = editor?.suggestionMeta();
+            if (collabBlockOp(targets, (blockId) => ({ kind: "formatParagraph", blockId, styleId, ...(suggest ? { suggest } : {}) }))) return;
             history.checkpoint();
-            if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId)) {
+            if (setParagraphStyle(doc, targets as Parameters<typeof setParagraphStyle>[1], styleId, suggestMeta(doc, suggest))) {
               pages = rerender(doc);
             }
           },
@@ -2150,6 +3660,202 @@ export function DocxView({
             list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
             return list;
           },
+          listStyles: (filter) => listStyles(doc, filter),
+          createStyle: (spec) => {
+            if (collabDocOp(() => documentOperationBody("createStyle", { style: spec }))) return true;
+            history.checkpoint();
+            if (!createStyle(doc, spec)) return false;
+            // A definition change repaints every paragraph that resolves
+            // through it, so the whole document relayouts rather than a block.
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          modifyStyle: (styleId, patch) => {
+            if (collabDocOp(() => documentOperationBody("modifyStyle", { styleId, patch }))) return true;
+            history.checkpoint();
+            if (!modifyStyle(doc, styleId, patch)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          deleteStyle: (styleId) => {
+            if (collabDocOp(() => documentOperationBody("deleteStyle", { styleId }))) return true;
+            history.checkpoint();
+            if (!deleteStyle(doc, styleId)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertWatermark: (spec) => {
+            // The watermark goes into the header parts, and insertWatermark
+            // will not create one: making a PART (rel + content-type override
+            // + sectPr references) is ensureHeaderFooter's structural intent.
+            // So in a room the two ride the wire in order — the header exists
+            // by the time the watermark operation applies on every replica.
+            if (!doc.hasHfPart("header")) {
+              const created = collabDocOp((ids) => ({
+                kind: "ensureHeaderFooter",
+                hfKind: "header",
+                nodeIds: ids(8),
+              }));
+              if (created) {
+                // The local replica applies its own submission, so the part is
+                // there; ask again with the real count.
+                doc.ensureHfPart("header");
+              } else {
+                history.checkpoint();
+                doc.ensureHfPart("header");
+              }
+            }
+            const headerCount = doc.headerRoots().length;
+            if (headerCount === 0) return false;
+            const args = {
+              text: spec.text,
+              headerCount,
+              ...(spec.diagonal !== undefined ? { diagonal: spec.diagonal } : {}),
+              ...(spec.color !== undefined ? { color: spec.color } : {}),
+              ...(spec.opacity !== undefined ? { opacity: spec.opacity } : {}),
+            };
+            if (collabDocOp((ids) => documentOperationBody("insertWatermark", args, ids))) return true;
+            history.checkpoint();
+            if (!insertWatermark(doc, spec)) return false;
+            // A watermark paints behind every page, so nothing reflows — but
+            // it lives in the header, which the page chrome repaints globally.
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          insertPictureWatermark: async (file) => {
+            const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+            // VML v:imagedata cannot carry an SVG, so the raster allowlist is
+            // the whole list here — local documents get no wider set.
+            if (!(COLLAB_IMAGE_EXTS as readonly string[]).includes(ext)) return "unsupported-format";
+            const current = collabRef.current;
+            const inCollab = !!(current?.submitOp && doc.stableIds);
+            // SIZE PRE-CHECK before a byte is read, for insertImage's reason.
+            const maxBytes = inCollab ? current?.mediaMaxBlobBytes ?? null : null;
+            if (typeof maxBytes === "number" && file.size > maxBytes) return "too-large";
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            let bitmap: ImageBitmap;
+            try {
+              bitmap = await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer], { type: file.type }));
+            } catch {
+              return "error";
+            }
+            const naturalWidthPx = bitmap.width;
+            const naturalHeightPx = bitmap.height;
+            bitmap.close();
+            // THE BYTES FIRST, the document after. In a room they travel out
+            // of band, so the reservation is only sound once the upload has
+            // succeeded (plan doc 16 §5.1) — and until then nothing here has
+            // touched the document, so a refusal leaves no half-made header
+            // part behind for a watermark that never lands.
+            let media: { blobSha: string; bytesLen: number; iv?: string } | null;
+            if (inCollab) {
+              if (!current!.uploadMedia) return "no-relay";
+              media = await current!.uploadMedia(bytes);
+              if (!media) return "upload-failed";
+            } else {
+              media = { blobSha: await blobSha256(bytes), bytesLen: bytes.length };
+            }
+            // The watermark lives in the header parts and this operation will
+            // not create one — the same ordering insertWatermark documents.
+            if (!doc.hasHfPart("header")) {
+              const created = collabDocOp((ids) => ({
+                kind: "ensureHeaderFooter",
+                hfKind: "header",
+                nodeIds: ids(8),
+              }));
+              if (created) doc.ensureHfPart("header");
+              else {
+                history.checkpoint();
+                doc.ensureHfPart("header");
+              }
+            }
+            const headerCount = doc.headerRoots().length;
+            if (headerCount === 0) return "error";
+            if (inCollab) {
+              collabDocOp((ids) => documentOperationBody("insertPictureWatermark", {
+                blobSha: media.blobSha,
+                bytesLen: media.bytesLen,
+                ext,
+                ...(media.iv ? { iv: media.iv } : {}),
+                naturalWidthPx,
+                naturalHeightPx,
+                headerCount,
+              }, ids));
+              return "inserted";
+            }
+            history.checkpoint();
+            const registered = insertPictureWatermark(doc, {
+              blobSha: media.blobSha,
+              ext,
+              naturalWidthPx,
+              naturalHeightPx,
+            });
+            if (!registered) return "error";
+            // No relay to fetch from: this replica IS the source of the bytes,
+            // so fill the part it just reserved before painting.
+            doc.installMedia(registered.part, bytes);
+            // A watermark paints behind every page and lives in the header,
+            // which the page chrome repaints globally.
+            pages = rerender(doc, undefined, "global");
+            return "inserted";
+          },
+          removeWatermark: () => {
+            if (collabDocOp(() => documentOperationBody("removeWatermark", {}))) return true;
+            history.checkpoint();
+            if (!removeWatermark(doc)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          setCharacterStyle: (styleId) => {
+            // A character style is a run property, so it rides the same path
+            // bold and colour do — including the run splitting a partial
+            // selection needs, and the collab intents applyFormat emits.
+            api.applyFormat({ characterStyleId: styleId });
+          },
+          setNumberingLevel: (ilvl, patch) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            if (collabOp((anchor) => operationBody("setNumberingLevel", anchor.blockId, { ilvl, patch }), {
+              t: caret.t,
+              offset: 0,
+            })) {
+              return true;
+            }
+            history.checkpoint();
+            if (!setNumberingLevelAt(doc, caret.t, ilvl, patch)) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          applyNumberingPreset: (preset) => {
+            const spec = NUMBERING_PRESETS[preset];
+            if (!spec) return false;
+            if (api.getListType() !== "number") api.toggleList("number");
+            let applied = true;
+            for (let ilvl = 0; ilvl < spec.levels.length; ilvl++) {
+              applied = api.setNumberingLevel(ilvl, spec.levels[ilvl]) && applied;
+            }
+            return applied;
+          },
+          setNumberingRestart: (start) => {
+            const caret = editor?.getCaretTarget();
+            if (!caret) return false;
+            if (collabOp((anchor) => operationBody("setNumberingRestart", anchor.blockId, { start }), {
+              t: caret.t,
+              offset: 0,
+            })) {
+              return true;
+            }
+            history.checkpoint();
+            const applied =
+              start === null ? continueNumberingAt(doc, caret.t) : restartNumberingAt(doc, caret.t, start);
+            if (!applied) return false;
+            pages = rerender(doc, undefined, "global");
+            return true;
+          },
+          copyFormatting: () => api.getSelectionFormat(),
+          applyCopiedFormatting: (format) => {
+            api.applyFormat(formatPatchFrom(format));
+          },
           getParagraphStyleId: () => {
             const segs = editor?.getSelectionSegments() ?? [];
             const t = segs.find((sg) => sg.t)?.t ?? editor?.getCaretTarget()?.t;
@@ -2162,6 +3868,18 @@ export function DocxView({
             printPages(handle.root, sp?.pageWidth ?? 816, sp?.pageHeight ?? 1056);
             restore?.();
           },
+          exportPrintHtml: () => {
+            if (!handle) return null;
+            const sp = doc.sections[0]?.props;
+            const restore = handle.materializeAll?.();
+            const html = buildPrintHtml(
+              handle.root,
+              sp?.pageWidth ?? 816,
+              sp?.pageHeight ?? 1056,
+            );
+            restore?.();
+            return html;
+          },
           save: () => doc.save(),
           setSuggesting: (on, author) => editor?.setSuggesting(on, author ?? commentAuthor),
           isSuggesting: () => editor?.isSuggesting() ?? false,
@@ -2170,10 +3888,17 @@ export function DocxView({
           rejectRevisionAtCaret: () => editor?.rejectRevisionRef() ?? false,
           // Count works in any mode (read-only walk); the bulk operations
           // need the editor (they re-render + record an undo step).
-          revisionCount: () => collectRevisions(doc).length,
-          acceptAllRevisions: () => editor?.acceptAllRevisions() ?? 0,
-          rejectAllRevisions: () => editor?.rejectAllRevisions() ?? 0,
-          getEncodedCaret: () => editor?.getEncodedCaret() ?? null,
+          revisionCount: (author) =>
+            (author === undefined
+              ? collectRevisions(doc)
+              : collectRevisions(doc).filter((ref) => ref.author === author)
+            ).length,
+          acceptAllRevisions: (author) => editor?.acceptAllRevisions(author) ?? 0,
+          rejectAllRevisions: (author) => editor?.rejectAllRevisions(author) ?? 0,
+          getEncodedCaret: () => {
+            doc.enableStableIds(); // local documents encode too (see the API doc)
+            return editor?.getEncodedCaret() ?? null;
+          },
           setCaretFromEncoded: (pos) => editor?.setCaretFromEncoded(pos) ?? false,
           revealPresence: (participant) => {
             // Read the CURRENT presence (presenceRef), not a render's snapshot:
@@ -2289,7 +4014,14 @@ export function DocxView({
       if (d && r && d === collab?.doc) {
         const take = collab.takeRenderScope;
         const scope = take ? take() : undefined;
-        if (scope !== null) r(d, scope);
+        if (scope !== null) {
+          r(d, scope);
+          // The toolbar reads api state (revision count, suggesting, formats)
+          // on its dxw-selection refresh; a session-applied op changes that
+          // state without moving the caret, so announce it here — once per
+          // coalesced repaint.
+          document.dispatchEvent(new CustomEvent("dxw-selection"));
+        }
       }
     };
     // rAF coalesces to vsync when THIS window is the foreground one — but the
@@ -2310,6 +4042,29 @@ export function DocxView({
     if (repaintRafRef.current) cancelAnimationFrame(repaintRafRef.current);
     if (repaintTimerRef.current !== undefined) clearTimeout(repaintTimerRef.current);
   }, []);
+
+  /**
+   * Step the mail-merge preview to another record.
+   *
+   * Keyed on the record's CONTENT: a host rebuilds the record object on every
+   * render, and keying on identity would relay the whole document on every
+   * keystroke. The mount paint already used the first record, so the ref starts
+   * equal and the first run of this effect does nothing.
+   *
+   * "doc" scope forces a full relayout. The engine gates reuse on the record
+   * too (LayoutOptions.mergeRecord), because stepping records changes no
+   * blocks — so nothing in the document can tell the incremental path that the
+   * painted text is now stale.
+   */
+  const mergeKey = mergeRecord ? JSON.stringify(mergeRecord) : "";
+  const paintedMergeKeyRef = useRef(mergeKey);
+  useEffect(() => {
+    if (paintedMergeKeyRef.current === mergeKey) return;
+    paintedMergeKeyRef.current = mergeKey;
+    const doc = docCacheRef.current?.doc;
+    const rerender = rerenderRef.current;
+    if (doc && rerender) rerender(doc, { kind: "doc" });
+  }, [mergeKey]);
 
   const hotBtn = (label: string, title: string, onClick: () => void) => (
     <button
@@ -2427,8 +4182,12 @@ export function DocxView({
 }
 
 export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
-export type { CoverPageContent, DrawingTool, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset } from "@wordinweb/core";
+export type { CoverPageContent, DrawingTool, MergeRecord, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret, HostShortcutSection } from "@wordinweb/core";
 export { DocxToolbar, ToolbarMenuSelect, INSERT_COMMANDS } from "./toolbar.js";
+// Compare Documents: the engine call plus the browser plumbing a host needs
+// to drive it (file picker, download, result naming).
+export { compareWithFile, pickDocx, pickAndCompare, downloadDocx, comparedName } from "./compare.js";
+export type { CompareResult, CompareWithFileOptions } from "./compare.js";
 export type {
   DocxToolbarProps,
   InsertCommandSpec,

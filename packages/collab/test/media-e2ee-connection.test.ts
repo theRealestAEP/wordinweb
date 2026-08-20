@@ -378,9 +378,22 @@ describe("collaborative undo over two encrypted clients (doc 03 Phase 8)", () =>
     await until(() => bodyText(a).includes("ONE"), "first edit");
     a.submit(ins(5, "TWO"));
     await until(() => bodyText(b).includes("TWO"), "B to see both");
+    // undoLast() takes from A's MIRROR, which advances only by ingesting
+    // sequenced envelopes, and A paints her own edits optimistically before
+    // that. B seeing TWO says nothing about A's mirror: the two clients drain
+    // independent async chains and A's also carries her own sealIntent work,
+    // so A routinely finishes last. Without this wait a slow A undoes ONE —
+    // the only entry her stack holds — and the wait below can never pass.
+    await until(() => a.pendingCount === 0, "A's mirror to confirm both edits");
 
     expect(a.undoLast()).toBe("undone");
     await until(() => !bodyText(a).includes("TWO"), "second undo target gone");
+    // The first undo is itself an intent in flight now, so the second press
+    // would be HELD by the pending gate (see undoLast, and the accumulation
+    // case in undo-pending-gate.test.ts). Waiting for the drain keeps this
+    // test on its own subject: that undo walks BACK TWO ACTIONS, not that a
+    // press mid-flight is deferred.
+    await until(() => a.pendingCount === 0, "the first undo to confirm");
     expect(a.undoLast()).toBe("undone");
     await until(() => !bodyText(a).includes("ONE"), "first undo target gone");
     expect(bodyText(a)).toBe("ab");

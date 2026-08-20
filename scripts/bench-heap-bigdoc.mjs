@@ -8,10 +8,13 @@
  * each). This instrument reports the model cost per page so a regression — or
  * an improvement — shows up as a number in internal/perf.
  *
- * Stages reported (all after full GC, so they are retained sizes, not churn):
+ * Retained stages use full GC. Peak stages sample reachable heap at each
+ * window boundary before the next page range is released:
  *   parsedMB   — DocxDocument.load (XML tree + package)
  *   layoutMB   — layoutDocument page model on top of the parsed doc
+ *   layoutPeakMB — highest sampled layout growth above the parsed document
  *   mountedMB  — full DocxView mount (renderer DOM + editor + React) in jsdom
+ *   openPeakHeapMB — highest sampled total heap during the full app mount
  *   undoMB     — growth after `undoKeys` separate (non-coalesced) checkpoints
  *
  * Run:
@@ -48,6 +51,19 @@ const heapMB = () => {
   return process.memoryUsage().heapUsed / 1048576;
 };
 const fmt = (n) => n.toFixed(1);
+let peakBaseBytes = 0;
+let peakBytes = 0;
+const sampleHeap = () => {
+  globalThis.gc();
+  globalThis.gc();
+  peakBytes = Math.max(peakBytes, process.memoryUsage().heapUsed);
+};
+const resetPeak = () => {
+  peakBaseBytes = process.memoryUsage().heapUsed;
+  peakBytes = peakBaseBytes;
+};
+const peakGrowthMB = () => (peakBytes - peakBaseBytes) / 1048576;
+globalThis.__dxwPerf = { heapSample: sampleHeap };
 
 /* ------------------------- jsdom environment ---------------------------- */
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
@@ -173,15 +189,31 @@ const docxMB = bytes.length / 1048576;
 /* Engine-only stages first: these transfer to the browser unchanged. */
 const doc = await core.DocxDocument.load(bytes.slice());
 const h1 = heapMB();
-let layout = core.layoutDocument(doc, { measurer: benchMeasurer });
+resetPeak();
+let layout = core.layoutDocument(doc, { measurer: benchMeasurer, windowModel: true });
+sampleHeap();
+const layoutPeakMB = peakGrowthMB();
 const h2 = heapMB();
 const pages = layout.totalPages;
 let items = 0;
 for (const p of layout.pages) items += p.items.length;
+const retainedPages = layout._window?.retainedPages().size ?? pages;
+const fontSamples = layout._fontSamples?.length ?? 0;
+const relayPageCount = layout._window ? 12 : 0;
+const relayStart = Math.floor((pages - relayPageCount) / 2);
+const relayPages = Array.from({ length: relayPageCount }, (_, index) => relayStart + index);
+const retainedBeforeRelay = layout._window?.retainedPages();
+globalThis.__dxwPerf.heapSample = undefined;
+const relayStarted = performance.now();
+layout._window?.materialize(relayPages);
+const relayMs = performance.now() - relayStarted;
+if (retainedBeforeRelay) layout._window?.releaseExcept(retainedBeforeRelay);
+globalThis.__dxwPerf.heapSample = sampleHeap;
 layout = null;
 
 /* Full app mount on its own copy of the bytes. */
 const h3 = heapMB();
+resetPeak();
 Object.defineProperty(window.HTMLElement.prototype, "clientHeight", { get() { return 1200; }, configurable: true });
 const container = window.document.createElement("div");
 window.document.body.appendChild(container);
@@ -200,6 +232,9 @@ for (let i = 0; i < 400 && !container.querySelector(".dxw-page"); i++) await tic
 if (!container.querySelector(".dxw-page")) throw new Error("document never painted");
 const busy = () => !!container.querySelector("[data-dxw-layout-busy]");
 for (let i = 0; i < 6000 && busy(); i++) await tick(5);
+sampleHeap();
+const mountedPeakMB = peakGrowthMB();
+const openPeakHeapMB = peakBytes / 1048576;
 const h4 = heapMB();
 
 /* Undo growth: separate checkpoints (typing bursts >1s apart each snapshot
@@ -231,8 +266,13 @@ const h6 = heapMB();
 console.log(
   `STRESS-METRIC heap-bigdoc pkg=${pkg === "wordinweb" ? "worktree" : "custom"} paragraphs=${PARAS} pages=${pages} ` +
     `docxMB=${fmt(docxMB)} items=${items} itemsPerPage=${Math.round(items / pages)} ` +
-    `parsedMB=${fmt(h1 - h0)} layoutMB=${fmt(h2 - h1)} layoutKBPerPage=${fmt(((h2 - h1) * 1024) / pages)} ` +
-    `mountedMB=${fmt(h4 - h3)} undoKeys=${UNDO_KEYS} undoMB=${fmt(h6 - h5)} ` +
+    `retainedPages=${retainedPages} fontSamples=${fontSamples} ` +
+    `parsedMB=${fmt(h1 - h0)} layoutMB=${fmt(h2 - h1)} layoutPeakMB=${fmt(layoutPeakMB)} ` +
+    `layoutKBPerPage=${fmt(((h2 - h1) * 1024) / pages)} mountedMB=${fmt(h4 - h3)} ` +
+    `mountedPeakMB=${fmt(mountedPeakMB)} openPeakHeapMB=${fmt(openPeakHeapMB)} ` +
+    `relayPages=${relayPageCount} relayMs=${fmt(relayMs)} ` +
+    `relayMsPerPage=${fmt(relayPageCount > 0 ? relayMs / relayPageCount : 0)} ` +
+    `undoKeys=${UNDO_KEYS} undoMB=${fmt(h6 - h5)} ` +
     `heapTotalMB=${fmt(heapMB())}`,
 );
 await act(async () => { root.unmount(); });

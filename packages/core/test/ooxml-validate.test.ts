@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parseXml } from "../src/xml.js";
-import { validatePastedOoxml } from "../src/ooxml-validate.js";
+import { parseXml, serializeXml } from "../src/xml.js";
+import { pruneToPastedSubset, validatePastedOoxml } from "../src/ooxml-validate.js";
 
 function blocks(xml: string) {
   // Wrap so parseXml has a single root, then take its children as the block list.
@@ -49,5 +49,24 @@ describe("validatePastedOoxml (gate 2 / F3)", () => {
     expect(validatePastedOoxml(blocks(deep), { maxNodes: 5000, maxDepth: 8 }).ok).toBe(false);
     const many = "<w:p>" + "<w:r><w:t>x</w:t></w:r>".repeat(20) + "</w:p>";
     expect(validatePastedOoxml(blocks(many), { maxNodes: 10, maxDepth: 24 }).ok).toBe(false);
+  });
+});
+
+describe("pruneToPastedSubset keeps table cell formatting whole", () => {
+  it("carries a cell margin override without spilling its sides into tcPr", () => {
+    // Off the allowlist tcMar was UNWRAPPED, not dropped, which left
+    // <w:top w:w="120"/> as a direct child of w:tcPr — an element that is not
+    // a valid tcPr child in any schema.
+    const [tbl] = pruneToPastedSubset(
+      blocks(
+        `<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr>` +
+          `<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="240" w:type="dxa"/></w:tcMar>` +
+          `<w:tcBorders><w:tl2br w:val="single" w:sz="8"/><w:top w:val="single" w:sz="8"/></w:tcBorders>` +
+          `</w:tcPr><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
+      ),
+    );
+    const xml = serializeXml(tbl);
+    expect(xml).toContain(`<w:tcMar><w:top w:w="120" w:type="dxa"/><w:left w:w="240" w:type="dxa"/></w:tcMar>`);
+    expect(xml).toContain(`<w:tl2br w:val="single" w:sz="8"/>`);
   });
 });

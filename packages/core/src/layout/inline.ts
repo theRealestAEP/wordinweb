@@ -12,7 +12,7 @@ import {
   TabStop,
   WebVideoReference,
 } from "../model.js";
-import { FontSpec, TextSource } from "./types.js";
+import { FontSpec, LayoutFontSample, TextSource } from "./types.js";
 import { hasSegoeUIEmoji, TextMeasurer } from "./measure.js";
 import { MathBox, layoutMath } from "./math.js";
 import { localName, XmlElement } from "../xml.js";
@@ -76,8 +76,43 @@ export interface FieldContext {
   refParaNumber?: (fieldKey: object) => string | undefined;
   /** STYLEREF: the text of the referenced style's paragraph on the field's page
    * (first-on-page, or last with \l). undefined keeps the cache. Header/footer
-   * only — body STYLEREF keeps its cache. */
+   * only — a body field takes `styleRefBody` instead. */
   styleRef?: (styleName: string, lastOnPage: boolean) => string | undefined;
+  /** STYLEREF in the BODY, where there is no header page to resolve against:
+   * Word shows the nearest paragraph of the named style at or before the
+   * field. Keyed by the field occurrence; undefined keeps the cache. Installed
+   * only outside a header/footer, so `styleRef`'s page-relative answer is
+   * always the one a header field gets. */
+  styleRefBody?: (styleName: string, fieldKey: object) => string | undefined;
+  /** CITATION: the display text for a citation instruction, resolved from the
+   * document's sources part in its citation style (src/citations.ts).
+   * undefined — unknown tag, unmodeled switch, or no sources part — keeps
+   * the cache. */
+  citation?: (instruction: string) => string | undefined;
+  /** FILENAME: the host's name for the open document. Absent keeps the cache —
+   * the engine has no filesystem of its own. */
+  fileName?: string;
+  /** AUTHOR: the host's document author. Absent keeps the cache. */
+  author?: string;
+  /** NUMWORDS / NUMCHARS: the document's body text statistics
+   * (src/word-count.ts holds the rule; the update pass reads that same one,
+   * so the painted text and the written cache stay equal). Absent keeps the
+   * cache. */
+  textStats?: () => { words: number; characters: number };
+  /** MERGEFIELD: the active mail-merge record's value for a column name.
+   *
+   * Installed only by LAYOUT (engine.ts fieldCtx), never by the field-update
+   * pass that writes caches back into the XML — which is what makes a previewed
+   * value structurally unable to reach a saved file rather than merely guarded.
+   *
+   * Two absences are distinct and must stay distinct:
+   *   undefined — the data has no such column. The caller keeps the cache, so
+   *               the «Name» placeholder stays visible. This is a DELIBERATE
+   *               divergence from Word (which renders nothing for an unbound
+   *               field): an unbound field should be seen, not silently blank.
+   *   ""        — the column exists and is empty for this record. Renders
+   *               empty, and suppresses the \b and \f switch texts. */
+  mergeField?: (name: string) => string | undefined;
 }
 
 // ---------- atoms ----------
@@ -105,6 +140,9 @@ interface FragAtom {
   ruby?: RubyData;
   /** A word-internal hyphen ends this fragment: Word may break the line here. */
   breakAfter?: boolean;
+  /** This fragment ends at a <w:softHyphen/>: breaking here paints a hyphen
+   * glyph when it fits (probe-softhyphen). */
+  softHyphen?: boolean;
   /** Footnote id when this fragment is a footnote reference mark. */
   noteId?: number;
   /** PAGEREF bookmark name (final-pass page-number rewrite). */
@@ -310,6 +348,17 @@ function isCJK(ch: string): boolean {
 // box (probe2-form-checkboxes: the boxes inked ~3.2% over Word's weight and
 // left a structural halo). Route them to MS Gothic explicitly to match Word.
 const BALLOT_RE = /[☐☑☒]/;
+/**
+ * How much text one cumulative measurement window spans, in characters (see
+ * pushLatin).
+ *
+ * Big enough that a text line — 70-ish characters at a normal size and column
+ * width — sits well inside one window, so the widths a line is packed from
+ * telescope exactly the way they always did. Small enough that measuring every
+ * prefix costs O(window) rather than O(run), which is what makes typing in a
+ * page-long paragraph affordable.
+ */
+const CUM_WINDOW = 512;
 // A legacy FORMCHECKBOX reserves 2.5pt after its 11pt ballot glyph in Word.
 // Modern w14 checkbox controls are ordinary text and do not use this advance.
 const LEGACY_CHECKBOX_TRAILING_ADVANCE = (2.5 * 96) / 72;
@@ -423,6 +472,8 @@ export interface LineSpan {
   noteId?: number;
   /** A word-internal hyphen ends this span: a line may break after it. */
   breakAfter?: boolean;
+  /** This span ends at a <w:softHyphen/> (see FragAtom.softHyphen). */
+  softHyphen?: boolean;
   /** PAGEREF bookmark name (final-pass page-number rewrite). */
   pageRef?: string;
   /** Bidi embedding level for visual reordering (0 = LTR, odd = RTL). */
@@ -472,6 +523,13 @@ export interface LineBox {
 export interface BrokenParagraph {
   lines: LineBox[];
   props: ParaProps;
+  /** Served from the break cache's metrics tier: every line carries its real
+   * geometry but an EMPTY span list, so the paragraph can be paginated but not
+   * painted. Only a caller that passed opts.metricsOnly ever sees this. */
+  metricsOnly?: true;
+  /** One sample per distinct face used by this paragraph's text, for the font
+   * preload list a discarded page can no longer supply from its items. */
+  fontSamples?: LayoutFontSample[];
   /** Floating shapes anchored to this paragraph (don't occupy inline space). */
   anchors: Shape[];
   /** Where each anchor's run sits in the flow: pen x (column-relative) and
@@ -672,7 +730,14 @@ type BreakLabel = {
   alignment?: "left" | "center" | "right";
 };
 type BreakBounds = (yOffset: number, estHeight: number) => LineBounds;
-type BreakOpts = { inTableCell?: boolean; verticalGridResync?: boolean; cache?: boolean };
+type BreakOpts = {
+  inTableCell?: boolean;
+  verticalGridResync?: boolean;
+  cache?: boolean;
+  /** The caller will paginate past these lines without painting them, so a
+   * metrics-only result is acceptable (see the two-tier cache below). */
+  metricsOnly?: boolean;
+};
 
 // --- Line-break cache -------------------------------------------------------
 // breakParagraph is a pure function of (paragraph content, content width,
@@ -693,15 +758,68 @@ type BreakOpts = { inTableCell?: boolean; verticalGridResync?: boolean; cache?: 
 // break cache to it means (a) two documents never share entries, and (b) a
 // layout run with a different (e.g. cold-font, pre-fonts-ready) measurer can
 // never serve a stale break to the warm measurer the editor actually uses.
-const BP_CACHES = new WeakMap<TextMeasurer, Map<string, BrokenParagraph>>();
-const BP_CACHE_MAX = 60000;
-function bpCacheFor(measurer: TextMeasurer): Map<string, BrokenParagraph> {
-  let m = BP_CACHES.get(measurer);
-  if (!m) {
-    m = new Map();
-    BP_CACHES.set(measurer, m);
+//
+// TWO TIERS. A full entry keeps the whole line/span output and costs ~50 KB per
+// paragraph of 600 characters; 3,500 of them were 180 MB of a 192 MB layout
+// heap. Most of that output is never painted, because the page it belongs to
+// sits outside the live window and its items are discarded as soon as they are
+// laid. But the entries cannot simply be capped: an edit's cascade re-lay walks
+// the whole document tail, once, front to back, so any cap below the number of
+// blocks it re-lays evicts every entry just before it is asked for (measured:
+// 361 measure calls at cap 60,000 against 382,897 at cap 1,000).
+//
+// So the entries get SMALLER rather than fewer. Tier 2 holds per-line METRICS
+// only - the heights and flags the pagination path reads - which is all the
+// re-lay needs for a block whose lines it merely paginates past. Tier 1 keeps
+// the full span output for the paragraphs actually being painted, which under a
+// page window is a bounded working set, so it takes a small cap. A caller asks
+// for tier 2 with opts.metricsOnly; it gets a metrics-only result only when the
+// paragraph's lines can be paginated without painting them (see paginatable
+// below), and a full result otherwise.
+const BP_CACHES = new WeakMap<TextMeasurer, BreakCache>();
+let BP_CACHE_MAX = 60000;
+/** Full-tier budget while a page-windowed run is in flight, counted in SPANS
+ * rather than entries because the spans are where the memory is: a paragraph of
+ * 600 characters holds ~200 of them at ~255 bytes each, a one-line heading ~20.
+ * An entry cap that fits one document's window overflows another's — twelve
+ * pages are 85 paragraphs of flowing prose but 540 one-line ones — while their
+ * span counts are within a small factor. This budget is several times either
+ * working set and still an order of magnitude under what the tier used to hold. */
+const BP_WINDOWED_FULL_SPANS = 60000;
+
+interface FullEntry {
+  broken: BrokenParagraph;
+  spans: number;
+}
+
+interface BreakCache {
+  full: Map<string, FullEntry>;
+  /** Running sum of the full tier's span counts, so eviction needs no rescan. */
+  fullSpans: number;
+  compact: Map<string, CompactBreak>;
+  windowed: boolean;
+}
+
+/** Test/benchmark hook for sweeping the cap. Not part of the public API. */
+export function __setBreakCacheMax(max: number): void {
+  BP_CACHE_MAX = max;
+}
+
+function bpCacheFor(measurer: TextMeasurer): BreakCache {
+  let c = BP_CACHES.get(measurer);
+  if (!c) {
+    c = { full: new Map(), fullSpans: 0, compact: new Map(), windowed: false };
+    BP_CACHES.set(measurer, c);
   }
-  return m;
+  return c;
+}
+
+/** Tell a measurer's cache whether the run about to start keeps only a page
+ * window of positioned items. A windowed run paginates most of the document
+ * from tier 2, so its full tier holds only the window's working set; an
+ * unwindowed run paints every page and keeps the large full tier it always had. */
+export function setBreakCacheWindowed(measurer: TextMeasurer, windowed: boolean): void {
+  bpCacheFor(measurer).windowed = windowed;
 }
 
 /** Drop a measurer's cached line breaks. The host calls this once after the
@@ -709,7 +827,11 @@ function bpCacheFor(measurer: TextMeasurer): Map<string, BrokenParagraph> {
  * fallbacks used during initial load, so any breaks measured before fonts
  * settled must be recomputed. Layouts after this are all warm and consistent. */
 export function clearBreakCache(measurer: TextMeasurer): void {
-  BP_CACHES.get(measurer)?.clear();
+  const cache = BP_CACHES.get(measurer);
+  if (!cache) return;
+  cache.full.clear();
+  cache.fullSpans = 0;
+  cache.compact.clear();
 }
 const paraSigMemo = new WeakMap<Paragraph, string>();
 const paraModelBySource = new WeakMap<XmlElement, Paragraph>();
@@ -806,6 +928,72 @@ function breakCacheKey(
   );
 }
 
+/** A line stripped to what the pagination path reads: the break planner's
+ * fit/height geometry plus the flags the emit loop branches on. Everything a
+ * LineBox carries beyond this exists to PAINT the line. */
+type LineMetrics = Omit<LineBox, "spans">;
+
+/** Metrics tier entry: one paragraph's line geometry without its spans. */
+interface CompactBreak {
+  lines: LineMetrics[];
+  props: ParaProps;
+  fontSamples: LayoutFontSample[];
+  /** Whether a caller may paginate these lines without painting them. False
+   * when a line holds an image, a drawing, a math box, a note mark or a field
+   * result: emitting those does more than push items (it registers footnotes,
+   * recurses into text-box layout, records a 3D model, resolves a PAGEREF), so
+   * the paragraph must take the full path even outside the window. */
+  paginatable: boolean;
+}
+
+function compactOf(b: BrokenParagraph): CompactBreak {
+  let paginatable = true;
+  const samples = new Map<string, LayoutFontSample>();
+  const lines = b.lines.map((line) => {
+    const { spans, ...metrics } = line;
+    for (const span of spans) {
+      if (span.image || span.drawing || span.math || span.noteId !== undefined || span.pageRef) {
+        paginatable = false;
+      }
+      // The docGrid re-sync at the end of placeParagraph asks whether a tall
+      // line came from the PingFang fallback profile, which only the spans can
+      // say. Rather than carry the answer, keep those paragraphs on the full
+      // path — they are the CJK-fallback case, not the bulk of any document.
+      if (PINGFANG_FALLBACK.test(span.font.family)) paginatable = false;
+      const text = span.text?.trim();
+      if (!text) continue;
+      // Mirror collectPageMetadata's preference for a sample that exercises the
+      // face past Latin Extended-B, so the preload list keeps its widest witness.
+      const key = span.font.family + "\u0000" + (span.font.bold ? 1 : 0) + (span.font.italic ? 1 : 0);
+      const existing = samples.get(key);
+      const sample = text.slice(0, 40);
+      if (!existing || (!NON_LATIN.test(existing.text) && NON_LATIN.test(sample))) {
+        samples.set(key, { font: span.font, text: sample });
+      }
+    }
+    return metrics;
+  });
+  return { lines, props: b.props, fontSamples: [...samples.values()], paginatable };
+}
+
+const PINGFANG_FALLBACK = /^pingfang /i;
+
+/** collectPageMetadata's witness test, applied to spans instead of items. */
+const NON_LATIN = /[^\u0000-\u024f]/;
+
+/** Metrics-tier result: real line geometry, no spans. The engine reads
+ * `metricsOnly` and skips the paint half of its paragraph loop. */
+function expandCompact(c: CompactBreak): BrokenParagraph {
+  return {
+    lines: c.lines.map((metrics) => ({ ...metrics, spans: [] })),
+    props: c.props,
+    metricsOnly: true,
+    fontSamples: c.fontSamples,
+    anchors: [],
+    anchorPoints: new Map(),
+  };
+}
+
 /** Clone of a break result whose lines and spans are fresh objects, so a
  * caller may mutate line/span scalar fields (the engine snaps line heights to
  * the doc grid and re-places spans in place during layout) without touching the
@@ -854,27 +1042,92 @@ export function breakParagraph(
   }
   const cache = bpCacheFor(measurer);
   const key = breakCacheKey(doc, para, contentWidth, minLineHeight, numberingLabel, opts);
-  const hit = cache.get(key);
+  const hit = cache.full.get(key);
   if (hit !== undefined) {
     // Dev guard (globalThis.__dxwVerifyBp): recompute uncached and confirm the
     // cached break still matches, catching any missed cache-key input.
     if ((globalThis as { __dxwVerifyBp?: boolean }).__dxwVerifyBp) {
       const fresh = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
-      if (brokenProj(hit) !== brokenProj(fresh)) {
+      if (brokenProj(hit.broken) !== brokenProj(fresh)) {
         const g = globalThis as { __dxwBpMismatch?: number };
         g.__dxwBpMismatch = (g.__dxwBpMismatch ?? 0) + 1;
         return fresh;
       }
     }
+    // Map iterates in insertion order, so re-inserting on a hit makes the first
+    // key the least recently used one and eviction below an LRU.
+    cache.full.delete(key);
+    cache.full.set(key, hit);
     // Never hand out the cached instance: the engine mutates line/span fields
     // (doc-grid height snapping, in-place re-placement) during layout.
-    return cloneBroken(hit);
+    return cloneBroken(hit.broken);
+  }
+  // Tier 2: the caller will not paint these lines, so its whole need is the
+  // geometry. This is the path that keeps a cascade re-lay off the measurer
+  // for every block it merely paginates past.
+  if (opts?.metricsOnly) {
+    const compact = cache.compact.get(key);
+    if (compact !== undefined) {
+      cache.compact.delete(key);
+      cache.compact.set(key, compact);
+      if (compact.paginatable) {
+        if ((globalThis as { __dxwVerifyBp?: boolean }).__dxwVerifyBp) {
+          const fresh = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
+          if (JSON.stringify(compact.lines) !== JSON.stringify(compactOf(fresh).lines)) {
+            const g = globalThis as { __dxwBpMismatch?: number };
+            g.__dxwBpMismatch = (g.__dxwBpMismatch ?? 0) + 1;
+            return fresh;
+          }
+        }
+        return expandCompact(compact);
+      }
+    }
   }
   const result = breakParagraphImpl(doc, measurer, para, contentWidth, fields, numberingLabel, boundsAt, minLineHeight, opts);
-  if (cache.size >= BP_CACHE_MAX) cache.clear();
-  // Store a pristine clone; return the original for this caller to mutate.
-  cache.set(key, cloneBroken(result));
-  return result;
+  const compact = compactOf(result);
+  evictTo(cache.compact, BP_CACHE_MAX);
+  cache.compact.set(key, compact);
+  // Under a window, a metrics-only caller has no use for the spans it just paid
+  // to compute, and storing them is what the tier split exists to avoid. Every
+  // other caller gets a full entry — including the lookahead sites of an
+  // unwindowed run, where the paragraph they simulated is about to be painted
+  // and would otherwise be broken a second time.
+  if (!opts?.metricsOnly || !compact.paginatable || !cache.windowed) {
+    storeFull(cache, key, result);
+    return result;
+  }
+  return expandCompact(compact);
+}
+
+/** Store a pristine clone in the full tier; the caller keeps the original to
+ * mutate. Evicts least-recently-used entries rather than clearing: a structural
+ * edit re-lays every block after it (the reflow is genuine — the added line
+ * pushes every later page boundary) and those breaks all come from here, so
+ * clearing on overflow dropped entries the relay was about to ask for and
+ * turned one Enter into a re-measure of the rest of the document. */
+function storeFull(cache: BreakCache, key: string, result: BrokenParagraph): void {
+  let spans = 0;
+  for (const line of result.lines) spans += line.spans.length;
+  while (
+    cache.windowed
+      ? cache.fullSpans + spans > BP_WINDOWED_FULL_SPANS
+      : cache.full.size >= BP_CACHE_MAX
+  ) {
+    const oldest = cache.full.keys().next();
+    if (oldest.done) break;
+    cache.fullSpans -= cache.full.get(oldest.value)!.spans;
+    cache.full.delete(oldest.value);
+  }
+  cache.full.set(key, { broken: cloneBroken(result), spans });
+  cache.fullSpans += spans;
+}
+
+function evictTo(map: Map<string, unknown>, max: number): void {
+  while (map.size >= max) {
+    const oldest = map.keys().next();
+    if (oldest.done) break;
+    map.delete(oldest.value);
+  }
 }
 
 function breakParagraphImpl(
@@ -1197,7 +1450,7 @@ function breakParagraphImpl(
         src: { run: anchorSrc.run, t: anchorSrc.t, offset: 0 },
       });
     }
-    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak, minLineHeight, opts?.inTableCell === true);
+    const line = finishLine(cur, curLineWidth, props, measurer, fallbackFamily, para, doc, isLast, endsWithBreak, minLineHeight, opts?.inTableCell === true, opts?.verticalGridResync === true);
     line.forcedBreakAfter = forced;
     line.floatYOffset = lineFloatOffset;
     // Alignment
@@ -1329,6 +1582,7 @@ function breakParagraphImpl(
         continue;
       }
       const sliceOff = atom.text.length - rest.length;
+      const finalPiece = take === rest.length;
       cur.push({
         x,
         width: w,
@@ -1339,6 +1593,11 @@ function breakParagraphImpl(
         src: atom.src ? { ...atom.src, offset: atom.src.offset + sliceOff } : undefined,
         metricsFont: atom.metricsFont,
         metricsStrut: atom.metricsStrut,
+        // The last piece ends where the atom ends: a soft-hyphen opportunity
+        // there survives the character wrap (probe-softhyphen H24: the
+        // emergency-wrapped "o" still takes the soft break and its hyphen).
+        breakAfter: finalPiece ? atom.breakAfter : undefined,
+        softHyphen: finalPiece ? atom.softHyphen : undefined,
         rtl: atom.rtl,
         rtlLevel: levelOf(atom.rtl),
       });
@@ -1861,6 +2120,14 @@ function breakParagraphImpl(
     if (!fits && curLineWidth > 0) {
       let hi = cur.length;
       let headW = 0;
+      // Nearest soft-hyphen opportunity passed over because its hyphen glyph
+      // would not fit. Word's break demand at a soft hyphen is prefix PLUS
+      // the hyphen it paints (probe-softhyphen H49-54: Word passes the nearer
+      // soft hyphen whose prefix+hyphen overflows and breaks at the earlier
+      // one) — but with no other opportunity on the line it still breaks at
+      // the passed-over one and omits the hyphen (H27-29).
+      let shFallbackHi = -1;
+      let shFallbackHeadW = 0;
       while (hi > minSpans) {
         const s = cur[hi - 1];
         // A noBreak space (word glued to a following NBSP) is not a break
@@ -1868,9 +2135,23 @@ function breakParagraphImpl(
         if ((s.isSpace && !s.noBreak) || !s.text || s.text === "\t" || s.image || s.drawing) break;
         // A hyphen break opportunity ends the head: the hyphenated left part
         // stays on this line, only the current segment (+tail) moves down.
-        if (s.breakAfter) break;
+        if (s.breakAfter) {
+          if (
+            s.softHyphen &&
+            x - headW + measurer.width("-", s.font, s.props.letterSpacing) > lineEnd + fitTolerance
+          ) {
+            if (shFallbackHi < 0) {
+              shFallbackHi = hi;
+              shFallbackHeadW = headW;
+            }
+          } else break;
+        }
         headW += s.width;
         hi--;
+      }
+      if (hi === minSpans && shFallbackHi >= 0) {
+        hi = shFallbackHi;
+        headW = shFallbackHeadW;
       }
       let tailW = 0;
       if (!atom.breakAfter) {
@@ -1997,6 +2278,27 @@ function breakParagraphImpl(
         if (moved) {
           x = lineStartX(lineIndex);
         } else {
+          // A line that WRAPS at a soft hyphen paints the hyphen glyph — but
+          // only when the glyph itself fits the remaining room. Word omits it
+          // otherwise (probe-softhyphen H27-29 break at the soft hyphen and
+          // paint nothing; H24's emergency-wrapped "o-" line paints it).
+          const brk = cur[cur.length - 1];
+          if (brk?.softHyphen && brk.text) {
+            const hw = measurer.width("-", brk.font, brk.props.letterSpacing);
+            if (brk.x + brk.width + hw <= lineEnd + fitTolerance) {
+              cur.push({
+                x: brk.x + brk.width,
+                width: hw,
+                text: "-",
+                props: brk.props,
+                font: brk.font,
+                metricsFont: brk.metricsFont,
+                rtl: brk.rtl,
+                rtlLevel: brk.rtlLevel,
+              });
+              curLineWidth += hw;
+            }
+          }
           // Any trailing spaces (the wrap separator and consecutive typed
           // spaces) hang at the end of the flushed line - Word never starts
           // a wrapped line with a space.
@@ -2011,13 +2313,35 @@ function breakParagraphImpl(
         // The moved head is glued to this fragment at the fresh line's start;
         // if the fragment still cannot fit, no break opportunity can ever
         // appear before it — emergency-break at the line edge like Word.
+        // UNLESS the head itself ends at a soft hyphen whose glyph fits:
+        // Word breaks there again (probe-softhyphen H52-54, [hydro-] then
+        // [matic-] then [graphs]) rather than character-wrapping.
         if (
           head.length > 0 &&
           curClearY === undefined &&
           x + atom.width > lineStartX(lineIndex) + availFor(lineIndex) + 0.01
         ) {
-          hardWrapFrag(atom);
-          continue;
+          const brk = cur[cur.length - 1];
+          const hw = brk?.softHyphen && brk.text ? measurer.width("-", brk.font, brk.props.letterSpacing) : -1;
+          if (hw >= 0 && brk.x + brk.width + hw <= lineStartX(lineIndex) + availFor(lineIndex) + fitTolerance) {
+            cur.push({
+              x: brk.x + brk.width,
+              width: hw,
+              text: "-",
+              props: brk.props,
+              font: brk.font,
+              metricsFont: brk.metricsFont,
+              rtl: brk.rtl,
+              rtlLevel: brk.rtlLevel,
+            });
+            curLineWidth += hw;
+            flush(false, false);
+            // The atom now starts the fresh line; the standard width checks
+            // below hard-wrap it only if it is too wide for a whole line.
+          } else {
+            hardWrapFrag(atom);
+            continue;
+          }
         }
       }
     }
@@ -2062,7 +2386,7 @@ function breakParagraphImpl(
     // this atom to a fresh line, where a mid-segment continuation re-insets.
     const padL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
     x += padL;
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, softHyphen: atom.softHyphen, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
     curLineWidth += padL + atom.width + bdrPadR;
     x += atom.width + bdrPadR;
     // A packed word may continue across formatting-run fragments, but an
@@ -2271,7 +2595,24 @@ function finishLine(
   endsWithBreak: boolean,
   minLineHeight?: number,
   inCell = false,
+  verticalFlow = false,
 ): LineBox {
+  // w:snapToGrid="0" turns the per-line grid snap off. The PARAGRAPH flag is
+  // handled at breakParagraphImpl's top (minLineHeight arrives undefined);
+  // this is the RUN carrier: a line whose runs ALL declare w:rPr
+  // w:snapToGrid="0" lays off the grid the same way. probe-gridopen measured
+  // the paragraph carrier (Word's opted-out opener takes its natural line and
+  // the grid resumes at pitch below it, with no re-sync to the grid rows);
+  // the run carrier itself is spec-directed (ECMA-376 17.3.2.34) and has no
+  // probe behind it — no corpus fixture authors it under a lines grid. A
+  // MIXED line keeps the snap: one participating run is enough.
+  if (
+    minLineHeight !== undefined &&
+    spans.length > 0 &&
+    spans.every((s) => s.props.snapToGrid === false)
+  ) {
+    minLineHeight = undefined;
+  }
   let maxAscent = 0;
   let maxDescent = 0;
   let maxRawDescent = 0;
@@ -2332,27 +2673,35 @@ function finishLine(
       return;
     }
     let m = measurer.metrics(font);
-    // East Asian line pitch: the tall macOS substitute faces (Hiragino Mincho
-    // for MS Mincho, PingFang/Songti for the Chinese fallback) overstate the
-    // line height of Word's real faces. Scale the substitute metric to the
-    // Word-measured em in the two contexts that use the font's NATURAL pitch:
+    // East Asian line pitch: the tall macOS substitute faces for the CHINESE
+    // fallback (PingFang/Songti) overstate the line height of Word's real
+    // face. Scale the substitute metric to the Word-measured em in the two
+    // contexts that use the font's NATURAL pitch:
     //   - docGrid type="charsAndLines" (compat 15) — probe3-chargrid.
     //   - NO docGrid at all (minLineHeight undefined) — plain CJK paragraphs
     //     and tbRl/btLr table cells (probe2-ruby-vertical p1: the vertical
     //     cell columns pitch 20.5px like Word's MS Mincho, not Hiragino's
     //     26px, and the ruby lines stop drifting the table down the page).
-    // A docGrid type="lines" section (staging-eastasian, this file's own p2
-    // vertical flow) keeps the snap-tuned raw profile — its line height is the
-    // grid pitch, not the natural em — so it is EXCLUDED here.
-    // 1.296em Japanese / 1.733em Chinese fallback, both x the auto 1.08
-    // multiplier give the Word-measured advances.
-    if ((doc.charGridEa || minLineHeight === undefined) && font.size > 0) {
+    // A docGrid type="lines" section keeps the raw profile — for the zh
+    // fallback its snap metric is unmeasured, so it is EXCLUDED here.
+    // The JAPANESE faces need no rescale: the hiragino profiles in
+    // WORD_FONT_METRICS carry Word's measured 1.296em natural directly
+    // (probe-docgrid15b), so their raw metric is right in every context.
+    // 1.733em Chinese fallback x the auto 1.08 multiplier gives the
+    // Word-measured advances.
+    if (font.size > 0) {
       const fam = font.family.toLowerCase();
-      const targetEm = /hiragino/.test(fam)
-        ? 1.296
-        : /pingfang|songti|heiti/.test(fam)
-          ? 1.733
-          : undefined;
+      // Vertical (tbRl) lines-grid flow keeps the pre-docgrid15b 1.643em ja
+      // column pitch: Word's vertical pitch does not take the horizontal
+      // snap rules (probe2-ruby-vertical p2 was measured good at 1.643 and
+      // is unprobed beyond that), so the 1.296em natural profile is scaled
+      // back up there and nowhere else.
+      const targetEm =
+        verticalFlow && minLineHeight !== undefined && !doc.charGridEa && /hiragino/.test(fam)
+          ? 1.643
+          : (doc.charGridEa || minLineHeight === undefined) && /pingfang|songti|heiti/.test(fam)
+            ? 1.733
+            : undefined;
       if (targetEm !== undefined && m.lineHeight > 0) {
         const scale = (targetEm * font.size) / m.lineHeight;
         m = {
@@ -2396,8 +2745,14 @@ function finishLine(
   // solid content: a lone 12pt space run between 10pt words (wild2 legal
   // p17) leaves the line at the 10pt pitch. Whitespace metrics count only
   // when the line holds nothing else.
+  // A hidden field's zero-width strut (metricsStrut) sizes a line only when
+  // nothing visible shares it: Word lays the us-courts caption row — a
+  // default-12pt hidden SEQ beside 8pt text — at the 8pt Times natural
+  // 12.37px, not the strut's 18.40 (probe-repeathdr2: Word's W3 stack is
+  // 12.37 + the exact row's authored 9.6; charging the strut read every
+  // model ~5.15px short of the authored trHeight).
   const solidSpans = metricSpans.filter(
-    (s) => s.metricsStrut || s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text),
+    (s) => !s.metricsStrut && (s.image || s.drawing || s.math || s.leader || s.text === undefined || !/^[ \t]*$/.test(s.text)),
   );
   if (solidSpans.length > 0) metricSpans = solidSpans;
   const styledLoweredIntegral =
@@ -2505,7 +2860,14 @@ function finishLine(
           maxBorderedDescent = Math.max(maxBorderedDescent, textMetrics.descent + pad);
         }
         if (textMetrics.lineHeight >= maxNaturalText) {
-          tallestTextIsEa = EA_FAMILY_RE.test((s.metricsFont ?? s.font).family);
+          // The textSnap carve-out exists because a substitute face's profile
+          // can overstate Word's natural and false-snap. The hiragino (ja)
+          // profiles now carry Word's measured 1.296em snap natural
+          // (probe-docgrid15b: ja 16pt snaps 2 rows at pitch 360tw and our
+          // snap must fire with it), so they take the snap like Latin faces;
+          // only the unmeasured zh/ko fallback faces stay carved out.
+          const fam = (s.metricsFont ?? s.font).family;
+          tallestTextIsEa = EA_FAMILY_RE.test(fam) && !/hiragino/i.test(fam);
         }
       }
       const r = s.props.raise;
@@ -2572,6 +2934,7 @@ function finishLine(
   // emitting items.
   let height = natural;
   let baselineH: number | undefined;
+  /** Only an OBJECT-snapped line fits as a whole physical box; see fitHeight. */
   let gridImageFit = false;
   const ls = props.lineSpacing;
   // w:docGrid(lines) OBJECT lines: a line whose inline-object extent exceeds
@@ -2605,20 +2968,43 @@ function finishLine(
     // (SimSun 14pt line = 15.97, atLeast 17.4) lays 2 pitches; the sz28 CSO-
     // acknowledgment block (auto 1.25) and the plain-Normal "Bpohaladuh"
     // heading (auto 1.0) both advance 31.2pt/line in the PDF - the snap
-    // REPLACES the multiplier. The 2% tolerance keeps staging-eastasian's
-    // MS Mincho substitute (1.643em = 18.07pt against its 18pt pitch, a
-    // modeling artifact of the substituted face) on its measured
-    // multiplier x natural pitch.
+    // REPLACES the multiplier. ANY overshoot of the pitch takes the second
+    // row, however small: probe-docgrid's L240 case puts a 16.32 px line
+    // under a 16.00 px pitch and Word advances 32.00, 29 lines to the page.
+    // So the text threshold is the same bare pitch the object rule uses; an
+    // earlier 2% tolerance here (fitted to staging-eastasian's substituted
+    // MS Mincho, which is compat 15 and never reaches this branch) swallowed
+    // exactly that case and left us laying 53 lines.
     const objSnap = maxImage > 0 && extent > pitch + 0.01;
-    // TEXT-line snapping is a LEGACY-mode behavior: eq-as-images (compat 12)
-    // snaps its oversized text lines, while staging-eastasian (compat 15,
-    // same docGrid type=lines) lays multiplier x natural for faces well
-    // above its pitch. Oversized East Asian faces keep multiplier x natural
-    // in either mode.
+    // TEXT-line snapping applies in EVERY compat mode: probe-docgrid15
+    // (compat 15, Word-exported, self-reproducing) advances Calibri Light
+    // 16/18pt lines 2 rows at pitch 360tw and Calibri 11/16pt lines 2 rows
+    // at 240tw, exactly like the compat-12 probes, and its glyph-centered
+    // first baselines (31.37/32.37px into the 48px band) match this branch's
+    // centering formula to 0.08px. The old `compatibilityMode < 15` gate
+    // cited staging-eastasian's Chinese-fallback lines, where snap
+    // (2 x 24 = 48) and multiplier x natural (44.48 x 1.0792 = 48.0) are
+    // numerically identical - that case discriminated nothing, and the
+    // fixture's Heading1 lines (natural 26.04 > pitch 24, Word advances 48)
+    // are what the gate broke. Word DOES snap an oversized EA line
+    // (probe-docgrid15 F360 advances 48). The JAPANESE faces now take the
+    // snap: their hiragino profiles carry Word's measured 1.296em natural
+    // (probe-docgrid15b brackets the snap natural in (1.25, 1.3125) over a
+    // 240..480tw pitch sweep), so ja 16pt snaps to 2 rows at pitch 360 and
+    // ja 11pt lays 1 row, both like Word. Only the zh/ko fallback faces
+    // (PingFang/Songti et al) keep the carve-out - their profiles still
+    // overstate the raw box and their snap metric is unmeasured
+    // (tallestTextIsEa is set only for them; the corpus zh lines land right
+    // through the auto path, staging-eastasian zh baselines +0.09px).
+    // A VERTICAL (tbRl) flow keeps the old compat gate: enabling
+    // the snap there moved probe2-ruby-vertical p2 from 0.02% to 12.05%
+    // against its clean reference, so Word's vertical column pitch does not
+    // take this rule; the vertical case is unprobed beyond that and is
+    // deliberately left at its measured-good behavior.
     const textSnap =
-      doc.compatibilityMode < 15 &&
-      maxNaturalText > pitch * 1.02 &&
-      (ls?.rule === "atLeast" || !tallestTextIsEa);
+      maxNaturalText > pitch + 0.01 &&
+      (ls?.rule === "atLeast" || !tallestTextIsEa) &&
+      (!verticalFlow || doc.compatibilityMode < 15);
     if (objSnap || textSnap) {
       const basis = Math.max(extent, textSnap ? maxNaturalText : 0);
       height = Math.ceil(basis / pitch - 1e-4) * pitch;
@@ -2628,7 +3014,7 @@ function finishLine(
       // 643.44 vs img 640.75 in the PDF).
       baselineH = cAsc + (height - extent) / 2 + maxDescent - commonLower;
       gridObjSnap = true;
-      gridImageFit = true;
+      gridImageFit = objSnap;
     }
   }
   if (!gridObjSnap && ls) {
@@ -2759,6 +3145,7 @@ function finishLine(
     baselineH = (baselineH ?? height + overlap) - overlap;
   }
 
+  const finalBaselineH = baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height);
   return {
     spans,
     width,
@@ -2766,18 +3153,23 @@ function finishLine(
     maxDescent,
     naturalHeight: natural,
     height,
-    baselineH: baselineH ?? (ls?.rule === "auto" ? Math.min(height, natural) : height),
+    baselineH: finalBaselineH,
     // A grid-snapped object line is a physical box: it must fit whole, but
     // its trailing paragraph space is NOT reserved in the fit decision
     // (eq-as-images p2: Word keeps the (04) equation at bottom 766.6 of 770
     // even though its 7.8pt spacing-after would overflow). An ordinary grid
     // TEXT line hangs its grid-min leading into the bottom margin like any
-    // other leading: the fit extent is the RAW font box, not the pitch
-    // (eq-as-images p7: the last reference line's glyph box ends 769.6 of
-    // 770 while its 15.6pt grid line overruns).
+    // other leading: the fit extent runs from the line top to the bottom of
+    // the RAW font box, and the leading below it overruns (eq-as-images p7:
+    // the last reference line's glyph box ends 769.6 of 770 while its 15.6pt
+    // grid line overruns). Charging a text-snapped line its whole pitch cost
+    // that page its final paragraph - two 41.6px lines whose glyph boxes end
+    // at 1022.3 of 1026.53 - and spilled it onto a page Word does not have.
     fitHeight: gridImageFit
       ? height
-      : Math.min(height, Math.max(maxNatural, maxAscent + maxDescent) - maxDescent + maxRawDescent),
+      : gridObjSnap
+        ? finalBaselineH - maxDescent + maxRawDescent
+        : Math.min(height, Math.max(maxNatural, maxAscent + maxDescent) - maxDescent + maxRawDescent),
     isLast,
     endsWithBreak,
   };
@@ -3438,17 +3830,37 @@ function buildAtoms(
     const charRtl = bidiPara && props.rtl ? resolveBidiRtl(text) : null;
     let offset = 0;
     // Measure by cumulative prefix differences: atom widths then sum exactly
-    // to the whole string's measure. Summing independently measured words +
-    // spaces overshoots by ~1px per space (side bearings/kerning), which
-    // accumulates enough to move line breaks off Word's.
+    // to the measure of the text they span. Summing independently measured
+    // words + spaces overshoots by ~1px per space (side bearings/kerning),
+    // which accumulates enough to move line breaks off Word's.
+    //
+    // WINDOWED, not from the start of the run. Measuring every prefix from
+    // index 0 costs O(n²) characters of measurement in the run's length: on a
+    // document whose paragraphs are each two-thirds of a page it reached 2.36
+    // MILLION characters per keystroke, and it is the single largest cost in
+    // typing there. Restarting the cumulative base every CUM_WINDOW characters
+    // holds the same telescoping exactness INSIDE a window — which is what a
+    // line needs, since the window is many times a line's length — and pays
+    // the independent-measure error only at the handful of restarts, instead
+    // of at every space. Calibrated against the parity corpus, not reasoned
+    // about: the window is only sound at a size where the corpus does not
+    // move.
     // w:w character scaling multiplies every advance (the renderer stretches
     // the painted glyphs by the same factor via scaleX).
     const tScale = props.textScale ?? 1;
     let prevCum = 0;
+    /** Index in `text` the current cumulative window starts at. */
+    let windowStart = 0;
     for (const part of parts) {
       if (part.length === 0) continue;
       const end = offset + part.length;
-      const cum = measurer.width(text.slice(0, end), font, props.letterSpacing) * tScale;
+      // Restart at a PART boundary, so the restarted part is measured whole
+      // rather than a fragment of one.
+      if (end - windowStart > CUM_WINDOW) {
+        windowStart = offset;
+        prevCum = 0;
+      }
+      const cum = measurer.width(text.slice(windowStart, end), font, props.letterSpacing) * tScale;
       const partWidth = Math.max(cum - prevCum, 0);
       const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + baseOffset + offset } : undefined;
       if (part[0] === " ") {
@@ -3496,6 +3908,14 @@ function buildAtoms(
         // an even/LTR level and must be its own frag so reorderVisual places it
         // in RTL visual order — probe2-arabic-rtl's "99.9٪"/"ISO 8601").
         const hyBreaks = hyphenBreaks(part, doc.compatibilityMode >= 15);
+        // <w:softHyphen/> (U+00AD): Word's conditional hyphen. Zero-width
+        // (the measurer strips it), a break-after opportunity, and the packer
+        // paints a hyphen glyph when a line breaks there (probe-softhyphen;
+        // compat-invariant, 11 and 15 ink-identical).
+        const softBreaks = [];
+        if (part.includes("\u00AD")) {
+          for (let i = 0; i < part.length; i++) if (part[i] === "\u00AD") softBreaks.push(i + 1);
+        }
         if ((part[0] === "-" || part[0] === "‐") && isWordAlnum(part[1])) {
           const prev = atoms[atoms.length - 1];
           const beforePrev = atoms[atoms.length - 2];
@@ -3508,15 +3928,18 @@ function buildAtoms(
               isWordAlnum(beforeText[beforeText.length - 1]));
           if (runBoundaryWordBefore) hyBreaks.unshift(1);
         }
-        let breaks = hyBreaks;
+        let breaks = softBreaks.length
+          ? [...new Set([...hyBreaks, ...softBreaks])].sort((a, b) => a - b)
+          : hyBreaks;
         if (charRtl) {
-          const set = new Set(hyBreaks);
+          const set = new Set(breaks);
           for (let i = 1; i < part.length; i++) {
             if (charRtl[offset + i] !== charRtl[offset + i - 1]) set.add(i);
           }
           breaks = [...set].sort((a, b) => a - b);
         }
         const hySet = new Set(hyBreaks);
+        const shSet = new Set(softBreaks);
         // A pure-digit word is a European Number regardless of the run's
         // w:rtl flag (UAX#9: EN takes an EVEN embedding level inside an RTL
         // paragraph). Keeping it odd reverses the ORDER of split digit spans
@@ -3542,7 +3965,7 @@ function buildAtoms(
           for (const segEnd of bounds) {
             if (segEnd <= segStart) continue;
             const seg = part.slice(segStart, segEnd);
-            const segCum = measurer.width(text.slice(0, offset + segEnd), font, props.letterSpacing);
+            const segCum = measurer.width(text.slice(windowStart, offset + segEnd), font, props.letterSpacing);
             const segWidth = Math.max(segCum - segPrevCum, 0);
             atoms.push({
               kind: "frag",
@@ -3554,7 +3977,8 @@ function buildAtoms(
               src: src ? { run: src.run, t: src.t, offset: src.offset + segStart } : undefined,
               metricsFont,
               // Only a hyphen is a line-break opportunity; a bidi split is not.
-              breakAfter: hySet.has(segEnd) ? true : undefined,
+              breakAfter: hySet.has(segEnd) || shSet.has(segEnd) ? true : undefined,
+              softHyphen: shSet.has(segEnd) ? true : undefined,
               rtl: charRtl ? charRtl[offset + segStart] : props.rtl && !/^[0-9]+$/.test(seg),
             });
             segPrevCum = segCum;
@@ -3711,6 +4135,51 @@ function buildAtoms(
 
 // ---------- fields ----------
 
+/** The data column a MERGEFIELD instruction names, quoted or bare. Shared with
+ * the host-facing listing (edit/update-fields.ts documentMergeFieldNames) so
+ * the names the UI reports as unmatched are exactly the ones resolved here. */
+export function mergeFieldName(instruction: string): string | undefined {
+  const m = /^MERGEFIELD\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instruction.trim());
+  return m?.[1] ?? m?.[2];
+}
+
+/** MERGEFIELD `\b` (text inserted BEFORE the result) and `\f` (AFTER). Both
+ * carry either a quoted string or one bare token, like the field name itself. */
+const MERGE_BEFORE_TEXT = /\\b\s+(?:"([^"]*)"|([^\s\\]+))/i;
+const MERGE_AFTER_TEXT = /\\f\s+(?:"([^"]*)"|([^\s\\]+))/i;
+
+function mergeSwitchText(instr: string, re: RegExp): string {
+  const m = re.exec(instr);
+  return m?.[1] ?? m?.[2] ?? "";
+}
+
+/** A MERGEFIELD's `\*` case switch, applied to the composed result (Word's
+ * format switch formats the field RESULT, and the `\b`/`\f` texts are part of
+ * it — so `\b "dear " \* Caps` paints "Dear Alex", not "dear Alex").
+ *
+ * The remainder of each capitalized word is lowered, which is what makes these
+ * switches useful on merge data: normalizing an ALL-CAPS CSV export is the
+ * reason a template carries `\* Caps` in the first place. */
+function mergeCaseFormat(instr: string, text: string): string {
+  const capitalize = (w: string) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+  switch (/\\\*\s+([A-Za-z]+)/.exec(instr)?.[1].toLowerCase()) {
+    case "upper":
+      return text.toUpperCase();
+    case "lower":
+      return text.toLowerCase();
+    case "firstcap":
+      return capitalize(text);
+    case "caps":
+      return text.replace(/\S+/g, capitalize);
+    default:
+      // `\* MERGEFORMAT` is a NO-OP by construction, not by omission: it means
+      // "keep the formatting of the previous result", and substituting text
+      // into the field's existing run preserves that run's formatting anyway.
+      // Worth stating because our own inserter writes it (edit/fields.ts).
+      return text;
+  }
+}
+
 export function resolveField(instruction: string, cachedResult: string, ctx: FieldContext, fieldKey?: object): string {
   const instr = instruction.trim();
   const keyword = instr.split(/\s+/)[0]?.toUpperCase();
@@ -3725,6 +4194,16 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
     case "NUMPAGES":
     case "SECTIONPAGES": {
       const n = ctx.totalPages();
+      return starNumberFormat(instr, n) ?? String(n);
+    }
+    case "NUMWORDS":
+    case "NUMCHARS": {
+      // Word recomputes both on F9/print, not continuously; this engine
+      // resolves them at layout so the screen is never stale, and the update
+      // pass writes the same shared-rule value into the file's cache.
+      if (!ctx.textStats) return cachedResult || "";
+      const stats = ctx.textStats();
+      const n = keyword === "NUMWORDS" ? stats.words : stats.characters;
       return starNumberFormat(instr, n) ?? String(n);
     }
     case "SEQ": {
@@ -3776,13 +4255,56 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       // Word recomputes STYLEREF on open (the docx cache reflects the style's
       // value when saved and goes stale). A header/footer STYLEREF shows the
       // first paragraph of the referenced style that starts on the field's page
-      // (or the last, with \l). Body STYLEREF and unknown styles keep the cache.
-      if (!ctx.styleRef) return cachedResult || "";
+      // (or the last, with \l); a body STYLEREF shows the nearest such
+      // paragraph at or before the field. Unknown styles keep the cache.
       const m = /^STYLEREF\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instr);
       const name = m?.[1] ?? m?.[2];
       if (!name) return cachedResult || "";
-      const lastOnPage = /\\l(\s|$)/i.test(instr);
-      const text = ctx.styleRef(name, lastOnPage);
+      if (ctx.styleRef) {
+        const lastOnPage = /\\l(\s|$)/i.test(instr);
+        const text = ctx.styleRef(name, lastOnPage);
+        return text !== undefined ? text : cachedResult || "";
+      }
+      const body = ctx.styleRefBody && fieldKey ? ctx.styleRefBody(name, fieldKey) : undefined;
+      return body !== undefined ? body : cachedResult || "";
+    }
+    case "FILENAME": {
+      // The name is the host's to know. `\p` asks for the full path, which no
+      // browser host can supply, so it keeps the cache like any unsupported
+      // switch rather than painting a bare name where a path belongs.
+      if (ctx.fileName === undefined || /\\p(\s|$)/i.test(instr)) return cachedResult || "";
+      return ctx.fileName;
+    }
+    case "AUTHOR":
+      return ctx.author !== undefined ? ctx.author : cachedResult || "";
+    case "MERGEFIELD": {
+      const name = mergeFieldName(instr);
+      // Mail-merge PREVIEW. ctx.mergeField is installed by layout only, so a
+      // previewed value is painted and never written to the XML.
+      const value = name === undefined ? undefined : ctx.mergeField?.(name);
+      if (value !== undefined) {
+        // \b and \f insert their texts only when the value is NOT blank, so a
+        // record with no first name renders "Dear," rather than "Dear ,".
+        if (value === "") return "";
+        return mergeCaseFormat(
+          instr,
+          mergeSwitchText(instr, MERGE_BEFORE_TEXT) + value + mergeSwitchText(instr, MERGE_AFTER_TEXT),
+        );
+      }
+      // No data source attached, or the data has no such column — Word's "no
+      // data source" state: the field shows its cached result (the last merged
+      // value, or the «Name» placeholder Word wrote on insertion), and a field
+      // that has never held one shows the placeholder. Keeping the placeholder
+      // for an UNBOUND column diverges from Word deliberately, so the user sees
+      // which fields the data does not supply. See FieldContext.mergeField.
+      if (cachedResult) return cachedResult;
+      return name ? `«${name}»` : "";
+    }
+    case "CITATION": {
+      // Resolved from the document's own sources part (src/citations.ts) in
+      // the selected citation style; a tag or switch the resolver cannot
+      // model keeps the cache, which is Word's own rendering.
+      const text = ctx.citation?.(instr);
       return text !== undefined ? text : cachedResult || "";
     }
     case "CREATEDATE":

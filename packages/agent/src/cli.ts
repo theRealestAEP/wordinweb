@@ -10,6 +10,7 @@ import { PassThrough } from "node:stream";
 import WebSocket from "ws";
 import {
   CollabConnection,
+  type CollabConnectionLike,
   EncryptedCollabConnection,
   createWebSocketTransport,
   stretchShareCode,
@@ -18,6 +19,7 @@ import {
   type RosterEntry,
 } from "@wordinweb/collab/client";
 import { AgentDocument } from "./document.js";
+import { isSuggestable, isSuggestableTableOp } from "./edit.js";
 
 if (!globalThis.crypto) Object.defineProperty(globalThis, "crypto", { value: webcrypto });
 
@@ -97,17 +99,28 @@ function editRequestForMode(request: Record<string, unknown> | undefined, mode: 
   const operations = request.operations.map((value) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Each edit operation must be an object");
     const operation = value as Record<string, unknown>;
+    // tableOp is half formatting and half structure. Shading, vertical
+    // alignment and text wrapping record a `*PrChange`; a row or column insert
+    // or delete, a merge and a split have no tracked form here, so they keep
+    // the refusal the whole operation used to carry.
+    if (operation.kind === "tableOp") {
+      if (!isSuggestableTableOp(operation.op)) {
+        throw new Error(
+          `tableOp ${String((operation.op as { kind?: unknown } | undefined)?.kind ?? operation.op)} restructures the table and is unavailable in suggestion mode. Ask the inviter to switch this agent to editing mode`,
+        );
+      }
+      return { ...operation, suggest: true };
+    }
+    // Every kind with a tracked OOXML form takes the flag; the compiler stamps
+    // the author and date and the engine writes w:ins, a `*PrChange`, or a
+    // struck paragraph mark.
+    if (isSuggestable(operation.kind)) return { ...operation, suggest: true };
     switch (operation.kind) {
-      case "insertText":
-      case "splitParagraph":
-        return { ...operation, suggest: true };
       case "deleteText":
         return {
           kind: "suggestRevision",
           ranges: [{ blockRef: operation.blockRef, runRef: operation.runRef, start: operation.start, end: operation.end }],
         };
-      case "mergeParagraph":
-        return { kind: "suggestRevision", marks: [{ blockRef: operation.blockRef, glyph: "del" }] };
       case "suggestRevision":
       case "commentRun":
       case "replyComment":
@@ -117,6 +130,14 @@ function editRequestForMode(request: Record<string, unknown> | undefined, mode: 
     }
   });
   return { ...request, operations };
+}
+
+/** A projection patch compiles to the same intents an editor emits, so
+ * suggestion mode asks the patch compiler for the tracked form rather than
+ * rewriting the operations it produced. */
+function patchRequestForMode(request: Record<string, unknown> | undefined, mode: AgentMode): Record<string, unknown> | undefined {
+  if (mode === "edit" || !request) return request;
+  return { ...request, suggest: true };
 }
 
 function randomId(prefix: string): string {
@@ -144,7 +165,8 @@ export function agentWakePrompt(agentSessionId: string, wakeId: string, text: st
     `The wake ID is ${wakeId}. Include ${JSON.stringify(wakeId)} as the wakeId field in every document command.`,
     `Run document commands with: ${sessionCommand}`,
     `Start with {"command":"sync","wakeId":${JSON.stringify(wakeId)}}. For a broad text task, inspect all non-empty stories in one compact call: {"command":"inspect","wakeId":${JSON.stringify(wakeId)},"request":{"kind":"context"}}. Use overview, read, object, or spatial only when the task needs their extra detail.`,
-    "Inspect the relevant content before every edit. If an edit returns needs_sync, sync and inspect again.",
+    `For a bulk prose rewrite, read the story as text and send the changed lines back: {"command":"project","wakeId":${JSON.stringify(wakeId)},"request":{"mode":"md"}}, then {"command":"patch","wakeId":${JSON.stringify(wakeId)},"request":{"revision":"<the projection revision>","mode":"md","edits":[{"startLine":4,"endLine":4,"newText":"the rewritten line"}]}}. The patch result carries the refreshed projection, so a second read is unnecessary.`,
+    "Inspect the relevant content before every edit. If an edit or patch returns needs_sync, sync and read the content again.",
     "Complete this task, then send the inviter a concise result with the chat command.",
     "End this agent turn after the reply and stay idle. The detached bridge will start the next turn when another message arrives.",
   ].join("\n\n");
@@ -216,7 +238,7 @@ export async function connectAgent(
   const socket = new WebSocket(payload.room.wsUrl);
   const transport = createWebSocketTransport(socket as never);
   const chatKey = await importChatKey(payload.invite.chatKey);
-  let connection: CollabConnection;
+  let connection: CollabConnectionLike;
   let revision = 0;
   let ready = false;
   const connectionState: { current: "reconnecting" | "live" | "offline" } = { current: "reconnecting" };
@@ -295,7 +317,7 @@ export async function connectAgent(
         stretched,
         undefined,
         payload.room.httpBase ? { httpBase: payload.room.httpBase } : undefined,
-      ) as unknown as CollabConnection
+      )
     : new CollabConnection(
         transport,
         clientId,
@@ -334,7 +356,7 @@ export async function connectAgent(
     revision: document.revision,
     mode,
     instructions: payload.agent.instructions,
-    commands: ["sync", "capabilities", "inspect", "edit", "chat", "wait", "close"],
+    commands: ["sync", "capabilities", "inspect", "edit", "project", "patch", "chat", "wait", "close"],
   });
 
   const nextEvent = (timeoutMs: number): Promise<unknown> => {
@@ -384,6 +406,19 @@ export async function connectAgent(
           try {
             if (connectionState.current !== "live") throw new Error("The collaboration connection is offline. Reconnect before editing");
             respond(command.id, await document.edit(editRequestForMode(command.request, mode) as never));
+          } catch (error) {
+            if (error instanceof Error && error.message.includes("revision is stale")) {
+              respond(command.id, { status: "needs_sync", latestRevision: document.revision });
+            } else throw error;
+          }
+          break;
+        case "project":
+          respond(command.id, document.project(command.request as never));
+          break;
+        case "patch":
+          try {
+            if (connectionState.current !== "live") throw new Error("The collaboration connection is offline. Reconnect before editing");
+            respond(command.id, await document.patch(patchRequestForMode(command.request, mode) as never));
           } catch (error) {
             if (error instanceof Error && error.message.includes("revision is stale")) {
               respond(command.id, { status: "needs_sync", latestRevision: document.revision });

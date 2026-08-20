@@ -17,6 +17,19 @@ function layout(parts: Record<string, string>) {
   return { doc, result: layoutDocument(doc, { measurer }) };
 }
 
+/** The single-line paragraph whose text is exactly `text`, on page 0. */
+function textItem(result: ReturnType<typeof layoutDocument>, text: string) {
+  const item = result.pages[0].items.find((i) => i.kind === "text" && i.text === text);
+  if (item?.kind !== "text") throw new Error(`no text item "${text}"`);
+  return item;
+}
+
+/** Vertical gap between two single-line paragraphs' line boxes. */
+function paraGap(result: ReturnType<typeof layoutDocument>, above: string, below: string): number {
+  const a = textItem(result, above);
+  return textItem(result, below).lineTop - (a.lineTop + a.lineHeight);
+}
+
 function pageText(result: ReturnType<typeof layoutDocument>, pageIdx: number): string {
   return result.pages[pageIdx].items
     .filter((i) => i.kind === "text")
@@ -276,16 +289,74 @@ describe("layout engine", () => {
     expect(inheritedTitle?.kind).toBe("text");
     expect(optedOutTitle?.kind).toBe("text");
     if (inheritedTitle?.kind !== "text" || optedOutTitle?.kind !== "text") return;
-    // Inherited grid paragraphs keep the measured four-pitch section reserve
-    // and a pitch-sized line. An explicit opt-out uses a two-pitch reserve and
-    // its natural line box.
-    expect(inherited.pages[0].bodyTop - optedOut.pages[0].bodyTop).toBeCloseTo(48, 3);
-    expect(inheritedTitle.lineTop - optedOutTitle.lineTop).toBeCloseTo(48, 3);
+    // Both open AT the body top (probe-docgrid: Word reserves no grid rows at
+    // a section opening), and the opt-out changes only the LINE, never the
+    // origin. The two-row drop this used to assert was carried over from the
+    // old four-row reserve; probe-gridopen has now measured it and Word drops
+    // nothing - its opted-out opener sits 2.33px ABOVE the snapped one, which
+    // is just the first line's grid snap not being taken.
+    expect(inherited.pages[0].bodyTop).toBeCloseTo(96, 3);
+    expect(optedOut.pages[0].bodyTop).toBeCloseTo(96, 3);
+    expect(inheritedTitle.lineTop).toBeCloseTo(optedOutTitle.lineTop, 3);
     expect(inheritedTitle.lineHeight).toBeCloseTo(24, 3);
     expect(optedOutTitle.lineHeight).toBeLessThan(24);
   });
 
-  it("keeps a grid reserve above auto-spaced inline images", () => {
+  it("resumes the grid at pitch below an opted-out paragraph without re-syncing", () => {
+    // probe-gridopen's G case (parity 02dff8a): the opted-out opener takes its
+    // NATURAL line, and the plain paragraph under it advances at the grid
+    // pitch from wherever that natural line ended — Word's G-case body sits a
+    // constant (pitch - natural) above the plain case's from line 2 onward,
+    // which is only possible if no line re-syncs to the absolute grid rows.
+    const body =
+      `<w:p><w:pPr><w:snapToGrid w:val="0"/></w:pPr><w:r><w:t>Opener</w:t></w:r></w:p>` +
+      `<w:p><w:r><w:t>Body</w:t></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+      `<w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const opener = result.pages[0].items.find((i) => i.kind === "text" && i.text === "Opener");
+    const bodyLine = result.pages[0].items.find((i) => i.kind === "text" && i.text === "Body");
+    expect(opener?.kind).toBe("text");
+    expect(bodyLine?.kind).toBe("text");
+    if (opener?.kind !== "text" || bodyLine?.kind !== "text") return;
+    expect(opener.lineTop).toBeCloseTo(96, 3);
+    expect(opener.lineHeight).toBeLessThan(24);
+    // The plain line snaps to the pitch again, starting at the opener's
+    // natural bottom, NOT at the next absolute grid row (96 + 24).
+    expect(bodyLine.lineHeight).toBeCloseTo(24, 3);
+    expect(bodyLine.lineTop).toBeCloseTo(96 + opener.lineHeight, 3);
+  });
+
+  it("honors run-level snapToGrid=0 when every run on the line opts out", () => {
+    // The run carrier of the same flag (w:rPr w:snapToGrid). No probe measures
+    // it — probe-gridopen authors the paragraph carrier — so this pins the
+    // spec-directed reading: a line whose runs ALL declare 0 lays its natural
+    // box, and ONE participating run keeps the whole line on the grid.
+    const OFF = `<w:rPr><w:snapToGrid w:val="0"/></w:rPr>`;
+    const gridDoc = (runs: string) =>
+      wrapDocument(
+        `<w:p>${runs}</w:p>` +
+          `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+          `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="360"/></w:sectPr>`,
+      );
+    const allOff = layout({
+      "word/document.xml": gridDoc(`<w:r>${OFF}<w:t>All</w:t></w:r><w:r>${OFF}<w:t xml:space="preserve"> off</w:t></w:r>`),
+    }).result;
+    const mixed = layout({
+      "word/document.xml": gridDoc(`<w:r>${OFF}<w:t>All</w:t></w:r><w:r><w:t xml:space="preserve"> off</w:t></w:r>`),
+    }).result;
+    const lineOf = (r: typeof allOff) => {
+      const it = r.pages[0].items.find((i) => i.kind === "text" && i.text === "All");
+      if (it?.kind !== "text") throw new Error("missing line");
+      return it;
+    };
+    expect(lineOf(allOff).lineHeight).toBeLessThan(24);
+    expect(lineOf(mixed).lineHeight).toBeCloseTo(24, 3);
+  });
+
+  it("snaps an auto-spaced inline-image line to whole grid pitches", () => {
     const rels = `<?xml version="1.0"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
@@ -318,12 +389,15 @@ describe("layout engine", () => {
     const grid = layout(parts()).result;
     const optedOut = layout(parts(`<w:snapToGrid w:val="0"/>`)).result;
 
-    expect(pageText(grid, 0)).not.toContain("(0)");
-    expect(pageText(grid, 1)).toContain("(0)");
+    // Both fit the first page: this section opens at the body top, so the
+    // only difference between the two is the image line's height. (The old
+    // four-row section reserve used to spend 83.2px here and push the grid
+    // case to page 2; probe-docgrid retired it.)
+    expect(pageText(grid, 0)).toContain("(0)");
     expect(pageText(optedOut, 0)).toContain("(0)");
 
-    const gridLabel = grid.pages[1].items.find((item) => item.kind === "text" && item.text === "(0)");
-    const gridImage = grid.pages[1].items.find((item) => item.kind === "image");
+    const gridLabel = grid.pages[0].items.find((item) => item.kind === "text" && item.text === "(0)");
+    const gridImage = grid.pages[0].items.find((item) => item.kind === "image");
     const controlLabel = optedOut.pages[0].items.find((item) => item.kind === "text" && item.text === "(0)");
     const controlImage = optedOut.pages[0].items.find((item) => item.kind === "image");
     expect(gridLabel?.kind).toBe("text");
@@ -342,8 +416,7 @@ describe("layout engine", () => {
     // image + 3.5px text descent = 48.43px extent exceeds the 23.92px text
     // line, so the line takes ceil(48.43/20.8) = 3 pitches = 62.4px and the
     // image top sits (62.4 - 48.43)/2 below the line top. The non-grid
-    // control retains the compact image-line rule (~48.9px) and stays on
-    // page 1; the 62.4px grid box does not fit and breaks to page 2.
+    // control retains the compact image-line rule (~48.9px).
     const extent = 44.93333333333333 + 14 * 0.25;
     const expectedGridHeight = 3 * 20.8;
     expect(gridLabel.lineHeight).toBeCloseTo(expectedGridHeight, 3);
@@ -353,15 +426,52 @@ describe("layout engine", () => {
     expect(controlLabel.lineHeight).toBeLessThan(gridLabel.lineHeight);
   });
 
+  it("gives a lines-grid text line a whole number of grid rows", () => {
+    // probe-docgrid, case L240 (compat 12): a text line whose natural height
+    // is a hair over the 16.00px pitch takes TWO rows in Word, which advances
+    // 32.00 per line and fits 29 to the page where max(natural, pitch) fit 53.
+    // The pitch is a quantum, not a floor.
+    const gridDocument = (linePitch: number) =>
+      wrapDocument(
+        p("Ravi") +
+          `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+          `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>` +
+          `<w:docGrid w:type="lines" w:linePitch="${linePitch}"/></w:sectPr>`,
+      );
+    // The whole-row snap for TEXT lines is a legacy-mode rule, as the probe's
+    // own base package is: compat 15 keeps multiplier x natural (measured on
+    // staging-eastasian), so the probe settles compat < 15 only.
+    const lineHeight = (linePitch: number) => {
+      const result = layout({
+        "word/document.xml": gridDocument(linePitch),
+        "word/settings.xml":
+          `<?xml version="1.0"?><w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+          `<w:compat><w:compatSetting w:name="compatibilityMode" w:val="12"/></w:compat></w:settings>`,
+      }).result;
+      return textItem(result, "Ravi").lineHeight;
+    };
+    const natural = lineHeight(1); // pitch far below the natural line
+    expect(natural).toBeGreaterThan(16);
+    expect(natural).toBeLessThan(32);
+    // A 32px pitch holds the line in ONE row; a 16px pitch needs TWO. Both
+    // land on 32px, which is why the probe's L240 and L480 both fit 29 lines.
+    expect(lineHeight(480)).toBeCloseTo(32, 3);
+    expect(lineHeight(240)).toBeCloseTo(32, 3);
+  });
+
   it("lays a docGrid equation-image line as whole grid pitches, centered, with w:position lowering the image", () => {
-    // wild2-math-eq-as-images eq(48): a 290.75x57.4pt VML pict (rounds to
-    // 291x57pt) on run position -47hp (-23.5pt) in a linePitch=312 (15.6pt)
-    // grid with spacing 348 atLeast. Word's PDF: the line takes 4 pitches
-    // (62.4pt = 83.2px), the image spans 33.5pt above / 23.5pt below the
-    // baseline, and the image top sits (62.4-57)/2 = 2.7pt below the line
-    // top (shading rect 643.44 vs image top 640.75). A 50.6x31.45pt pict at
-    // position -22hp rounds to 31pt and takes exactly 2 pitches (31.2pt) -
-    // unrounded 31.45pt would wrongly take 3.
+    // wild2-math-eq-as-images eq(48): a 290.75x57.4pt VML pict on run
+    // position -47hp (-23.5pt) in a linePitch=312 (15.6pt) grid with spacing
+    // 348 atLeast. Word's PDF: the line takes 4 pitches (62.4pt = 83.2px),
+    // the image spans 33.5pt above / 23.5pt below the baseline, and the image
+    // top sits (62.4-57.4)/2 below the line top.
+    // A 31.45pt pict takes THREE pitches, not two: it is 0.25pt over the
+    // 2-pitch bound of 31.2pt. Pinned on page 2 of the re-exported reference,
+    // where the two 31.45pt equations at position -23hp ((9) and (6), both
+    // before/after 156tw) place their image tops 72.67px apart = 3 pitches
+    // (62.4px) plus the 10.4px paragraph spacing. Rounding the extent to a
+    // whole 31pt bought 2 pitches and lost 20.8px on every such line - the
+    // document's most common equation height, ~12 lines of it.
     const rels = `<?xml version="1.0"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/eq.png"/>
@@ -393,18 +503,19 @@ describe("layout engine", () => {
     expect(images).toHaveLength(2);
     if (labels[0].kind !== "text" || labels[1].kind !== "text" || images[0].kind !== "image" || images[1].kind !== "image") return;
     const pitch = 20.8; // 312tw in px
-    // eq48: extent = rounded 57pt image (76px) -> 4 pitches.
-    expect(images[0].height).toBeCloseTo(76, 3);
+    const eq48H = 57.4 * (4 / 3);
+    // eq48: extent = the 57.4pt image -> 4 pitches.
+    expect(images[0].height).toBeCloseTo(eq48H, 3);
     expect(labels[0].lineHeight).toBeCloseTo(4 * pitch, 3);
     // Centered: image top = line top + (H - extent)/2 (paint baselines
     // quantize to quarter-points, so allow 0.5px).
-    expect(images[0].y - labels[0].lineTop).toBeCloseTo((4 * pitch - 76) / 2, 0);
+    expect(images[0].y - labels[0].lineTop).toBeCloseTo((4 * pitch - eq48H) / 2, 0);
     // The lowered image hangs 23.5pt (31.33px) below the label baseline.
     const baseline48 = labels[0].baseline;
     expect(images[0].y + images[0].height - baseline48).toBeCloseTo(23.5 * (4 / 3), 1);
-    // eq76: 31.45pt rounds to 31pt (41.33px) -> exactly 2 pitches.
-    expect(images[1].height).toBeCloseTo(31 * (4 / 3), 3);
-    expect(labels[1].lineHeight).toBeCloseTo(2 * pitch, 3);
+    // eq76: 31.45pt clears the 2-pitch bound of 31.2pt -> 3 pitches.
+    expect(images[1].height).toBeCloseTo(31.45 * (4 / 3), 3);
+    expect(labels[1].lineHeight).toBeCloseTo(3 * pitch, 3);
   });
 
   it("preserves a section line-grid opt-out through column balancing", () => {
@@ -427,10 +538,12 @@ describe("layout engine", () => {
       (item) => item.kind === "text" && item.text === "Title",
     );
 
-    expect(result.pages[0].bodyTop).toBeCloseTo(144, 3);
+    // The opt-out survives column balancing, and it opens at the body top:
+    // 144 was the old two-row drop, refuted by probe-gridopen.
+    expect(result.pages[0].bodyTop).toBeCloseTo(96, 3);
     expect(title?.kind).toBe("text");
     if (title?.kind !== "text") return;
-    expect(title.lineTop).toBeCloseTo(144, 3);
+    expect(title.lineTop).toBeCloseTo(96, 3);
   });
 
   it("offsets a header by the binding gutter so it aligns with the body column", () => {
@@ -623,61 +736,94 @@ describe("layout engine", () => {
     expect(openerOffset(render(15, true))).toBeCloseTo(0, 3);
   });
 
-  it("keeps a trailing-break section closer's mark before a continuous section", () => {
+  // Probe fixtures probe-sectcontinuous*.docx (Word reference PDFs) measure a
+  // paragraph that carries BOTH a w:sectPr and a trailing w:br type="page".
+  // The break opens the next section's page, so that page starts at the body
+  // top - the closer's mark line and its space-after stay on the old page -
+  // and the page's first paragraph keeps only max(0, before - that after).
+  // Word treats continuous and nextPage identically once the break happened.
+  describe("a section closer that breaks the page", () => {
     const pageGeometry =
-      `<w:pgSz w:w="6000" w:h="6000"/>` +
-      `<w:pgMar w:top="720" w:right="720" w:bottom="720" w:left="720"/>`;
-    const render = (type: "continuous" | "nextPage") => {
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>`;
+    const render = (opts: {
+      type: "continuous" | "nextPage";
+      closerSizePt: number;
+      closerAfterPt: number;
+      openerBeforePt: number;
+    }) => {
+      const sz = `<w:sz w:val="${opts.closerSizePt * 2}"/>`;
       const closer =
-        `<w:p><w:pPr><w:pStyle w:val="Heading2"/><w:sectPr>${pageGeometry}</w:sectPr></w:pPr>` +
-        `<w:r><w:br w:type="page"/></w:r></w:p>`;
+        `<w:p><w:pPr><w:spacing w:after="${opts.closerAfterPt * 20}"/><w:rPr>${sz}</w:rPr>` +
+        `<w:sectPr>${pageGeometry}</w:sectPr></w:pPr>` +
+        `<w:r><w:rPr>${sz}</w:rPr><w:br w:type="page"/></w:r></w:p>`;
       const opener =
-        `<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr>` +
+        `<w:p><w:pPr><w:spacing w:before="${opts.openerBeforePt * 20}"/></w:pPr>` +
         `<w:r><w:t>OPEN</w:t></w:r></w:p>`;
       return layout({
         "word/document.xml": wrapDocument(
-          closer + opener + `<w:sectPr><w:type w:val="${type}"/>${pageGeometry}</w:sectPr>`,
+          `<w:p><w:r><w:t>BODY</w:t></w:r></w:p>` +
+            closer +
+            opener +
+            `<w:sectPr><w:type w:val="${opts.type}"/>${pageGeometry}</w:sectPr>`,
         ),
-        "word/styles.xml": `<?xml version="1.0"?>
-          <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-            <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
-              <w:rPr><w:sz w:val="24"/></w:rPr>
-            </w:style>
-            <w:style w:type="paragraph" w:styleId="Heading2">
-              <w:basedOn w:val="Normal"/>
-              <w:pPr><w:spacing w:before="240" w:after="120" w:line="240" w:lineRule="atLeast"/></w:pPr>
-              <w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:b/></w:rPr>
-            </w:style>
-          </w:styles>`,
         "word/settings.xml": `<?xml version="1.0"?>
           <w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
             <w:compat><w:compatSetting w:name="compatibilityMode" w:val="14"/></w:compat>
           </w:settings>`,
       }).result;
     };
-    const opener = (result: ReturnType<typeof layoutDocument>) => {
+    /** Absolute top of the opener's line, in points (Word PDF coordinates). */
+    const openerTopPt = (result: ReturnType<typeof layoutDocument>) => {
       const page = result.pages[1];
       const item = page.items.find((candidate) => candidate.kind === "text" && candidate.text === "OPEN");
       if (item?.kind !== "text") throw new Error("section opener missing");
-      return { page, item };
+      return item.lineTop * 0.75;
     };
 
-    const continuousResult = render("continuous");
-    const nextPageResult = render("nextPage");
-    const continuous = opener(continuousResult);
-    const nextPage = opener(nextPageResult);
-    expect(continuousResult.totalPages).toBe(2);
-    expect(nextPageResult.totalPages).toBe(2);
-    // NCCIH's Word PDF measures this hidden line at 13.75pt; its 6pt after
-    // remains in addition to the visible Heading2's own 12pt before.
-    expect(continuous.item.lineTop - continuous.page.bodyTop).toBeCloseTo(
-      16 + continuous.item.lineHeight + 8,
-      3,
-    );
-    expect(nextPage.item.lineTop - nextPage.page.bodyTop).toBeCloseTo(16, 3);
+    // Word's page-top origin is the 72pt body top whatever the closer's own
+    // line height (13.80pt at 12pt, 27.60pt at 24pt) and space-after are. We
+    // used to resume at the flow offset the closer left, which re-added both:
+    // 103.80 / 121.80 / 117.60pt against Word's 78.00 / 72.00 / 78.00pt.
+    it("starts the broken-to page at the body top", () => {
+      for (const type of ["continuous", "nextPage"] as const) {
+        expect(
+          openerTopPt(render({ type, closerSizePt: 12, closerAfterPt: 6, openerBeforePt: 12 })),
+        ).toBeCloseTo(78.0, 1);
+        expect(
+          openerTopPt(render({ type, closerSizePt: 12, closerAfterPt: 24, openerBeforePt: 12 })),
+        ).toBeCloseTo(72.0, 1);
+        expect(
+          openerTopPt(render({ type, closerSizePt: 24, closerAfterPt: 6, openerBeforePt: 12 })),
+        ).toBeCloseTo(78.0, 1);
+      }
+    });
+
+    it("collapses the opener's space-before against the closer's space-after", () => {
+      const offsetPt = (closerAfterPt: number, openerBeforePt: number) =>
+        openerTopPt(render({ type: "continuous", closerSizePt: 12, closerAfterPt, openerBeforePt })) - 72;
+      expect(offsetPt(6, 12)).toBeCloseTo(6.0, 1);
+      expect(offsetPt(6, 24)).toBeCloseTo(18.0, 1);
+      expect(offsetPt(24, 12)).toBeCloseTo(0.0, 1);
+    });
+
+    it("does not leave a blank page between the sections", () => {
+      expect(
+        render({ type: "continuous", closerSizePt: 12, closerAfterPt: 6, openerBeforePt: 12 }).totalPages,
+      ).toBe(2);
+      expect(
+        render({ type: "nextPage", closerSizePt: 12, closerAfterPt: 6, openerBeforePt: 12 }).totalPages,
+      ).toBe(2);
+    });
   });
 
-  it("lets an ordinary break-only paragraph overflow before applying its page break", () => {
+  it("spills a break-only paragraph whose own line does not fit", () => {
+    // The space-after leaves 6 px of room and the paragraph's single-spaced
+    // line is ~16 px, so Word spills it. The spilled mark paints nothing, which
+    // is what makes the middle page blank. Sweep S read this shape as "fits at
+    // any room" because its floor of 18 px sat just above the threshold; the
+    // sectadvance probe brackets it at (16, 17] for a 10pt run (parity 2ba4f98,
+    // pinned in pagefit-break-only.test.ts).
     const body =
       `<w:p><w:pPr><w:spacing w:after="1200"/></w:pPr><w:r><w:t>first page</w:t></w:r></w:p>` +
       `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
@@ -714,7 +860,13 @@ describe("layout engine", () => {
     expect(pageText(result, 1)).toContain("second page");
   });
 
-  it("lets an authored empty paragraph after a table leave a break on a blank page", () => {
+  it("spills the break-only paragraph after an authored empty paragraph following a table", () => {
+    // The authored spacer (pPr, so NOT the table's own mark paragraph) uses up
+    // the room, and the break-only paragraph after it has none left for its own
+    // line. The break-only rule reads the paragraph's own content rather than
+    // what precedes it, so this spills exactly like the case above; only the
+    // table's OWN mark paragraph gets the unconditional stay (the case above
+    // this one).
     const table = `<w:tbl>
       <w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>
       <w:tr><w:trPr><w:trHeight w:val="900" w:hRule="exact"/></w:trPr>
@@ -1952,6 +2104,76 @@ describe("layout engine", () => {
     expect(w0).toBeLessThan(w1 + 40); // both stay near content size
   });
 
+  // Column widths of the first table on page 1, read off its vertical rules.
+  // The inserted column below holds no text, so its edges are the only way to
+  // measure it.
+  const autofitColumns = (tbl: string): number[] => {
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
+    const xs: number[] = [];
+    const vertical = result.pages[0].items
+      .filter((i) => i.kind === "edge" && Math.abs(i.x1 - i.x2) < 0.01)
+      .map((i) => (i.kind === "edge" ? i.x1 : 0))
+      .sort((a, b) => a - b);
+    for (const x of vertical) {
+      if (xs.length === 0 || Math.abs(x - xs[xs.length - 1]) > 0.5) xs.push(x);
+    }
+    return xs.slice(1).map((x, i) => x - xs[i]);
+  };
+
+  const AUTOFIT_PR =
+    `<w:tblPr><w:tblW w:type="pct" w:w="100%"/><w:tblBorders>` +
+    ["top", "left", "bottom", "right", "insideH", "insideV"]
+      .map((s) => `<w:${s} w:val="single" w:color="auto" w:sz="4"/>`)
+      .join("") +
+    `</w:tblBorders></w:tblPr>`;
+  const GRID4 =
+    `<w:tblGrid><w:gridCol w:w="600"/><w:gridCol w:w="900"/>` +
+    `<w:gridCol w:w="600"/><w:gridCol w:w="6926"/></w:tblGrid>`;
+  const LONG = "A much longer description cell that should dominate the width";
+  const cells = (texts: string[]) =>
+    texts.map((t) => `<w:tc><w:p><w:r><w:t>${t}</w:t></w:r></w:p></w:tc>`).join("");
+
+  it("collapses a freshly inserted (empty) autofit column instead of splitting its neighbour", () => {
+    // Desktop Word, parity-tables with one column inserted after "Status",
+    // exported at 192dpi: the columns render 63 / 106 / 4 / 1030 device px.
+    // The empty column takes 4 — the rule plus the cell margins, no content
+    // stub — and "Status" keeps its full content width. Word lands on the
+    // same four numbers for a placeholder grid, an even grid and a grid that
+    // makes the empty column the widest, so the tblGrid plays no part.
+    const tbl =
+      `<w:tbl>${AUTOFIT_PR}${GRID4}` +
+      `<w:tr>${cells(["Key", "Status", "", "Description of the item"])}</w:tr>` +
+      `<w:tr>${cells(["A", "ok", "", LONG])}</w:tr></w:tbl>`;
+    const [, status, inserted, description] = autofitColumns(tbl);
+    // Word 106 / 4 device px = 53 / 2 css px.
+    expect(inserted).toBeLessThan(6);
+    expect(status).toBeGreaterThan(40);
+    expect(description).toBeGreaterThan(400);
+  });
+
+  it("gives a spanning cell's width to the covered columns by their own content, not evenly", () => {
+    // Word, same export: "Status" spanning an [ok | empty] pair renders
+    // 96 / 10 device px, and spanning [ok | alsoContent] renders 39 / 182.
+    // An even split of the spanned demand reproduces neither — it renders the
+    // first pair 55 / 55. The covered columns are weighed by what they hold on
+    // their own, so an empty one takes almost none of the span.
+    const spanned = (second: string, third: string) =>
+      `<w:tbl>${AUTOFIT_PR}${GRID4}` +
+      `<w:tr><w:tc><w:p><w:r><w:t>Key</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Status</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:p><w:r><w:t>Description of the item</w:t></w:r></w:p></w:tc></w:tr>` +
+      `<w:tr>${cells(["A", second, third, LONG])}</w:tr></w:tbl>`;
+
+    const [, ok, empty] = autofitColumns(spanned("ok", ""));
+    expect(empty).toBeLessThan(6);
+    expect(ok).toBeGreaterThan(40);
+
+    // When the second covered column holds the longer text it takes the larger
+    // share, so the weighting follows content in both directions.
+    const [, narrow, wide] = autofitColumns(spanned("ok", "alsoContent"));
+    expect(wide).toBeGreaterThan(narrow * 2);
+  });
+
   it("autofits a tcW-less grid to content like Word", () => {
     // Word only trusts a grid it wrote itself, and it writes tcW on every
     // cell. A plausible-looking grid with no tcW is ignored: Word sizes the
@@ -2091,22 +2313,104 @@ describe("layout engine", () => {
     expect(gap).toBeCloseTo(20 + 4 / 3 + 0.75, 1);
   });
 
-  it("keeps the single collapsed reserve between merged identical-border paragraphs", () => {
+  it("charges no border reserve at a merged run's interior boundary", () => {
     const bordered = (t: string) =>
       `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr><w:top w:val="single" w:sz="4" w:space="1"/><w:bottom w:val="single" w:sz="4" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
     const { result } = layout({
       "word/document.xml": wrapDocument(bordered("first") + bordered("second")),
     });
-    const items = result.pages[0].items.filter((i) => i.kind === "text");
-    const a = items.find((i) => i.kind === "text" && i.text === "first");
-    const b = items.find((i) => i.kind === "text" && i.text === "second");
-    if (a?.kind !== "text" || b?.kind !== "text") throw new Error("items missing");
-    // Inside a merged box no rule paints between the paragraphs, but Word
-    // still keeps ONE space+rule reserve of room (the top and bottom pads
-    // collapse against each other, not add) — pre-existing calibrated
-    // behavior (Alex Pickett cover RECIPIENT/ADDRESS block), preserved by
-    // the outside-the-collapse reserve rule.
-    expect(b.lineTop - (a.lineTop + a.lineHeight)).toBeCloseTo(4 / 3 + 0.75, 1);
+    // Word reads the pair as ONE box: the shared edge neither paints nor
+    // claims room, so with before=after=0 the rows abut.
+    expect(paraGap(result, "first", "second")).toBeCloseTo(0, 2);
+  });
+
+  it("keeps a merged bordered pair the same distance apart as unbordered siblings", () => {
+    // wild2-legal-ca-agreement p1: two adjacent clauses carrying the same
+    // `bottom sz=6 space=1` rule sit 15.3px apart — exactly the gap of the
+    // unbordered clauses around them. Charging each paragraph its own border
+    // + w:space adds 1.75pt (2.4px) and gives 17.7px.
+    const pPr = `<w:spacing w:before="0" w:after="120"/><w:ind w:left="-450" w:hanging="270"/>`;
+    const bdr = `<w:pBdr><w:bottom w:val="single" w:sz="6" w:space="1" w:color="auto"/></w:pBdr>`;
+    const para = (t: string, borders: string) =>
+      `<w:p><w:pPr>${borders}${pPr}</w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        para("plainA", "") + para("plainB", "") + para("boxA", bdr) + para("boxB", bdr),
+      ),
+    });
+    const plainGap = paraGap(result, "plainA", "plainB");
+    expect(plainGap).toBeCloseTo(8, 2); // 120tw after, nothing else
+    expect(paraGap(result, "boxA", "boxB")).toBeCloseTo(plainGap, 2);
+  });
+
+  it("draws a merged run's rules once, above the first and below the last", () => {
+    const bordered = (t: string) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr><w:top w:val="single" w:sz="6" w:space="1"/><w:bottom w:val="single" w:sz="6" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered("one") + bordered("two") + bordered("three")),
+    });
+    const edges = result.pages[0].items.filter((i) => i.kind === "edge");
+    expect(edges.length).toBe(2);
+    const first = textItem(result, "one");
+    const last = textItem(result, "three");
+    const ys = edges.map((e) => (e.kind === "edge" ? e.y1 : NaN)).sort((x, y) => x - y);
+    expect(ys[0]).toBeLessThan(first.lineTop);
+    expect(ys[1]).toBeGreaterThan(last.lineTop + last.lineHeight);
+  });
+
+  it("draws a declared w:between rule at each interior boundary of the run", () => {
+    // A declared between border fills the boundary the merged top/bottom pair
+    // vacates: three merged paragraphs give one top, one bottom and TWO
+    // between rules. sz=24 (3pt) keeps the between rules telling apart from
+    // the sz=6 (0.75pt) box edges.
+    const bordered = (t: string) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr>` +
+      `<w:top w:val="single" w:sz="6" w:space="1"/><w:bottom w:val="single" w:sz="6" w:space="1"/>` +
+      `<w:between w:val="single" w:sz="24" w:space="1"/>` +
+      `</w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered("one") + bordered("two") + bordered("three")),
+    });
+    const edges = result.pages[0].items.filter((i) => i.kind === "edge");
+    expect(edges.length).toBe(4);
+    const between = edges.filter((e) => e.kind === "edge" && e.border.width > 2);
+    expect(between.length).toBe(2);
+    const one = textItem(result, "one");
+    const two = textItem(result, "two");
+    // The first between rule sits in the gap below "one", above "two".
+    const y = between[0].kind === "edge" ? between[0].y1 : NaN;
+    expect(y).toBeGreaterThan(one.lineTop + one.lineHeight - 0.01);
+    expect(y).toBeLessThan(two.lineTop + two.lineHeight);
+  });
+
+  it("does not merge adjacent paragraphs whose borders differ", () => {
+    // Different w:sz = different border set: two separate boxes, each drawing
+    // its own rule and charging its own reserve.
+    const bordered = (t: string, sz: number) =>
+      `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:pBdr><w:bottom w:val="single" w:sz="${sz}" w:space="1"/></w:pBdr></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(bordered("thin", 4) + bordered("thick", 12)),
+    });
+    expect(result.pages[0].items.filter((i) => i.kind === "edge").length).toBe(2);
+    // "thin" keeps its own bottom reserve: 1pt space + the 0.75px paint floor.
+    expect(paraGap(result, "thin", "thick")).toBeCloseTo(4 / 3 + 0.75, 2);
+  });
+
+  it("merges borders inherited from a paragraph style", () => {
+    // The merge compares RESOLVED borders: a pBdr that both paragraphs get
+    // from their style merges exactly like a direct one.
+    const styled = (t: string) =>
+      `<w:p><w:pPr><w:pStyle w:val="Boxed"/></w:pPr><w:r><w:t>${t}</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(styled("first") + styled("second")),
+      "word/styles.xml":
+        `<?xml version="1.0"?>\n<w:styles ${W_NS}><w:style w:type="paragraph" w:styleId="Boxed"><w:pPr>` +
+        `<w:spacing w:before="0" w:after="0"/>` +
+        `<w:pBdr><w:top w:val="single" w:sz="6" w:space="1"/><w:bottom w:val="single" w:sz="6" w:space="1"/></w:pBdr>` +
+        `</w:pPr></w:style></w:styles>`,
+    });
+    expect(result.pages[0].items.filter((i) => i.kind === "edge").length).toBe(2);
+    expect(paraGap(result, "first", "second")).toBeCloseTo(0, 2);
   });
 
   it("anchors paint-routed CJK glyph boxes by the browser strut box", () => {
@@ -2698,6 +3002,36 @@ describe("footnotes and endnotes", () => {
     });
     const marks = result.pages[0].items.filter((i) => i.kind === "text" && i.text === "*");
     expect(marks.length).toBe(2);
+  });
+
+  it("restarts footnote numbering at eachSect (w:numRestart), continuous by default", () => {
+    const geometry = `<w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:t>One</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>` +
+          `<w:p><w:r><w:t>Two</w:t></w:r><w:r><w:footnoteReference w:id="2"/></w:r></w:p>` +
+          // Closes section 1 — plain sectPr, default (continuous) restart.
+          `<w:p><w:pPr><w:sectPr>${geometry}</w:sectPr></w:pPr></w:p>` +
+          `<w:p><w:r><w:t>Three</w:t></w:r><w:r><w:footnoteReference w:id="3"/></w:r></w:p>` +
+          // Section 2's own (trailing, body-level) sectPr: restarts.
+          `<w:sectPr><w:footnotePr><w:numRestart w:val="eachSect"/></w:footnotePr>${geometry}</w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(
+        note("footnote", 1, "first note") + note("footnote", 2, "second note") + note("footnote", 3, "third note"),
+      ),
+    });
+    // Default section break is nextPage, so each section lands on its own page.
+    expect(result.totalPages).toBe(2);
+    const marksOn = (page: number, text: string) =>
+      result.pages[page].items.filter((i) => i.kind === "text" && i.text === text && i.props.verticalAlign === "superscript").length;
+    // Section 1: continuous default, marks 1 then 2 (reference + own mark each).
+    expect(marksOn(0, "1")).toBe(2);
+    expect(marksOn(0, "2")).toBe(2);
+    // Section 2 restarts: footnote 3 reads "1" again, not "3".
+    expect(marksOn(1, "1")).toBe(2);
+    expect(marksOn(1, "3")).toBe(0);
   });
 });
 
@@ -3834,9 +4168,12 @@ describe("wild2 legal agreement rules", () => {
     expect(textItem(result, "Body").x).toBeCloseTo(66, 1);
   });
 
-  it("gives a document-opening empty paragraph before a table two mark lines", () => {
-    // PDF-measured on wild2-legal p1: the top table's grid sits at margin +
-    // two mark line heights; the same construct mid-flow takes one line.
+  it("gives a document-opening empty paragraph before a table ONE mark line", () => {
+    // Re-measured on the current-build wild2-legal-ca-agreement reference: the
+    // letterhead table's first exact row is 260tw = 17.33px and the rule under
+    // it sits at 131.71, so Word's table top is 114.38 against a body top of 96
+    // - one 18.4px mark line, not two. The two-line reading came from the stale
+    // 23-page export and cost that document a phantom page.
     const emptyPara = `<w:p><w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:pPr></w:p>`;
     const table =
       `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
@@ -3844,8 +4181,8 @@ describe("wild2 legal agreement rules", () => {
       `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>CELL</w:t></w:r></w:p></w:tc></w:tr>` +
       `</w:tbl><w:p/>`;
     const { result } = layout({ "word/document.xml": wrapDocument(emptyPara + table + SECT) });
-    // margin 96px + 2 x (12pt = 16px x 1.15 = 18.4px) = 132.8px
-    expect(textItem(result, "CELL").lineTop).toBeCloseTo(96 + 2 * 18.4, 1);
+    // margin 96px + 12pt = 16px x 1.15 = 18.4px = 114.4px
+    expect(textItem(result, "CELL").lineTop).toBeCloseTo(96 + 18.4, 1);
   });
 });
 
@@ -4559,6 +4896,96 @@ describe("margin line numbers (w:lnNumType)", () => {
     expect(num.glyphBoxH).toBeCloseTo(m.ascent + m.descent, 3);
     // Number sits in the left margin, right-aligned against the distance gap.
     expect(num.x + num.width).toBeLessThan(body.x);  });
+
+  // probe-linenum2 (parity repo, self-reproducing Word export): a WRITTEN
+  // w:start attribute is an offset added to the running count, not the first
+  // printed number — Word prints (start + 1) on the scope's first line even
+  // for w:start="1", and only an ABSENT attribute prints the bare count
+  // (1,2,3...). Confirmed with start="1" (prints 2,3,4,5,6) and start="10"
+  // (prints 11,12,13,14,15) in isolated single-section documents.
+  it("prints (w:start + 1) on the first line when w:start is written explicitly", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1" w:start="10"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("one") + p("two") + p("three") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["11", "12", "13"]);
+  });
+
+  it("omitting w:start prints the bare count starting at 1", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("one") + p("two") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2"]);
+  });
+
+  // probe-linenum (parity repo, self-reproducing Word export): table content
+  // consumes ZERO line numbers — neither displayed nor counted — and the
+  // count resumes correctly with the paragraph after the table.
+  it("skips table rows entirely and resumes the count after the table", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="4500" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="4500"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>${p("in a cell")}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("before") + tbl + p("after") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2"]);
+  });
+
+  // probe-linenum: an empty paragraph consumes a line number just like a
+  // text paragraph does.
+  it("counts an empty paragraph as a numbered line", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("first") + "<w:p/>" + p("third") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2", "3"]);
+  });
+
+  // probe-linenum (case F): each visual line of a paragraph is numbered
+  // individually, including wrapped/broken continuation lines within ONE
+  // w:p — not just once per paragraph.
+  it("numbers every visual line of a multi-line paragraph, not once per paragraph", () => {
+    const sect =
+      `<w:sectPr><w:lnNumType w:countBy="1"/>` +
+      `<w:pgSz w:w="12240" w:h="15840"/>` +
+      `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+    const threeLines =
+      `<w:p><w:r><w:t>one</w:t><w:br/><w:t>two</w:t><w:br/><w:t>three</w:t></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(threeLines + p("after") + sect),
+    });
+    const numbers = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+$/.test(i.text))
+      .map((i) => (i as { text: string }).text);
+    expect(numbers).toEqual(["1", "2", "3", "4"]);
+  });
 });
 
 describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
@@ -4610,9 +5037,11 @@ describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
   });
 
   it("spans a body-level fixed pct table over content width + edge cell margins (nccih p14)", () => {
-    // tblW 5000 pct with tblLayout fixed: Word measures 100% against the
-    // text column PLUS the table's left+right cell margins, rendering the
-    // authored grid (content + 216tw) raw — rules at margin -/+ 7.2px.
+    // tblW 5000 pct with tblLayout fixed: nccih declares no compatibilityMode,
+    // so Word's legacy table metrics apply and it measures the percentage
+    // against the text column PLUS the table's left+right cell margins,
+    // rendering the authored grid (content + 216tw) raw — rules at margin
+    // -/+ 7.2px. table-format.test.ts pins the compat-15 counterpart.
     const content = 9360; // 12240 - 2*1440
     const grid = `<w:gridCol w:w="${content / 2 + 108}"/><w:gridCol w:w="${content / 2 + 108}"/>`;
     const cell = (w: number) =>
@@ -4624,7 +5053,9 @@ describe("tail parity rules (textboxes/nccih/hf2/yiddish)", () => {
       `<w:tblCellMar><w:left w:w="108" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
       `<w:tblGrid>${grid}</w:tblGrid>` +
       `<w:tr>${cell(content / 2 + 108)}${cell(content / 2 + 108)}</w:tr></w:tbl><w:p/>`;
-    const { result } = layout({ "word/document.xml": wrapDocument(tbl) });
+    const { doc, result } = layout({ "word/document.xml": wrapDocument(tbl) });
+    // The allowance rides on the ABSENT setting, not on the 100% width.
+    expect(doc.declaredCompatibilityMode).toBeUndefined();
     const edges = result.pages[0].items.filter((i) => i.kind === "edge");
     const xs = edges.flatMap((e) => (e.kind === "edge" ? [e.x1, e.x2] : []));
     // The grid renders RAW: rules span content (624px) + 2 x 7.2px cell

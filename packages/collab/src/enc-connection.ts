@@ -12,7 +12,7 @@ import {
   ParticipantProfile,
   sanitizePresencePosition,
 } from "./protocol.js";
-import type { ClientTransport, ConnectionCallbacks } from "./connection.js";
+import type { ClientTransport, CollabConnectionLike, ConnectionCallbacks } from "./connection.js";
 import type { Scope } from "./apply.js";
 import type { RosterEntry } from "./protocol.js";
 import type { DocBundle } from "./bundle.js";
@@ -49,7 +49,7 @@ import { CarriedIdAllocator } from "./id-allocator.js";
  * exists because the caller holds `#k` — a plaintext `welcome` arriving
  * anyway is a downgrade attempt and is hard-refused.
  */
-export class EncryptedCollabConnection {
+export class EncryptedCollabConnection implements CollabConnectionLike {
   private mirror: DocumentSession | null = null;
   private replica: ClientReplica | null = null;
   private keys: EpochKeys | null = null;
@@ -278,7 +278,9 @@ export class EncryptedCollabConnection {
    * connection — the react layer's `as unknown as CollabConnection` cast
    * hid it from the typechecker, so the demo's owner controls were silent
    * TypeErrors on encrypted docs (the default), long misattributed to a
-   * Vite prebundle race ("stale session w/o admin"). */
+   * Vite prebundle race ("stale session w/o admin"). That cast is gone: this
+   * class now `implements CollabConnectionLike`, so the same omission is a
+   * compile error rather than a runtime silence. */
   admin(action:
     | { op: "kick"; clientId: string }
     | { op: "readOnly"; on: boolean }
@@ -332,7 +334,109 @@ export class EncryptedCollabConnection {
   }
 
   /**
-   * COLLABORATIVE UNDO (plan doc 03 Phase 8), encrypted flavour.
+   * COLLABORATIVE UNDO, the entry point — a PENDING GATE in front of the real
+   * work below.
+   *
+   * The undo stack lives on the MIRROR, which advances only by ingesting
+   * sequenced envelopes, while this client paints its OWN edits optimistically
+   * the moment they are made. So between a keystroke and its echo the mirror
+   * has not seen it, and `submitUndoNow` would reverse the previous
+   * CONFIRMED action instead — the user types, presses Ctrl+Z, and watches an
+   * older edit disappear while the one they just made stays. Architecturally
+   * correct and completely wrong to a person.
+   *
+   * The press is therefore HELD while `pendingCount > 0` and run on the drain,
+   * against a mirror that by then holds the edit the user meant. Presses
+   * ACCUMULATE (two quick Ctrl+Z's undo two actions), because that is what the
+   * same two presses do outside a room.
+   *
+   * Held presses are not held forever: the deadline exists because a queue
+   * that never drains means the connection stopped carrying edits to
+   * confirmation, and running the undo then would reverse the wrong action
+   * anyway. At the deadline the queue is DROPPED and onUndoQueue reports it,
+   * beside the offline/writes-blocked affordances that are already up by then.
+   * Each press restarts that deadline, so it measures the wait the user is
+   * actually watching rather than the age of the oldest press.
+   *
+   * A held press targets whatever this client's newest action is WHEN IT RUNS,
+   * so typing during the wait makes the new keystrokes the undo's target. It
+   * cannot be otherwise — the whole reason the press is held is that the
+   * target it would name is not in the mirror yet — and it stays "undo my
+   * latest thing", which is what the key means.
+   */
+  undoLast(): UndoOutcome {
+    if (!this.mirror || !this.replica || !this.keys || !this.genesisId) return "unavailable";
+    if (this.replica.pendingCount === 0) return this.submitUndoNow();
+    this.queuedUndos++;
+    this.armUndoDeadline();
+    this.cb.onUndoQueue?.({ queued: this.queuedUndos, expired: false });
+    return "queued";
+  }
+
+  /** Undos held for the drain (see undoLast) — the count onUndoQueue reports. */
+  get undoQueued(): number {
+    return this.queuedUndos;
+  }
+  private queuedUndos = 0;
+  private undoDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * How long held undos wait for the pending queue to drain before they are
+   * dropped. A few seconds: long enough to cover an ordinary round trip under
+   * load, short enough that a dead connection tells the user quickly. Settable
+   * for tests.
+   */
+  undoDrainTimeoutMs = 5000;
+
+  /**
+   * Run ONE held undo now that the pending queue is empty. True when it
+   * submitted — the queue is non-empty again, so the caller has nothing left
+   * to schedule.
+   */
+  private runQueuedUndo(): boolean {
+    if (this.queuedUndos === 0) return false;
+    while (this.queuedUndos > 0) {
+      this.queuedUndos--;
+      const outcome = this.submitUndoNow();
+      if (outcome === "undone") {
+        // Submitted, so it is pending now and the NEXT held press waits for
+        // the next drain. That is deliberate: each undo must aim at a mirror
+        // that already holds the one before it, which is exactly what running
+        // them back-to-back against an un-ingested mirror would not give.
+        // Progress earns the remainder a fresh deadline.
+        if (this.queuedUndos > 0) this.armUndoDeadline();
+        else this.clearUndoDeadline();
+        this.cb.onUndoQueue?.({ queued: this.queuedUndos, expired: false });
+        return true;
+      }
+      // `changed-since` consumed its entry without submitting anything, so the
+      // next press can go straight on. Every other outcome is a stop (see
+      // UndoOutcome) — drop what is left rather than reaching past it.
+      if (outcome !== "changed-since") this.queuedUndos = 0;
+    }
+    this.clearUndoDeadline();
+    this.cb.onUndoQueue?.({ queued: 0, expired: false });
+    return false;
+  }
+
+  private armUndoDeadline(): void {
+    this.clearUndoDeadline();
+    this.undoDeadlineTimer = setTimeout(() => {
+      this.undoDeadlineTimer = null;
+      if (this.queuedUndos === 0) return;
+      this.queuedUndos = 0;
+      this.cb.onUndoQueue?.({ queued: 0, expired: true });
+    }, this.undoDrainTimeoutMs);
+  }
+
+  private clearUndoDeadline(): void {
+    if (this.undoDeadlineTimer !== null) clearTimeout(this.undoDeadlineTimer);
+    this.undoDeadlineTimer = null;
+  }
+
+  /**
+   * COLLABORATIVE UNDO (plan doc 03 Phase 8), encrypted flavour. Callers go
+   * through `undoLast`, which holds the press until the mirror can see this
+   * client's own edits; everything below assumes that already happened.
    *
    * The mirror is a real DocumentSession fed the canonical log, so it already
    * knows the inverse of this client's last action — no new wire message and
@@ -349,7 +453,7 @@ export class EncryptedCollabConnection {
    * canonical id table first, so the common conflict (someone else removed
    * the thing) is declined up front rather than painted and yanked back.
    */
-  undoLast(): UndoOutcome {
+  private submitUndoNow(): UndoOutcome {
     if (!this.mirror || !this.replica || !this.keys || !this.genesisId) return "unavailable";
     const candidate = this.mirror.takeUndo(this.clientId);
     if (candidate.kind !== "undoable") return candidate.kind;
@@ -859,6 +963,13 @@ export class EncryptedCollabConnection {
       this.scheduleStuckCheck();
       return;
     }
+    // THE DRAIN HOOK for held undos (see undoLast). Every path that can empty
+    // the pending queue — echo ingest, a stuck drop, a heal — funnels through
+    // here, which is why the gate hangs off this method rather than off the
+    // ingest site alone. A held undo that runs re-fills the queue and re-arms
+    // every timer below through this same method, so there is nothing left to
+    // schedule on this pass.
+    if (this.runQueuedUndo()) return;
     this.redriveBackoffMs = 0; // queue drained — rate-limit backoff resets
     if (this.redriveTimer !== null) {
       clearTimeout(this.redriveTimer);

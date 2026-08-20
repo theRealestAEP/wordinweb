@@ -119,12 +119,36 @@ const matrix: Cell[] = [];
  * Offered pairs that legitimately do nothing. Every entry needs a reason a
  * human can act on. An offered-but-inert pair NOT listed here fails the suite.
  *
- * Empty today, and that is the result worth keeping: every command the ribbon
- * currently offers does something for every kind it is offered for. Adding an
- * entry should feel expensive — the cheap fix is usually to stop offering the
- * command for that kind (a gate in `availableObjectCommands`).
+ * Adding an entry should feel expensive — the cheap fix is usually to stop
+ * offering the command for that kind (a gate in `availableObjectCommands`).
+ * The one entry below is a MODE, not a mutation, which is the only shape this
+ * audit cannot drive: it measures a command by whether the document changed.
  */
-const EXCEPTIONS: { fixture: string; command: SelectedObjectCommand; reason: string }[] = [];
+const EXCEPTIONS: { fixture: string; command: SelectedObjectCommand; reason: string }[] = [
+  {
+    fixture: "image",
+    command: "crop",
+    reason:
+      "Crop is a mode toggle: it paints the crop frame and waits for a handle drag, " +
+      "and the drag is what writes a:srcRect. Nothing is mutated by the command itself, " +
+      "so there is no document change for this audit to see. The write path is covered " +
+      "by core's setImageCrop tests and collab's setCrop intent tests.",
+  },
+  // The Autofit menu is a three-way state choice, and every shape this matrix
+  // can insert starts in the "none" state (insertShapeAt and insertWordArtAt
+  // both author a:noAutofit). Picking the state a shape is already in writes
+  // the same bytes, so it reads as inert here; the other two members of the
+  // same menu mutate on the same fixtures, which is what proves the control
+  // is live.
+  ...(["shape", "wordArt"] as const).map((fixture) => ({
+    fixture,
+    command: "autofitNone" as SelectedObjectCommand,
+    reason:
+      "Re-selecting the autofit mode the shape already has. Both fixtures are " +
+      "inserted with a:noAutofit, so this writes the bytes that are already there; " +
+      "autofitResizeShape and autofitShrinkText mutate the same fixtures.",
+  })),
+];
 
 // -------------------------------------------------------------------- mounts
 async function tick(ms = 4) {

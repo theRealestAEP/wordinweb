@@ -99,21 +99,27 @@ async function room() {
   const docKey = mintDocKey();
   const { checkpoint } = await seedEncrypted("seed", "g1", docKey);
   const srv = blindServer("g1", checkpoint);
-  const a = new EncryptedCollabConnection(srv.attach(), "alice", docKey);
-  const b = new EncryptedCollabConnection(srv.attach(), "bob", docKey);
+  // A press made while this client's own edits are in flight is HELD for the
+  // drain (the undo pending gate). Counting the drops keeps the fuzz's
+  // non-vacuity claim true: a held undo that expired never became a real one.
+  let expired = 0;
+  const cb = { onUndoQueue: (s: { expired: boolean }) => { if (s.expired) expired++; } };
+  const a = new EncryptedCollabConnection(srv.attach(), "alice", docKey, cb);
+  const b = new EncryptedCollabConnection(srv.attach(), "bob", docKey, cb);
   a.join("d");
   b.join("d");
   await until(() => a.ready && b.ready, "both clients to rehydrate");
-  return { a, b };
+  return { a, b, expiredUndos: () => expired };
 }
 
 describe("undo fuzz: undos interleaved with edits still converge", () => {
   for (const seed of [1, 7, 42]) {
     it(`seed ${seed}: 40 mixed rounds converge byte-identically`, async () => {
       const rand = rng(seed);
-      const { a, b } = await room();
+      const { a, b, expiredUndos } = await room();
       const clients = [a, b];
       let undone = 0;
+      let queued = 0;
       let declined = 0;
 
       for (let round = 0; round < 40; round++) {
@@ -123,6 +129,7 @@ describe("undo fuzz: undos interleaved with edits still converge", () => {
           // Undo — the operation under test.
           const outcome = c.undoLast();
           if (outcome === "undone") undone++;
+          else if (outcome === "queued") queued++; // held for this client's drain
           else declined++;
         } else if (roll < 0.75) {
           const len = textOf(c).length;
@@ -140,14 +147,24 @@ describe("undo fuzz: undos interleaved with edits still converge", () => {
         if (round % 4 === 3) await new Promise((r) => setTimeout(r, 8));
       }
 
+      // SETTLE FIRST. A held undo submits on its client's drain, so equality
+      // observed while one is still waiting says nothing — the room would
+      // diverge again the moment it ran.
+      await until(
+        () => a.pendingCount === 0 && b.pendingCount === 0 && a.undoQueued === 0 && b.undoQueued === 0,
+        `seed ${seed}: in-flight edits and held undos to settle`,
+      );
       // THE INVARIANT: whatever the interleaving produced, the room agrees.
       await until(() => xmlOf(a) === xmlOf(b), `seed ${seed} to converge`);
       expect(xmlOf(a)).toBe(xmlOf(b));
 
       // NON-VACUITY: undos actually happened, and at least some were real —
       // otherwise this would be an ordinary edit fuzz wearing an undo label.
-      expect(undone + declined).toBeGreaterThan(0);
-      expect(undone).toBeGreaterThan(0);
+      // A held press counts only because none of them expired: every one of
+      // them reached the mirror and became a genuine undo attempt.
+      expect(undone + declined + queued).toBeGreaterThan(0);
+      expect(undone + queued).toBeGreaterThan(0);
+      expect(expiredUndos(), "no held undo may be dropped in a healthy room").toBe(0);
     });
   }
 
@@ -162,6 +179,13 @@ describe("undo fuzz: undos interleaved with edits still converge", () => {
 
     a.undoLast();
     b.undoLast();
+    // Either press may have been HELD for its own client's drain (the undo
+    // pending gate) — B's echo in particular is not implied by A having seen
+    // the edit. Both must have run before the room can be judged.
+    await until(
+      () => a.undoQueued === 0 && b.undoQueued === 0 && a.pendingCount === 0 && b.pendingCount === 0,
+      "both undos to run and settle",
+    );
     await until(() => xmlOf(a) === xmlOf(b), "the room to converge after simultaneous undos");
     expect(xmlOf(a)).toBe(xmlOf(b));
     // Both authors' text is gone; the seed survives.

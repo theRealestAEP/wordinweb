@@ -1,5 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { XmlElement, attr, localName } from "../xml.js";
+import { setParagraphBorders } from "./paragraph.js";
 
 /**
  * Section editing: resolve the sectPr governing a caret position, insert
@@ -34,10 +35,21 @@ function containsEl(root: XmlElement, target: XmlElement): boolean {
   return false;
 }
 
+/** The cover-page design gallery. "title" is Word's plain centered title
+ * block (this engine's original single form). "banner" shades the title
+ * paragraph into a colored band — Word's "Sideline"/"Facet" family look —
+ * reusing setParagraphBorders' shading rather than inventing a second way to
+ * paint a fill. "sidebar" left-aligns the block lower on the page with a
+ * colored accent rule on the title, the same reuse for the rule itself. */
+export const COVER_PAGE_LAYOUTS = ["title", "banner", "sidebar"] as const;
+export type CoverPageLayout = (typeof COVER_PAGE_LAYOUTS)[number];
+
 export interface CoverPageContent {
   title: string;
   subtitle?: string;
   author?: string;
+  /** Defaults to "title" — the original single layout, unchanged. */
+  layout?: CoverPageLayout;
 }
 
 /** Insert an editable, Word-native cover page before the current document body. */
@@ -45,6 +57,8 @@ export function insertCoverPage(doc: DocxDocument, content: CoverPageContent): b
   const body = bodyOf(doc);
   if (!body || !content.title.trim()) return false;
   const w = body.name.includes(":") ? body.name.slice(0, body.name.indexOf(":") + 1) : "w:";
+  const layout = content.layout ?? "title";
+  const align = layout === "sidebar" ? "left" : "center";
   const paragraph = (
     text: string,
     style: string | null,
@@ -56,7 +70,7 @@ export function insertCoverPage(doc: DocxDocument, content: CoverPageContent): b
     el(`${w}pPr`, {}, [
       ...(style ? [el(`${w}pStyle`, { [`${w}val`]: style })] : []),
       el(`${w}spacing`, { [`${w}before`]: String(before), [`${w}after`]: "180" }),
-      el(`${w}jc`, { [`${w}val`]: "center" }),
+      el(`${w}jc`, { [`${w}val`]: align }),
     ]),
     el(`${w}r`, {}, [
       el(`${w}rPr`, {}, [
@@ -68,8 +82,18 @@ export function insertCoverPage(doc: DocxDocument, content: CoverPageContent): b
       el(`${w}t`, { "xml:space": "preserve" }, [], text),
     ]),
   ]);
+  const titleColor = layout === "banner" ? "FFFFFF" : "2F5597";
+  const titleBefore = layout === "sidebar" ? 5040 : 3600;
+  const titlePara = paragraph(content.title.trim(), "Title", 64, titleColor, titleBefore, true);
+  if (layout === "banner") {
+    setParagraphBorders(doc, [titlePara], { shading: "2F5597" });
+  } else if (layout === "sidebar") {
+    setParagraphBorders(doc, [titlePara], {
+      borders: { left: { style: "single", sz: 36, color: "2F5597", space: 240 } },
+    });
+  }
   const cover = [
-    paragraph(content.title.trim(), "Title", 64, "2F5597", 3600, true),
+    titlePara,
     ...(content.subtitle?.trim() ? [paragraph(content.subtitle.trim(), "Subtitle", 30, "5B6573", 120)] : []),
     ...(content.author?.trim() ? [paragraph(content.author.trim(), null, 22, "404040", 720)] : []),
     el(`${w}p`, {}, [el(`${w}r`, {}, [el(`${w}br`, { [`${w}type`]: "page" })])]),
@@ -307,6 +331,350 @@ function allSectPrs(doc: DocxDocument): XmlElement[] {
   return out;
 }
 
+// ---------- header/footer page variants (w:titlePg, w:evenAndOddHeaders) ----------
+
+/** Whether any section requests a different first-page header/footer. */
+export function titlePageEnabled(doc: DocxDocument): boolean {
+  return allSectPrs(doc).some((sectPr) =>
+    sectPr.children.some((c) => localName(c.name) === "titlePg" && attr(c, "val") !== "0" && attr(c, "val") !== "false"),
+  );
+}
+
+/**
+ * Toggle Word's "Different First Page" (w:titlePg, ECMA-376 §17.10.6) on every
+ * section. Enabling also creates the missing first-page header and footer
+ * parts (empty, referenced w:type="first" from each section — §17.10.5,
+ * ST_HdrFtr §17.18.36), the way Word materializes the bands when the box is
+ * first checked. Disabling removes only the toggle: parts and references stay,
+ * so re-enabling restores their content, exactly as Word does. False when the
+ * document is already in the requested state (honest no-op).
+ */
+export function setTitlePage(doc: DocxDocument, enabled: boolean): boolean {
+  if (enabled) {
+    // Creates the missing first-page parts, and materializes the default body
+    // sectPr when a minimal document has none at all.
+    const partsAdded = doc.ensureHfVariantParts("first");
+    const missingToggle = allSectPrs(doc).filter(
+      (sectPr) => !sectPr.children.some((c) => localName(c.name) === "titlePg"),
+    );
+    for (const sectPr of missingToggle) insertTitlePg(sectPr);
+    if (missingToggle.length === 0 && !partsAdded) return false;
+    doc.refresh();
+    return true;
+  }
+  let changed = false;
+  for (const sectPr of allSectPrs(doc)) {
+    const before = sectPr.children.length;
+    sectPr.children = sectPr.children.filter((c) => localName(c.name) !== "titlePg");
+    changed = changed || sectPr.children.length !== before;
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
+function insertTitlePg(sectPr: XmlElement): void {
+  const w = prefixOf(sectPr) || "w:";
+  insertInOrder(sectPr, el(`${w}titlePg`));
+}
+
+/**
+ * Toggle Word's "Different Odd & Even Pages": the document-global
+ * w:evenAndOddHeaders switch in settings.xml (ECMA-376 §17.10.1). Enabling
+ * also creates the missing even-page header and footer parts (empty,
+ * referenced w:type="even" from each section), because with the switch on an
+ * even page uses ONLY the even variant — a chain that never declares one gets
+ * a blank band. Disabling removes only the switch. False when already in the
+ * requested state.
+ */
+export function setEvenOddHeaders(doc: DocxDocument, enabled: boolean): boolean {
+  if (enabled) {
+    const partsAdded = doc.ensureHfVariantParts("even");
+    if (doc.evenAndOddHeaders && !partsAdded) return false;
+    doc.setEvenAndOddHeaders(true);
+    doc.refresh();
+    return true;
+  }
+  if (!doc.evenAndOddHeaders) return false;
+  doc.setEvenAndOddHeaders(false);
+  doc.refresh();
+  return true;
+}
+
+// ---------- page number format (w:pgNumType) ----------
+
+/** The w:pgNumType number formats the layout engine paints (its PAGE_FMT
+ * table); the editable subset of ST_NumberFormat (ECMA-376 §17.18.59). */
+export const PAGE_NUMBER_FORMATS = [
+  "decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter",
+] as const;
+
+export type PageNumberFormat = (typeof PAGE_NUMBER_FORMATS)[number];
+
+export interface PageNumberFormatPatch {
+  /** w:pgNumType@fmt. null removes the attribute (back to decimal). */
+  fmt?: PageNumberFormat | null;
+  /** w:pgNumType@start. null removes it (numbering continues from the
+   * previous section, the OOXML default). */
+  start?: number | null;
+}
+
+/** Current w:pgNumType settings for the section governing `t`. */
+export function pageNumberFormatAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { fmt: PageNumberFormat; start: number | null } {
+  const sectPr = sectPrAt(doc, t);
+  const pg = sectPr?.children.find((c) => localName(c.name) === "pgNumType");
+  const fmt = pg ? attr(pg, "fmt") : undefined;
+  const start = pg ? attr(pg, "start") : undefined;
+  return {
+    fmt: (PAGE_NUMBER_FORMATS as readonly string[]).includes(fmt ?? "") ? (fmt as PageNumberFormat) : "decimal",
+    start: start !== undefined && Number.isFinite(parseInt(start, 10)) ? parseInt(start, 10) : null,
+  };
+}
+
+/**
+ * Set the page-number format and/or start-at value (w:pgNumType,
+ * ECMA-376 §17.6.12). With `target` (a sectPr) only that section changes;
+ * otherwise every section in the document updates. An attribute set to null
+ * is removed; a w:pgNumType left with no attributes is removed entirely.
+ * False when nothing changed.
+ */
+export function setPageNumberFormat(
+  doc: DocxDocument,
+  patch: PageNumberFormatPatch,
+  target?: XmlElement,
+): boolean {
+  let sectPrs = target ? [target] : allSectPrs(doc);
+  if (sectPrs.length === 0 && !target) {
+    // sectPr-less minimal doc: materialize the default body section (see
+    // setLineNumbering) so the control isn't a dead no-op.
+    const root = doc.editableRoots()[0];
+    const body = root && (localName(root.name) === "body"
+      ? root
+      : root.children.find((c) => localName(c.name) === "body"));
+    if (body) {
+      const w = prefixOf(body) || "w:";
+      const created: XmlElement = { name: `${w}sectPr`, attrs: {}, children: [], text: "" };
+      body.children.push(created);
+      sectPrs = [created];
+    }
+  }
+  if (sectPrs.length === 0) return false;
+  let changed = false;
+  for (const sectPr of sectPrs) {
+    const w = prefixOf(sectPr) || "w:";
+    let pg = sectPr.children.find((c) => localName(c.name) === "pgNumType");
+    const setA = (local: string, v: string | null) => {
+      if (!pg) {
+        if (v === null) return;
+        pg = el(`${w}pgNumType`);
+        insertInOrder(sectPr, pg);
+      }
+      const key = Object.keys(pg.attrs).find((k) => localName(k) === local) ?? `${w}${local}`;
+      if (v === null) {
+        if (key in pg.attrs) {
+          delete pg.attrs[key];
+          changed = true;
+        }
+      } else if (pg.attrs[key] !== v) {
+        pg.attrs[key] = v;
+        changed = true;
+      }
+    };
+    if (patch.fmt !== undefined) setA("fmt", patch.fmt === "decimal" ? null : patch.fmt);
+    if (patch.start !== undefined) setA("start", patch.start === null ? null : String(patch.start));
+    if (pg && Object.keys(pg.attrs).length === 0) {
+      sectPr.children = sectPr.children.filter((c) => c !== pg);
+    }
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
+// ---------- footnote / endnote options (w:footnotePr / w:endnotePr) ----------
+
+/** Note-mark numbering formats the layout engine paints (formatNoteMark's
+ * table): the page-number format subset plus "chicago", Word's symbol style
+ * (*, †, ‡, §) — footnotes' traditional default in some templates. */
+export const NOTE_NUMBER_FORMATS = [...PAGE_NUMBER_FORMATS, "chicago"] as const;
+export type NoteNumberFormat = (typeof NOTE_NUMBER_FORMATS)[number];
+
+/** ST_RestartNumber (ECMA-376 §17.18.81): when the mark counter resets.
+ * Only "eachSect" is honored by layout (assignNoteNumbers); "continuous" is
+ * the OOXML default; "eachPage" round-trips but is not laid out — see
+ * assignNoteNumbers' comment for why. */
+export const NOTE_RESTART_VALUES = ["continuous", "eachSect", "eachPage"] as const;
+export type NoteRestart = (typeof NOTE_RESTART_VALUES)[number];
+
+export interface FootnoteOptionsPatch {
+  /** w:footnotePr/w:numFmt@val. null removes it (back to decimal). */
+  fmt?: NoteNumberFormat | null;
+  /** w:footnotePr/w:numStart@val. null removes it (back to 1). */
+  start?: number | null;
+  /** w:footnotePr/w:numRestart@val. null removes it (back to continuous). */
+  restart?: NoteRestart | null;
+  /** w:footnotePr/w:pos@val (§17.11.21). null removes it (back to pageBottom). */
+  pos?: "pageBottom" | "beneathText" | null;
+}
+
+export interface EndnoteOptionsPatch {
+  fmt?: NoteNumberFormat | null;
+  start?: number | null;
+  restart?: NoteRestart | null;
+  /** w:endnotePr/w:pos@val. null removes it (back to docEnd). */
+  pos?: "sectEnd" | "docEnd" | null;
+}
+
+/** Child order inside CT_FtnProps / CT_EdnProps (ECMA-376): pos, numFmt,
+ * numStart, numRestart, then any w:footnote/w:endnote separator refs. */
+const NOTE_PR_ORDER = ["pos", "numFmt", "numStart", "numRestart", "footnote", "endnote"];
+
+function insertInNotePrOrder(pr: XmlElement, childEl: XmlElement): void {
+  const rank = (e: XmlElement) => {
+    const i = NOTE_PR_ORDER.indexOf(localName(e.name));
+    return i === -1 ? NOTE_PR_ORDER.length : i;
+  };
+  const r = rank(childEl);
+  const at = pr.children.findIndex((c) => rank(c) > r);
+  if (at === -1) pr.children.push(childEl);
+  else pr.children.splice(at, 0, childEl);
+}
+
+/** Current w:footnotePr settings for the section governing `t`. */
+export function footnoteOptionsAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { fmt: NoteNumberFormat; start: number | null; restart: NoteRestart; pos: "pageBottom" | "beneathText" } {
+  const sectPr = sectPrAt(doc, t);
+  const pr = sectPr?.children.find((c) => localName(c.name) === "footnotePr");
+  const fmt = pr ? attr(pr.children.find((c) => localName(c.name) === "numFmt"), "val") : undefined;
+  const start = pr ? attr(pr.children.find((c) => localName(c.name) === "numStart"), "val") : undefined;
+  const restart = pr ? attr(pr.children.find((c) => localName(c.name) === "numRestart"), "val") : undefined;
+  const pos = pr ? attr(pr.children.find((c) => localName(c.name) === "pos"), "val") : undefined;
+  return {
+    fmt: (NOTE_NUMBER_FORMATS as readonly string[]).includes(fmt ?? "") ? (fmt as NoteNumberFormat) : "decimal",
+    start: start !== undefined && Number.isFinite(parseInt(start, 10)) ? parseInt(start, 10) : null,
+    restart: restart === "eachSect" || restart === "eachPage" ? restart : "continuous",
+    pos: pos === "beneathText" ? "beneathText" : "pageBottom",
+  };
+}
+
+/** Current w:endnotePr settings for the section governing `t`. */
+export function endnoteOptionsAt(
+  doc: DocxDocument,
+  t: XmlElement,
+): { fmt: NoteNumberFormat; start: number | null; restart: NoteRestart; pos: "sectEnd" | "docEnd" } {
+  const sectPr = sectPrAt(doc, t);
+  const pr = sectPr?.children.find((c) => localName(c.name) === "endnotePr");
+  const fmt = pr ? attr(pr.children.find((c) => localName(c.name) === "numFmt"), "val") : undefined;
+  const start = pr ? attr(pr.children.find((c) => localName(c.name) === "numStart"), "val") : undefined;
+  const restart = pr ? attr(pr.children.find((c) => localName(c.name) === "numRestart"), "val") : undefined;
+  const pos = pr ? attr(pr.children.find((c) => localName(c.name) === "pos"), "val") : undefined;
+  return {
+    fmt: (NOTE_NUMBER_FORMATS as readonly string[]).includes(fmt ?? "") ? (fmt as NoteNumberFormat) : "lowerRoman",
+    start: start !== undefined && Number.isFinite(parseInt(start, 10)) ? parseInt(start, 10) : null,
+    restart: restart === "eachSect" || restart === "eachPage" ? restart : "continuous",
+    pos: pos === "sectEnd" ? "sectEnd" : "docEnd",
+  };
+}
+
+/**
+ * Shared write path for w:footnotePr / w:endnotePr (identical shape, only
+ * the element name and each field's OOXML default differ). With `target` (a
+ * sectPr) only that section changes; otherwise every section in the
+ * document updates, like setPageNumberFormat. An attribute set to null (or
+ * equal to its default) removes the child element; a w:footnotePr /
+ * w:endnotePr left with no children is removed entirely. False when nothing
+ * changed.
+ */
+function setNoteOptions(
+  doc: DocxDocument,
+  prLocalName: "footnotePr" | "endnotePr",
+  defaultFmt: NoteNumberFormat,
+  defaultPos: string,
+  patch: { fmt?: string | null; start?: number | null; restart?: string | null; pos?: string | null },
+  target?: XmlElement,
+): boolean {
+  let sectPrs = target ? [target] : allSectPrs(doc);
+  if (sectPrs.length === 0 && !target) {
+    // sectPr-less minimal doc: materialize the default body section (see
+    // setPageNumberFormat) so the control isn't a dead no-op.
+    const root = doc.editableRoots()[0];
+    const body = root && (localName(root.name) === "body"
+      ? root
+      : root.children.find((c) => localName(c.name) === "body"));
+    if (body) {
+      const w = prefixOf(body) || "w:";
+      const created: XmlElement = { name: `${w}sectPr`, attrs: {}, children: [], text: "" };
+      body.children.push(created);
+      sectPrs = [created];
+    }
+  }
+  if (sectPrs.length === 0) return false;
+  let changed = false;
+  for (const sectPr of sectPrs) {
+    const w = prefixOf(sectPr) || "w:";
+    let pr = sectPr.children.find((c) => localName(c.name) === prLocalName);
+    const ensurePr = (): XmlElement => {
+      if (!pr) {
+        pr = el(`${w}${prLocalName}`);
+        insertInOrder(sectPr, pr);
+      }
+      return pr;
+    };
+    const setChild = (local: string, v: string | null) => {
+      const existing = pr?.children.find((c) => localName(c.name) === local);
+      if (v === null) {
+        if (existing) {
+          ensurePr().children = ensurePr().children.filter((c) => c !== existing);
+          changed = true;
+        }
+        return;
+      }
+      if (existing) {
+        const key = Object.keys(existing.attrs).find((k) => localName(k) === "val") ?? `${w}val`;
+        if (existing.attrs[key] !== v) {
+          existing.attrs[key] = v;
+          changed = true;
+        }
+      } else {
+        insertInNotePrOrder(ensurePr(), el(`${w}${local}`, { [`${w}val`]: v }));
+        changed = true;
+      }
+    };
+    if (patch.pos !== undefined) setChild("pos", patch.pos === null || patch.pos === defaultPos ? null : patch.pos);
+    if (patch.fmt !== undefined) setChild("numFmt", patch.fmt === null || patch.fmt === defaultFmt ? null : patch.fmt);
+    if (patch.start !== undefined) setChild("numStart", patch.start === null ? null : String(patch.start));
+    if (patch.restart !== undefined) {
+      setChild("numRestart", patch.restart === null || patch.restart === "continuous" ? null : patch.restart);
+    }
+    if (pr && pr.children.length === 0) {
+      sectPr.children = sectPr.children.filter((c) => c !== pr);
+    }
+  }
+  if (changed) doc.refresh();
+  return changed;
+}
+
+/**
+ * Set footnote options — number format (w:numFmt, §17.11.17), restart rule
+ * (w:numRestart, §17.11.19), start-at (w:numStart), and position (w:pos,
+ * §17.11.21). The mark's format and start already drive the number layout
+ * paints (formatNoteMark); restart honors "eachSect" (see assignNoteNumbers)
+ * but not "eachPage"; position round-trips but layout always places
+ * footnotes at the page bottom regardless of the value written here.
+ */
+export function setFootnoteOptions(doc: DocxDocument, patch: FootnoteOptionsPatch, target?: XmlElement): boolean {
+  return setNoteOptions(doc, "footnotePr", "decimal", "pageBottom", patch, target);
+}
+
+/** Set endnote options — same shape as setFootnoteOptions; endnotes' OOXML
+ * defaults differ (lowerRoman marks, position "docEnd"). */
+export function setEndnoteOptions(doc: DocxDocument, patch: EndnoteOptionsPatch, target?: XmlElement): boolean {
+  return setNoteOptions(doc, "endnotePr", "lowerRoman", "docEnd", patch, target);
+}
+
 export interface LineNumberingPatch {
   /** Turn margin line numbering on/off for the target section(s). */
   enabled: boolean;
@@ -331,7 +699,10 @@ export function lineNumberingAt(
   return {
     countBy: parseInt(attr(ln, "countBy") ?? "1", 10) || 1,
     restart: restart === "continuous" || restart === "newSection" ? restart : "newPage",
-    start: parseInt(attr(ln, "start") ?? "1", 10) || 1,
+    // The XML attribute is a raw offset (0 implicit when absent) added to the
+    // running count; the number a user actually sees on the first line is
+    // one more than that (see setLineNumbering below and model.ts).
+    start: (parseInt(attr(ln, "start") ?? "0", 10) || 0) + 1,
   };
 }
 
@@ -387,8 +758,14 @@ export function setLineNumbering(doc: DocxDocument, patch: LineNumberingPatch, t
       else setA("restart", patch.restart);
     }
     if (patch.start !== undefined) {
+      // patch.start is the first line's own displayed number. Word reads a
+      // WRITTEN w:start as an offset one below that (probe-linenum2:
+      // explicit start="1" prints 2, start="10" prints 11) — an absent
+      // attribute is the only way to get the bare count starting at 1, so
+      // start=1 omits the attribute and any other value is written as
+      // (start - 1).
       if (patch.start === 1) delA("start");
-      else setA("start", String(patch.start));
+      else setA("start", String(patch.start - 1));
     }
   }
   doc.refresh();

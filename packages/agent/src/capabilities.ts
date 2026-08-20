@@ -1,3 +1,4 @@
+import { CITATION_SOURCE_TYPES, CITATION_STYLES, COVER_PAGE_LAYOUTS, HEADER_FOOTER_PRESETS, knownShapeGeometryNames, PAGE_NUMBER_ALIGNMENTS, PAGE_NUMBER_POSITIONS, registeredOperationCapabilities, STYLE_TYPES, TOC_LEADERS, type RegisteredOperationKind } from "@wordinweb/core";
 import { INTENT_KINDS, type Intent } from "@wordinweb/collab/client";
 
 export interface AgentEditCapability {
@@ -8,20 +9,32 @@ export interface AgentEditCapability {
 }
 
 /**
- * The agent-facing coverage map for the complete canonical edit surface.
- * Record<Intent["kind"], ...> makes a new intent fail the agent build until
- * its tool contract is declared here.
+ * The agent-facing coverage map for every edit operation that is NOT declared
+ * in the core operation registry.
+ *
+ * The Record is still the coverage gate it always was: a new hand-written
+ * intent fails the agent build until its tool contract is declared here.
+ * Registered operations are excluded because their category, description, and
+ * agent-facing fields already come from one declaration — see
+ * registeredOperationCapabilities.
  */
-export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability> = {
-  insertText: { category: "text", description: "Insert text at a run offset.", required: ["at", "text"], optional: ["suggest"] },
-  deleteText: { category: "text", description: "Delete a range within one run.", required: ["blockRef", "runRef", "start", "end"] },
-  splitParagraph: { category: "paragraph", description: "Split a paragraph at a run offset.", required: ["at"], optional: ["suggest"] },
-  formatRun: { category: "text", description: "Format a complete run.", required: ["blockRef", "runRef", "patch"] },
-  formatParagraph: { category: "paragraph", description: "Set paragraph alignment or style.", required: ["blockRef"], optional: ["align", "styleId"] },
-  setListType: { category: "paragraph", description: "Set or clear paragraph list formatting.", required: ["blockRef", "listKind"] },
-  formatRange: { category: "text", description: "Format a range within one run.", required: ["blockRef", "runRef", "start", "end", "patch"] },
-  tableOp: { category: "table", description: "Apply a row, column, cell, or table operation.", required: ["cellRef", "op"] },
-  mergeParagraph: { category: "paragraph", description: "Merge a paragraph into its predecessor.", required: ["blockRef"] },
+const HAND_WRITTEN_CAPABILITIES: Record<
+  Exclude<Intent["kind"], RegisteredOperationKind>,
+  AgentEditCapability
+> = {
+  insertText: { category: "text", description: 'Insert text at a run offset. Each "\\n" in the text creates a real new paragraph.', required: ["at", "text"], optional: ["suggest"] },
+  insertSeparator: { category: "text", description: "Insert an inline separator at a run offset: a soft line break (br) or a tab character (tab).", required: ["at", "separator"], optional: ["suggest"] },
+  deleteSeparator: { category: "text", description: "Delete the inline separator (soft line break, tab) occupying one wire unit at a run offset — insertSeparator's inverse.", required: ["at"], optional: ["suggest"] },
+  deleteText: { category: "text", description: "Delete a range within one run. start/end are offsets within that run's own text, not the paragraph.", required: ["blockRef", "runRef", "start", "end"] },
+  splitParagraph: { category: "paragraph", description: "Split a paragraph at a run offset (with suggest, the new paragraph mark is a tracked insertion).", required: ["at"], optional: ["suggest"] },
+  formatRun: { category: "text", description: "Format a complete run.", required: ["blockRef", "runRef", "patch"], optional: ["suggest"] },
+  formatParagraph: { category: "paragraph", description: "Set paragraph alignment or style.", required: ["blockRef"], optional: ["align", "styleId", "suggest"] },
+  formatRange: { category: "text", description: "Format a range within one run. start/end are offsets within that run's own text, not the paragraph; the range splits into its own run, so re-inspect before addressing this run again.", required: ["blockRef", "runRef", "start", "end", "patch"], optional: ["suggest"] },
+  // `suggest` applies to the three PROPERTY ops (cell shading, cell vertical
+  // alignment, table text wrapping); the structural ones have no tracked form
+  // and are refused in suggestion mode rather than tracked.
+  tableOp: { category: "table", description: "Apply a row, column, cell, or table operation.", required: ["cellRef", "op"], optional: ["suggest"] },
+  mergeParagraph: { category: "paragraph", description: "Merge a paragraph into its predecessor.", required: ["blockRef"], optional: ["suggest"] },
   commentRun: { category: "review", description: "Add a review comment to a run.", required: ["runRef", "text"], optional: ["initials"] },
   pasteBlocks: { category: "insert", description: "Insert validated OOXML paragraph blocks.", required: ["afterBlockRef", "blocksXml"] },
   insertImage: { category: "insert", description: "Insert a registered image asset.", required: ["runRef", "assetRef", "widthPx", "heightPx"] },
@@ -30,8 +43,8 @@ export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability
   insertMath: { category: "math", description: "Insert an equation from linear math text.", required: ["runRef", "mathText"] },
   insertShape: { category: "insert", description: "Insert a shape or text box.", required: ["runRef", "preset"], optional: ["text"] },
   replyComment: { category: "review", description: "Reply to a review comment.", required: ["parentId", "text"], optional: ["initials"] },
-  adjustIndent: { category: "paragraph", description: "Increase or decrease a paragraph indent.", required: ["blockRef", "direction"] },
-  setSpacing: { category: "paragraph", description: "Set paragraph spacing.", required: ["blockRef", "patch"] },
+  adjustIndent: { category: "paragraph", description: "Increase or decrease a paragraph indent.", required: ["blockRef", "direction"], optional: ["suggest"] },
+  setSpacing: { category: "paragraph", description: "Set paragraph spacing.", required: ["blockRef", "patch"], optional: ["suggest"] },
   insertPageField: { category: "insert", description: "Insert a page-number field.", required: ["runRef", "fieldKind"] },
   setLink: { category: "text", description: "Wrap a run in a hyperlink.", required: ["runRef", "url"] },
   insertFootnote: { category: "insert", description: "Insert a footnote.", required: ["runRef", "text"] },
@@ -44,7 +57,7 @@ export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability
   insertCoverPage: { category: "insert", description: "Insert a cover page.", required: ["content"] },
   setPageLayout: { category: "document", description: "Set page layout properties.", required: ["patch"] },
   setListLevel: { category: "paragraph", description: "Change a list nesting level.", required: ["blockRef", "delta"] },
-  insertWordArt: { category: "insert", description: "Insert WordArt.", required: ["runRef", "text", "preset"] },
+  insertWordArt: { category: "insert", description: "Insert WordArt.", required: ["runRef", "text", "preset"], optional: ["style"] },
   insertChart: { category: "insert", description: "Insert a chart.", required: ["runRef", "chart"] },
   insertSmartArt: { category: "insert", description: "Insert SmartArt.", required: ["runRef", "smartArt"] },
   setLineNumbering: { category: "document", description: "Configure margin line numbering.", required: ["patch"] },
@@ -67,21 +80,27 @@ export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability
   setFloatingPagePosition: { category: "drawing", description: "Position a floating drawing on the page.", required: ["objectRef", "xPx", "yPx"] },
   resizeDrawing: { category: "drawing", description: "Resize a drawing.", required: ["objectRef", "widthPx", "heightPx"] },
   resizeTableColumn: { category: "table", description: "Resize a table column.", required: ["cellRef", "boundary", "deltaPx"], optional: ["renderedWidths"] },
-  resizeTableRow: { category: "table", description: "Resize a table row.", required: ["cellRef", "rowIdx", "heightPx"] },
   moveTable: { category: "table", description: "Move a floating table.", required: ["cellRef", "xPx", "yPx", "preservePageStart", "pageDelta"] },
   removeDrawing: { category: "drawing", description: "Remove a drawing.", required: ["objectRef"] },
-  setMathLinear: { category: "math", description: "Replace an equation from linear math text.", required: ["blockRef", "mathText"] },
-  deleteMath: { category: "math", description: "Delete an equation.", required: ["blockRef"] },
-  moveMath: { category: "math", description: "Move an equation to a text position.", required: ["blockRef", "at"] },
+  setMathLinear: { category: "math", description: "Replace an equation from linear math text.", required: ["blockRef", "mathText"], optional: ["mathIndex"] },
+  deleteMath: { category: "math", description: "Delete an equation.", required: ["blockRef"], optional: ["mathIndex"] },
+  moveMath: { category: "math", description: "Move an equation to a text position.", required: ["blockRef", "at"], optional: ["mathIndex"] },
   ensureHeaderFooter: { category: "document", description: "Create a header or footer story.", required: ["hfKind"] },
-  deleteComment: { category: "review", description: "Delete a comment thread.", required: ["commentId"] },
+  deleteComment: { category: "review", description: "Delete a comment (a thread-parent id deletes the whole thread; a reply id deletes just that reply).", required: ["commentId"] },
+  resolveComment: { category: "review", description: "Resolve or reopen a comment thread.", required: ["commentId", "resolved"] },
+  editComment: { category: "review", description: "Replace a comment's text.", required: ["commentId", "text"] },
   insertBookmarkRange: { category: "insert", description: "Wrap a run range in a bookmark.", required: ["runRef", "name", "start", "end"] },
-  toggleCheckbox: { category: "text", description: "Toggle a checkbox content control.", required: ["runRef"] },
   acceptRevision: { category: "review", description: "Accept one tracked revision.", required: ["index"] },
   rejectRevision: { category: "review", description: "Reject one tracked revision.", required: ["index"] },
   acceptAllRevisions: { category: "review", description: "Accept all tracked revisions.", required: [] },
   rejectAllRevisions: { category: "review", description: "Reject all tracked revisions.", required: [] },
-  insertTable: { category: "insert", description: "Insert a table.", required: ["runRef", "rows", "cols"] },
+};
+
+/** The complete agent-facing coverage map: hand-written rows plus the rows
+ * the core operation registry declares. */
+export const AGENT_EDIT_CAPABILITIES: Record<Intent["kind"], AgentEditCapability> = {
+  ...HAND_WRITTEN_CAPABILITIES,
+  ...registeredOperationCapabilities(),
 };
 
 type JsonSchema = Record<string, unknown>;
@@ -114,6 +133,23 @@ const wirePosition = closedObject({
   offset: integer(0),
 }, ["blockRef", "runRef", "offset"]);
 
+const styleId = { type: "string", pattern: "^[A-Za-z0-9\\-_]{1,253}$" };
+
+/** One w:tblBorders edge. Shared by the table-border operation and by a
+ * table STYLE definition, so the two cannot admit different borders. */
+const borderEdgeSpec = closedObject({
+  style: {
+    enum: [
+      "single", "thick", "double", "dotted", "dashed", "dotDash",
+      "dotDotDash", "thinThickSmallGap", "triple", "wave", "none",
+    ],
+  },
+  sz: number(1, 96),
+  color: { anyOf: [rgb, { const: "auto" }] },
+  space: number(0, 31),
+}, ["style"]);
+
+
 const runFormatPatch = closedObject({
   bold: boolean,
   italic: boolean,
@@ -124,7 +160,98 @@ const runFormatPatch = closedObject({
   fontSizePt: number(1, 1638),
   fontFamily: string(100, 1),
   verticalAlign: { enum: ["superscript", "subscript", null] },
+  // Applying a character style is a run-patch property rather than an
+  // operation of its own, because it splits the run at a partial selection
+  // exactly as the other properties do. This WIDENS formatRun/formatRange:
+  // every payload that validated before still validates.
+  characterStyleId: { anyOf: [styleId, { type: "null" }] },
   clear: boolean,
+});
+
+/** The paragraph properties a style DEFINITION can carry (styles.xml), as
+ * opposed to the direct paragraph formatting setSpacing patches. */
+const styleParaPatch = closedObject({
+  alignment: { enum: ["left", "center", "right", "both", null] },
+  spacingBeforePt: { anyOf: [number(0, 1584), { type: "null" }] },
+  spacingAfterPt: { anyOf: [number(0, 1584), { type: "null" }] },
+  lineMultiple: { anyOf: [number(0.1, 132), { type: "null" }] },
+  indentLeftPt: { anyOf: [number(-1584, 1584), { type: "null" }] },
+  indentFirstLinePt: { anyOf: [number(-1584, 1584), { type: "null" }] },
+  keepNext: { type: ["boolean", "null"] },
+  outlineLevel: { anyOf: [integer(0, 8), { type: "null" }] },
+});
+
+const styleRunPatch = closedObject({
+  bold: boolean,
+  italic: boolean,
+  underline: boolean,
+  strike: boolean,
+  color: { anyOf: [rgb, { type: "null" }] },
+  highlight: { type: ["string", "null"] },
+  fontSizePt: number(1, 1638),
+  fontFamily: string(64, 1),
+  verticalAlign: { enum: ["superscript", "subscript", null] },
+  characterStyleId: { anyOf: [styleId, { type: "null" }] },
+});
+
+/** The grid a TABLE style draws. Conditional formats (w:tblStylePr) are not
+ * expressible yet, so the schema does not admit them. */
+const styleTableProps = closedObject({
+  borders: closedObject({
+    top: borderEdgeSpec,
+    bottom: borderEdgeSpec,
+    left: borderEdgeSpec,
+    right: borderEdgeSpec,
+    insideH: borderEdgeSpec,
+    insideV: borderEdgeSpec,
+  }),
+});
+
+const styleSpec = closedObject(
+  {
+    styleId,
+    // Widened from paragraph/character: every payload that validated before
+    // still validates, and a table or numbering style is now expressible.
+    type: { enum: [...STYLE_TYPES] },
+    name: string(253, 1),
+    basedOn: { anyOf: [styleId, { type: "null" }] },
+    next: { anyOf: [styleId, { type: "null" }] },
+    quickStyle: boolean,
+    uiPriority: integer(0, 99),
+    paragraph: styleParaPatch,
+    run: styleRunPatch,
+    /** Paragraph styles only: also write Word's linked character companion. */
+    linked: boolean,
+    /** Table styles only. */
+    table: styleTableProps,
+    /** Numbering styles only, and required for them. */
+    numbering: closedObject({ numId: integer(1, 32767) }, ["numId"]),
+  },
+  ["styleId", "type", "name"],
+);
+
+const stylePatch = closedObject({
+  name: string(253, 1),
+  basedOn: { anyOf: [styleId, { type: "null" }] },
+  next: { anyOf: [styleId, { type: "null" }] },
+  quickStyle: boolean,
+  uiPriority: integer(0, 99),
+  paragraph: styleParaPatch,
+  run: styleRunPatch,
+});
+
+const numberingLevelPatch = closedObject({
+  format: {
+    enum: [
+      "decimal", "decimalZero", "upperRoman", "lowerRoman", "upperLetter",
+      "lowerLetter", "ordinal", "bullet", "none",
+    ],
+  },
+  text: string(100, 1),
+  start: integer(0, 32767),
+  alignment: { enum: ["left", "center", "right"] },
+  indentLeftPt: number(0, 1584),
+  hangingPt: number(0, 1584),
 });
 
 const paragraphSpacingPatch = closedObject({
@@ -142,7 +269,7 @@ const paragraphDivider = closedObject({
 }, ["style", "color", "widthPt", "spacePt"]);
 
 const chartData = closedObject({
-  type: { enum: ["column", "bar", "line", "pie"] },
+  type: { enum: ["column", "bar", "line", "pie", "doughnut", "area", "scatter"] },
   title: string(200),
   categories: { type: "array", minItems: 1, maxItems: 100, items: string(200) },
   series: {
@@ -154,6 +281,7 @@ const chartData = closedObject({
       values: { type: "array", maxItems: 100, items: number() },
     }, ["name", "values"]),
   },
+  grouping: { enum: ["clustered", "stacked", "percentStacked"] },
 }, ["type", "categories", "series"]);
 
 const smartArtData = closedObject({
@@ -203,7 +331,7 @@ const lineNumberingPatch = closedObject({
 
 const tableOperation = {
   anyOf: [
-    { enum: ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight"] },
+    { enum: ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight", "mergeRight", "mergeDown", "splitCell"] },
     closedObject({ kind: { const: "cellShading" }, fill: { anyOf: [rgb, { type: "null" }] } }, ["kind", "fill"]),
     closedObject({ kind: { const: "cellVAlign" }, v: { enum: ["top", "center", "bottom"] } }, ["kind", "v"]),
     closedObject({
@@ -215,6 +343,48 @@ const tableOperation = {
   ],
 };
 
+// Table formatting. "none" is a real border style (Word's No Border, written
+// w:val="nil") and is distinct from a null `border`, which REMOVES the edge so
+// it inherits again — the schema has to admit both.
+const tableBorderSpec = { anyOf: [borderEdgeSpec, { type: "null" }] };
+
+const tableLookToggles = closedObject({
+  firstRow: boolean,
+  lastRow: boolean,
+  firstColumn: boolean,
+  lastColumn: boolean,
+  bandedRows: boolean,
+  bandedCols: boolean,
+});
+
+const cellMarginsPt = {
+  anyOf: [
+    closedObject({ top: number(0, 720), left: number(0, 720), bottom: number(0, 720), right: number(0, 720) }),
+    { type: "null" },
+  ],
+};
+
+/** One bibliography-source tag: Word's Source-Manager shape, shared with the
+ * insertCitation row below. */
+const citationTag = { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$" };
+
+/** The editable fields of a bibliography source, minus its identity; the
+ * source spec and the edit patch share them so the two cannot drift. */
+const citationSourceFields: Record<string, JsonSchema> = {
+  type: { enum: [...CITATION_SOURCE_TYPES] },
+  authors: {
+    type: "array",
+    maxItems: 20,
+    items: closedObject({ last: string(100, 1), first: string(100) }, ["last"]),
+  },
+  corporate: string(255),
+  title: string(512),
+  year: string(16),
+  publisher: string(255),
+  journal: string(255),
+  url: string(2048),
+};
+
 const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "formatRun.patch": runFormatPatch,
   "formatRange.patch": runFormatPatch,
@@ -222,33 +392,203 @@ const NESTED_SCHEMAS: Record<string, JsonSchema> = {
   "setDivider.divider": { anyOf: [paragraphDivider, { type: "null" }] },
   "setPageLayout.patch": pageLayoutPatch,
   "setLineNumbering.patch": lineNumberingPatch,
-  "insertCoverPage.content": closedObject({ title: string(1000, 1), subtitle: string(1000), author: string(500) }, ["title"]),
+  "insertCoverPage.content": closedObject(
+    { title: string(1000, 1), subtitle: string(1000), author: string(500), layout: { type: "string", enum: [...COVER_PAGE_LAYOUTS] } },
+    ["title"],
+  ),
+  // Degrees on each axis. Unbounded because the mutation normalizes into
+  // 0..360 itself, which is also why the registry's validate asks only that
+  // each angle be finite.
+  "setModel3DRotation.rotation": closedObject({ x: number(), y: number(), z: number() }, ["x", "y", "z"]),
+  "insertWordArt.style": closedObject({
+    fill: { type: "string", pattern: "^[0-9A-Fa-f]{6}$" },
+    outline: closedObject({
+      color: { type: "string", pattern: "^[0-9A-Fa-f]{6}$" },
+      widthPt: number(0.25, 50),
+    }, ["color", "widthPt"]),
+    shadow: boolean,
+  }, ["fill"]),
   "insertChart.chart": chartData,
   "setChartData.chart": chartData,
   "insertSmartArt.smartArt": smartArtData,
   "setSmartArtData.smartArt": smartArtData,
   "setSmartArtTextFormat.format": smartArtTextFormat,
   "tableOp.op": tableOperation,
+  "insertTable.cells": {
+    type: "array",
+    maxItems: 50,
+    items: { type: "array", maxItems: 50, items: string(2000) },
+  },
+  "setTableBorders.border": tableBorderSpec,
+  "setTableBorders.edges": {
+    type: "array",
+    minItems: 1,
+    maxItems: 8,
+    items: { enum: ["top", "bottom", "left", "right", "insideH", "insideV", "tl2br", "tr2bl"] },
+  },
+  "setTableLook.look": tableLookToggles,
+  "setTableCellMargins.margins": cellMarginsPt,
+  "setTableWidth.value": number(0.1, 1584),
+  "setTableColumnWidth.colIdx": integer(0, 200),
+  "sortTableRows.colIdx": integer(0, 200),
+  // The registry's validate parses the whole grammar; the schema carries the
+  // length caps ("=SUM(ABOVE)" body, "#,##0.00" picture).
+  "insertTableFormula.formula": string(129, 1),
+  "insertTableFormula.numFmt": string(32, 1),
+  "convertTextToTable.cellCount": integer(1, 10000),
+  "convertTableToText.rowCount": integer(1, 10000),
+  "setTableColumnWidth.widthPt": number(1, 1584),
+  "setTableHeaderRows.count": integer(0, 5000),
+  // A TOC's size is document-derived, so entryCount is an id BUDGET the
+  // originator computes with tocEntryCount — see the operation's own comment.
+  "insertToc.entryCount": integer(1, 10000),
+  // Same budget pattern: one entry per bibliography source, computed with
+  // bibliographyEntryCount (× the field count for a refresh).
+  "insertBibliography.entryCount": integer(1, 10000),
+  "refreshBibliography.entryCount": integer(1, 10000),
+  // Same budget pattern again: one per index entry paragraph, computed with
+  // indexEntryCount (× the field count for a refresh).
+  "insertIndex.entryCount": integer(1, 10000),
+  "refreshIndex.entryCount": integer(1, 10000),
+  "insertIndexEntry.entry": string(128, 1),
+  "insertToc.levels": {
+    type: "array",
+    minItems: 2,
+    maxItems: 2,
+    items: integer(1, 9),
+  },
+  // The core registry's own validate is stricter (printable ASCII, no quote
+  // or backslash in a name; Word's alphanumeric tag shape); the schema carries
+  // the length caps and the tag pattern.
+  "insertMergeField.name": string(64, 1),
+  "insertCitation.tag": citationTag,
+  "createCitationSource.source": closedObject(
+    { tag: citationTag, ...citationSourceFields },
+    ["tag", "type"],
+  ),
+  "editCitationSource.tag": citationTag,
+  "editCitationSource.patch": closedObject(citationSourceFields),
+  "deleteCitationSource.tag": citationTag,
+  // Word's own AutoText/Quick-Part name length (the core registry's own
+  // isValidBuildingBlockName is stricter still: no control characters).
+  "createBuildingBlock.name": string(64, 1),
+  "createBuildingBlock.category": string(64),
+  "insertBuildingBlock.name": string(64, 1),
+  "deleteBuildingBlock.name": string(64, 1),
+  // The insertBibliography entryCount budget pattern: the caller computes
+  // this with buildingBlockNodeCount from the SAME already-synced glossary
+  // state the apply side reads.
+  "insertBuildingBlock.blockCount": integer(0, 5000),
+  "insertToc.captionLabel": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
+  "insertCaption.label": { type: "string", pattern: "^[A-Za-z][A-Za-z0-9]{0,31}$" },
+  "insertCaption.text": string(2000, 0),
+  "ensureRefBookmark.name": { type: "string", pattern: "^_Ref[0-9]{1,12}$" },
+  "createStyle.style": styleSpec,
+  "modifyStyle.styleId": styleId,
+  "modifyStyle.patch": stylePatch,
+  "deleteStyle.styleId": styleId,
+  "setNumberingLevel.ilvl": { anyOf: [integer(0, 8), { type: "null" }] },
+  "setNumberingLevel.patch": numberingLevelPatch,
+  "setNumberingRestart.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  // The registry's own validate is the wire authority (edge/style/range caps).
+  "setParagraphBorders.patch": {
+    type: "object",
+    properties: {
+      borders: {
+        type: "object",
+        additionalProperties: false,
+        properties: Object.fromEntries(
+          ["top", "left", "bottom", "right", "between", "bar"].map((edge) => [
+            edge,
+            {
+              anyOf: [
+                closedObject(
+                  {
+                    style: { enum: ["single", "thick", "double", "dotted", "dashed", "dotDash", "dotDotDash", "thinThickSmallGap", "triple", "wave", "none"] },
+                    sz: number(1, 96),
+                    color: { type: "string" },
+                    space: number(0, 31),
+                  },
+                  ["style"],
+                ),
+                { type: "null" },
+              ],
+            },
+          ]),
+        ),
+      },
+      shading: { anyOf: [{ type: "string", pattern: "^#?[0-9A-Fa-f]{6}$" }, { type: "null" }] },
+    },
+    additionalProperties: false,
+  },
+  // The registry's own validate is the wire authority (count and range caps).
+  "setTabStops.stops": {
+    type: "array",
+    maxItems: 64,
+    items: closedObject(
+      {
+        posPt: number(-1584, 1584),
+        align: { enum: ["left", "center", "right", "decimal", "bar"] },
+        leader: { enum: ["none", "dot", "hyphen", "underscore", "middleDot"] },
+      },
+      ["posPt", "align", "leader"],
+    ),
+  },
+  // w:pgNumType. null clears the attribute (fmt back to decimal; start back
+  // to "continue from previous section").
+  "setPageNumberFormat.fmt": {
+    anyOf: [{ enum: ["decimal", "lowerRoman", "upperRoman", "lowerLetter", "upperLetter"] }, { type: "null" }],
+  },
+  "setPageNumberFormat.start": { anyOf: [integer(0, 32767), { type: "null" }] },
+  "setHyphenation.auto": boolean,
+  "setHyphenation.noCaps": boolean,
+  "setHyphenation.zonePt": { anyOf: [number(0.1, 1584), { type: "null" }] },
+  // Fractions of the source bitmap trimmed off each edge; the registry's own
+  // validate additionally refuses a crop that leaves no visible strip.
+  "setCrop.crop": closedObject(
+    Object.fromEntries(["l", "t", "r", "b"].map((edge) => [edge, number(0, 0.99)])),
+    ["l", "t", "r", "b"],
+  ),
 };
 
 const ENUMS: Record<string, readonly unknown[]> = {
   "formatParagraph.align": ["left", "center", "right", "justify"],
   "setListType.listKind": ["bullet", "number", null],
-  "tableOp.op": ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight"],
+  "tableOp.op": ["deleteRow", "deleteCol", "deleteTable", "rowAbove", "rowBelow", "colLeft", "colRight", "mergeRight", "mergeDown", "splitCell"],
   "insertBreak.breakKind": ["page", "column"],
-  "insertShape.preset": ["line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox"],
+  "insertSeparator.separator": ["br", "tab"],
+  "insertShape.preset": [...new Set([
+    "line", "verticalLine", "rectangle", "roundedRectangle", "ellipse", "diamond", "textBox",
+    ...knownShapeGeometryNames(),
+  ])],
   "adjustIndent.direction": [1, -1],
   "insertPageField.fieldKind": ["page", "pageOfTotal"],
   "setDropCap.mode": ["drop", "margin", null],
   "insertSectionBreak.breakType": ["nextPage", "continuous"],
   "insertCrossRef.refKind": ["text", "page"],
   "setListLevel.delta": [1, -1],
-  "insertWordArt.preset": ["plain", "archUp", "archDown", "wave", "chevron"],
+  "insertWordArt.preset": ["plain", "archUp", "archDown", "wave", "chevron", "circle", "button", "chevronDown"],
   "insertDateTimeField.dtKind": ["date", "time"],
   "setDrawingLineStyle.dash": ["solid", "dashed", "dotted"],
+  "setDrawingTextFit.mode": ["none", "resizeShape", "shrinkText"],
   "setImageWrap.mode": ["inline", "square", "topAndBottom", "none", "behind"],
   "setDrawingOrder.order": ["front", "back"],
   "ensureHeaderFooter.hfKind": ["header", "footer"],
+  "setTableBorders.scope": ["cell", "table"],
+  "setTableCellMargins.scope": ["cell", "table"],
+  "setTableWidth.unit": ["pt", "pct", "auto"],
+  "insertToc.leader": [...TOC_LEADERS],
+  "setTableLayout.layout": ["fixed", "autofit"],
+  "sortTableRows.order": ["asc", "desc"],
+  "sortTableRows.compare": ["text", "number"],
+  "convertTextToTable.separator": ["tab", "comma"],
+  "convertTableToText.separator": ["tab", "comma"],
+  "setCitationStyle.style": [...CITATION_STYLES],
+  "insertCaption.position": ["below", "above"],
+  "insertPageNumberPosition.position": [...PAGE_NUMBER_POSITIONS],
+  "insertPageNumberPosition.align": [...PAGE_NUMBER_ALIGNMENTS],
+  "insertHeaderFooterPreset.hfKind": ["header", "footer"],
+  "insertHeaderFooterPreset.preset": [...HEADER_FOOTER_PRESETS],
 };
 
 function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
@@ -288,19 +628,41 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
       },
     };
   }
-  if (field === "suggest" || field === "preservePageStart") return { type: "boolean" };
+  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow" || field === "hasHeader" || field === "enabled" || field === "resolved" || field === "washout") return { type: "boolean" };
+  // insertWatermark's headerCount is both its carried-id budget and its
+  // rejection predicate; the cap matches its own validate in the registry.
+  if (field === "headerCount") return integer(1, 50);
+  // insertPictureWatermark carries a media RESERVATION, never the bytes: the
+  // blob's address, its length, the extension that names its type, and (in an
+  // encrypted room) the IV it was sealed with. Each pattern matches the
+  // operation's own validate in the core registry.
+  if (field === "blobSha") return { type: "string", pattern: "^[0-9a-f]{64}$" };
+  if (field === "iv") return { type: "string", pattern: "^[A-Za-z0-9+/]{16}$" };
+  if (field === "ext") return { enum: ["png", "jpg", "jpeg", "gif", "bmp", "webp"] };
+  if (field === "bytesLen") return integer(1);
+  // The picture's OWN pixel size. The painted size is derived from it against
+  // the page, so it is not a layout number the caller chooses.
+  if (field === "naturalWidthPx" || field === "naturalHeightPx") return number(1, 20000);
   if (field === "rows" || field === "cols") return integer(1, 50);
   if (field === "boundary") return integer(1, 200);
   if (field === "rowIdx") return integer(0, 5000);
   if (field === "pageDelta") return integer(-500, 500);
   if (field === "index" || field === "nodeIndex") return integer(0, 100000);
+  // Which equation in the block, in document order. The cap matches the wire
+  // validate; anything past the block's last equation is a clean no-op.
+  if (field === "mathIndex") return integer(0, 1000);
   if (field === "start" || field === "end") return integer(0);
   if (field === "degrees") return number();
   if (field === "opacity") return number(0, 1);
+  // a:normAutofit's cached scale, as a percentage of the authored font size.
+  if (field === "fontScalePct") return number(1, 100);
   if (field === "widthPx" || field === "heightPx") return number(1, kind === "resizeTableRow" ? 20000 : 5000);
   if (field === "xPx" || field === "yPx") return number(-5000, kind === "moveTable" ? 20000 : 5000);
   if (field === "deltaPx") return number(-5000, 5000);
   if (field === "renderedWidths") return { type: "array", maxItems: 200, items: number(0, 20000) };
+  // updateFields carries one recomputed cached result per field in document
+  // order; the caps match the operation's own validate in the core registry.
+  if (field === "results") return { type: "array", maxItems: 20000, items: string(4096) };
   if (field === "color") {
     const nullable = kind === "setDrawingFill" || kind === "setSmartArtFill" || kind === "setDrawingLineStyle";
     const value = { type: "string", pattern: "^[0-9A-Fa-f]{6}$" };
@@ -309,8 +671,9 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
   if (field === "styleId") return { type: ["string", "null"] };
   if (field === "text") {
     const max = kind === "insertText" ? 100000
-      : kind === "insertWordArt" || kind === "setDrawingWordArtText" || kind === "setSmartArtNodeText" ? 500
-        : 20000;
+      : kind === "insertWatermark" ? 255
+        : kind === "insertWordArt" || kind === "setDrawingWordArtText" || kind === "setSmartArtNodeText" ? 500
+          : 20000;
     return string(max, kind === "insertShape" || kind === "setSmartArtNodeText" ? 0 : 1);
   }
   if (field === "blocksXml") return string(2_000_000, 1);
@@ -401,4 +764,185 @@ export function agentCapabilities(category?: AgentEditCapability["category"], re
         inputSchema: agentOperationSchema(kind),
       };
     });
+}
+
+// --- $defs hoisting ---------------------------------------------------------
+
+/**
+ * The 125-branch operations union spells the same subschema out over and over:
+ * `^run:[0-9]+$` appears 38 times, `^block:[0-9]+$` 44 times, and the border
+ * edge object 6 times inside setParagraphBorders alone. Those bytes ship on
+ * every request of every round.
+ *
+ * The Messages API accepts `$defs` and `$ref` inside a tool's `input_schema`
+ * and charges the definition once — a live probe against claude-opus-5 counted
+ * 783 input tokens for a shape written out three times and 584 for the same
+ * shape behind three `$ref`s, and the model filled the referenced shape in
+ * correctly, including through an `anyOf` branch. So the repetition is pure
+ * cost with no meaning attached, and collapsing it changes nothing the model
+ * can observe except the byte count.
+ *
+ * Only the top-level combinator is forbidden (see model.ts validateRequestShape),
+ * and `$defs` is not one.
+ */
+
+/** Every subschema a `$ref` could stand in for: the values of `properties`,
+ * of `items`, and the branches of `anyOf`. */
+function refableChildren(node: JsonSchema): JsonSchema[] {
+  const children: JsonSchema[] = [];
+  const properties = node.properties;
+  if (properties && typeof properties === "object") {
+    for (const value of Object.values(properties as Record<string, unknown>)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) children.push(value as JsonSchema);
+    }
+  }
+  const items = node.items;
+  if (items && typeof items === "object" && !Array.isArray(items)) children.push(items as JsonSchema);
+  const anyOf = node.anyOf;
+  if (Array.isArray(anyOf)) {
+    for (const branch of anyOf) {
+      if (branch && typeof branch === "object" && !Array.isArray(branch)) children.push(branch as JsonSchema);
+    }
+  }
+  return children;
+}
+
+/**
+ * Property names that hold an address — where in the document an operation
+ * acts — rather than content. Shapes reached under one of these stay written
+ * out in full wherever they appear.
+ *
+ * The reason is measured, not aesthetic. Hoisting *every* repeated shape saved
+ * 14.3% of the input tokens and cost `object-insert` 1.8 rounds (mean 6.7 ->
+ * 8.5 over 40 runs an arm, against a 0.5-round noise floor from an A/A
+ * control). The transcripts put the divergence at the first `word_document_edit`:
+ * behind `$ref`s the model composed smaller first transactions. Composing a
+ * transaction is reasoning about where each operation lands, so the addressing
+ * shapes are the ones it has to hold in mind while it does that, and they are
+ * also the cheapest to leave alone — keeping them inline gives back about a
+ * quarter of the bytes the full hoist saved.
+ *
+ * `offset` is here so an `at` reads end to end with no indirection in it; it
+ * shares its shape with `start` and `end`, which address character ranges, and
+ * the whole exclusion costs 30 characters.
+ */
+const ADDRESSING_PROPERTIES = new Set([
+  "at",
+  "blockRef",
+  "cellRef",
+  "afterBlockRef",
+  "runRef",
+  "objectRef",
+  "offset",
+  "start",
+  "end",
+]);
+
+/** Walk every refable position, keyed by the property name it first appears
+ * under so the generated `$defs` key reads like the thing it describes. */
+function censusSubschemas(root: JsonSchema): Map<string, { count: number; hint: string; addressing: boolean }> {
+  const census = new Map<string, { count: number; hint: string; addressing: boolean }>();
+  const visit = (node: JsonSchema, hint: string): void => {
+    const properties = node.properties;
+    const named = new Map<JsonSchema, string>();
+    if (properties && typeof properties === "object") {
+      for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+        // First key wins: one subschema object can sit under several property
+        // names, and the $defs key should not depend on iteration order.
+        if (value && typeof value === "object" && !Array.isArray(value) && !named.has(value as JsonSchema)) {
+          named.set(value as JsonSchema, key);
+        }
+      }
+    }
+    for (const child of refableChildren(node)) {
+      const childHint = named.get(child) ?? hint;
+      const key = JSON.stringify(child);
+      const entry = census.get(key);
+      const addressing = ADDRESSING_PROPERTIES.has(childHint);
+      if (entry) {
+        entry.count += 1;
+        // One appearance under an address name keeps the shape inline
+        // everywhere, so a reader never meets it in two forms.
+        entry.addressing ||= addressing;
+      } else census.set(key, { count: 1, hint: childHint, addressing });
+      visit(child, childHint);
+    }
+  };
+  visit(root, "value");
+  return census;
+}
+
+/** A `$defs` key that reads as the shape it names, unique within the schema. */
+function definitionName(hint: string, taken: Set<string>): string {
+  const base = /^[A-Za-z][A-Za-z0-9]*$/.test(hint) ? hint : "shape";
+  let name = base;
+  for (let suffix = 2; taken.has(name); suffix++) name = `${base}${suffix}`;
+  taken.add(name);
+  return name;
+}
+
+/**
+ * Collapse every repeated subschema that describes *what to write* into one
+ * `$defs` entry and a `$ref` at each site. Shapes that describe *where to
+ * write* (see `ADDRESSING_PROPERTIES`) and shapes that would cost more as a
+ * reference than as themselves are left alone. The resolved schema is
+ * identical to the input, so no caller and no model behaviour depends on which
+ * form it gets.
+ */
+export function hoistRepeatedSubschemas(schema: JsonSchema): JsonSchema {
+  const census = censusSubschemas(schema);
+  const taken = new Set<string>();
+  const chosen = new Map<string, string>();
+  const candidates = [...census.entries()]
+    .filter(([, entry]) => entry.count > 1 && !entry.addressing)
+    // Largest first, so a shape that contains another gets the readable name.
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [key, entry] of candidates) {
+    const name = definitionName(entry.hint, new Set(taken));
+    const refLength = `{"$ref":"#/$defs/${name}"}`.length;
+    // Cost of keeping it: count copies. Cost of hoisting: one definition, its
+    // key, and one reference per site.
+    const kept = entry.count * key.length;
+    const hoisted = key.length + name.length + 4 + entry.count * refLength;
+    if (hoisted >= kept) continue;
+    taken.add(name);
+    chosen.set(key, name);
+  }
+  if (chosen.size === 0) return schema;
+
+  /** Substitution happens only where a `$ref` is legal — the same positions
+   * the census walked — so a `properties` map or an `enum` entry that happens
+   * to look like a hoisted shape is left alone. */
+  const asRefOrRewritten = (node: JsonSchema): unknown => {
+    const name = chosen.get(JSON.stringify(node));
+    return name === undefined ? rewriteBody(node) : { $ref: `#/$defs/${name}` };
+  };
+  function rewriteBody(node: JsonSchema): JsonSchema {
+    const output: Record<string, unknown> = { ...node };
+    if (node.properties && typeof node.properties === "object") {
+      output.properties = Object.fromEntries(
+        Object.entries(node.properties as Record<string, unknown>).map(([key, value]) => [
+          key,
+          value && typeof value === "object" && !Array.isArray(value) ? asRefOrRewritten(value as JsonSchema) : value,
+        ]),
+      );
+    }
+    if (node.items && typeof node.items === "object" && !Array.isArray(node.items)) {
+      output.items = asRefOrRewritten(node.items as JsonSchema);
+    }
+    if (Array.isArray(node.anyOf)) {
+      output.anyOf = node.anyOf.map((branch) =>
+        branch && typeof branch === "object" && !Array.isArray(branch) ? asRefOrRewritten(branch as JsonSchema) : branch,
+      );
+    }
+    return output;
+  }
+
+  const $defs: Record<string, unknown> = {};
+  for (const [key, name] of chosen) $defs[name] = rewriteBody(JSON.parse(key) as JsonSchema);
+  const { $defs: existing, ...rest } = schema;
+  return {
+    ...rewriteBody(rest),
+    $defs: { ...(existing as Record<string, unknown> | undefined), ...$defs },
+  };
 }

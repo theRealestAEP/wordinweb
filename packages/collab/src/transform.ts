@@ -1,4 +1,4 @@
-import { Intent, Position } from "./intents.js";
+import { Intent, Position, isRegisteredIntent } from "./intents.js";
 
 /**
  * The canonical transform (plan doc 03). Stable ids make structural
@@ -30,9 +30,23 @@ export interface RunEdit {
 /** The run edits a prior intent imposes on the document (only same-run edits
  * matter to offset transformation; cross-run structure is handled by ids). */
 export function runEditsOf(intent: Intent): RunEdit[] {
+  // The registry admits only position-stable operations (see its module
+  // comment), so a registered intent never shifts another intent's offsets.
+  if (isRegisteredIntent(intent)) return [];
   switch (intent.kind) {
     case "insertText":
       return [{ runId: intent.at.runId, at: intent.at.offset, del: 0, ins: intent.text.length }];
+    case "insertSeparator":
+      // In-run w:t split around a one-unit separator: exactly an insert of
+      // length one in the run's separator-counting wire basis.
+      return [{ runId: intent.at.runId, at: intent.at.offset, del: 0, ins: 1 }];
+    case "deleteSeparator":
+      // The inverse: exactly a delete of length one in the same basis. The
+      // SUGGEST form wraps instead of removing (run splits at the strike,
+      // like suggestRevision) — no run edit is modeled, and a concurrent
+      // same-run position past the boundary resolves-or-rejects identically
+      // on every replica (degraded fidelity, never divergence).
+      return intent.suggest ? [] : [{ runId: intent.at.runId, at: intent.at.offset, del: 1, ins: 0 }];
     case "deleteText":
       return [{ runId: intent.runId, at: intent.start, del: intent.end - intent.start, ins: 0 }];
     case "splitParagraph":
@@ -43,9 +57,6 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // position of any concurrent intent is affected.
       return [];
     case "formatParagraph":
-      // Block-level; moves no text, preserves ids.
-      return [];
-    case "setListType":
       // Block-level; moves no text, preserves ids.
       return [];
     case "formatRange":
@@ -130,15 +141,15 @@ export function runEditsOf(intent: Intent): RunEdit[] {
     case "setFloatingPagePosition":
     case "resizeDrawing":
     case "resizeTableColumn":
-    case "resizeTableRow":
     case "moveTable":
     case "removeDrawing":
     case "setMathLinear":
     case "deleteMath":
     case "ensureHeaderFooter":
     case "deleteComment":
+    case "resolveComment":
+    case "editComment":
     case "insertBookmarkRange":
-    case "toggleCheckbox":
       // Run/block/document-level; no existing run's text offsets shift.
       return [];
     case "moveMath":
@@ -148,7 +159,6 @@ export function runEditsOf(intent: Intent): RunEdit[] {
       // every replica (degraded concurrency fidelity, never divergence). The
       // movedToRunId remap is the designed follow-on for both.
       return [];
-    case "insertTable":
     case "acceptRevision":
     case "rejectRevision":
     case "acceptAllRevisions":
@@ -233,8 +243,18 @@ export function transformPosition(pos: Position, ahead: Intent[], leftGravity = 
  * intent with adjusted positions; `base` is advanced past `ahead`. */
 export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
   const newBase = intent.base + ahead.length;
+  // Registered operations are addressed by stable id alone; their transform is
+  // identity. Narrowing first keeps the switch over the hand-written intents.
+  if (isRegisteredIntent(intent)) return { ...intent, base: newBase };
   switch (intent.kind) {
     case "insertText":
+      return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
+    case "insertSeparator":
+      return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
+    case "deleteSeparator":
+      // The separator's unit start shifts like any position; if a prior
+      // delete swallowed it, the unit no longer resolves to a separator and
+      // the apply no-ops cleanly.
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
     case "splitParagraph":
       return { ...intent, at: transformPosition(intent.at, ahead), base: newBase };
@@ -243,8 +263,6 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
       return { ...intent, base: newBase };
     case "formatParagraph":
       // Addressed by block id only; nothing to transform.
-      return { ...intent, base: newBase };
-    case "setListType":
       return { ...intent, base: newBase };
     case "formatRange": {
       // Transform the [start,end) endpoints against prior edits in the run.
@@ -328,16 +346,15 @@ export function transformIntent(intent: Intent, ahead: Intent[]): Intent {
     case "setFloatingPagePosition":
     case "resizeDrawing":
     case "resizeTableColumn":
-    case "resizeTableRow":
     case "moveTable":
     case "removeDrawing":
     case "setMathLinear":
     case "deleteMath":
     case "ensureHeaderFooter":
     case "deleteComment":
+    case "resolveComment":
+    case "editComment":
     case "insertBookmarkRange":
-    case "toggleCheckbox":
-    case "insertTable":
     case "acceptRevision":
     case "rejectRevision":
     case "acceptAllRevisions":
