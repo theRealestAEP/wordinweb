@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import {
   deleteWatermark,
+  headerPictureWatermarks,
   headerWatermarks,
+  insertPictureWatermark,
   insertWatermark,
   removeWatermark,
   setWordArtOpacity,
@@ -13,7 +15,7 @@ import {
   wordArtRotation,
   wordArtText,
 } from "../src/edit/watermark.js";
-import { Block, ShapeWordArt } from "../src/model.js";
+import { Block, ShapeImage, ShapeWordArt } from "../src/model.js";
 import { XmlElement, localName } from "../src/xml.js";
 import { W_NS, makeDocx } from "./helpers.js";
 
@@ -312,5 +314,115 @@ describe("watermark authoring", () => {
       if (name.startsWith("word/header")) continue;
       expect(after[name], name).toEqual(before[name]);
     }
+  });
+});
+
+/** Every image shape the PARSER found in the header models — the same path
+ * the renderer draws from, as for parsedHeaderWordArt above. */
+function parsedHeaderImages(doc: DocxDocument): ShapeImage[] {
+  const found: ShapeImage[] = [];
+  const visit = (blocks: Block[]): void => {
+    for (const block of blocks) {
+      if (block.type !== "paragraph") continue;
+      for (const child of block.children) {
+        if (child.type !== "run") continue;
+        for (const content of child.content) {
+          if (content.kind === "anchor" && content.shape.type === "image") found.push(content.shape);
+        }
+      }
+    }
+  };
+  for (const hf of doc.headers.values()) visit(hf.blocks);
+  return found;
+}
+
+const SHA = "a".repeat(64);
+const PICTURE = { blobSha: SHA, ext: "png", naturalWidthPx: 100, naturalHeightPx: 50 };
+/** A one-pixel PNG, enough to fill a registered part with real bytes. */
+const PNG_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+describe("picture watermark authoring", () => {
+  it("stamps a washed-out picture into every header part", () => {
+    const doc = DocxDocument.load(docWithHeaders(3));
+    const registered = insertPictureWatermark(doc, PICTURE);
+    expect(registered).not.toBeNull();
+
+    const shapes = parsedHeaderImages(doc);
+    expect(shapes).toHaveLength(3);
+    for (const shape of shapes) {
+      // Word's Washout: gain 19661f = 0.3, blacklevel 22938f = 0.35.
+      expect(shape.washout).toEqual({ gain: 19661 / 65536, blacklevel: 22938 / 65536 });
+      expect(shape.behind).toBe(true);
+      expect(shape.hAlign).toBe("center");
+      expect(shape.vAlign).toBe("center");
+      expect(shape.hRel).toBe("margin");
+      expect(shape.vRel).toBe("margin");
+      // Fitted to the 6.5in x 9in text box of a Letter page, aspect kept:
+      // 100x50 scales by 624/100, so 624x312px.
+      expect(shape.width).toBeCloseTo(624, 1);
+      expect(shape.height).toBeCloseTo(312, 1);
+    }
+  });
+
+  it("registers ONE media part that every header part links to", () => {
+    const doc = DocxDocument.load(docWithHeaders(3));
+    const registered = insertPictureWatermark(doc, PICTURE);
+    expect([...doc.pendingMedia.keys()]).toEqual([registered!.part]);
+    // Three headers, three relationships, one picture.
+    expect(parsedHeaderImages(doc).map((shape) => shape.part)).toEqual([
+      registered!.part,
+      registered!.part,
+      registered!.part,
+    ]);
+  });
+
+  it("survives save and reload as the same picture watermark", () => {
+    const doc = DocxDocument.load(docWithHeaders(2));
+    const registered = insertPictureWatermark(doc, PICTURE);
+    doc.installMedia(registered!.part, PNG_BYTES);
+
+    const reloaded = DocxDocument.load(doc.save());
+    const shapes = parsedHeaderImages(reloaded);
+    expect(shapes).toHaveLength(2);
+    expect(shapes[0].washout).toBeDefined();
+    expect(shapes[0].behind).toBe(true);
+  });
+
+  it("keeps a picture watermark and a text one as alternatives", () => {
+    const doc = DocxDocument.load(docWithHeaders(2));
+    insertWatermark(doc, { text: "DRAFT" });
+    insertPictureWatermark(doc, PICTURE);
+    expect(parsedHeaderWordArt(doc)).toHaveLength(0);
+    expect(parsedHeaderImages(doc)).toHaveLength(2);
+
+    insertWatermark(doc, { text: "FINAL" });
+    expect(parsedHeaderImages(doc)).toHaveLength(0);
+    expect(parsedHeaderWordArt(doc)).toHaveLength(2);
+  });
+
+  it("removes a picture watermark and leaves the header's own content alone", () => {
+    const doc = DocxDocument.load(docWithHeaders(2));
+    insertPictureWatermark(doc, PICTURE);
+    expect(removeWatermark(doc)).toBe(true);
+    expect(parsedHeaderImages(doc)).toHaveLength(0);
+    expect(removeWatermark(doc)).toBe(false);
+    for (const hf of doc.headers.values()) expect(hf.blocks).toHaveLength(1);
+  });
+
+  it("gives the shapes in different header parts distinct, non-random ids", () => {
+    const first = DocxDocument.load(docWithHeaders(3));
+    const second = DocxDocument.load(docWithHeaders(3));
+    insertPictureWatermark(first, PICTURE);
+    insertPictureWatermark(second, PICTURE);
+
+    const ids = headerPictureWatermarks(first).map((shape) => shape.attrs["id"]);
+    expect(new Set(ids).size).toBe(3);
+    // Two replicas of the same room must author byte-identical XML.
+    expect(headerPictureWatermarks(second).map((shape) => shape.attrs["id"])).toEqual(ids);
+  });
+
+  it("declines a document with no header part", () => {
+    const doc = DocxDocument.load(docWithHeaders(0));
+    expect(insertPictureWatermark(doc, PICTURE)).toBeNull();
   });
 });

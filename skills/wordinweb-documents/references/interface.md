@@ -779,7 +779,8 @@ The `word_document_capabilities` result is the authoritative closed schema. The 
 | `insertCaption` | Insert a caption ("Figure 1", "Table 2", …) below or above the addressed paragraph or its table | `blockRef`, `label`; optional: `text`, `position` |
 | `ensureRefBookmark` | Wrap the addressed paragraph in a hidden _Ref bookmark for cross-referencing | `blockRef`, `name` |
 | `insertWatermark` | Stamp a text watermark across every page, in the document's header parts | `text`, `headerCount`; optional: `diagonal`, `color`, `opacity` |
-| `removeWatermark` | Remove the text watermark from every page | — |
+| `insertPictureWatermark` | Stamp a picture watermark across every page, in the document's header parts. Carries the blob's ADDRESS, never its bytes, so it needs a blob the host has already prepared — an `asset:*` reference is not enough on its own | `blobSha`, `bytesLen`, `ext`, `naturalWidthPx`, `naturalHeightPx`, `headerCount`; optional: `iv`, `washout` |
+| `removeWatermark` | Remove the watermark, text or picture, from every page | — |
 
 ### Drawing
 

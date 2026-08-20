@@ -708,6 +708,9 @@ class Engine {
   private windowRelay = false;
   private windowPointPages = 0;
   private windowLastPointPage = -1;
+  /** Page of the last captured resume point, so capturePoint can keep at least
+   * one point per page whatever the block size is. */
+  private incrLastPointPage = -1;
   private windowFontSamples = new Map<string, LayoutFontSample>();
   private windowHasModel3D = false;
 
@@ -889,7 +892,7 @@ class Engine {
     // replays forward from a point, which works across section boundaries.
     const relayOk = this.incrEligible();
     const windowOk = this.windowModel && this.windowEligible();
-    if (relayOk || windowOk) this.incrPoints = [];
+    if (relayOk || windowOk) { this.incrPoints = []; this.incrLastPointPage = -1; }
     if (relayOk) {
       const blocks = this.doc.sections[0].blocks;
       this.incrSigs = blocks.map((b) => this.blockSig(b));
@@ -1331,11 +1334,27 @@ class Engine {
       p.footnotes.length !== 0
     ) return;
     const atPageTop = p.items.length === 0 && Math.abs(this.y - p.bodyTop) < 1e-6;
-    // Numbering state grows throughout long legal documents. Keep every page
-    // top plus a bounded sample of intra-page block points so the retained
-    // counter snapshots stay modest while replay remains capped at 15 blocks.
-    if (!atPageTop && blockIdx % 16 !== 0) return;
     const globalPageIdx = this.pages.length - 1 + this.physBase;
+    // Numbering state grows throughout long legal documents. Keep every page
+    // top, a bounded sample of intra-page block points, AND at least one point
+    // per page, so the retained counter snapshots stay modest while the replay
+    // stays near the edit.
+    //
+    // THE PER-PAGE CLAUSE IS NOT REDUNDANT with the page-top one. A page-top
+    // point needs a block to START exactly at the top of a page; a document
+    // whose paragraphs are each two-thirds of a page almost never does that,
+    // so it captured nothing there and fell back to one point per 16 blocks —
+    // which on that document is one point per ELEVEN PAGES. A keystroke then
+    // replayed eleven pages of layout and handed the renderer eleven fresh
+    // page objects to rebuild (measured: 108ms per keystroke on a 164-page
+    // document, against 16ms for the same text in ordinary paragraphs). The
+    // block sample alone silently assumed many blocks per page; bounding by
+    // page as well holds whatever the block size is.
+    if (
+      !atPageTop &&
+      blockIdx % 16 !== 0 &&
+      globalPageIdx === this.incrLastPointPage
+    ) return;
     if (this.windowFullRun && globalPageIdx !== this.windowLastPointPage) {
       this.windowLastPointPage = globalPageIdx;
       this.windowPointPages++;
@@ -1403,6 +1422,7 @@ class Engine {
         __incrStats.pageShift = pageShift;
         this.incrPageShift = pageShift;
         this.incrConvergePrevPointPageIdx = pp.pageCount;
+        this.incrLastPointPage = globalPageIdx;
         this.incrPoints.push(snapshot());
         const reuseWholePage =
           p.items.length === 0 &&
@@ -1426,6 +1446,7 @@ class Engine {
         return;
       }
     }
+    this.incrLastPointPage = globalPageIdx;
     this.incrPoints.push(snapshot());
   }
 
@@ -1843,6 +1864,7 @@ class Engine {
     this.displayBase = prefixCount > 0 ? inc.pages[prefixCount - 1].displayNumber : 0;
     this.incrSigs = newSigs;
     this.incrPoints = [];
+    this.incrLastPointPage = -1;
     const shiftedBlockIdx = (blockIdx: number): number =>
       blockIdx > this.incrBlockShiftAfter ? blockIdx + this.incrBlockDelta : blockIdx;
     this.incrPrevPoints = new Map(inc.points.map((pt) => [shiftedBlockIdx(pt.blockIdx), pt]));

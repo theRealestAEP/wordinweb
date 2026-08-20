@@ -348,6 +348,20 @@ export class CanvasMeasurer implements TextMeasurer {
     if (text.length === 0) return 0;
     const key = fontKey(font) + "\0" + text;
     let w = this.widthCache.get(key);
+    // Measurement accounting for the typing-latency instrument (armed by a
+    // host that set __dxwPerf). `chars` is the load-bearing one: line breaking
+    // measures CUMULATIVE PREFIXES of a run (see pushLatin), so a paragraph of
+    // n characters costs O(n²) characters of measurement, and on a document
+    // whose paragraphs are each two-thirds of a page that reached 2.3 MILLION
+    // characters per keystroke. Call counts alone hide it completely.
+    const stats = (globalThis as {
+      __dxwPerf?: { width?: { hit: number; miss: number; chars: number } };
+    }).__dxwPerf;
+    if (stats) {
+      const s = (stats.width ??= { hit: 0, miss: 0, chars: 0 });
+      s[w !== undefined ? "hit" : "miss"]++;
+      s.chars += text.length;
+    }
     if (w !== undefined) {
       // Re-insert so Map iteration order tracks recency (see evictLru).
       this.widthCache.delete(key);

@@ -91,7 +91,7 @@ import { suggestMeta } from "./suggest.js";
 import { TOC_LEADERS, insertToc, isValidCaptionLabel, type TocLeader, type TocLevels } from "./toc.js";
 import { ensureRefBookmark, insertCaptionAt } from "./references.js";
 import { applyFieldResults } from "./update-fields.js";
-import { insertWatermark, removeWatermark } from "./watermark.js";
+import { insertPictureWatermark, insertWatermark, removeWatermark } from "./watermark.js";
 import {
   CELL_SCOPE_EDGES,
   TABLE_BORDER_STYLES,
@@ -1847,6 +1847,78 @@ const insertWatermarkOperation = defineOperation<{
     }),
 });
 
+/** Image formats the picture watermark accepts — the wire's raster allowlist,
+ * minus SVG, which a VML `v:imagedata` cannot carry. */
+const PICTURE_WATERMARK_EXTS = ["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+
+/**
+ * Stamp a PICTURE across every page, Word's Watermark > Picture.
+ *
+ * The bytes never ride this operation: it carries their address (sha, length,
+ * extension) exactly as insertImage does, and each replica registers the part
+ * pending and fills it when the bytes arrive. `naturalWidthPx`/`Height` are
+ * the image's own pixel size — the painted size is derived from it against
+ * the page, so every replica fits the picture identically.
+ */
+const insertPictureWatermarkOperation = defineOperation<{
+  blobSha: string;
+  bytesLen: number;
+  ext: string;
+  iv?: string;
+  naturalWidthPx: number;
+  naturalHeightPx: number;
+  headerCount: number;
+  washout?: boolean;
+  nodeIds: StableId[];
+}>()({
+  kind: "insertPictureWatermark",
+  address: "document",
+  category: "insert",
+  description: "Stamp a picture watermark across every page, in the document's header parts.",
+  fields: [
+    { name: "blobSha" },
+    { name: "bytesLen" },
+    { name: "ext" },
+    { name: "iv", optional: true },
+    { name: "naturalWidthPx" },
+    { name: "naturalHeightPx" },
+    { name: "headerCount" },
+    { name: "washout", optional: true },
+  ],
+  // Per header part: the watermark run, plus the paragraph to host it when the
+  // part has none of its own (the same budget insertWatermark takes).
+  nodeIds: ({ headerCount }) => (badHeaderCount(headerCount, "x") ? 2 : headerCount * 2),
+  // Inserting REPLACES any watermark already there, so it deletes runs too.
+  prunesIds: true,
+  validate: ({ blobSha, bytesLen, ext, iv, naturalWidthPx, naturalHeightPx, headerCount, washout }) => {
+    if (typeof blobSha !== "string" || !/^[0-9a-f]{64}$/.test(blobSha)) return "insertPictureWatermark: bad sha";
+    if (!Number.isInteger(bytesLen) || (bytesLen as number) <= 0) return "insertPictureWatermark: bad size";
+    if (typeof ext !== "string" || !PICTURE_WATERMARK_EXTS.includes(ext)) return "insertPictureWatermark: bad ext";
+    if (iv !== undefined && (typeof iv !== "string" || !/^[A-Za-z0-9+/]{16}$/.test(iv))) {
+      return "insertPictureWatermark: bad iv";
+    }
+    for (const side of [naturalWidthPx, naturalHeightPx]) {
+      if (typeof side !== "number" || !Number.isFinite(side) || side <= 0) {
+        return "insertPictureWatermark: bad natural size";
+      }
+    }
+    const bad = badHeaderCount(headerCount, "insertPictureWatermark");
+    if (bad) return bad;
+    if (washout !== undefined && typeof washout !== "boolean") return "insertPictureWatermark: bad washout";
+    return null;
+  },
+  apply: ({ doc, payload }) =>
+    doc.headerRoots().length === payload.headerCount &&
+    insertPictureWatermark(doc, {
+      blobSha: payload.blobSha,
+      ext: payload.ext,
+      naturalWidthPx: payload.naturalWidthPx,
+      naturalHeightPx: payload.naturalHeightPx,
+      ...(payload.iv !== undefined ? { iv: payload.iv } : {}),
+      ...(payload.washout !== undefined ? { washout: payload.washout } : {}),
+    }) !== null,
+});
+
 /**
  * Sort a table's body rows by one grid column. STRUCTURAL (rows reorder, no
  * tracked form), so suggestion-mode surfaces refuse it like the other
@@ -2312,6 +2384,7 @@ const OPERATIONS = [
   insertBuildingBlockOperation,
   deleteBuildingBlockOperation,
   insertWatermarkOperation,
+  insertPictureWatermarkOperation,
   removeWatermarkOperation,
   setTitlePageOperation,
   setEvenOddHeadersOperation,

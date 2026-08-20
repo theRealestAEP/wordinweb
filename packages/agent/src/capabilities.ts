@@ -628,10 +628,21 @@ function schemaForField(kind: Intent["kind"], field: string): JsonSchema {
       },
     };
   }
-  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow" || field === "hasHeader" || field === "enabled" || field === "resolved") return { type: "boolean" };
+  if (field === "suggest" || field === "preservePageStart" || field === "diagonal" || field === "headerRow" || field === "hasHeader" || field === "enabled" || field === "resolved" || field === "washout") return { type: "boolean" };
   // insertWatermark's headerCount is both its carried-id budget and its
   // rejection predicate; the cap matches its own validate in the registry.
   if (field === "headerCount") return integer(1, 50);
+  // insertPictureWatermark carries a media RESERVATION, never the bytes: the
+  // blob's address, its length, the extension that names its type, and (in an
+  // encrypted room) the IV it was sealed with. Each pattern matches the
+  // operation's own validate in the core registry.
+  if (field === "blobSha") return { type: "string", pattern: "^[0-9a-f]{64}$" };
+  if (field === "iv") return { type: "string", pattern: "^[A-Za-z0-9+/]{16}$" };
+  if (field === "ext") return { enum: ["png", "jpg", "jpeg", "gif", "bmp", "webp"] };
+  if (field === "bytesLen") return integer(1);
+  // The picture's OWN pixel size. The painted size is derived from it against
+  // the page, so it is not a layout number the caller chooses.
+  if (field === "naturalWidthPx" || field === "naturalHeightPx") return number(1, 20000);
   if (field === "rows" || field === "cols") return integer(1, 50);
   if (field === "boundary") return integer(1, 200);
   if (field === "rowIdx") return integer(0, 5000);

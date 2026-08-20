@@ -25,3 +25,39 @@ describe("validateIntent", () => {
     expect(validateIntent({ ...base, kind: "commentRun", runId: 2, text: "x", author: "a" } as unknown as Intent)).toMatch(/provenance/);
   });
 });
+
+/**
+ * The envelope is what the sequencer orders and de-duplicates by, so it has to
+ * be the right SHAPE before any arithmetic on it means anything. A non-number
+ * `base` used to pass `base < 0 || base > seq` — both comparisons coerce — and
+ * behave like base=head.
+ */
+describe("intent envelope", () => {
+  const body = { kind: "acceptAllRevisions" as const };
+  const envelope = { clientId: "c1", clientSeq: 1, base: 0 };
+
+  it("accepts a well-formed envelope", () => {
+    expect(validateIntent({ ...body, ...envelope } as Intent)).toBeNull();
+  });
+
+  it("refuses a base that is not a non-negative integer", () => {
+    for (const base of [{}, "3", -1, 1.5, NaN, null, undefined]) {
+      expect(
+        validateIntent({ ...body, ...envelope, base } as unknown as Intent),
+        `base ${JSON.stringify(base)}`,
+      ).toBe("intent: bad base");
+    }
+  });
+
+  it("refuses a bad clientSeq or clientId", () => {
+    expect(validateIntent({ ...body, ...envelope, clientSeq: "1" } as unknown as Intent)).toBe(
+      "intent: bad clientSeq",
+    );
+    expect(validateIntent({ ...body, ...envelope, clientId: "" } as unknown as Intent)).toBe(
+      "intent: bad clientId",
+    );
+    expect(validateIntent({ ...body, ...envelope, clientId: 7 } as unknown as Intent)).toBe(
+      "intent: bad clientId",
+    );
+  });
+});

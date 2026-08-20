@@ -26,7 +26,7 @@ import {
   type KeyCombo,
 } from "@wordinweb/core";
 import { planRibbon, type RibbonItem } from "./ribbon-layout.js";
-import type { DocxViewApi } from "./index.js";
+import { RASTER_IMAGE_ACCEPT, type DocxViewApi } from "./index.js";
 import { HelpGuide } from "./help.js";
 
 /** The keys that open the help guide — bound below, listed by the guide. */
@@ -181,6 +181,36 @@ ensureToolbarFieldStyles();
  * own body, byte for byte the same, before #141 collapsed them. */
 const fieldStyle: React.CSSProperties = { width: "100%", boxSizing: "border-box", border: `1px solid ${T.border}`, borderRadius: 6, padding: "6px 8px", font: "13px system-ui, sans-serif", color: T.fg, background: T.popoverBg };
 const fieldLabelStyle: React.CSSProperties = { display: "grid", gap: 3, color: T.muted, font: "11px system-ui, sans-serif" };
+
+/* A popover that TEACHES rather than lists verbs: a heading per group, one
+ * action per line, and a note saying what the action needs or does. Used by the
+ * Contents menu, where every command depends on something the user has to have
+ * done first. */
+const sectionLabel: React.CSSProperties = {
+  font: "600 11px system-ui, sans-serif",
+  color: T.muted,
+  textTransform: "uppercase",
+  letterSpacing: 0.4,
+  margin: "10px 0 4px",
+};
+const menuItem: React.CSSProperties = {
+  display: "block",
+  width: "100%",
+  textAlign: "left",
+  border: "none",
+  background: "none",
+  color: T.fg,
+  font: "13px system-ui, sans-serif",
+  padding: "6px 6px",
+  borderRadius: 5,
+  cursor: "pointer",
+};
+const menuNote: React.CSSProperties = {
+  color: T.muted,
+  font: "11.5px system-ui, sans-serif",
+  lineHeight: 1.45,
+  margin: "2px 6px 8px",
+};
 const rowBtn: React.CSSProperties = { border: `1px solid ${T.border}`, borderRadius: 5, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "12px system-ui, sans-serif", padding: "3px 8px" };
 
 /**
@@ -964,7 +994,15 @@ export function ToolbarCheckbox({ label, checked, onChange, ariaLabel, disabled,
   );
 }
 
-/** Menu select that runs an action and resets (never shows a value). */
+/** Menu select that runs an action and resets (never shows a value).
+ *
+ * The trigger takes NO fixed width. Its label never changes — an action menu
+ * shows the same word whatever you pick — so a pinned width buys nothing and
+ * costs a clipped label: "Header & footer" in a 118px box reads "Header &
+ * foo…". The ribbon's layout engine already refuses to squeeze a control
+ * (flexShrink 0) and folds whole controls away when the line is full, so a
+ * label sized to its own text is the one that always fits.
+ */
 function ActionMenu({
   label,
   title,
@@ -976,6 +1014,7 @@ function ActionMenu({
   title: string;
   groups: { label?: string; items: [value: string, text: string][] }[];
   onPick: (value: string) => void;
+  /** Minimum width of the dropped menu, in px. Not the trigger's width. */
   width?: number;
 }) {
   return (
@@ -984,7 +1023,6 @@ function ActionMenu({
       triggerAriaLabel={title}
       value=""
       placeholder={label}
-      width={width}
       menuWidth={Math.max(width ?? 0, 190)}
       options={groups.flatMap((group) => group.items.map(([value, text]) => ({
         value,
@@ -1715,6 +1753,7 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
     if (!open) return;
     inputRef.current?.focus();
   }, [open]);
+  const bookmarks = open ? (api?.listBookmarks() ?? []) : [];
   const submit = () => {
     const value = name.trim();
     if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(value)) {
@@ -1727,7 +1766,8 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
     }
     setName("");
     setError("");
-    setOpen(false);
+    // Stay open: the new bookmark appears in the list below, which is the only
+    // confirmation that anything happened — the document shows nothing.
   };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
@@ -1751,6 +1791,35 @@ function BookmarkMenu({ api }: { api: DocxViewApi | null }) {
             <button style={{ ...pillBtn, background: T.popoverBg, color: T.fg }} onClick={() => setOpen(false)}>Cancel</button>
             <button style={pillBtn} disabled={!name.trim()} onClick={submit}>Add</button>
           </div>
+
+          {/* THE BOOKMARKS THAT EXIST. Adding one was the whole feature: a
+              bookmark is invisible in the document, so without a list there was
+              no way to tell whether one had been made, what it was called, or
+              how to get back to it. Reading on open keeps it a walk per
+              opening rather than per render. */}
+          <div style={sectionLabel}>In this document</div>
+          {bookmarks.length === 0 ? (
+            <div style={menuNote}>
+              None yet. Bookmarks are invisible markers — add one here, then jump back to it from this
+              list or point a cross-reference at it.
+            </div>
+          ) : (
+            <div style={{ display: "grid", gap: 2 }} data-testid="bookmark-list">
+              {bookmarks.map((mark) => (
+                <button
+                  key={mark}
+                  style={menuItem}
+                  title={`Go to ${mark}`}
+                  onClick={() => {
+                    api?.goToBookmark(mark);
+                    setOpen(false);
+                  }}
+                >
+                  {mark}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </span>
@@ -2002,37 +2071,90 @@ function EquationMenu({ api }: { api: DocxViewApi | null }) {
  * cross-references) against the current layout.
  */
 function ContentsMenu({ api }: { api: DocxViewApi | null }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLSpanElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const position = useAnchoredPanel(rootRef, panelRef, open, { width: 320, align: "end", onClose: () => setOpen(false) });
+  // Read when the menu OPENS, not on every render: the counts come from a walk
+  // of the document, and a ribbon control must not pay for that while idle.
+  const available = open ? api?.contentsAvailability() : undefined;
+  const headings = available?.headings ?? 0;
+  const marked = available?.indexEntries ?? 0;
+
+  const act = (run: () => void) => {
+    run();
+    setOpen(false);
+  };
+
   return (
-    <ActionMenu
-      label="Contents"
-      title="Insert or update a table of contents"
-      width={92}
-      groups={[
-        {
-          items: [
-            ["insert", "Table of contents"],
-            ["figures", "Table of figures"],
-            ["rebuild", "Update table of contents"],
-            ["fields", "Update fields"],
-          ],
-        },
-        {
-          label: "Index",
-          items: [
-            ["markEntry", "Mark index entry"],
-            ["index", "Insert index"],
-          ],
-        },
-      ]}
-      onPick={(value) => {
-        if (value === "insert") api?.insertToc();
-        else if (value === "figures") api?.insertToc({ captionLabel: "Figure" });
-        else if (value === "rebuild") api?.refreshTocs();
-        else if (value === "markEntry") api?.addIndexEntry();
-        else if (value === "index") api?.insertIndex();
-        else api?.updateFields();
-      }}
-    />
+    <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        title="Insert or update a table of contents"
+        style={{ ...btnStyle(open), display: "inline-flex", alignItems: "center", gap: 5 }}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setOpen(!open)}
+        data-testid="contents-menu"
+      >
+        Contents
+        <span aria-hidden="true" style={{ fontSize: 10 }}>⌄</span>
+      </button>
+      {open && (
+        <div
+          ref={panelRef}
+          style={{
+            position: "fixed", top: position.top, left: position.left, zIndex: 100,
+            width: position.width, maxHeight: position.maxHeight, overflowY: "auto",
+            overscrollBehavior: "contain", boxSizing: "border-box", padding: 10,
+            background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8,
+            boxShadow: T.popoverShadow,
+          }}
+        >
+          <div style={sectionLabel}>Table of contents</div>
+          {/* WHAT IT IS BUILT FROM, said before it is built. Inserting a TOC
+              into a document with no headings drops Word's "No table of
+              contents entries found." into the page — true, and no help at all
+              about what to do next. */}
+          <div style={{ ...menuNote, color: headings > 0 ? T.muted : T.accent }} data-testid="toc-state">
+            {headings > 0
+              ? `${headings} heading${headings === 1 ? "" : "s"} found — the contents will list ${headings === 1 ? "it" : "them"}.`
+              : "No headings yet. A table of contents lists paragraphs styled Heading 1–3, so style your section titles first."}
+          </div>
+          <button style={menuItem} onClick={() => act(() => api?.insertToc())} data-testid="toc-insert">
+            Insert table of contents
+          </button>
+          <button style={menuItem} onClick={() => act(() => api?.insertToc({ captionLabel: "Figure" }))}>
+            Insert table of figures
+          </button>
+          <button style={menuItem} onClick={() => act(() => api?.refreshTocs())}>
+            Update it from the document
+          </button>
+          <div style={menuNote}>
+            A table of contents is a snapshot. Update it after you add or rename headings.
+          </div>
+
+          <div style={sectionLabel}>Index</div>
+          <div style={{ ...menuNote, color: marked > 0 ? T.muted : T.accent }} data-testid="index-state">
+            {marked > 0
+              ? `${marked} entr${marked === 1 ? "y" : "ies"} marked.`
+              : "Nothing marked yet. Select a word, mark it, then insert the index."}
+          </div>
+          <button style={menuItem} onClick={() => act(() => api?.addIndexEntry())} data-testid="index-mark">
+            Mark the selected text
+          </button>
+          <button style={menuItem} onClick={() => act(() => api?.insertIndex())}>
+            Insert index
+          </button>
+
+          <div style={sectionLabel}>Everything else</div>
+          <button style={menuItem} onClick={() => act(() => api?.updateFields())}>
+            Update all fields
+          </button>
+          <div style={menuNote}>
+            Recomputes page numbers, dates and cross-references against the current layout.
+          </div>
+        </div>
+      )}
+    </span>
   );
 }
 
@@ -2813,16 +2935,40 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState("CONFIDENTIAL");
   const [diagonal, setDiagonal] = useState(true);
+  const [status, setStatus] = useState("");
   const rootRef = useRef<HTMLSpanElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const pictureInput = useRef<HTMLInputElement | null>(null);
   const position = useAnchoredPanel(rootRef, panelRef, open, { width: 240, align: "end" , onClose: () => setOpen(false) });
   const stamp = (value: string) => {
     if (api?.insertWatermark({ text: value, diagonal })) setOpen(false);
   };
+  /** Why a picture watermark did not happen, IN the panel that asked for it —
+   * the file dialog closes on its own, so a silent panel reads as a dead
+   * button. */
+  const stampPicture = async (file: File) => {
+    setStatus("");
+    const result = await api?.insertPictureWatermark(file);
+    if (result === undefined || result === "inserted") {
+      setOpen(false);
+      return;
+    }
+    setStatus(
+      result === "unsupported-format"
+        ? "A watermark picture must be PNG, JPEG, GIF, BMP or WebP."
+        : result === "too-large"
+          ? "That picture is too large for this document."
+          : result === "no-relay"
+            ? "This shared document has no image relay, so a picture watermark can’t be added."
+            : result === "upload-failed"
+              ? "Upload failed. Try a smaller picture."
+              : "That file could not be read as an image.",
+    );
+  };
   return (
     <span ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button title="Watermark" style={btnStyle(open)} onMouseDown={(event) => event.preventDefault()} onClick={() => setOpen(!open)}>
-        <span style={{ color: "#9aa0a6", fontSize: 13, fontWeight: 700, letterSpacing: 0.5 }}>WM</span>
+        Watermark
       </button>
       {open && (
         <div ref={panelRef} style={{ position: "fixed", top: position.top, left: position.left, zIndex: 100, width: position.width, maxHeight: position.maxHeight, overflowY: "auto", overscrollBehavior: "contain", boxSizing: "border-box", padding: 10, background: T.popoverBg, border: `1px solid ${T.border}`, borderRadius: 8, boxShadow: T.popoverShadow }}>
@@ -2848,6 +2994,31 @@ function WatermarkMenu({ api }: { api: DocxViewApi | null }) {
           <div style={{ marginTop: 8 }}>
             <ToolbarCheckbox label="Diagonal" checked={diagonal} onChange={setDiagonal} />
           </div>
+          <button
+            type="button"
+            title="Stamp a picture on every page, washed out behind the text"
+            onClick={() => pictureInput.current?.click()}
+            style={{ width: "100%", marginTop: 8, padding: "6px 8px", border: `1px solid ${T.border}`, borderRadius: 6, background: T.popoverBg, color: T.fg, cursor: "pointer", font: "600 12px system-ui, sans-serif" }}
+          >
+            Picture…
+          </button>
+          <input
+            ref={pictureInput}
+            aria-label="Watermark picture"
+            type="file"
+            accept={RASTER_IMAGE_ACCEPT}
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) void stampPicture(file);
+              event.target.value = "";
+            }}
+          />
+          {status && (
+            <div role="status" style={{ marginTop: 8, color: T.muted, font: "12px system-ui, sans-serif" }}>
+              {status}
+            </div>
+          )}
           <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
             <button
               title="Stamp this text on every page"
@@ -6431,6 +6602,7 @@ export const INSERT_COMMANDS: readonly InsertCommandSpec[] = [
   // needs no addressable position — but it is an insert, and the rule the
   // list exists for applies to it unchanged.
   { command: "insertWatermark", feature: "watermark" },
+  { command: "insertPictureWatermark", feature: "watermark" },
   { command: "addComment", feature: "comment" },
   { command: "addFootnote", feature: "footnote" },
   { command: "addEndnote", feature: "footnote" },

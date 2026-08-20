@@ -307,6 +307,25 @@ function paragraphOf(doc: DocxDocument, node: XmlElement): XmlElement | undefine
  * Zero headings still produces one paragraph: the "no entries found" text
  * Word writes in place of an empty list.
  */
+/**
+ * How many headings a table of contents would actually LIST.
+ *
+ * Not the same number as tocEntryCount, which is the count of PARAGRAPHS the
+ * field will occupy and is therefore floored at 1 — an empty TOC still takes
+ * one line, the one carrying TOC_EMPTY_TEXT. That floor makes it the right
+ * value for a node budget and the wrong value for "does this document have any
+ * headings", where it reports 1 for a document that has none.
+ */
+export function tocHeadingCount(doc: DocxDocument, options: TocOptions = {}): number {
+  if (options.captionLabel) {
+    if (!isValidCaptionLabel(options.captionLabel)) return 0;
+    return collectCaptions(doc, options.captionLabel).length;
+  }
+  const [min, max] = options.levels ?? [1, 3];
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max > 9 || min > max) return 0;
+  return collectHeadings(doc, [min, max]).length;
+}
+
 export function tocEntryCount(doc: DocxDocument, options: TocOptions = {}): number {
   if (options.captionLabel) {
     if (!isValidCaptionLabel(options.captionLabel)) return 0;

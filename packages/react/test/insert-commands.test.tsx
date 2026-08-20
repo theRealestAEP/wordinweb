@@ -178,6 +178,11 @@ const INVOKE: Record<string, (api: DocxViewApi) => unknown> = {
   insertBlankPage: (api) => api.insertBlankPage(),
   insertCoverPage: (api) => api.insertCoverPage({ title: "T", subtitle: "S", author: "A", date: "2026" } as never),
   insertWatermark: (api) => api.insertWatermark({ text: "DRAFT" }),
+  // The collab mount publishes no media relay, so this takes the "no-relay"
+  // branch. The branch ORDER is what the audit pins: the upload runs before
+  // the document is touched, so a room with no relay is never left holding a
+  // header part made for a watermark that never arrives.
+  insertPictureWatermark: (api) => api.insertPictureWatermark(new Blob([PNG], { type: "image/png" })),
   insertHeaderFooterPreset: (api) => api.insertHeaderFooterPreset("header", "blank"),
   addComment: (api) => api.addComment("note"),
   addFootnote: (api) => api.addFootnote("note"),

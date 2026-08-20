@@ -890,9 +890,9 @@ function applyIntentInner(
       return rejectRevision(doc, refs[intent.index]);
     }
     case "acceptAllRevisions":
-      return acceptAllRevisions(doc) > 0;
+      return acceptAllRevisions(doc, intent.author) > 0;
     case "rejectAllRevisions":
-      return rejectAllRevisions(doc) > 0;
+      return rejectAllRevisions(doc, intent.author) > 0;
     case "setLink": {
       if (!isSafeUrl(intent.url)) return false; // reject javascript:/data: etc.
       const runEl = ids.elOf(intent.runId);

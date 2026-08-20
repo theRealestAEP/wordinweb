@@ -64,10 +64,24 @@ export class LocalDocumentSession implements AgentCollaborativeTarget {
     return scope;
   };
 
+  /**
+   * Called immediately before an intent mutates the document.
+   *
+   * A host that also renders this document — the desktop app, whose editor owns
+   * an undo stack — sets this to take a checkpoint, so an edit made by an agent
+   * is reachable with Cmd+Z like any other. Without it the agent's changes are
+   * applied behind the editor's back: undo cannot reverse them, and structural
+   * ones have no tracked form to reject either, leaving no way back.
+   */
+  onBeforeApply: (() => void) | null = null;
+
   submit = (operation: IntentBody): void => {
     const intent = this.fullIntent(operation);
     const error = validateIntent(intent);
     if (error) throw new Error(error);
+    // Before the mutation, and only once validation has passed: a rejected
+    // intent must not leave an empty undo step behind.
+    this.onBeforeApply?.();
     const ids = this.doc.enableStableIds();
     const result = applyIntentScoped(this.doc, ids, intent);
     if (!result.applied) throw new Error(`${operation.kind} could not apply to the referenced document state`);
@@ -106,14 +120,24 @@ export class LocalDocumentSession implements AgentCollaborativeTarget {
     return { ...operation, clientId: "local-document-session", clientSeq: ++this.clientSequence, base: this.revision } as Intent;
   }
 
+  /**
+   * Fill the part an operation just reserved with the bytes this session is
+   * already holding.
+   *
+   * Keyed on the blobSha the operation carries, not on its kind: the sha IS
+   * the media reservation, and every operation that reserves media carries
+   * one (insertImage, insertPictureWatermark). Naming one kind here left
+   * every later one's picture pending forever.
+   */
   private installUploadedImage(operation: IntentBody): void {
-    if (operation.kind !== "insertImage") return;
-    const bytes = this.uploadedMedia.get(operation.blobSha);
+    const blobSha = (operation as { blobSha?: unknown }).blobSha;
+    if (typeof blobSha !== "string") return;
+    const bytes = this.uploadedMedia.get(blobSha);
     if (!bytes) return;
     for (const [part, metadata] of this.doc.pendingMedia) {
-      if (metadata.sha !== operation.blobSha) continue;
+      if (metadata.sha !== blobSha) continue;
       this.doc.installMedia(part, bytes);
-      this.uploadedMedia.delete(operation.blobSha);
+      this.uploadedMedia.delete(blobSha);
       return;
     }
   }

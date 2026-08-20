@@ -348,6 +348,17 @@ function isCJK(ch: string): boolean {
 // box (probe2-form-checkboxes: the boxes inked ~3.2% over Word's weight and
 // left a structural halo). Route them to MS Gothic explicitly to match Word.
 const BALLOT_RE = /[☐☑☒]/;
+/**
+ * How much text one cumulative measurement window spans, in characters (see
+ * pushLatin).
+ *
+ * Big enough that a text line — 70-ish characters at a normal size and column
+ * width — sits well inside one window, so the widths a line is packed from
+ * telescope exactly the way they always did. Small enough that measuring every
+ * prefix costs O(window) rather than O(run), which is what makes typing in a
+ * page-long paragraph affordable.
+ */
+const CUM_WINDOW = 512;
 // A legacy FORMCHECKBOX reserves 2.5pt after its 11pt ballot glyph in Word.
 // Modern w14 checkbox controls are ordinary text and do not use this advance.
 const LEGACY_CHECKBOX_TRAILING_ADVANCE = (2.5 * 96) / 72;
@@ -3819,17 +3830,37 @@ function buildAtoms(
     const charRtl = bidiPara && props.rtl ? resolveBidiRtl(text) : null;
     let offset = 0;
     // Measure by cumulative prefix differences: atom widths then sum exactly
-    // to the whole string's measure. Summing independently measured words +
-    // spaces overshoots by ~1px per space (side bearings/kerning), which
-    // accumulates enough to move line breaks off Word's.
+    // to the measure of the text they span. Summing independently measured
+    // words + spaces overshoots by ~1px per space (side bearings/kerning),
+    // which accumulates enough to move line breaks off Word's.
+    //
+    // WINDOWED, not from the start of the run. Measuring every prefix from
+    // index 0 costs O(n²) characters of measurement in the run's length: on a
+    // document whose paragraphs are each two-thirds of a page it reached 2.36
+    // MILLION characters per keystroke, and it is the single largest cost in
+    // typing there. Restarting the cumulative base every CUM_WINDOW characters
+    // holds the same telescoping exactness INSIDE a window — which is what a
+    // line needs, since the window is many times a line's length — and pays
+    // the independent-measure error only at the handful of restarts, instead
+    // of at every space. Calibrated against the parity corpus, not reasoned
+    // about: the window is only sound at a size where the corpus does not
+    // move.
     // w:w character scaling multiplies every advance (the renderer stretches
     // the painted glyphs by the same factor via scaleX).
     const tScale = props.textScale ?? 1;
     let prevCum = 0;
+    /** Index in `text` the current cumulative window starts at. */
+    let windowStart = 0;
     for (const part of parts) {
       if (part.length === 0) continue;
       const end = offset + part.length;
-      const cum = measurer.width(text.slice(0, end), font, props.letterSpacing) * tScale;
+      // Restart at a PART boundary, so the restarted part is measured whole
+      // rather than a fragment of one.
+      if (end - windowStart > CUM_WINDOW) {
+        windowStart = offset;
+        prevCum = 0;
+      }
+      const cum = measurer.width(text.slice(windowStart, end), font, props.letterSpacing) * tScale;
       const partWidth = Math.max(cum - prevCum, 0);
       const src = srcBase ? { run: srcBase.run, t: srcBase.t, offset: srcBase.offset + baseOffset + offset } : undefined;
       if (part[0] === " ") {
@@ -3934,7 +3965,7 @@ function buildAtoms(
           for (const segEnd of bounds) {
             if (segEnd <= segStart) continue;
             const seg = part.slice(segStart, segEnd);
-            const segCum = measurer.width(text.slice(0, offset + segEnd), font, props.letterSpacing);
+            const segCum = measurer.width(text.slice(windowStart, offset + segEnd), font, props.letterSpacing);
             const segWidth = Math.max(segCum - segPrevCum, 0);
             atoms.push({
               kind: "frag",

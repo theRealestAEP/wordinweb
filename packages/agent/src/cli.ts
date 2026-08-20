@@ -10,6 +10,7 @@ import { PassThrough } from "node:stream";
 import WebSocket from "ws";
 import {
   CollabConnection,
+  type CollabConnectionLike,
   EncryptedCollabConnection,
   createWebSocketTransport,
   stretchShareCode,
@@ -237,7 +238,7 @@ export async function connectAgent(
   const socket = new WebSocket(payload.room.wsUrl);
   const transport = createWebSocketTransport(socket as never);
   const chatKey = await importChatKey(payload.invite.chatKey);
-  let connection: CollabConnection;
+  let connection: CollabConnectionLike;
   let revision = 0;
   let ready = false;
   const connectionState: { current: "reconnecting" | "live" | "offline" } = { current: "reconnecting" };
@@ -316,7 +317,7 @@ export async function connectAgent(
         stretched,
         undefined,
         payload.room.httpBase ? { httpBase: payload.room.httpBase } : undefined,
-      ) as unknown as CollabConnection
+      )
     : new CollabConnection(
         transport,
         clientId,

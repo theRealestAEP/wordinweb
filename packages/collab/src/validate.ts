@@ -126,6 +126,18 @@ function badTextEffect(patch: Record<string, unknown>, who: string): string | nu
 /** Returns a rejection reason, or null if the intent is well-formed. */
 export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_INTENT_LIMITS): string | null {
   const nonNegInt = (n: number) => Number.isInteger(n) && n >= 0;
+  // THE ENVELOPE, before anything reads the payload. clientId/clientSeq/base
+  // are the fields the sequencer orders and de-duplicates by, and they went
+  // unchecked: a non-number `base` passed `base < 0 || base > seq` — both
+  // comparisons coerce — and behaved like base=head. The consequence was
+  // benign (every replica coerces identically, so no fork), which is exactly
+  // why it survived: the ordering fields have to be the right SHAPE before
+  // arithmetic on them means anything.
+  if (typeof intent.clientId !== "string" || intent.clientId.length === 0 || intent.clientId.length > 128) {
+    return "intent: bad clientId";
+  }
+  if (!nonNegInt(intent.clientSeq)) return "intent: bad clientSeq";
+  if (!nonNegInt(intent.base)) return "intent: bad base";
   // Which equation in the block a math intent names. Absent means the first.
   // The cap is generous but finite: an index is an array position, and the
   // apply resolves out-of-range ones to a clean no-op anyway.
@@ -428,6 +440,11 @@ export function validateIntent(intent: Intent, limits: IntentLimits = DEFAULT_IN
       return null;
     case "acceptAllRevisions":
     case "rejectAllRevisions":
+      // Absent = every revision (what older clients send). Present = one
+      // author's, bounded like every other author string on the wire.
+      if (intent.author !== undefined && (typeof intent.author !== "string" || intent.author.length > 255)) {
+        return `${intent.kind}: bad author`;
+      }
       return null;
     case "setLineNumbering": {
       const p = intent.patch;

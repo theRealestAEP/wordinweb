@@ -194,11 +194,38 @@ function isTextWatermark(shapeEl: XmlElement): boolean {
   return firstDescendant(shapeEl, "textpath")?.attrs["string"] !== undefined;
 }
 
+/**
+ * Whether a VML shape is a PICTURE watermark: a floating image painted behind
+ * the text of a header part.
+ *
+ * The test is the one the parser already uses to tell a watermark from an
+ * ordinary inline picture (parse/document.ts): absolute position plus a
+ * negative z-index. Word marks its own with an id prefix as well, but a
+ * document that arrived from another producer need not carry that, and this
+ * pair is what actually makes the picture paint behind every page.
+ */
+function isPictureWatermark(shapeEl: XmlElement): boolean {
+  const ln = localName(shapeEl.name);
+  if (ln !== "shape" && ln !== "rect") return false;
+  if (!firstDescendant(shapeEl, "imagedata")) return false;
+  if (styleProp(shapeEl, "position") !== "absolute") return false;
+  return (parseFloat(styleProp(shapeEl, "z-index") ?? "0") || 0) < 0;
+}
+
 /** Every text-watermark shape in the document's header parts, in part order. */
 export function headerWatermarks(doc: DocxDocument): XmlElement[] {
+  return headerShapes(doc, isTextWatermark);
+}
+
+/** Every picture-watermark shape in the header parts, in part order. */
+export function headerPictureWatermarks(doc: DocxDocument): XmlElement[] {
+  return headerShapes(doc, isPictureWatermark);
+}
+
+function headerShapes(doc: DocxDocument, match: (el: XmlElement) => boolean): XmlElement[] {
   const found: XmlElement[] = [];
   const walk = (element: XmlElement): void => {
-    if (isTextWatermark(element)) found.push(element);
+    if (match(element)) found.push(element);
     else for (const c of element.children) walk(c);
   };
   for (const root of doc.headerRoots()) walk(root);
@@ -286,9 +313,180 @@ export function insertWatermark(doc: DocxDocument, spec: WatermarkSpec): boolean
   return true;
 }
 
-/** Remove every text watermark from the header parts. False when none. */
+// ---------------------------------------------------------------------------
+// Picture watermarks
+// ---------------------------------------------------------------------------
+
+/** Word's `_x0000_t75` picture shapetype, verbatim as it writes it. The shape
+ * references it by `type="#_x0000_t75"`, so it has to be in the part. */
+const PICTURE_SHAPETYPE: XmlElement = {
+  name: "v:shapetype",
+  attrs: {
+    id: "_x0000_t75",
+    coordsize: "21600,21600",
+    "o:spt": "75",
+    "o:preferrelative": "t",
+    path: "m@4@5l@4@11@9@11@9@5xe",
+    filled: "f",
+    stroked: "f",
+  },
+  children: [
+    el("v:stroke", { joinstyle: "miter" }),
+    el("v:formulas", {}, [
+      "if lineDrawn pixelLineWidth 0", "sum @0 1 0", "sum 0 0 @1", "prod @2 1 2",
+      "prod @3 21600 pixelWidth", "prod @3 21600 pixelHeight", "sum @0 0 1", "prod @6 1 2",
+      "prod @7 21600 pixelWidth", "sum @8 21600 0", "prod @7 21600 pixelHeight", "sum @10 21600 0",
+    ].map((eqn) => el("v:f", { eqn }))),
+    el("v:path", { "o:extrusionok": "f", gradientshapeok: "t", "o:connecttype": "rect" }),
+    el("o:lock", { "v:ext": "edit", aspectratio: "t" }),
+  ],
+  text: "",
+};
+
+/** The picture shape addresses its image part by relationship id, so the
+ * header part needs the `r` prefix bound on top of the VML three. */
+const PICTURE_NS: Record<string, string> = {
+  ...VML_NS,
+  "xmlns:r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+};
+
+/** Word's "Washout" recolor, in VML's 1/65536 fractions: gain 0.3, blacklevel
+ * 0.35. These exact values are what render/dom.ts's washout math was measured
+ * against (probe2-picture-watermark), so they are the pair to write. */
+const WASHOUT = { gain: "19661f", blacklevel: "22938f" };
+
+export interface PictureWatermarkSpec {
+  /** sha256 hex of the blob — the media reservation's hash commitment, the
+   * same address `insertImage` carries. Bytes arrive out of band. */
+  blobSha: string;
+  /** File extension without the dot (png/jpg/gif/webp). */
+  ext: string;
+  /** E2EE only: base64 12-byte GCM IV, recorded for byte-identical re-seal. */
+  iv?: string;
+  /** The image's own pixel size. The painted size is derived from it here, so
+   * that every replica fits the picture to the page identically. */
+  naturalWidthPx: number;
+  naturalHeightPx: number;
+  /** Word's Washout recolor, ticked by default in its Watermark dialog. False
+   * paints the picture at full strength. */
+  washout?: boolean;
+}
+
+/** Painted size in points: the picture fitted to the first section's printable
+ * box, aspect preserved — Word's "Auto" scale. */
+function pictureGeometry(doc: DocxDocument, spec: PictureWatermarkSpec): { width: string; height: string } {
+  const props = doc.sections[0]?.props;
+  const boxWidth = props ? props.pageWidth - props.marginLeft - props.marginRight : 624;
+  const boxHeight = props ? props.pageHeight - props.marginTop - props.marginBottom : 816;
+  const natural = { w: spec.naturalWidthPx || 1, h: spec.naturalHeightPx || 1 };
+  const scale = Math.min(boxWidth / natural.w, boxHeight / natural.h);
+  // px -> pt, at 2dp: the same quarter-point-ish precision Word writes, and
+  // short enough that the XML stays readable.
+  const pt = (px: number) => `${Math.round(px * scale * 0.75 * 100) / 100}pt`;
+  return { width: pt(natural.w), height: pt(natural.h) };
+}
+
+/** Build one picture-watermark run, for the header part at `index`. */
+function pictureWatermarkRun(
+  spec: PictureWatermarkSpec,
+  relId: string,
+  geometry: { width: string; height: string },
+  index: number,
+): XmlElement {
+  const style = [
+    "position:absolute",
+    "margin-left:0",
+    "margin-top:0",
+    `width:${geometry.width}`,
+    `height:${geometry.height}`,
+    // Negative z-index is what puts the picture behind the body text.
+    "z-index:-251658240",
+    "mso-position-horizontal:center",
+    "mso-position-horizontal-relative:margin",
+    "mso-position-vertical:center",
+    "mso-position-vertical-relative:margin",
+  ].join(";");
+
+  const shape = el(
+    "v:shape",
+    {
+      id: `WordPictureWatermark${100000 + index}`,
+      "o:spid": `_x0000_s${2049 + index}`,
+      type: "#_x0000_t75",
+      style,
+      "o:allowincell": "f",
+    },
+    [
+      el("v:imagedata", {
+        "r:id": relId,
+        "o:title": "watermark",
+        ...(spec.washout === false ? {} : WASHOUT),
+      }),
+    ],
+  );
+
+  return el("w:r", {}, [
+    el("w:rPr", {}, [el("w:noProof")]),
+    el("w:pict", {}, [PICTURE_SHAPETYPE, shape]),
+  ]);
+}
+
+/**
+ * Author a picture watermark into every header part, replacing any watermark
+ * already there — the same replace-and-stamp shape `insertWatermark` has, and
+ * the same thing Word's own Watermark gallery does.
+ *
+ * The image is registered ONCE and every header part links to that one part
+ * (linkImageResource), which is how Word writes it: three headers do not mean
+ * three copies of the picture. The part is registered PENDING — the bytes
+ * travel out of band and install later — so the caller gets the part name
+ * back and either installs the bytes itself or leaves them to the media path.
+ *
+ * Returns null when the document has no header part. Creating one is
+ * `ensureHeaderFooter`'s job, as for the text watermark.
+ */
+export function insertPictureWatermark(doc: DocxDocument, spec: PictureWatermarkSpec): { part: string } | null {
+  const roots = doc.headerRoots();
+  if (roots.length === 0) return null;
+  removeWatermark(doc);
+  const geometry = pictureGeometry(doc, spec);
+  let part: string | null = null;
+  roots.forEach((root, index) => {
+    for (const [name, uri] of Object.entries(PICTURE_NS)) {
+      if (root.attrs[name] === undefined) root.attrs[name] = uri;
+    }
+    // The first header registers the media part; the rest point at it.
+    let relId: string;
+    if (part === null) {
+      const registered = doc.registerPendingImagePart(
+        spec.blobSha,
+        spec.ext,
+        spec.iv !== undefined ? { iv: spec.iv } : undefined,
+        root,
+      );
+      part = registered.part;
+      relId = registered.relId;
+    } else {
+      relId = doc.linkImageResource(part, root);
+    }
+    // The shape is absolutely positioned against the page margin, so its host
+    // paragraph is only an anchor (see insertWatermark).
+    let paragraph = root.children.find((c) => localName(c.name) === "p");
+    if (!paragraph) {
+      paragraph = el("w:p");
+      root.children.push(paragraph);
+    }
+    paragraph.children.unshift(pictureWatermarkRun(spec, relId, geometry, index));
+  });
+  doc.refresh();
+  return part === null ? null : { part };
+}
+
+/** Remove every watermark, text or picture, from the header parts. False when
+ * there was none. Word's Remove Watermark takes off whichever kind is there,
+ * and the two are alternatives — inserting either replaces both. */
 export function removeWatermark(doc: DocxDocument): boolean {
-  const shapes = headerWatermarks(doc);
+  const shapes = [...headerWatermarks(doc), ...headerPictureWatermarks(doc)];
   let removed = false;
   for (const shape of shapes) removed = deleteWatermark(doc, shape) || removed;
   return removed;

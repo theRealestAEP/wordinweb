@@ -550,11 +550,31 @@ export function renderToDom(
   let lo = 0;
   let hiNew = layout.pages.length - 1;
   let hiOld = prevPages.length - 1;
+  // Scan accounting, for the typing-latency instrument only (armed by a host
+  // that set __dxwPerf). The prefix/suffix scans are the reason a keystroke on
+  // a 160-page document can cost more than the page it changed, so their shape
+  // has to be observable rather than guessed at.
+  const scan = (globalThis as { __dxwPerf?: { scan?: Record<string, number> } }).__dxwPerf;
+  let identityHits = 0;
+  let textUpdates = 0;
+  let textUpdateMs = 0;
+  const scanStep = (record: PageRender, page: LaidOutPage, index: number): boolean => {
+    if (samePage(page, record.page, index)) {
+      identityHits++;
+      return true;
+    }
+    if (!scan) return updatePageText(record, page);
+    const t = performance.now();
+    const ok = updatePageText(record, page);
+    textUpdateMs += performance.now() - t;
+    if (ok) textUpdates++;
+    return ok;
+  };
   if (canReuse) {
     while (
       lo < layout.pages.length &&
       lo < prevPages.length &&
-      (samePage(layout.pages[lo], prevPages[lo].page, lo) || updatePageText(prevPages[lo], layout.pages[lo]))
+      scanStep(prevPages[lo], layout.pages[lo], lo)
     ) {
       const pr = prevPages[lo];
       pr.page = layout.pages[lo];
@@ -564,8 +584,7 @@ export function renderToDom(
     while (
       hiNew >= lo &&
       hiOld >= lo &&
-      (samePage(layout.pages[hiNew], prevPages[hiOld].page, hiNew) ||
-        updatePageText(prevPages[hiOld], layout.pages[hiNew]))
+      scanStep(prevPages[hiOld], layout.pages[hiNew], hiNew)
     ) {
       const pr = prevPages[hiOld];
       pr.page = layout.pages[hiNew];
@@ -575,6 +594,16 @@ export function renderToDom(
     }
     for (let i = lo; i <= hiNew; i++) pages[i] = createRecord(layout.pages[i]);
     reusedCount = layout.pages.length - (hiNew - lo + 1);
+    if (scan) {
+      scan.scan = {
+        rebuilt: hiNew - lo + 1,
+        identityHits,
+        textUpdates,
+        textUpdateMs,
+        prefixEnd: layout._incrementalStructuralPrefixEnd ?? -1,
+        incremental: layout._incremental === true ? 1 : 0,
+      };
+    }
   } else {
     for (let i = 0; i < layout.pages.length; i++) pages[i] = createRecord(layout.pages[i]);
   }

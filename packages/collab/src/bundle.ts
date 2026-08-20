@@ -1,7 +1,7 @@
 import type { Intent } from "./intents.js";
 import type { IdSidecar } from "./session.js";
 import type { LineageHead } from "./protocol.js";
-import type { CollabConnection } from "./connection.js";
+import type { CollabConnectionLike } from "./connection.js";
 
 /**
  * The client-side document bundle (plan doc 12 §4) — under zero custody this
@@ -209,7 +209,10 @@ export class BundlePersister {
   private chain: Promise<void> = Promise.resolve();
 
   constructor(
-    private conn: CollabConnection,
+    // The LIKE type, not the class: this is handed an encrypted connection in
+    // an E2EE room, and typing it as the plaintext class only looked correct
+    // because the caller cast. It uses one member, and both classes have it.
+    private conn: CollabConnectionLike,
     private store: BundleStore,
     private docId: string,
     private opts: {

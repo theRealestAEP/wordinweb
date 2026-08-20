@@ -82,6 +82,7 @@ import {
   refreshBibliographies,
   findIndexFields,
   indexEntryCount,
+  markedIndexEntryCount,
   insertIndex,
   insertIndexEntry,
   isValidIndexEntry,
@@ -184,10 +185,13 @@ import {
   computeFieldResults,
   findTocFields,
   insertToc,
+  insertPictureWatermark,
   insertWatermark,
   removeWatermark,
   type WatermarkSpec,
+  mergeRecordIntoCopy,
   tocEntryCount,
+  tocHeadingCount,
   rebuildToc,
   type TocOptions,
   createMeasurer,
@@ -281,6 +285,17 @@ export interface DocxViewApi {
   insertDateTime(kind: "date" | "time", picture?: string): boolean;
   /** Named bookmarks in document order. */
   listBookmarks(): string[];
+  /**
+   * How many entries a table of contents would find right now, and how many
+   * index entries have been marked.
+   *
+   * A TOC and an INDEX are both built from something the user has to do first —
+   * apply heading styles, or mark entries — and inserting one before that puts
+   * Word's own "No table of contents entries found." into the document, which
+   * is accurate and explains nothing. A surface that can ask beforehand can say
+   * what is missing instead.
+   */
+  contentsAvailability(): { headings: number; indexEntries: number };
   /** Add a bookmark around the selection, or a zero-length bookmark at the caret. */
   addBookmark(name: string): boolean;
   /** Insert a live text or page reference to a bookmark. */
@@ -441,6 +456,24 @@ export interface DocxViewApi {
   redo(): void;
   canUndo(): boolean;
   canRedo(): boolean;
+  /**
+   * Record the document's current state as an undo boundary.
+   *
+   * For a host that mutates the document THROUGH SOMETHING OTHER THAN THIS API
+   * — an agent session applying intents to the same DocxDocument — and still
+   * wants Cmd+Z to reach those changes. Every editing method here checkpoints
+   * on its own; nothing outside can, so without this an external edit is
+   * invisible to undo and leaves the history's shadow describing a document
+   * that no longer exists.
+   */
+  checkpoint(): void;
+  /**
+   * MAIL MERGE OUTPUT: this document with one record's values baked into its
+   * MERGEFIELD results, as bytes. The open document is NOT modified — the
+   * merge runs against a fresh parse of its serialized form, so a hundred
+   * records produce a hundred files and leave the template on screen alone.
+   */
+  mergeRecordToBytes(record: MergeRecord): Uint8Array;
   /** Insert a rows×cols table at the caret's paragraph. */
   insertTable(rows: number, cols: number): void;
   /** Row/column/table operations on the table containing the caret. */
@@ -595,6 +628,15 @@ export interface DocxViewApi {
    * header parts, so a document with none gets one first.
    */
   insertWatermark(spec: WatermarkSpec): boolean;
+  /**
+   * Stamp a PICTURE across every page — Word's Watermark > Picture. Replaces
+   * whichever watermark is already there, text or picture.
+   *
+   * The picture is washed out (Word's own recolor) and fitted to the page.
+   * Takes the same formats a shared document can carry, so SVG is refused;
+   * `imageAccept()` is the list to hand a file picker.
+   */
+  insertPictureWatermark(file: Blob): Promise<ImageInsertResult>;
   /** Take the watermark back off every page. False when there was none. */
   removeWatermark(): boolean;
   /** Apply (or with null remove) a character style over the selection. */
@@ -717,11 +759,16 @@ export interface DocxViewApi {
   /** Reject the tracked change at the caret (drop insertion / restore deletion). */
   rejectRevisionAtCaret(): boolean;
   /** How many tracked changes (suggestions) the document currently holds. */
-  revisionCount(): number;
+  /** Tracked changes in the document, or only `author`'s when given. */
+  revisionCount(author?: string): number;
   /** Accept every tracked change (one undo step). Returns how many applied. */
-  acceptAllRevisions(): number;
+  /** Accept every tracked change, or only `author`'s. A surface that owns some
+   * of the document's revisions must pass its own author, or it resolves work
+   * it never made. */
+  acceptAllRevisions(author?: string): number;
   /** Reject every tracked change (one undo step). Returns how many applied. */
-  rejectAllRevisions(): number;
+  /** Reject every tracked change, or only `author`'s. See acceptAllRevisions. */
+  rejectAllRevisions(author?: string): number;
   /** Current caret as stable-id addresses, or null. The encoding survives a
    * reconciliation reload, so it can be captured from a view about to
    * remount and restored into its replacement. In a local document the first
@@ -774,9 +821,28 @@ export type { NumberingPresetId } from "@wordinweb/core";
  * it is an intent-shape change with an ENGINE_VERSION bump, not a UI edit.
  */
 export const COLLAB_IMAGE_EXTS = ["png", "jpg", "jpeg", "gif", "bmp", "webp"] as const;
-const COLLAB_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/bmp,image/webp";
+/** File-picker accept list for the raster formats. Also the picture
+ * watermark's whole list: a VML `v:imagedata` cannot carry an SVG, in a
+ * shared document or a local one. */
+export const RASTER_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/bmp,image/webp";
+const COLLAB_IMAGE_ACCEPT = RASTER_IMAGE_ACCEPT;
 /** Local documents additionally take SVG — nothing has to agree with them. */
 const LOCAL_IMAGE_ACCEPT = `${COLLAB_IMAGE_ACCEPT},image/svg+xml`;
+
+/**
+ * Lowercase hex sha256 — a blob's address.
+ *
+ * Spelled out here rather than imported from @wordinweb/collab: this bundle
+ * keeps the collab client in its own chunk, and a value import would pull all
+ * of it into the base one. In a room the relay's uploadMedia returns the sha,
+ * so this runs only for a local document filling its own media part.
+ */
+async function blobSha256(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  let hex = "";
+  for (const b of new Uint8Array(digest)) hex += b.toString(16).padStart(2, "0");
+  return hex;
+}
 
 /**
  * Why an image insert did not happen, so the caller can SAY so. Every one of
@@ -2180,7 +2246,15 @@ export function DocxView({
           pageCount: () => pages,
           getSelectionFormat: () => {
             const segs = editor?.getSelectionSegments() ?? [];
-            return summarizeSelection(segs.length > 0 ? segs : handle ? selectionToSegments(handle.bindings) : []);
+            if (segs.length > 0) return summarizeSelection(segs);
+            const dom = handle ? selectionToSegments(handle.bindings) : [];
+            if (dom.length > 0) return summarizeSelection(dom);
+            // A COLLAPSED CARET still has formatting — what the next typed
+            // character would take — and the toolbar has to show it, or
+            // clicking into a paragraph blanks the font box, the size box and
+            // every toggle until a range happens to be selected.
+            const caret = editor?.caretFormatSegment();
+            return caret ? summarizeSelection([caret]) : null;
           },
           applyFormat: (patch) => {
             if (!handle) return;
@@ -2252,6 +2326,13 @@ export function DocxView({
             return true;
           },
           listBookmarks: () => listBookmarks(doc),
+          contentsAvailability: () => ({
+            // The SOURCE counts, not tocEntryCount/indexEntryCount — those are
+            // paragraph budgets floored at 1 for the empty placeholder line,
+            // and reported "1 heading" for a document with none.
+            headings: tocHeadingCount(doc),
+            indexEntries: markedIndexEntryCount(doc),
+          }),
           addBookmark: (name) => {
             {
               // Collab: a selection becomes a range bookmark on its first
@@ -2758,6 +2839,8 @@ export function DocxView({
           redo: () => editor?.applyHistory("redo"),
           canUndo: () => history.canUndo,
           canRedo: () => history.canRedo,
+          checkpoint: () => history.checkpoint(),
+          mergeRecordToBytes: (record) => mergeRecordIntoCopy(doc.save(), record),
           insertTable: (rows, cols) => {
             if (collabRunOperation("insertTable", { rows, cols })) return;
             const caret = editor?.getCaretTarget();
@@ -3639,6 +3722,83 @@ export function DocxView({
             pages = rerender(doc, undefined, "global");
             return true;
           },
+          insertPictureWatermark: async (file) => {
+            const ext = (file.type.split("/")[1] ?? "png").replace("jpeg", "jpg");
+            // VML v:imagedata cannot carry an SVG, so the raster allowlist is
+            // the whole list here — local documents get no wider set.
+            if (!(COLLAB_IMAGE_EXTS as readonly string[]).includes(ext)) return "unsupported-format";
+            const current = collabRef.current;
+            const inCollab = !!(current?.submitOp && doc.stableIds);
+            // SIZE PRE-CHECK before a byte is read, for insertImage's reason.
+            const maxBytes = inCollab ? current?.mediaMaxBlobBytes ?? null : null;
+            if (typeof maxBytes === "number" && file.size > maxBytes) return "too-large";
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            let bitmap: ImageBitmap;
+            try {
+              bitmap = await createImageBitmap(new Blob([bytes.buffer as ArrayBuffer], { type: file.type }));
+            } catch {
+              return "error";
+            }
+            const naturalWidthPx = bitmap.width;
+            const naturalHeightPx = bitmap.height;
+            bitmap.close();
+            // THE BYTES FIRST, the document after. In a room they travel out
+            // of band, so the reservation is only sound once the upload has
+            // succeeded (plan doc 16 §5.1) — and until then nothing here has
+            // touched the document, so a refusal leaves no half-made header
+            // part behind for a watermark that never lands.
+            let media: { blobSha: string; bytesLen: number; iv?: string } | null;
+            if (inCollab) {
+              if (!current!.uploadMedia) return "no-relay";
+              media = await current!.uploadMedia(bytes);
+              if (!media) return "upload-failed";
+            } else {
+              media = { blobSha: await blobSha256(bytes), bytesLen: bytes.length };
+            }
+            // The watermark lives in the header parts and this operation will
+            // not create one — the same ordering insertWatermark documents.
+            if (!doc.hasHfPart("header")) {
+              const created = collabDocOp((ids) => ({
+                kind: "ensureHeaderFooter",
+                hfKind: "header",
+                nodeIds: ids(8),
+              }));
+              if (created) doc.ensureHfPart("header");
+              else {
+                history.checkpoint();
+                doc.ensureHfPart("header");
+              }
+            }
+            const headerCount = doc.headerRoots().length;
+            if (headerCount === 0) return "error";
+            if (inCollab) {
+              collabDocOp((ids) => documentOperationBody("insertPictureWatermark", {
+                blobSha: media.blobSha,
+                bytesLen: media.bytesLen,
+                ext,
+                ...(media.iv ? { iv: media.iv } : {}),
+                naturalWidthPx,
+                naturalHeightPx,
+                headerCount,
+              }, ids));
+              return "inserted";
+            }
+            history.checkpoint();
+            const registered = insertPictureWatermark(doc, {
+              blobSha: media.blobSha,
+              ext,
+              naturalWidthPx,
+              naturalHeightPx,
+            });
+            if (!registered) return "error";
+            // No relay to fetch from: this replica IS the source of the bytes,
+            // so fill the part it just reserved before painting.
+            doc.installMedia(registered.part, bytes);
+            // A watermark paints behind every page and lives in the header,
+            // which the page chrome repaints globally.
+            pages = rerender(doc, undefined, "global");
+            return "inserted";
+          },
           removeWatermark: () => {
             if (collabDocOp(() => documentOperationBody("removeWatermark", {}))) return true;
             history.checkpoint();
@@ -3728,9 +3888,13 @@ export function DocxView({
           rejectRevisionAtCaret: () => editor?.rejectRevisionRef() ?? false,
           // Count works in any mode (read-only walk); the bulk operations
           // need the editor (they re-render + record an undo step).
-          revisionCount: () => collectRevisions(doc).length,
-          acceptAllRevisions: () => editor?.acceptAllRevisions() ?? 0,
-          rejectAllRevisions: () => editor?.rejectAllRevisions() ?? 0,
+          revisionCount: (author) =>
+            (author === undefined
+              ? collectRevisions(doc)
+              : collectRevisions(doc).filter((ref) => ref.author === author)
+            ).length,
+          acceptAllRevisions: (author) => editor?.acceptAllRevisions(author) ?? 0,
+          rejectAllRevisions: (author) => editor?.rejectAllRevisions(author) ?? 0,
           getEncodedCaret: () => {
             doc.enableStableIds(); // local documents encode too (see the API doc)
             return editor?.getEncodedCaret() ?? null;

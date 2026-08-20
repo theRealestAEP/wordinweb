@@ -104,6 +104,37 @@ describe("image insert — LOCAL mode (the pre-existing path)", () => {
     await ed.unmount();
   });
 
+  it("stamps a picture watermark, filling the part it reserved", async () => {
+    // The watermark path reserves its media part PENDING, because in a room
+    // the bytes arrive out of band. A local document is its own source, so
+    // "inserted" has to mean the bytes are really in the package — a part
+    // left pending here would render as a placeholder forever.
+    const ed = await mountLocal();
+    let outcome: string | undefined;
+    await act(async () => { outcome = await ed.api().insertPictureWatermark(new Blob([PNG], { type: "image/png" })); });
+    await tick();
+
+    expect(outcome).toBe("inserted");
+    const parts = ed.mediaParts();
+    expect(parts.length).toBe(1);
+    expect(ed.doc().pkg.binary(parts[0])).toEqual(PNG);
+    expect(ed.doc().pendingMedia.size).toBe(0);
+    await ed.unmount();
+  });
+
+  it("refuses an SVG watermark in a local document too", async () => {
+    // Unlike insertImage, which keeps SVG locally: a VML v:imagedata cannot
+    // carry an SVG at all, so this restriction is about the markup rather
+    // than about what the wire agrees on.
+    const ed = await mountLocal();
+    let outcome: string | undefined;
+    await act(async () => { outcome = await ed.api().insertPictureWatermark(new Blob([SVG], { type: "image/svg+xml" })); });
+    await tick();
+    expect(outcome).toBe("unsupported-format");
+    expect(ed.mediaParts()).toEqual([]);
+    await ed.unmount();
+  });
+
   it("works with NO caret placed (reaching for the toolbar first)", async () => {
     // WAS a silent no-op, and a plausible half of "images don't work at all":
     // clicking Insert-image before clicking into the page did nothing, with no

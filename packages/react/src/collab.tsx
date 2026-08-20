@@ -4,6 +4,7 @@ import { DocxView, type DocxViewApi } from "./index.js";
 import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js";
 import {
   CollabConnection,
+  type CollabConnectionLike,
   ClientReplica,
   EncryptedCollabConnection,
   CarriedIdAllocator,
@@ -520,7 +521,7 @@ function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 export function useCollab(opts: UseCollabOptions): CollabSession {
   const { url, docId, clientId, token, createSocket, store, profile, takeover, docKey, shareCode, ownerToken, httpBase } = opts;
   const startOffline = Boolean(opts.startOffline);
-  const connRef = useRef<CollabConnection | null>(null);
+  const connRef = useRef<CollabConnectionLike | null>(null);
   const carriedIdAllocator = useMemo(() => new CarriedIdAllocator(clientId), [clientId]);
   const [doc, setDoc] = useState<DocxDocument | null>(null);
   const docRef = useRef<DocxDocument | null>(null);
@@ -832,7 +833,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
    * verbatim, deduplicated by (clientId, clientSeq). A hard kill inside the
    * sub-second flush window keeps the ordinary doc 12 §4 RPO bound.
    */
-  const runTailReplay = (conn: CollabConnection, kind: "plain" | "suggest"): void => {
+  const runTailReplay = (conn: CollabConnectionLike, kind: "plain" | "suggest"): void => {
     const author = profile?.name || clientId;
     const date = new Date().toISOString();
     const step = (): void => {
@@ -1203,8 +1204,10 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
       // duties at all and images stay a local-only feature, which is exactly
       // how every non-media caller behaves today.
       const mediaOpts = httpBase ? { httpBase } : undefined;
-      const conn: CollabConnection = docKey
-        ? (new EncryptedCollabConnection(transport, clientId, docKey, callbacks, stretched, undefined, mediaOpts) as unknown as CollabConnection)
+      // No cast: both classes implement CollabConnectionLike, so the compiler
+      // checks the two surfaces still agree instead of being told they do.
+      const conn: CollabConnectionLike = docKey
+        ? new EncryptedCollabConnection(transport, clientId, docKey, callbacks, stretched, undefined, mediaOpts)
         : new CollabConnection(transport, clientId, callbacks, mediaOpts);
       connRef.current = conn;
       if (store) {

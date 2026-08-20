@@ -341,8 +341,8 @@ export type EditorIntent =
     }
   | { kind: "acceptRevision"; index: number }
   | { kind: "rejectRevision"; index: number }
-  | { kind: "acceptAllRevisions" }
-  | { kind: "rejectAllRevisions" }
+  | { kind: "acceptAllRevisions"; author?: string }
+  | { kind: "rejectAllRevisions"; author?: string }
   | { kind: "setImageWrap"; runId: number; objectIndex?: number; mode: "inline" | "square" | "topAndBottom" | "none" | "behind" }
   | { kind: "setFloatingPagePosition"; runId: number; objectIndex?: number; xPx: number; yPx: number }
   | { kind: "resizeDrawing"; runId: number; objectIndex?: number; widthPx: number; heightPx: number }
@@ -771,6 +771,45 @@ export class DocxEditor {
       current = this.host.doc.findParentOf(current);
     }
     return false;
+  }
+
+  /**
+   * The effective run formatting AT THE CARET, as a zero-width segment.
+   *
+   * A collapsed caret covers no text, so it produces no selection segments and
+   * the toolbar had nothing to summarize: click into a paragraph and the font
+   * box, the size box and every toggle went blank until you selected a range.
+   * Word fills them the moment the caret lands, because what they report is
+   * the formatting the next typed character would take.
+   *
+   * The props come from the LAID-OUT item rather than the run's own rPr, so
+   * what the boxes show is the font actually in force — resolved through the
+   * style chain and docDefaults — not just whatever direct formatting the run
+   * happens to carry (usually none, which is why a blank document could never
+   * have named its own font).
+   *
+   * A caret at a span boundary takes the PRECEDING span's formatting, which is
+   * both Word's rule and the one the bindings scan gives for free: bindings
+   * are in paint order, so the span ENDING at the offset is met first.
+   */
+  caretFormatSegment(): SelectionSegment | null {
+    const caret = this.caret;
+    const handle = this.host.getHandle();
+    if (!caret || !handle) return null;
+    for (const binding of handle.bindings) {
+      const src = binding.item.src;
+      if (!src?.t || src.t !== caret.t) continue;
+      const start = src.offset;
+      if (caret.offset < start || caret.offset > start + binding.item.text.length) continue;
+      return {
+        run: src.run,
+        t: src.t,
+        start: caret.offset,
+        end: caret.offset,
+        props: binding.item.props,
+      };
+    }
+    return null;
   }
 
   /** Segments covered by the owned selection, in document paint order. */
@@ -4611,6 +4650,17 @@ export class DocxEditor {
       if ((this.regionOf(binding.item.src) === "hf") !== this.inHeaderFooter) return false;
       e.preventDefault();
       e.stopPropagation();
+      // ARMED HERE, NOT ON RELEASE. The container's own mouseup runs BEFORE
+      // this gesture's document-level one — the container is an ancestor of
+      // the object and the document an ancestor of the container — so a flag
+      // set on release arrives one handler too late and the caret path has
+      // already run. It ran to the end: a picture is not a glyph, so
+      // caretFromPoint finds nothing, the press is read as a click in empty
+      // space, and click-and-type SPLIT A PARAGRAPH and re-rendered. That
+      // cost a paragraph of the user's document (emitted to every peer in a
+      // room) on a click that was only ever asking to select the object, and
+      // the re-render replaced the object's node underneath this gesture.
+      this.suppressNextMouseUp = true;
       const startX = e.clientX;
       const startY = e.clientY;
       const floating = isFloatingDrawing(binding.item.src!);
@@ -4672,9 +4722,14 @@ export class DocxEditor {
         document.removeEventListener("mouseup", onUp);
         ghost?.remove();
         this.hideDropIndicator();
-        this.suppressNextMouseUp = true;
         if (!moved) {
-          this.selectImage(el, binding.item.src!, binding.item);
+          // By SRC, not by the element captured on press. A re-render between
+          // press and release replaces the object's node, and selecting a
+          // detached one appends the whole selection overlay — box, handles,
+          // wrap bar — to a dead subtree, so the object reads as unselectable.
+          // In a room the re-render need not be local at all: a peer's edit
+          // arriving mid-gesture is enough.
+          this.reselectImage(binding.item.src!, { x: rect0.left, y: rect0.top });
           return;
         }
         this.host.history?.checkpoint();
@@ -7023,11 +7078,13 @@ export class DocxEditor {
   }
 
   /** Accept every tracked change (one undo step). Returns how many applied. */
-  acceptAllRevisions(): number {
+  acceptAllRevisions(author?: string): number {
     this.host.history?.checkpoint();
-    const n = acceptAllRevisions(this.host.doc);
+    const n = acceptAllRevisions(this.host.doc, author);
     if (n === 0) return 0;
-    this.host.onIntent?.({ kind: "acceptAllRevisions" });
+    // The author travels with the intent: a replica that swept everything while
+    // this one swept one author's changes would diverge.
+    this.host.onIntent?.({ kind: "acceptAllRevisions", ...(author !== undefined ? { author } : {}) });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();
@@ -7036,11 +7093,11 @@ export class DocxEditor {
   }
 
   /** Reject every tracked change (one undo step). Returns how many applied. */
-  rejectAllRevisions(): number {
+  rejectAllRevisions(author?: string): number {
     this.host.history?.checkpoint();
-    const n = rejectAllRevisions(this.host.doc);
+    const n = rejectAllRevisions(this.host.doc, author);
     if (n === 0) return 0;
-    this.host.onIntent?.({ kind: "rejectAllRevisions" });
+    this.host.onIntent?.({ kind: "rejectAllRevisions", ...(author !== undefined ? { author } : {}) });
     this.dismissSuggestionPopover();
     this.host.rerender();
     this.positionCaret();

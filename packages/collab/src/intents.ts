@@ -1052,14 +1052,18 @@ export interface RejectRevisionIntent extends IntentBase {
   index: number;
 }
 
-/** Accept every tracked change in the document. */
+/** Accept every tracked change in the document, or only one author's when
+ * `author` is given — a surface that owns some of the revisions must not
+ * resolve the rest. Absent means all, which is what older clients send. */
 export interface AcceptAllRevisionsIntent extends IntentBase {
   kind: "acceptAllRevisions";
+  author?: string;
 }
 
-/** Reject every tracked change in the document. */
+/** Reject every tracked change, or only one author's. See AcceptAll. */
 export interface RejectAllRevisionsIntent extends IntentBase {
   kind: "rejectAllRevisions";
+  author?: string;
 }
 
 /** Insert a rows×cols table after the paragraph containing the anchor run.

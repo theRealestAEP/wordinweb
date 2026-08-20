@@ -1182,16 +1182,29 @@ export function rejectRevision(doc: DocxDocument, ref: RevisionRef): boolean {
  * (front-to-back, the second of two consecutive mark revisions would already
  * be absorbed and silently skipped). Returns how many revisions were applied.
  */
-export function acceptAllRevisions(doc: DocxDocument): number {
-  return applyToAll(doc, applyAccept);
+export function acceptAllRevisions(doc: DocxDocument, author?: string): number {
+  return applyToAll(doc, applyAccept, author);
 }
 
-export function rejectAllRevisions(doc: DocxDocument): number {
-  return applyToAll(doc, applyReject);
+export function rejectAllRevisions(doc: DocxDocument, author?: string): number {
+  return applyToAll(doc, applyReject, author);
 }
 
-function applyToAll(doc: DocxDocument, apply: (doc: DocxDocument, ref: RevisionRef) => boolean): number {
-  const refs = collectRevisions(doc);
+/**
+ * `author` narrows the sweep to one person's tracked changes.
+ *
+ * Undefined means every revision, which is what "Accept all" in a review UI
+ * means. A caller that only owns SOME of the document's revisions — the AI
+ * panel, which stamps its edits with its own author — must pass one, or its
+ * "reject all" throws away a co-author's work that it never touched.
+ */
+function applyToAll(
+  doc: DocxDocument,
+  apply: (doc: DocxDocument, ref: RevisionRef) => boolean,
+  author?: string,
+): number {
+  const all = collectRevisions(doc);
+  const refs = author === undefined ? all : all.filter((ref) => ref.author === author);
   const notes = new Set<NotePart>();
   let n = 0;
   for (let i = refs.length - 1; i >= 0; i--) {

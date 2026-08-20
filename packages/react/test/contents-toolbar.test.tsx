@@ -51,6 +51,22 @@ const FIXTURE = (() => {
   });
 })();
 
+/** The same package with NO headings — the state a new document is in, and the
+ * one where a table of contents has nothing to list. */
+const PLAIN_FIXTURE = (() => {
+  const body = `<w:p><w:r><w:t xml:space="preserve">Just a sentence.</w:t></w:r></w:p>`;
+  const xml =
+    `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:body>${body}</w:body></w:document>`;
+  return zipSync({
+    "[Content_Types].xml": strToU8(`<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`),
+    "_rels/.rels": strToU8(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`),
+    "word/_rels/document.xml.rels": strToU8(`<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`),
+    "word/document.xml": strToU8(xml),
+    "word/styles.xml": strToU8(STYLES_XML),
+  });
+})();
+
 async function tick(ms = 5) {
   await act(async () => {
     await new Promise<void>((r) => setTimeout(r, ms));
@@ -65,7 +81,7 @@ async function click(element: HTMLElement) {
 
 /** Mount a real editable view with the real toolbar above it. Supply `collab`
  * to mount IN A ROOM, where the api emits an intent instead of mutating. */
-async function mount(inRoom = false) {
+async function mount(inRoom = false, source: Uint8Array = FIXTURE) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -78,7 +94,7 @@ async function mount(inRoom = false) {
   await act(async () => {
     root.render(
       createElement(DocxView, {
-        source: FIXTURE,
+        source,
         editable: true,
         onReady: (api: DocxViewApi) => {
           seen.api = api;
@@ -118,6 +134,7 @@ async function mount(inRoom = false) {
   await tick();
   return {
     bar,
+    container,
     intents,
     api: () => seen.api!,
     xml: () => serializeXml(seen.doc!.docRoot),
@@ -132,19 +149,28 @@ async function mount(inRoom = false) {
   };
 }
 
-/** Open the Insert tab, then pick `label` from the Contents menu. */
-async function pickContents(bar: HTMLElement, label: string) {
+/**
+ * Open the Insert tab, then pick `label` from the Contents menu.
+ *
+ * The menu is a popover of plain buttons rather than a listbox: every command
+ * in it depends on something the user must have done first (heading styles,
+ * marked entries), so each one carries a note saying so, which a <select> of
+ * options cannot express.
+ */
+async function openContents(bar: HTMLElement): Promise<void> {
   const insert = bar.querySelector<HTMLButtonElement>('button[data-tab="insert"]');
   expect(insert, "Insert tab").toBeTruthy();
   await click(insert!);
-  const trigger = bar.querySelector<HTMLButtonElement>(
-    'button[aria-label="Insert or update a table of contents"]',
-  );
+  const trigger = bar.querySelector<HTMLButtonElement>('button[data-testid="contents-menu"]');
   expect(trigger, "Contents menu").toBeTruthy();
   await click(trigger!);
-  const options = [...bar.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+}
+
+async function pickContents(bar: HTMLElement, label: string) {
+  await openContents(bar);
+  const options = [...bar.querySelectorAll<HTMLButtonElement>("button")];
   const option = options.find((item) => (item.textContent ?? "").trim() === label);
-  expect(option, `option "${label}" among ${options.map((o) => o.textContent).join(", ")}`).toBeTruthy();
+  expect(option, `option "${label}" among ${options.map((o) => o.textContent).join(" | ")}`).toBeTruthy();
   await click(option!);
   await tick(20);
 }
@@ -153,7 +179,7 @@ describe("Insert tab: the Contents menu", () => {
   it("inserts a real TOC field with an entry per heading", async () => {
     const t = await mount();
     expect(t.xml()).not.toContain("TOC \\o");
-    await pickContents(t.bar, "Table of contents");
+    await pickContents(t.bar, "Insert table of contents");
     const xml = t.xml();
     // The field itself, spelled the way Word writes it.
     expect(xml).toContain(`<w:instrText xml:space="preserve"> TOC \\o "1-3" \\h \\z \\u </w:instrText>`);
@@ -167,18 +193,18 @@ describe("Insert tab: the Contents menu", () => {
 
   it("updates field results without rebuilding the entries", async () => {
     const t = await mount();
-    await pickContents(t.bar, "Table of contents");
+    await pickContents(t.bar, "Insert table of contents");
     const withToc = t.xml();
     // A pure result refresh: the entry paragraphs the insert produced survive,
     // so the document is unchanged when nothing about the headings moved.
-    await pickContents(t.bar, "Update fields");
+    await pickContents(t.bar, "Update all fields");
     expect(t.xml()).toBe(withToc);
     await t.unmount();
   });
 
   it("rebuilds the entries after a heading changes", async () => {
     const t = await mount();
-    await pickContents(t.bar, "Table of contents");
+    await pickContents(t.bar, "Insert table of contents");
     expect(t.xml()).toContain("Method");
     // Retitle the last heading behind the TOC's back, the way editing does.
     const doc = t.api().document;
@@ -192,7 +218,7 @@ describe("Insert tab: the Contents menu", () => {
     expect(texts.length).toBeGreaterThanOrEqual(2);
     texts[texts.length - 1].text = "Materials";
     doc.refresh();
-    await pickContents(t.bar, "Update table of contents");
+    await pickContents(t.bar, "Update it from the document");
     expect(t.xml()).toContain("Materials");
     await t.unmount();
   });
@@ -202,7 +228,7 @@ describe("Insert tab: the Contents menu in a room", () => {
   it("emits an insertToc intent instead of forking the room", async () => {
     const t = await mount(true);
     const before = t.xml();
-    await pickContents(t.bar, "Table of contents");
+    await pickContents(t.bar, "Insert table of contents");
     const toc = t.intents.find((intent) => intent.kind === "insertToc");
     expect(toc, `insertToc among ${t.intents.map((i) => i.kind).join(", ")}`).toBeTruthy();
     // The local document is NOT mutated: in a room the intent is the whole of
@@ -218,10 +244,47 @@ describe("Insert tab: the Contents menu in a room", () => {
     // eight ids per entry (the paragraph and its seven hyperlink runs) plus
     // spares for the field runs and the closing paragraph.
     const t = await mount(true);
-    await pickContents(t.bar, "Table of contents");
+    await pickContents(t.bar, "Insert table of contents");
     const toc = t.intents.find((intent) => intent.kind === "insertToc")!;
     expect(toc.entryCount).toBe(3);
     expect((toc.nodeIds as number[]).length).toBe(3 * 8 + 8);
+    await t.unmount();
+  });
+});
+
+describe("Insert tab: the Contents menu explains what it needs", () => {
+  /**
+   * Inserting a TOC into a document with no headings puts Word's own "No table
+   * of contents entries found." into the page. That text is correct and has to
+   * stay — it is what Word writes, and changing it would make the saved file
+   * disagree with Word. So the explanation belongs BEFORE the insert, where it
+   * can say what a table of contents is built from.
+   */
+  it("says there are no headings, and what a heading is, before anything is inserted", async () => {
+    const t = await mount(false, PLAIN_FIXTURE);
+    await openContents(t.bar);
+    const state = t.bar.querySelector('[data-testid="toc-state"]');
+
+    expect(state?.textContent).toContain("No headings yet");
+    expect(state?.textContent).toContain("Heading 1");
+    // And the document is untouched: opening a menu must insert nothing.
+    expect(t.container.textContent).not.toContain("No table of contents entries found.");
+    await t.unmount();
+  });
+
+  it("counts the headings it would list once they exist", async () => {
+    const t = await mount();
+    await openContents(t.bar);
+    expect(t.bar.querySelector('[data-testid="toc-state"]')?.textContent).toMatch(/\d+ headings? found/);
+    await t.unmount();
+  });
+
+  it("says the index needs entries marked first", async () => {
+    const t = await mount();
+    await openContents(t.bar);
+    const state = t.bar.querySelector('[data-testid="index-state"]');
+    expect(state?.textContent).toContain("Nothing marked yet");
+    expect(state?.textContent).toContain("Select a word");
     await t.unmount();
   });
 });

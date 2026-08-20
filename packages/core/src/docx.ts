@@ -2545,48 +2545,69 @@ export class DocxDocument {
     return true;
   }
 
-  private addImageResourceAt(bytes: Uint8Array, ext: string, source?: XmlElement): { relId: string; part: string } {
-    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
-    let n = 1;
-    while (this.pkg.has(`${docDir}media/image${n}.${ext}`)) n++;
-    const part = `${docDir}media/image${n}.${ext}`;
-    this.pkg.raw()[part] = bytes;
-
+  /** The relationships of the part that holds `source`: a header or footer
+   * part when the element is inside one, else the document part. */
+  private imageRelsOwner(source?: XmlElement): { relsRoot: XmlElement; relationships: Relationships } {
     const contains = (root: XmlElement, target: XmlElement): boolean =>
       root === target || root.children.some((item) => contains(item, target));
     const owner = source ? this.hfParts.find((candidate) => contains(candidate.root, source)) : undefined;
-    let relsRoot: XmlElement;
-    let relationships: Relationships;
-    if (owner) {
-      owner.relsRoot ??= {
-        name: "Relationships",
-        attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
-        children: [],
-        text: "",
-      };
-      relsRoot = owner.relsRoot;
-      relationships = owner.rels;
-    } else {
-      relsRoot = this.ensureRelsRoot();
-      relationships = this.documentRels;
-    }
+    if (!owner) return { relsRoot: this.ensureRelsRoot(), relationships: this.documentRels };
+    owner.relsRoot ??= {
+      name: "Relationships",
+      attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
+      children: [],
+      text: "",
+    };
+    return { relsRoot: owner.relsRoot, relationships: owner.rels };
+  }
+
+  /** Add an image relationship pointing at `part`, in the relationships of
+   * whichever part holds `source`. */
+  private addImageRel(part: string, source?: XmlElement): string {
+    const { relsRoot, relationships } = this.imageRelsOwner(source);
     let maxId = 0;
     for (const r of relsRoot.children) {
       const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
       if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
     }
     const relId = `rId${maxId + 1}`;
+    // Header, footer and document parts are all siblings in word/, so one
+    // relative target reads the same from any of their .rels files.
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
     relsRoot.children.push({
       name: "Relationship",
       attrs: {
         Id: relId,
         Type: "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
-        Target: `media/image${n}.${ext}`,
+        Target: part.startsWith(docDir) ? part.slice(docDir.length) : part,
       },
       children: [],
       text: "",
     });
     relationships.set(relId, { id: relId, type: "image", target: part, external: false });
+    return relId;
+  }
+
+  /**
+   * Point a SECOND part at an image part this document already has.
+   *
+   * Word's picture watermark is ONE media part that every header part
+   * references. Registering the image again per header would put a full copy
+   * of the bytes in the package for each one — three headers, three copies of
+   * the same logo — and give the media-install path three pending parts to
+   * fill from one upload.
+   */
+  linkImageResource(part: string, source: XmlElement): string {
+    return this.addImageRel(part, source);
+  }
+
+  private addImageResourceAt(bytes: Uint8Array, ext: string, source?: XmlElement): { relId: string; part: string } {
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    let n = 1;
+    while (this.pkg.has(`${docDir}media/image${n}.${ext}`)) n++;
+    const part = `${docDir}media/image${n}.${ext}`;
+    this.pkg.raw()[part] = bytes;
+    const relId = this.addImageRel(part, source);
 
     // Content type default for the extension
     const MIME: Record<string, string> = {
@@ -2898,6 +2919,17 @@ export class DocxDocument {
     meta?: { iv?: string; genesisId?: string },
     source?: XmlElement,
   ): string {
+    return this.registerPendingImagePart(sha, ext, meta, source).relId;
+  }
+
+  /** As registerPendingImage, and also names the part it made — what a second
+   * part needs to reach the same image through linkImageResource. */
+  registerPendingImagePart(
+    sha: string,
+    ext: string,
+    meta?: { iv?: string; genesisId?: string },
+    source?: XmlElement,
+  ): { relId: string; part: string } {
     // Register with a 0-byte placeholder entry so part-name scanning and
     // content-type bookkeeping behave identically to a real image…
     const { relId, part } = this.addImageResourceAt(new Uint8Array(0), ext, source);
@@ -2906,7 +2938,7 @@ export class DocxDocument {
     delete this.pkg.raw()[part];
     this.pendingMedia.set(part, { sha, ...meta });
     this.mediaMeta.set(part, { sha, ...meta });
-    return relId;
+    return { relId, part };
   }
 
   /** Install fetched bytes into a pending part (doc 05). The caller has

@@ -275,6 +275,13 @@ function buildIndexParagraphs(doc: DocxDocument, w: string): XmlElement[] {
  * the payload, so the originator asks here and carries the answer. This walk
  * must not mutate, so it counts WITHOUT allocating bookmarks.
  */
+/** How many index entries have been MARKED — the count of XE marks in the
+ * document. indexEntryCount below is the field's paragraph budget instead, and
+ * is floored at 1 for the empty placeholder line. */
+export function markedIndexEntryCount(doc: DocxDocument): number {
+  return collectIndexOccurrences(doc).length;
+}
+
 export function indexEntryCount(doc: DocxDocument): number {
   const occurrences = collectIndexOccurrences(doc);
   const mains = new Map<string, Set<string>>();

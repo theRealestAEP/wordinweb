@@ -12,7 +12,7 @@ import {
   ParticipantProfile,
   sanitizePresencePosition,
 } from "./protocol.js";
-import type { ClientTransport, ConnectionCallbacks } from "./connection.js";
+import type { ClientTransport, CollabConnectionLike, ConnectionCallbacks } from "./connection.js";
 import type { Scope } from "./apply.js";
 import type { RosterEntry } from "./protocol.js";
 import type { DocBundle } from "./bundle.js";
@@ -49,7 +49,7 @@ import { CarriedIdAllocator } from "./id-allocator.js";
  * exists because the caller holds `#k` — a plaintext `welcome` arriving
  * anyway is a downgrade attempt and is hard-refused.
  */
-export class EncryptedCollabConnection {
+export class EncryptedCollabConnection implements CollabConnectionLike {
   private mirror: DocumentSession | null = null;
   private replica: ClientReplica | null = null;
   private keys: EpochKeys | null = null;
@@ -278,7 +278,9 @@ export class EncryptedCollabConnection {
    * connection — the react layer's `as unknown as CollabConnection` cast
    * hid it from the typechecker, so the demo's owner controls were silent
    * TypeErrors on encrypted docs (the default), long misattributed to a
-   * Vite prebundle race ("stale session w/o admin"). */
+   * Vite prebundle race ("stale session w/o admin"). That cast is gone: this
+   * class now `implements CollabConnectionLike`, so the same omission is a
+   * compile error rather than a runtime silence. */
   admin(action:
     | { op: "kick"; clientId: string }
     | { op: "readOnly"; on: boolean }

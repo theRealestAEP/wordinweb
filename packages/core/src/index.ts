@@ -224,7 +224,8 @@ export {
   updateFields,
 } from "./edit/update-fields.js";
 export type { FieldUpdateOptions } from "./edit/update-fields.js";
-export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, isValidCaptionLabel, rebuildToc, tocEntryCount } from "./edit/toc.js";
+export { bakeMergeRecord, mergeRecordIntoCopy } from "./edit/mail-merge.js";
+export { TOC_EMPTY_TEXT, TOC_LEADERS, findTocFields, insertToc, isValidCaptionLabel, rebuildToc, tocEntryCount, tocHeadingCount } from "./edit/toc.js";
 export {
   bibliographyEntryCount,
   findBibliographyFields,
@@ -235,6 +236,7 @@ export {
   INDEX_EMPTY_TEXT,
   findIndexFields,
   indexEntryCount,
+  markedIndexEntryCount,
   insertIndex,
   insertIndexEntry,
   isValidIndexEntry,
@@ -276,7 +278,9 @@ export { validBookmarkName, listBookmarks, bookmarkTextTarget, insertBookmarkAro
 export type { CrossRefTarget } from "./edit/references.js";
 export {
   deleteWatermark,
+  headerPictureWatermarks,
   headerWatermarks,
+  insertPictureWatermark,
   insertWatermark,
   removeWatermark,
   setWordArtOpacity,
@@ -286,7 +290,7 @@ export {
   wordArtRotation,
   wordArtText,
 } from "./edit/watermark.js";
-export type { WatermarkSpec } from "./edit/watermark.js";
+export type { PictureWatermarkSpec, WatermarkSpec } from "./edit/watermark.js";
 export { checkboxStateElement, checkboxChecked, toggleCheckbox } from "./checkbox.js";
 export { isSafeUrl, safeUrlOrBlank } from "./url-safety.js";
 export { validatePastedOoxml, pruneToPastedSubset, DEFAULT_OOXML_LIMITS } from "./ooxml-validate.js";
