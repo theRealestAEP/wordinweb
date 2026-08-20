@@ -15,7 +15,18 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30 minutes was never a measured budget: until b8abc14 this job died in
+    # `npm run verify` after ~2.5 minutes, so nothing after it had ever run to
+    # completion here. With verify green, `test:agent-fixtures` alone passed 25
+    # minutes and was still going when the cap cancelled it — it opens every
+    # corpus document and checks each component is reachable and inspectable,
+    # which takes 12+ minutes on a 16-worker laptop and far longer on a 2-core
+    # runner. `e2e:ci` after it has never run in CI at all.
+    #
+    # So this is deliberately generous rather than tight. Tighten it once a full
+    # run has reported real numbers; a cap below the work's actual cost reads as
+    # a red suite, which is worse than a slow one.
+    timeout-minutes: 90
 
     steps:
       - uses: actions/checkout@v4
