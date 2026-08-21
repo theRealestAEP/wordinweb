@@ -98,8 +98,17 @@ async function converge(pages: { a: Page; b: Page; c: Page }, label: string): Pr
   await expect
     .poll(
       async () => {
-        const [a, b, c] = await Promise.all([saveB64(pages.a), saveB64(pages.b), saveB64(pages.c)]);
-        return a !== null && a === b && b === c;
+        try {
+          const [a, b, c] = await Promise.all([saveB64(pages.a), saveB64(pages.b), saveB64(pages.c)]);
+          return a !== null && a === b && b === c;
+        } catch (error) {
+          // A THROW HERE IS THE STEP'S FAULT, so say which step. save() walks
+          // the whole tree, so an operation that writes a malformed node (an
+          // attribute whose value is undefined, say) fails here rather than
+          // where it was written — and without the label the report names only
+          // saveB64, which is the same line for all 126 kinds.
+          throw new Error(`saving after ${label} threw: ${error instanceof Error ? error.message : String(error)}`);
+        }
       },
       { message: `clients did not converge after ${label}`, timeout: 8000 },
     )

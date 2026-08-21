@@ -1,6 +1,6 @@
 {
   "name": "@wordinweb/server",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Collaborative-editing host for wordinweb: routes clients to per-document sessions (thin transport over @wordinweb/collab)",
   "license": "MIT",
   "repository": {
