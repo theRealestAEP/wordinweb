@@ -66,14 +66,19 @@ test("several WordArt objects drag repeatedly and keep native positions through 
   const bodyAfterWordArt = await bodyPositions(page);
   expect(bodyAfterWordArt).toEqual(bodyBeforeWordArt);
 
-  // The first object moves twice. The other two then move out from the shared
+  // The topmost object moves twice. The other two then move out from the shared
   // insertion point. This exercises the real drag path and its rerenders.
-  // Equal-z drawings paint in DOM order, so the last one is the object the
-  // pointer can reach while all three still share the insertion point.
-  await dragDrawing(page, 2, 150, -45);
-  await dragDrawing(page, 2, 45, 70);
+  //
+  // REACHABILITY FOLLOWS Z, NOT DOM ORDER. Since #159 a new floating object is
+  // given a higher relativeHeight than the one before it, so while all three
+  // share an insertion point the NEWEST is on top — and it is first in the DOM,
+  // z descending (251658243, …242, …241). The pointer can only reach that one;
+  // aiming at any of the three hits index 0. Each drag moves the top object off
+  // the pile, which uncovers the next.
+  await dragDrawing(page, 0, 150, -45);
+  await dragDrawing(page, 0, 45, 70);
   await dragDrawing(page, 1, 75, 145);
-  await dragDrawing(page, 0, 285, 245);
+  await dragDrawing(page, 2, 285, 245);
   const beforeReload = await drawingPositions(page);
   expect(new Set(beforeReload.map(({ x, y }) => `${Math.round(x)},${Math.round(y)}`)).size).toBe(3);
 

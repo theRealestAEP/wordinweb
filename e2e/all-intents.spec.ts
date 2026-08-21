@@ -1,5 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { INTENT_KINDS } from "../packages/collab/src/client.js";
+import { ADDRESS_WIRE_FIELD, registeredOperation } from "../packages/core/src/index.js";
 import { BOARD_CODE, enterCodeIfPrompted } from "./_helpers";
 
 /**
@@ -46,7 +47,10 @@ async function step(
         out.push(...ids);
         // Splice into the intent by a `$field` placeholder (single id) or
         // `$field[]` (array).
-        (intent as Record<string, unknown>)[field] = (n as number) === 1 && !field.endsWith("[]") ? ids[0] : ids;
+        // nodeIds is a LIST on the wire even when one id is carried, so the
+        // single-id shorthand below must never collapse it to a scalar.
+        (intent as Record<string, unknown>)[field] =
+          (n as number) === 1 && !field.endsWith("[]") && field !== "nodeIds" ? ids[0] : ids;
       }
       ww.submitOp(intent);
       return out;
@@ -55,6 +59,34 @@ async function step(
   );
   await converge(pages, kind);
   return allocated;
+}
+
+/**
+ * Submit a REGISTERED operation, taking its address field and carried-id budget
+ * from the registry instead of repeating them at the call site.
+ *
+ * Fifty-five of the kinds below are declared in the core operation registry,
+ * which already knows each one's address ("run" → runId, "cell" →
+ * cellParagraphId, …) and exactly how many ids it carries for the arguments
+ * given. Reading that here means a registered operation that changes its shape
+ * cannot leave this test asserting the old one, and that adding a kind needs
+ * only the arguments — the wiring comes from the declaration.
+ */
+async function regStep(
+  pages: { a: Page; b: Page; c: Page },
+  kind: string,
+  addressId: number | undefined,
+  args: Record<string, unknown>,
+): Promise<number[]> {
+  const definition = registeredOperation(kind);
+  if (!definition) throw new Error(`${kind} is not a registered operation`);
+  const intent: Record<string, unknown> = { kind, ...args };
+  if (definition.address !== "document") {
+    if (addressId === undefined) throw new Error(`${kind} is ${definition.address}-addressed and needs an id`);
+    intent[ADDRESS_WIRE_FIELD[definition.address]] = addressId;
+  }
+  const carried = definition.nodeIds ? definition.nodeIds(args as never) : 0;
+  return step(pages, kind, intent, carried > 0 ? { nodeIds: carried } : undefined);
 }
 
 async function saveB64(page: Page): Promise<string | null> {
@@ -132,6 +164,10 @@ test("all canonical intent kinds converge byte-identically across 3 browser clie
     void nr;
     await step(pages, "mergeParagraph", { kind: "mergeParagraph", blockId: nb }); cover("mergeParagraph");
 
+    // --- inline separators (insert then take it back out) ---
+    await step(pages, "insertSeparator", { kind: "insertSeparator", at: { ...P, offset: 0 }, separator: "br" }); cover("insertSeparator");
+    await step(pages, "deleteSeparator", { kind: "deleteSeparator", at: { ...P, offset: 0 } }); cover("deleteSeparator");
+
     // --- run-anchored inserts (fields, links, notes, breaks, bookmarks) ---
     await step(pages, "setLink", { kind: "setLink", runId: 2, url: "https://example.com" }, { nodeIds: 2 }); cover("setLink");
     await step(pages, "removeLink", { kind: "removeLink", runId: 2 }); cover("removeLink");
@@ -178,6 +214,8 @@ test("all canonical intent kinds converge byte-identically across 3 browser clie
       return found;
     });
     await step(pages, "replyComment", { kind: "replyComment", parentId: commentId, text: "re", author: "B", date: "2026-07-23T00:01:00Z", paraIds: ["c2"] }); cover("replyComment");
+    await step(pages, "editComment", { kind: "editComment", commentId, text: "note, revised" }); cover("editComment");
+    await step(pages, "resolveComment", { kind: "resolveComment", commentId, resolved: true, paraId: "c3" }); cover("resolveComment");
     await step(pages, "deleteComment", { kind: "deleteComment", commentId }); cover("deleteComment");
 
     // --- paste ---
@@ -242,6 +280,84 @@ test("all canonical intent kinds converge byte-identically across 3 browser clie
     await step(pages, "rejectAllRevisions", { kind: "rejectAllRevisions" }); cover("rejectAllRevisions");
 
     await step(pages, "removeDrawing", { kind: "removeDrawing", runId: shapeRun }); cover("removeDrawing");
+
+    // --- references: caption, cross-ref bookmark, TOC, index ---
+    await regStep(pages, "insertCaption", 1, { label: "Figure", text: "A caption" }); cover("insertCaption");
+    await regStep(pages, "ensureRefBookmark", 1, { name: "refbm1" }); cover("ensureRefBookmark");
+    await regStep(pages, "insertToc", 2, { entryCount: 1, levels: 3 }); cover("insertToc");
+    await regStep(pages, "insertIndexEntry", 2, { entry: "term" }); cover("insertIndexEntry");
+    await regStep(pages, "insertIndex", 2, { entryCount: 1 }); cover("insertIndex");
+    await regStep(pages, "refreshIndex", undefined, { entryCount: 1 }); cover("refreshIndex");
+    await regStep(pages, "updateFields", undefined, { results: [] }); cover("updateFields");
+
+    // --- styles ---
+    await regStep(pages, "createStyle", undefined, { style: { styleId: "MyStyle", name: "My Style", type: "paragraph", rPr: { bold: true } } }); cover("createStyle");
+    await regStep(pages, "modifyStyle", undefined, { styleId: "MyStyle", patch: { rPr: { italic: true } } }); cover("modifyStyle");
+    await regStep(pages, "deleteStyle", undefined, { styleId: "MyStyle" }); cover("deleteStyle");
+
+    // --- paragraph-level: numbering, borders, tabs ---
+    await regStep(pages, "setNumberingLevel", 1, { ilvl: 0, patch: { numFmt: "decimal" } }); cover("setNumberingLevel");
+    await regStep(pages, "setNumberingRestart", 1, { start: 3 }); cover("setNumberingRestart");
+    await regStep(pages, "setParagraphBorders", 1, { patch: { top: { val: "single", sz: 4 } } }); cover("setParagraphBorders");
+    await regStep(pages, "setTabStops", 1, { stops: [{ pos: 1440, val: "left" }] }); cover("setTabStops");
+
+    // --- citations and bibliography (source first, so the citation resolves) ---
+    await regStep(pages, "createCitationSource", undefined, { source: { tag: "SRC1", type: "Book", title: "T", author: "A", year: "2026" } }); cover("createCitationSource");
+    await regStep(pages, "setCitationStyle", undefined, { style: "apa" }); cover("setCitationStyle");
+    await regStep(pages, "insertCitation", 2, { tag: "SRC1" }); cover("insertCitation");
+    await regStep(pages, "insertBibliography", 2, { entryCount: 1 }); cover("insertBibliography");
+    await regStep(pages, "refreshBibliography", undefined, { entryCount: 1 }); cover("refreshBibliography");
+    await regStep(pages, "editCitationSource", undefined, { tag: "SRC1", patch: { title: "T2" } }); cover("editCitationSource");
+    await regStep(pages, "deleteCitationSource", undefined, { tag: "SRC1" }); cover("deleteCitationSource");
+
+    // --- building blocks (create, use, remove) ---
+    await regStep(pages, "createBuildingBlock", undefined, { name: "BB1", blocksXml: "<w:p><w:r><w:t>bb</w:t></w:r></w:p>" }); cover("createBuildingBlock");
+    await regStep(pages, "insertBuildingBlock", 2, { name: "BB1", blockCount: 1 }); cover("insertBuildingBlock");
+    await regStep(pages, "deleteBuildingBlock", undefined, { name: "BB1" }); cover("deleteBuildingBlock");
+
+    // --- merge field, endnote ---
+    await regStep(pages, "insertMergeField", 2, { name: "FirstName" }); cover("insertMergeField");
+    await regStep(pages, "insertEndnote", 2, { text: "an endnote" }); cover("insertEndnote");
+
+    // --- object setters (address "object" is wire field runId) ---
+    await regStep(pages, "setCrop", imgRun, { crop: { left: 0.1, top: 0.1, right: 0.1, bottom: 0.1 } }); cover("setCrop");
+    await regStep(pages, "setDrawingTextFit", shapeRun, { mode: "shrink" }); cover("setDrawingTextFit");
+    // No intent CREATES a 3D model, so this one is exercised against an
+    // existing object: convergence is the contract here, not effect.
+    await regStep(pages, "setModel3DRotation", imgRun, { rotation: { x: 10, y: 20, z: 0 } }); cover("setModel3DRotation");
+
+    // --- document setup: watermark, title page, page numbers, notes ---
+    await regStep(pages, "insertWatermark", undefined, { text: "DRAFT", headerCount: 1 }); cover("insertWatermark");
+    await regStep(pages, "removeWatermark", undefined, {}); cover("removeWatermark");
+    await regStep(pages, "insertPictureWatermark", undefined, { blobSha: "b".repeat(64), bytesLen: 100, ext: "png", naturalWidthPx: 40, naturalHeightPx: 40, headerCount: 1 }); cover("insertPictureWatermark");
+    await regStep(pages, "setTitlePage", undefined, { enabled: true }); cover("setTitlePage");
+    await regStep(pages, "setEvenOddHeaders", undefined, { enabled: true }); cover("setEvenOddHeaders");
+    await regStep(pages, "setPageNumberFormat", undefined, { fmt: "decimal", start: 1 }); cover("setPageNumberFormat");
+    await regStep(pages, "insertPageNumberPosition", undefined, { position: "footer", align: "center" }); cover("insertPageNumberPosition");
+    await regStep(pages, "removePageNumbers", undefined, {}); cover("removePageNumbers");
+    await regStep(pages, "insertHeaderFooterPreset", undefined, { hfKind: "header", preset: "blank" }); cover("insertHeaderFooterPreset");
+    await regStep(pages, "setHyphenation", undefined, { auto: true, zonePt: 18 }); cover("setHyphenation");
+    await regStep(pages, "setFootnoteOptions", undefined, { fmt: "decimal", start: 1 }); cover("setFootnoteOptions");
+    await regStep(pages, "setEndnoteOptions", undefined, { fmt: "lowerRoman", start: 1 }); cover("setEndnoteOptions");
+
+    // --- table depth (the table from above is still standing) ---
+    await regStep(pages, "setTableStyle", cellParaId, { styleId: "TableGrid" }); cover("setTableStyle");
+    await regStep(pages, "setTableLook", cellParaId, { look: { firstRow: true } }); cover("setTableLook");
+    await regStep(pages, "setTableBorders", cellParaId, { scope: "table", edges: ["top"], border: { val: "single", sz: 4 } }); cover("setTableBorders");
+    await regStep(pages, "setTableWidth", cellParaId, { unit: "auto" }); cover("setTableWidth");
+    await regStep(pages, "setTableColumnWidth", cellParaId, { colIdx: 0, widthPt: 90 }); cover("setTableColumnWidth");
+    await regStep(pages, "setTableLayout", cellParaId, { layout: "fixed" }); cover("setTableLayout");
+    await regStep(pages, "setTableCellMargins", cellParaId, { scope: "table", margins: { top: 40 } }); cover("setTableCellMargins");
+    await regStep(pages, "setTableHeaderRows", cellParaId, { count: 1 }); cover("setTableHeaderRows");
+    await regStep(pages, "insertTableFormula", cellParaId, { formula: "=SUM(ABOVE)" }); cover("insertTableFormula");
+    await regStep(pages, "sortTableRows", cellParaId, { colIdx: 0, order: "asc", compare: "text", hasHeader: false }); cover("sortTableRows");
+
+    // --- text ⇄ table, on a paragraph of their own so nothing above is
+    // rebuilt underneath the ids it still uses ---
+    const convIds = await step(pages, "pasteBlocks-convert", { kind: "pasteBlocks", afterBlockId: 1, blocksXml: "<w:p><w:r><w:t>a\tb</w:t></w:r></w:p>" }, { nodeIds: 2 });
+    const convBlockId = convIds[0];
+    const madeTable = await regStep(pages, "convertTextToTable", convBlockId, { separator: "tab", cellCount: 2 }); cover("convertTextToTable");
+    await regStep(pages, "convertTableToText", madeTable[madeTable.length - 1], { separator: "tab", rowCount: 1 }); cover("convertTableToText");
 
     // --- delete (last: removes content) ---
     await step(pages, "deleteText", { kind: "deleteText", blockId: 1, runId: 2, start: 0, end: 1 }); cover("deleteText");
