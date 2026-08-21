@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
-import { describe, expect, it } from "vitest";
+import { expect } from "vitest";
 import type { Block, DocxDocument, Paragraph, Run, RunContent } from "@wordinweb/core";
 import { AgentDocument, type AgentBlock, type AgentObjectResult } from "../src/index.js";
 
@@ -183,31 +183,57 @@ async function audit(bytes: Uint8Array, label: string): Promise<void> {
   } while (start <= total);
 }
 
-describe.runIf(enabled)("agent representation parity corpus", () => {
-  it("represents every semantic component and every laid-out page in every DOCX fixture", async () => {
-    const root = fixtureRoot();
-    expect(root, "Set WORDINWEB_FIXTURES to the wordinweb-parity checkout").toBeTruthy();
-    const files = docxFiles(root!);
-    expect(files.length, "The fixture corpus must not be empty").toBeGreaterThan(100);
+/** Every corpus document, deduplicated by content hash. */
+function corpusGroups(root: string): { bytes: Uint8Array; paths: string[] }[] {
+  const files = docxFiles(root);
+  expect(files.length, "The fixture corpus must not be empty").toBeGreaterThan(100);
+  const byHash = new Map<string, { bytes: Uint8Array; paths: string[] }>();
+  for (const path of files) {
+    const bytes = new Uint8Array(readFileSync(path));
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const group = byHash.get(hash);
+    if (group) group.paths.push(relative(root, path));
+    else byHash.set(hash, { bytes, paths: [relative(root, path)] });
+  }
+  return [...byHash.values()];
+}
 
-    const byHash = new Map<string, { bytes: Uint8Array; paths: string[] }>();
-    for (const path of files) {
-      const bytes = new Uint8Array(readFileSync(path));
-      const hash = createHash("sha256").update(bytes).digest("hex");
-      const group = byHash.get(hash);
-      if (group) group.paths.push(relative(root!, path));
-      else byHash.set(hash, { bytes, paths: [relative(root!, path)] });
-    }
+export const AUDIT_ENABLED = enabled;
 
-    const failures: string[] = [];
-    for (const { bytes, paths } of byHash.values()) {
-      const label = paths.find(expectedLoadFailure) ?? paths[0];
-      try {
-        await audit(bytes, label);
-      } catch (error) {
-        failures.push(`${label}${paths.length > 1 ? ` (+${paths.length - 1} identical copies)` : ""}: ${error instanceof Error ? error.message : String(error)}`);
-      }
+/**
+ * Audit one slice of the corpus.
+ *
+ * SHARDED BECAUSE VITEST SCHEDULES FILES, NOT TESTS. This audit used to be a
+ * single `it` in a single file walking all 165 documents in a `for` loop. That
+ * gave the pool exactly one unit of work, so one worker ran at 100% while every
+ * other sat idle — 73 minutes of wall clock on a 16-core laptop for work that
+ * is embarrassingly parallel, and long enough on a 2-core runner that CI was
+ * cancelled by its job timeout before the step could ever finish.
+ *
+ * Each shard is its own file, so the pool can hand them to different workers.
+ * Documents are assigned round-robin. Balancing by BYTE SIZE was tried and is
+ * much worse (1h19 against 8m30): size does not predict cost here — the most
+ * expensive document in the corpus is 4 KB — so sorting by it concentrates the
+ * slow documents instead of spreading them.
+ *
+ * The old 20-minute per-test timeout is gone rather than reduced. It never
+ * fired: the loop is CPU-bound between awaits, so the timer had no chance to
+ * run, and a limit that cannot be enforced is worse than none — it reads as a
+ * guard while guarding nothing.
+ */
+export async function auditCorpusShard(shard: number, shards: number): Promise<void> {
+  const root = fixtureRoot();
+  expect(root, "Set WORDINWEB_FIXTURES to the wordinweb-parity checkout").toBeTruthy();
+
+  const mine = corpusGroups(root!).filter((_, index) => index % shards === shard);
+  const failures: string[] = [];
+  for (const { bytes, paths } of mine) {
+    const label = paths.find(expectedLoadFailure) ?? paths[0];
+    try {
+      await audit(bytes, label);
+    } catch (error) {
+      failures.push(`${label}${paths.length > 1 ? ` (+${paths.length - 1} identical copies)` : ""}: ${error instanceof Error ? error.message : String(error)}`);
     }
-    expect(failures, failures.join("\n")).toEqual([]);
-  }, 20 * 60 * 1000);
-});
+  }
+  expect(failures, failures.join("\n")).toEqual([]);
+}

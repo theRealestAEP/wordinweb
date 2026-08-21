@@ -2118,6 +2118,14 @@ export class DocxDocument {
 
   findParentOf(target: XmlElement): XmlElement | undefined {
     const roots = this.contentRoots();
+    // A ROOT HAS NO PARENT, so answer without walking. Callers climb to the top
+    // — referenceScope walks up looking for an enclosing w:tbl and stops only
+    // when it runs out of ancestors — so the last lookup of every climb asked
+    // for the root's parent. That is a guaranteed miss, and a miss walks the
+    // whole document before returning undefined. One projection window of a
+    // 266-page file made ~200 of those futile full walks, which was almost all
+    // of the 100 seconds it took.
+    if (roots.includes(target)) return undefined;
     const memo = this._parentMemo.get(target);
     if (memo && memo.children.includes(target) && this.memoIsLive(memo, roots)) return memo;
     // A miss walks the tree anyway, so record EVERY link the walk passes, not
@@ -2125,20 +2133,26 @@ export class DocxDocument {
     // (split resolves run → paragraph → parent), and the neighbours are then
     // free. This is what keeps a structural edit from paying one full-document
     // walk per lookup (perf B9).
-    const walk = (el: XmlElement): XmlElement | undefined => {
+    //
+    // THE WALK DOES NOT STOP AT THE TARGET. Stopping early only memoizes the
+    // nodes BEFORE it, so the next lookup — almost always the next sibling —
+    // missed and walked from the root again. Resolving n paragraphs cost
+    // 1+2+…+n, and projecting one window of a 266-page document spent 100
+    // seconds here for 30 KB of text. Walking to the end costs one full pass
+    // and leaves every later lookup a memo hit, turning that quadratic into a
+    // single linear pass.
+    const walk = (el: XmlElement): void => {
       for (const c of el.children) {
         this._parentMemo.set(c, el);
-        if (c === target) return el;
-        const hit = walk(c);
-        if (hit) return hit;
+        walk(c);
       }
-      return undefined;
     };
-    for (const root of roots) {
-      const hit = walk(root);
-      if (hit) return hit;
-    }
-    return undefined;
+    for (const root of roots) walk(root);
+    // Verified the same way as the fast path above: a target that is no longer
+    // in the live tree keeps whatever stale link it had, and the walk cannot
+    // refresh what it never reaches.
+    const found = this._parentMemo.get(target);
+    return found && found.children.includes(target) && this.memoIsLive(found, roots) ? found : undefined;
   }
 
   /** Record a parent link the caller just created (a splice), so the next

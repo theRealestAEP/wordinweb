@@ -19,7 +19,7 @@
     "test": "npm run build && npm run test:unit",
     "test:unit": "npm run check:dist && npm run test:packages && npm run test:demo",
     "test:packages": "vitest run --root packages/core && vitest run --root packages/collab && vitest run --root packages/agent && vitest run --root packages/server && vitest run --root packages/react",
-    "test:agent-fixtures": "WORDINWEB_FIXTURE_AUDIT=1 vitest run --root packages/agent test/fixtures.test.ts",
+    "test:agent-fixtures": "WORDINWEB_FIXTURE_AUDIT=1 vitest run --root packages/agent test/fixtures-",
     "test:agent-skill": "vitest run --root packages/agent test/skill.test.ts test/authoring-eval.test.ts",
     "test:agent-skill:codex": "node scripts/run-agent-skill-eval.mjs",
     "test:demo": "vitest run --root examples/anon-share",
