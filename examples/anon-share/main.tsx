@@ -5,6 +5,16 @@ import { LocalEditor } from "./src/local-editor";
 import { goLiveEncrypted } from "./src/e2ee-flows";
 import { docKeyFromFragment, IndexedDbBundleStore, type StoredDocSummary } from "wordinweb/collab";
 import { installWsRegistry } from "./src/perf/ws-tap";
+// Word-metric substitutes (Carlito ≈ Calibri, Caladea ≈ Cambria). Text is
+// measured on a canvas before layout, so without these a Calibri document on
+// a machine without Office fonts measures in Helvetica — ~10% wider — and
+// every line break and page break drifts from Word (issue #18).
+import "@fontsource/carlito/400.css";
+import "@fontsource/carlito/400-italic.css";
+import "@fontsource/carlito/700.css";
+import "@fontsource/carlito/700-italic.css";
+import "@fontsource/caladea/400.css";
+import "@fontsource/caladea/700.css";
 
 // Perf HUD plumbing (Ctrl+Shift+P / ?perf=1): registers collab sockets so the
 // HUD can attach when opened. Must run BEFORE the session builds its socket;

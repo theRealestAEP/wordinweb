@@ -346,6 +346,7 @@ For your own application, source your own fonts.
 Add a separate `@font-face` rule for every weight and style you use.
 
 When the browser can't render a requested face, `onMissingFonts` reports it so you can warn the user that the on-screen layout may drift from Word.
+`CollabEditor` accepts the same `onMissingFonts` callback and forwards it to the live view.
 
 ## Development
 

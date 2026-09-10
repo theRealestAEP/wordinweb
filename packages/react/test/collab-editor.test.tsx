@@ -125,3 +125,24 @@ describe("name-on-caret (doc 14 §2)", () => {
     expect(surface.querySelector(".dxw-presence-caret")).toBeTruthy();
   });
 });
+
+describe("CollabEditor forwards onMissingFonts to the live view", () => {
+  it("reports after the collab document lays out", async () => {
+    const hub = new CollabHub(provider);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const reports: unknown[] = [];
+    await act(async () => {
+      root.render(createElement(CollabEditor, {
+        url: "ws://x", docId: "d", clientId: "a", createSocket: factoryFor(hub),
+        onMissingFonts: (missing) => { reports.push(missing); },
+      }));
+    });
+    for (let i = 0; i < 15 && reports.length === 0; i++) await tick();
+    // The live DocxView ran its missing-font check and the report reached the host.
+    expect(reports.length).toBeGreaterThan(0);
+    expect(Array.isArray(reports[0])).toBe(true);
+    await act(async () => { root.unmount(); });
+  });
+});

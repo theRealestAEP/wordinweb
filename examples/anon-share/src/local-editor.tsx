@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DocxView, DocxToolbar, type DocxViewApi } from "wordinweb";
 import { IndexedDbBundleStore, type BundleStore, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
 import { FileMenu, fmtSize, savedDocName } from "./file-menu";
+import { MissingFontsBanner } from "./missing-fonts-banner";
 import { useStartupReclaim } from "./startup-reclaim";
 import { type GoLivePhase } from "./e2ee-flows";
 
@@ -112,6 +113,8 @@ export function LocalEditor({
   const [openedName, setOpenedName] = useState<string | null>(null);
   /** Name of the file currently being parsed and laid out, or null. */
   const [loading, setLoading] = useState<string | null>(null);
+  /** Faces the browser substituted on the last load; dismiss clears it. */
+  const [missingFonts, setMissingFonts] = useState<{ family: string }[]>([]);
   const codeRef = useRef<HTMLInputElement | null>(null);
   /**
    * The autosave failed — said out loud, with the escape hatch beside it.
@@ -522,6 +525,7 @@ export function LocalEditor({
         <span style={{ flex: 1 }} />
       </div>
       <DocxToolbar api={api} mode="advanced" />
+      <MissingFontsBanner fonts={missingFonts} onDismiss={() => setMissingFonts([])} />
       {/* `position: relative` anchors the loading overlay's inset:0, and
           `minHeight: 0` is what lets this flex child shrink below its content
           so DocxView's container actually scrolls — which is what keeps it
@@ -565,6 +569,7 @@ export function LocalEditor({
           }}
           onLoad={() => setLoading(null)}
           onError={() => setLoading(null)}
+          onMissingFonts={setMissingFonts}
         />
       </div>
 

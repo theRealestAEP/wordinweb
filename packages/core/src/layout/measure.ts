@@ -83,6 +83,18 @@ const METRIC_SUBSTITUTES: Record<string, string> = {
   // line height stays normal — wild-athabasca's header "\u2264" run.)
 };
 
+/** The substitutes above whose advances EQUAL the Office face's, so text laid
+ * out in one breaks lines exactly where Word does. The rest are visual
+ * stand-ins: right line pitch, different widths. */
+const METRIC_COMPATIBLE = new Set(["Carlito", "Caladea", "Times New Roman"]);
+
+/** The metric-compatible substitute for `family`, if it has one. A loaded
+ * one makes the face effectively present for Word parity. */
+export function metricCompatibleSubstitute(family: string): string | undefined {
+  const substitute = METRIC_SUBSTITUTES[family.toLowerCase()];
+  return substitute && METRIC_COMPATIBLE.has(substitute) ? substitute : undefined;
+}
+
 /**
  * Per-font vertical metrics, calibrated against Word's own exports
  * (probe-lineheight/probe-lh2: repeated single-font paragraphs at 8-24pt,

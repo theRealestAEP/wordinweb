@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, createElement, type ReactNode } from "react";
-import type { DocxDocument, EncodedCaret } from "@wordinweb/core";
+import type { DocxDocument, EncodedCaret, MissingFont } from "@wordinweb/core";
 import { DocxView, type DocxViewApi } from "./index.js";
 import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js";
 import {
@@ -1613,6 +1613,9 @@ export function CollabEditor(opts: UseCollabOptions & {
   toolbarFeatures?: Partial<Record<ToolbarFeature, boolean>>;
   /** Observe the imperative document API (find/replace, inserts, ...). */
   onReady?: (api: DocxViewApi) => void;
+  /** Requested faces the browser cannot render, reported after each
+   * document load exactly as DocxView's own `onMissingFonts` does. */
+  onMissingFonts?: (missing: MissingFont[]) => void;
   /** Observe the live CollabSession (roster, activity, epochChanged,
    * doc-for-download) — how an app shell renders chips/banners/buttons
    * around the editor without re-implementing its composition. */
@@ -1797,6 +1800,7 @@ export function CollabEditor(opts: UseCollabOptions & {
     commentAuthor: opts.commentAuthor,
     commentMentions: opts.commentMentions,
     revisions: opts.revisions,
+    onMissingFonts: opts.onMissingFonts,
     // Re-key only on docEpoch (a document replacement), not on every change.
     // Between replacements the live doc mutates in place and the key stays stable,
     // so DocxView repaints in place instead of re-mounting (no flash/jump).

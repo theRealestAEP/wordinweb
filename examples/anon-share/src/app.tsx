@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CollabEditor, IndexedDbBundleStore, InMemoryBundleStore, versionKey, type BundleStore, type CollabSession, type DocBundle, type StoredDocSummary } from "wordinweb/collab";
 import { type DocxViewApi } from "wordinweb";
+import { MissingFontsBanner } from "./missing-fonts-banner";
 import type { XmlElement } from "@wordinweb/core";
 import { reviveEncrypted } from "./e2ee-flows";
 import { pruneVersions, versionByteBudget, VERSION_COUNT_CAP } from "./version-retention";
@@ -742,6 +743,8 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
    * click; it is never the source of truth.
    */
   const [api, setApi] = useState<DocxViewApi | null>(null);
+  /** Faces the browser substituted on the last load; dismiss clears it. */
+  const [missingFonts, setMissingFonts] = useState<{ family: string }[]>([]);
   const [, setModeTick] = useState(0);
   const [reviewOpen, setReviewOpen] = useState(false);
   // writesBlocked is THE write gate in this codebase (it is what turns the
@@ -1712,6 +1715,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           </div>
         </aside>
       )}
+      <MissingFontsBanner fonts={missingFonts} onDismiss={() => setMissingFonts([])} />
       <div style={{ flex: 1, minHeight: 0 }}>
         <CollabEditor
           key={attempt}
@@ -1738,6 +1742,7 @@ export function App({ url, httpBase, docId, clientId, name, docKey, ownerToken, 
           ).map((participant) => participant.profile.name)}
           onSession={setSession}
           onReady={setApi}
+          onMissingFonts={setMissingFonts}
           refusedContent={refusedContent}
           editable={!choiceModalOpen}
           revisions="markup"

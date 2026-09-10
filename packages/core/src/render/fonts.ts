@@ -1,5 +1,5 @@
 import type { LayoutResult } from "../layout/types.js";
-import { normalizeFamily } from "../layout/measure.js";
+import { metricCompatibleSubstitute, normalizeFamily } from "../layout/measure.js";
 
 /** Families the browser always resolves; never worth a warning. */
 const GENERIC = new Set([
@@ -75,7 +75,13 @@ export function detectMissingFonts(layout: LayoutResult): MissingFont[] {
     const viaSerif = width(`32px "${family}", serif`);
     const faceMissing = viaMono === mono && viaSerif === serif && mono !== serif;
     if (faceMissing) {
-      missing.push({ family, sample });
+      // Carlito/Caladea carry Calibri/Cambria's exact advances: with one of
+      // them loaded the page breaks lines where Word does, which is the whole
+      // point of the warning — so a loaded substitute counts as the face.
+      const substitute = metricCompatibleSubstitute(family);
+      const substitutePresent = !!substitute &&
+        !(width(`32px "${substitute}", monospace`) === mono && width(`32px "${substitute}", serif`) === serif);
+      if (!substitutePresent) missing.push({ family, sample });
       continue;
     }
     // Coverage check on the document's own sample: compare the sample's width
