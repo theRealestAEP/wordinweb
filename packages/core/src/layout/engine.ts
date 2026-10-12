@@ -4077,7 +4077,9 @@ class Engine {
           "hRel" in s && s.hRel === "char" ? charX : this.colX,
           "vRel" in s && s.vRel === "line" ? lineY : paraTop,
         );
-        if ("wrap" in s && s.wrap && s.wrap !== "none" && !("behind" in s && s.behind)) reBreak = true;
+        // An explicit wrap narrows the lines even on a behindDoc shape (see
+        // the float registration in emitAnchors for the fixture).
+        if ("wrap" in s && s.wrap && s.wrap !== "none") reBreak = true;
       }
       // The new floats narrow this paragraph's own lines.
       if (reBreak) broken = breakNow(paraTop);
@@ -6722,12 +6724,15 @@ class Engine {
         }
 
         // Body text flows around a wrapping text box (square / tight / topAndBottom).
-        // In a FRAME story (header/footer/cell, physIndex -1) an explicit wrap
-        // registers even on a behindDoc shape: parity-hftemplates p3's Banded
-        // bar is behindDoc="1" WITH wrapSquare, and Word still lays the
-        // header's own line below it. Body flow keeps the old behind gate -
-        // no body-flow fixture measures a behind+wrapped shape.
-        if (shape.wrap && shape.wrap !== "none" && (!shape.behind || page.physIndex === -1)) {
+        // An explicit wrap registers even on a behindDoc shape: behindDoc only
+        // says which layer the shape PAINTS on, the wrap element says how text
+        // flows. parity-hftemplates p3's Banded bar is behindDoc="1" WITH
+        // wrapSquare and Word lays the header's own line below it; a term
+        // sheet's behindDoc="1" wrapTopAndBottom text box (anchored in the
+        // title paragraph, followed by the terms table) has Word start the
+        // table below the box, where this engine used to paint the table
+        // straight through it.
+        if (shape.wrap && shape.wrap !== "none") {
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           const list = this.floats.get(page) ?? [];
           list.push({
@@ -9782,7 +9787,13 @@ function resolveGrid(
   // left by tblInd -612 — the Word PDF paints the last column 10.5pt past
   // the right margin, not shrunk to fit).
   const fixedOverflow = overflowAllowed && tbl.props.layout === "fixed";
-  const cap = fixedOverflow ? Number.POSITIVE_INFINITY : available;
+  // A percentage width above 100% is honored the same way. The term-sheet
+  // fixture (wild-termsheet-behinddoc) declares tblW 5454 pct — 109% — over
+  // a 10210tw grid against a 9360tw column, and Word's PDF paints the second
+  // column past the right margin rather than shrinking the table to the text
+  // width; shrinking it re-wrapped every row and ran the document a page long.
+  const pctOverflow = overflowAllowed && (tbl.props.widthPct ?? 0) > 1;
+  const cap = fixedOverflow || pctOverflow ? Number.POSITIVE_INFINITY : available;
   // A tblW pct width resolves against the text column, plus the table's own
   // horizontal cell margins when `pctBoxAddsMargins` says the file follows
   // Word's legacy table metrics (see resolveGridWidths).

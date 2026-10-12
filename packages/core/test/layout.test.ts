@@ -5394,3 +5394,88 @@ describe("native chart layout", () => {
     expect(hit.height).toBeCloseTo(chart.height, 4);
   });
 });
+
+describe("behindDoc anchors with an explicit wrap", () => {
+  // A term sheet (issue: "totally breaks in web") anchors a behindDoc="1"
+  // text box with wrapTopAndBottom in its title paragraph and follows it
+  // with the terms table. behindDoc only picks the paint layer; the wrap
+  // element still governs flow, so Word starts the table below the box.
+  // The engine used to skip the float for body-flow behindDoc shapes and
+  // painted the table straight through the box.
+  const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
+  const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+  const WPS = 'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"';
+  const box = (behindDoc: string) =>
+    `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2" behindDoc="${behindDoc}" locked="0" layoutInCell="1" allowOverlap="1">` +
+    `<wp:simplePos x="0" y="0"/>` +
+    `<wp:positionH relativeFrom="page"><wp:posOffset>843915</wp:posOffset></wp:positionH>` +
+    `<wp:positionV relativeFrom="paragraph"><wp:posOffset>155575</wp:posOffset></wp:positionV>` +
+    `<wp:extent cx="6374765" cy="1026795"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+    `<wp:wrapTopAndBottom/>` +
+    `<wp:docPr id="2" name="Textbox 2"/><wp:cNvGraphicFramePr/>` +
+    `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+    `<wps:wsp ${WPS}><wps:cNvSpPr/><wps:spPr>` +
+    `<a:xfrm><a:off x="0" y="0"/><a:ext cx="6374765" cy="1026795"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+    `<a:ln w="6350"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>` +
+    `</wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>BOXTEXT</w:t></w:r></w:p></w:txbxContent></wps:txbx>` +
+    `<wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr>` +
+    `</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+  const table =
+    `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="7000"/></w:tblGrid>` +
+    `<w:tr><w:tc><w:p><w:r><w:t>CELLLABEL</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Cell body text.</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+  const boxBottom = (result: ReturnType<typeof layoutDocument>) => {
+    const text = textItem(result, "BOXTEXT");
+    // The box's text sits inside its top inset; the box itself is 1026795
+    // EMU = 108px tall, so its bottom edge is below that line by nearly all
+    // of it. A conservative floor: the text line top plus 90px.
+    return text.lineTop + 90;
+  };
+
+  it("starts a following table below a behindDoc wrapTopAndBottom text box", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(`<w:p><w:pPr><w:jc w:val="center"/></w:pPr>${box("1")}<w:r><w:t>TITLE LINE</w:t></w:r></w:p>` + table + p("Tail")),
+    });
+    const cell = textItem(result, "CELLLABEL");
+    expect(cell.lineTop).toBeGreaterThanOrEqual(boxBottom(result));
+  });
+
+  it("matches the behindDoc=0 flow exactly", () => {
+    const flow = (behindDoc: string) => {
+      const { result } = layout({
+        "word/document.xml": wrapDocument(`<w:p>${box(behindDoc)}<w:r><w:t>TITLE LINE</w:t></w:r></w:p>` + table + p("Tail")),
+      });
+      return textItem(result, "CELLLABEL").lineTop;
+    };
+    expect(flow("1")).toBe(flow("0"));
+  });
+});
+
+describe("percentage table widths above 100%", () => {
+  // wild-termsheet-behinddoc: tblW 5454 pct (109.08%) over a 1981 + 8229tw
+  // grid against the 9360tw Letter column. Word paints the table at its
+  // declared width, into the right margin; clamping it to the column
+  // re-wrapped every row and ran the document a page long.
+  const table = (pct: number) =>
+    `<w:tbl><w:tblPr><w:tblW w:w="${pct}" w:type="pct"/></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="1981"/><w:gridCol w:w="8229"/></w:tblGrid>` +
+    `<w:tr><w:tc><w:p><w:r><w:t>Label:</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Body text.</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+  const sect =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+  const tableWidth = (pct: number) => {
+    const { result } = layout({ "word/document.xml": wrapDocument(p("Before") + table(pct) + p("After") + sect) });
+    const grip = result.pages[0].items.find((i) => i.kind === "grip" && i.axis === "move") as { x: number; x2: number };
+    expect(grip).toBeTruthy();
+    return grip.x2 - grip.x;
+  };
+
+  it("keeps a 109% table at its declared width, past the text column", () => {
+    // 10210tw = 680.67px against a 624px column.
+    expect(tableWidth(5454)).toBeGreaterThan(670);
+  });
+
+  it("still fits a 100% table to the column", () => {
+    expect(tableWidth(5000)).toBeLessThanOrEqual(625);
+  });
+});
