@@ -22,7 +22,7 @@
     }
   },
   "bin": {
-    "wordinweb-agent": "./dist/cli.js"
+    "wordinweb-agent": "dist/cli.js"
   },
   "files": [
     "dist",
