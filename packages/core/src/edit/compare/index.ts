@@ -614,6 +614,8 @@ function resolveGap(
   // came out struck and reinserted whole (91% of the compare benchmark's
   // misses). A MOVED item never lands here: it leaves a removal in one slot
   // and an insertion in another, so a reordered list still reads as a move.
+  // Tables pair the same way, and table rows when their cell counts agree: a
+  // two-row table whose one word changed was struck and reinserted whole.
   const settled = [...out].sort((a, b) => a.o - b.o);
   let oFrom = oLo;
   let rFrom = rLo;
@@ -622,7 +624,7 @@ function resolveGap(
     const rs: number[] = [];
     for (let i = oFrom; i < p.o; i++) if (!oUsed.has(i)) os.push(i);
     for (let j = rFrom; j < p.r; j++) if (!rUsed.has(j)) rs.push(j);
-    if (os.length === 1 && rs.length === 1 && isParagraph(oBlocks[os[0]]) && isParagraph(rBlocks[rs[0]])) {
+    if (os.length === 1 && rs.length === 1 && sameShape(oBlocks[os[0]], rBlocks[rs[0]])) {
       accept({ kind: "pair", o: os[0], r: rs[0], other: -1 });
       oUsed.add(os[0]);
       rUsed.add(rs[0]);
@@ -653,6 +655,17 @@ function resolveGap(
     }
   }
   return out.sort((a, b) => a.o - b.o);
+}
+
+/**
+ * Two paragraphs, two tables, two block-level content controls (or custom XML
+ * elements), or two table rows with the same number of cells.
+ */
+function sameShape(a: XmlElement, b: XmlElement): boolean {
+  if (isParagraph(a) && isParagraph(b)) return true;
+  if (localName(a.name) === localName(b.name) && ["tbl", "sdt", "customXml"].includes(localName(a.name))) return true;
+  const cells = (tr: XmlElement) => tr.children.filter((c) => localName(c.name) === "tc").length;
+  return localName(a.name) === "tr" && localName(b.name) === "tr" && cells(a) === cells(b);
 }
 
 /**
@@ -692,6 +705,14 @@ function emitMatched(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): Entry {
   const ln = localName(oEl.name);
   if (ln === "p") comparePair(oEl, rEl, ctx);
   else if (ln === "tbl") compareTable(oEl, rEl, ctx);
+  // A block-level content control or custom XML element: compare what it
+  // holds. Passing it through let an edited paragraph inside a content
+  // control come out with no tracked change at all.
+  else if (ln === "sdt") {
+    const o = child(oEl, "sdtContent");
+    const r = child(rEl, "sdtContent");
+    if (o && r) compareContainer(o, r, ctx);
+  } else if (ln === "customXml") compareContainer(oEl, rEl, ctx);
   return { el: rEl, cls: "kept" };
 }
 
@@ -1209,8 +1230,20 @@ function compareTable(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
     alignTableGrid(oTbl, rTbl, ctx);
   }
 
-  const oRows = oTbl.children.filter((c) => localName(c.name) === "tr");
-  const rRows = rTbl.children.filter((c) => localName(c.name) === "tr");
+  compareRows(oTbl, rTbl, ctx);
+}
+
+/** Row-level children: rows, and content controls or custom XML holding rows. */
+const ROW_LEVEL = ["tr", "sdt", "customXml"];
+
+/**
+ * Align and diff the rows of a table, or of a row-level content control (a
+ * repeating section) inside one. Such a control was once set aside as a
+ * non-row child: moved to the top of the table, its rows never compared.
+ */
+function compareRows(oParent: XmlElement, rParent: XmlElement, ctx: Ctx): void {
+  const oRows = oParent.children.filter((c) => ROW_LEVEL.includes(localName(c.name)));
+  const rRows = rParent.children.filter((c) => ROW_LEVEL.includes(localName(c.name)));
   const anchors = histogramMatch(oRows.map(rowFingerprint), rRows.map(rowFingerprint));
 
   const rows: XmlElement[] = [];
@@ -1239,29 +1272,48 @@ function compareTable(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
     rAt = anchor.b + 1;
   }
 
-  rTbl.children = [...rTbl.children.filter((c) => localName(c.name) !== "tr"), ...rows];
+  rParent.children = [...rParent.children.filter((c) => !ROW_LEVEL.includes(localName(c.name))), ...rows];
 }
 
 function rowFingerprint(tr: XmlElement): string {
+  if (localName(tr.name) !== "tr") return `X\u0000${serializeXml(tr)}`;
   const cells = tr.children.filter((c) => localName(c.name) === "tc");
   return `${cells.length}\u0000${normalizeText(paragraphText(tr))}`;
 }
 
-function deletedRow(tr: XmlElement, ctx: Ctx): XmlElement {
-  const clone = cloneXml(tr);
-  markRowRevision(clone, "del", ctx.meta);
-  wrapRowContent(clone, "del", ctx);
+/** The rows a row-level element holds: itself, or those inside its container. */
+function rowsIn(el: XmlElement): XmlElement[] {
+  if (localName(el.name) === "tr") return [el];
+  const inner = localName(el.name) === "sdt" ? child(el, "sdtContent") : el;
+  return (inner?.children ?? []).filter((c) => ROW_LEVEL.includes(localName(c.name))).flatMap(rowsIn);
+}
+
+function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
+  const clone = cloneXml(el);
+  for (const tr of rowsIn(clone)) {
+    markRowRevision(tr, "del", ctx.meta);
+    wrapRowContent(tr, "del", ctx);
+  }
   return clone;
 }
 
-function insertedRow(tr: XmlElement, ctx: Ctx): XmlElement {
-  markRowRevision(tr, "ins", ctx.meta);
-  wrapRowContent(tr, "ins", ctx);
-  return tr;
+function insertedRow(el: XmlElement, ctx: Ctx): XmlElement {
+  for (const tr of rowsIn(el)) {
+    markRowRevision(tr, "ins", ctx.meta);
+    wrapRowContent(tr, "ins", ctx);
+  }
+  return el;
 }
 
 /** A matched row pair, or — when the cell counts differ — two coarse rows. */
 function compareRow(oTr: XmlElement, rTr: XmlElement, ctx: Ctx): XmlElement[] {
+  if (localName(oTr.name) !== "tr") {
+    const inner = (el: XmlElement) => (localName(el.name) === "sdt" ? child(el, "sdtContent") : el);
+    const o = inner(oTr);
+    const r = inner(rTr);
+    if (o && r) compareRows(o, r, ctx);
+    return [rTr];
+  }
   const oCells = oTr.children.filter((c) => localName(c.name) === "tc");
   const rCells = rTr.children.filter((c) => localName(c.name) === "tc");
   if (oCells.length !== rCells.length) {

@@ -551,3 +551,46 @@ describe("compareDocuments — headers, footers and notes", () => {
     expect(collectRevisions(DocxDocument.load(rejected.save()))).toHaveLength(0);
   });
 });
+
+describe("compareDocuments — content controls and table rows", () => {
+  const sdt = (inner: string) => `<w:sdt><w:sdtPr><w:id w:val="7"/></w:sdtPr><w:sdtContent>${inner}</w:sdtContent></w:sdt>`;
+  const deletions = (merged: DocxDocument) =>
+    collectRevisions(merged)
+      .filter((r) => r.kind === "deletion")
+      .map((r) => [...serializeXml(r.el).matchAll(/<w:delText[^>]*>([^<]*)/g)].map((m) => m[1]).join(""));
+
+  it("marks an edit inside a block-level content control", () => {
+    // A matched block-level w:sdt was passed through whole, so the edit
+    // inside it came out with no tracked change at all.
+    const { merged } = roundTrip(
+      para("Before.") + sdt(para("The message body goes here.")) + para("After."),
+      para("Before.") + sdt(para("The letter body goes here.")) + para("After."),
+    );
+    expect(deletions(merged)).toEqual(["message "]);
+  });
+
+  it("marks an edit inside a row-level content control", () => {
+    // A w:sdt holding rows (a repeating section) was set aside as a non-row
+    // child: moved to the top of the table, its rows never compared.
+    const row = (a: string, b: string) => `<w:tr><w:tc><w:tcPr/>${para(a)}</w:tc><w:tc><w:tcPr/>${para(b)}</w:tc></w:tr>`;
+    const tbl = (name: string) =>
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>${row("Member", "Role")}` +
+      sdt(row("Alice Chen", "Chair") + row(name, "Secretary")) +
+      `</w:tbl>`;
+    const { merged } = roundTrip(tbl("Bob Ortiz") + para("End."), tbl("Bob Smith") + para("End."));
+    expect(deletions(merged)).toEqual(["Ortiz"]);
+    const xml = serializeXml(merged.docRoot);
+    expect(xml.indexOf("Member")).toBeLessThan(xml.indexOf("Alice Chen"));
+  });
+
+  it("edits a one-word cell in place rather than replacing the table", () => {
+    // Two one-cell rows: the changed one shares no word with what replaced
+    // it, so similarity paired nothing and the whole table came out struck.
+    const { merged } = roundTrip(
+      para("Codes:") + table([["ROUP"], ["ROMK"]]) + para("End."),
+      para("Codes:") + table([["ROUP"], ["CLRB"]]) + para("End."),
+    );
+    expect(deletions(merged)).toEqual(["ROMK"]);
+    expect(collectRevisions(merged).filter((r) => r.kind === "rowDeletion")).toHaveLength(0);
+  });
+});
