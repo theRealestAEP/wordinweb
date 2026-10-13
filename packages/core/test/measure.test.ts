@@ -8,6 +8,14 @@ describe("CanvasMeasurer", () => {
     expect(normalizeFamily("宋体", false, false).family).toBe("SimSun");
   });
 
+  it("lays Liberation faces out in the Office faces Word replaces them with", () => {
+    // probe3-lo-provenance: Word's PDF embeds Times New Roman and Arial for
+    // LibreOffice's Liberation Serif / Sans, even where those are installed.
+    expect(normalizeFamily("Liberation Serif", false, false).family).toBe("Times New Roman");
+    expect(normalizeFamily("Liberation Sans Bold", false, false)).toEqual({ family: "Arial", bold: true, italic: false });
+    expect(normalizeFamily("Liberation Mono", false, false).family).toBe("Courier New");
+  });
+
   it("uses the system UI face as the width-compatible Aptos fallback", () => {
     expect(cssFont({ family: "Aptos", size: 44 / 3, bold: false, italic: false })).toContain(
       "Aptos, system-ui, sans-serif",

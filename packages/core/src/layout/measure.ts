@@ -195,17 +195,28 @@ export function quantizeQuarterPt(px: number): number {
  * fails to wrap where Word does: doerfp's boxed SECTION titles). Fold a trailing
  * "Bold"/"Italic"/"Bold Italic" back into the base family + weight/style. */
 const FACE_SUFFIX = /\s+(bold italic|italic bold|bold|italic)$/i;
+/** LibreOffice writes its Liberation faces with altName Times New Roman /
+ * Arial / Courier New, and Word lays them out AND paints them in those
+ * (probe3-lo-provenance: Word's PDF embeds TimesNewRomanPSMT and ArialMT and
+ * no Liberation face, on a Mac that has them installed). Measured as
+ * themselves, a 12pt Liberation Serif line ran ~0.7px short of Word's. */
+const WORD_REPLACES: Record<string, string> = {
+  "liberation serif": "Times New Roman",
+  "liberation sans": "Arial",
+  "liberation mono": "Courier New",
+};
 export function normalizeFamily(
   family: string,
   bold: boolean,
   italic: boolean,
 ): { family: string; bold: boolean; italic: boolean } {
   if (family === "宋体") family = "SimSun";
+  const replaced = (f: string) => WORD_REPLACES[f.toLowerCase()] ?? f;
   const m = FACE_SUFFIX.exec(family);
-  if (!m) return { family, bold, italic };
+  if (!m) return { family: replaced(family), bold, italic };
   const suffix = m[1].toLowerCase();
   return {
-    family: family.slice(0, m.index).trim() || family,
+    family: replaced(family.slice(0, m.index).trim() || family),
     bold: bold || suffix.includes("bold"),
     italic: italic || suffix.includes("italic"),
   };
