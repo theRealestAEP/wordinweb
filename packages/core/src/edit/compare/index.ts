@@ -276,7 +276,14 @@ function emitGap(
   entries: Entry[],
   ctx: Ctx,
 ): void {
-  const pairings = resolveGap(oBlocks, rBlocks, oLo, oHi, rLo, rHi, ctx, oLo === 0 && rLo === 0);
+  // A gap with no paragraph on either side has no mark to stand on: an added
+  // or removed paragraph there can only join a neighbour that is a table, and
+  // review cannot do that (a heading rewritten between two tables came back
+  // from reject-all with an empty paragraph after it). Such a gap, like one
+  // opening the container, must pair something and diff it in place.
+  const before = entries[entries.length - 1];
+  const unanchored = (!before || !isParagraph(before.el)) && (rHi >= rBlocks.length || !isParagraph(rBlocks[rHi]));
+  const pairings = resolveGap(oBlocks, rBlocks, oLo, oHi, rLo, rHi, ctx, (oLo === 0 && rLo === 0) || unanchored);
   let oAt = oLo;
   let rAt = rLo;
   for (const pairing of [...pairings, { kind: "pair" as const, o: oHi, r: rHi, other: -1 }]) {
@@ -1036,6 +1043,25 @@ function applyParagraphMarks(entries: Entry[], ctx: Ctx): void {
 }
 
 function markRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
+  // Tables carry their own row revisions and no pilcrow, so the paragraphs
+  // between them are marked stretch by stretch: a stretch after a table has
+  // no paragraph before it to take a mark from, exactly like one opening the
+  // container, and marks its own (a paragraph removed right after a removed
+  // table used to get no mark at all, and survived accept-all empty).
+  let at = start;
+  while (at <= end) {
+    if (!isParagraph(entries[at].el)) {
+      at++;
+      continue;
+    }
+    let last = at;
+    while (last + 1 <= end && isParagraph(entries[last + 1].el)) last++;
+    markParagraphRun(entries, at, last, ctx);
+    at = last + 1;
+  }
+}
+
+function markParagraphRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
   const shifted = start > 0 && isParagraph(entries[start - 1].el);
   if (shifted) {
     for (let i = start; i <= end; i++) {

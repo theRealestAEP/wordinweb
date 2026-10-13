@@ -919,13 +919,26 @@ function removeRevisionAndEmptyHost(doc: DocxDocument, el: XmlElement): boolean 
 }
 
 /** Join pEl with the paragraph that follows it (accept a deleted mark / reject
- * an inserted mark): move the next paragraph's runs into pEl, drop the next. */
-function joinWithNext(doc: DocxDocument, pEl: XmlElement): boolean {
+ * an inserted mark): move the next paragraph's runs into pEl, drop the next.
+ *
+ * With no paragraph to join (a table follows, or nothing does), a paragraph
+ * whose content is all `gone` (the revision kind this review removes: w:del
+ * on accept, w:ins on reject) is removed outright: its content goes and now
+ * its mark does too, so it no longer exists. The mark is reviewed before the
+ * runs it ends (reverse document order), which is why the content is judged
+ * by kind rather than by absence. Kept as an empty paragraph, it put a blank
+ * line before the term sheet's terms table that neither document had. A
+ * paragraph holding anything else stays, since there is nothing it could join. */
+function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): boolean {
   const parent = doc.findParentOf(pEl);
   if (!parent) return false;
   const idx = parent.children.indexOf(pEl);
   const next = parent.children[idx + 1];
-  if (!next || localName(next.name) !== "p") return false;
+  if (!next || localName(next.name) !== "p") {
+    if (pEl.children.some((c) => localName(c.name) !== "pPr" && localName(c.name) !== gone)) return false;
+    parent.children.splice(idx, 1);
+    return true;
+  }
   const moved = next.children.filter((c) => localName(c.name) !== "pPr");
   pEl.children.push(...moved);
   parent.children.splice(idx + 1, 1);
@@ -1024,7 +1037,7 @@ function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
     case "markDeletion":
       if (!ref.paragraph) return false;
       removeMarkRevision(ref);
-      return joinWithNext(doc, ref.paragraph);
+      return joinWithNext(doc, ref.paragraph, "del");
     case "rowInsertion":
       // The row is already there; accepting just retires the record.
       return removeRowRevision(doc, ref);
@@ -1126,7 +1139,7 @@ function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
     case "markInsertion":
       if (!ref.paragraph) return false;
       removeMarkRevision(ref);
-      return joinWithNext(doc, ref.paragraph);
+      return joinWithNext(doc, ref.paragraph, "ins");
     case "markDeletion":
       return removeMarkRevision(ref);
     case "rowInsertion":

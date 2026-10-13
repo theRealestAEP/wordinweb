@@ -346,3 +346,40 @@ describe("compareDocuments — punctuation tokens", () => {
     );
   });
 });
+
+describe("compareDocuments — a paragraph between two tables", () => {
+  // A paragraph mark is how a paragraph is added or removed, and it joins the
+  // paragraph to a neighbouring one. Between two tables there is no neighbour
+  // paragraph, so a short heading rewritten there ("42" -> "amended", too
+  // short to pair by similarity) came out as delete-one-insert-another, and
+  // reject-all left an empty paragraph behind (the NIH contract's red section
+  // numbers, each sitting between two tables).
+  it("rewrites a short paragraph in place between two tables", () => {
+    const sandwich = (text: string) => table([["Alpha", "One"]]) + para(text) + table([["Bravo", "Two"]]);
+    roundTrip(sandwich("42"), sandwich("amended"));
+  });
+});
+
+describe("compareDocuments — a paragraph removed before a table", () => {
+  // The term sheet opens with a title paragraph and then its terms table.
+  // Removing the paragraph strikes its text and its mark; with no paragraph
+  // after it to join, accept-all used to keep it as an empty paragraph, and
+  // reject-all did the same for an inserted one.
+  const terms = table([["Term", "Value"]]);
+  it("removes it on accept", () => {
+    roundTrip(para("Summary of terms") + terms + para("End."), terms + para("End."));
+  });
+  it("removes an inserted one on reject", () => {
+    roundTrip(terms + para("End."), para("Summary of terms") + terms + para("End."));
+  });
+  it("marks a paragraph removed right after a removed table", () => {
+    // The term sheet with its table moved: the run of removed blocks is the
+    // table and then a paragraph. Marks are taken from the paragraph BEFORE
+    // each removed one, and before this one stood a table, so it got none
+    // and accept-all kept it as an empty paragraph.
+    roundTrip(
+      para("Title") + terms + para("Note after the table") + para("Body text stays.") + para("End."),
+      para("Title") + para("Body text stays.") + para("End."),
+    );
+  });
+});
