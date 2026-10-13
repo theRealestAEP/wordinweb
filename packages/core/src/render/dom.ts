@@ -893,6 +893,25 @@ export function printStylesheet(pageWidthPx: number, pageHeightPx: number, root?
 }
 
 /**
+ * Remove the spans that paint nothing, for print. The engine places one
+ * absolutely positioned span per word AND per space, so a page runs 750-1,100
+ * spans, about half of them blank, and Chrome is slow to print that many. A
+ * blank span shows only when it is underlined or a link; every span is
+ * absolutely positioned, so removing one moves nothing else. Not for a live
+ * page: the editor needs the spaces for the caret. Returns how many it removed.
+ */
+export function pruneBlankSpans(root: ParentNode): number {
+  let removed = 0;
+  for (const el of Array.from(root.querySelectorAll<HTMLElement>(".dxw-page span"))) {
+    if (el.childElementCount > 0 || el.textContent?.trim()) continue;
+    if (el.style.textDecoration.includes("underline")) continue;
+    el.remove();
+    removed++;
+  }
+  return removed;
+}
+
+/**
  * Build a standalone print document (page DOM plus the host page's styles,
  * screen chrome stripped) as an HTML string. Shared by the browser print
  * path and hosts that render the pages elsewhere (e.g. a desktop shell's
@@ -905,7 +924,9 @@ export function buildPrintHtml(root: HTMLElement, pageWidthPx: number, pageHeigh
     head.push((node as HTMLElement).outerHTML);
   }
   head.push(`<style>${printStylesheet(pageWidthPx, pageHeightPx, root)}</style>`);
-  return `<!doctype html><html><head>${head.join("")}</head><body>${root.outerHTML}</body></html>`;
+  const pages = root.cloneNode(true) as HTMLElement;
+  pruneBlankSpans(pages);
+  return `<!doctype html><html><head>${head.join("")}</head><body>${pages.outerHTML}</body></html>`;
 }
 
 /**

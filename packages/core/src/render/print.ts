@@ -1,6 +1,6 @@
 import { DocxDocument } from "../docx.js";
 import { layoutDocument } from "../layout/engine.js";
-import { paintsSettled, printStylesheet, renderToDom } from "./dom.js";
+import { paintsSettled, printStylesheet, pruneBlankSpans, renderToDom } from "./dom.js";
 
 /**
  * Lay out and render a whole .docx into `container` for a headless browser
@@ -13,6 +13,7 @@ export async function renderForPrint(bytes: Uint8Array, container: HTMLElement):
   const doc = DocxDocument.load(bytes);
   const layout = layoutDocument(doc);
   renderToDom(doc, layout, container, { zoom: 1, pageGap: 0, pageShadow: false, comments: false });
+  pruneBlankSpans(container);
 
   const first = layout.pages[0];
   const style = document.createElement("style");
