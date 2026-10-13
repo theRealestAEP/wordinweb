@@ -291,7 +291,7 @@ export function serializeXml(el: XmlElement, declaration = false): string {
 }
 
 /** The placeholder serializeXml leaves out: an omitWhenEmpty run holding only an empty w:t. */
-function omitted(e: XmlElement): boolean {
+export function isEmptyPlaceholder(e: XmlElement): boolean {
   return (
     !!e.omitWhenEmpty &&
     Object.keys(e.attrs).length === 0 &&
@@ -317,8 +317,8 @@ export function sameXml(a: XmlElement, b: XmlElement): boolean {
   for (const k of ak) if (a.attrs[k] !== b.attrs[k]) return false;
   // serializeXml writes text only for an element with no children.
   if (a.children.length === 0 && b.children.length === 0) return a.text === b.text;
-  const ac = a.children.filter((c) => !omitted(c));
-  const bc = b.children.filter((c) => !omitted(c));
+  const ac = a.children.filter((c) => !isEmptyPlaceholder(c));
+  const bc = b.children.filter((c) => !isEmptyPlaceholder(c));
   if (ac.length !== bc.length) return false;
   if (ac.length === 0) return (a.children.length > 0 ? "" : a.text) === (b.children.length > 0 ? "" : b.text);
   for (let i = 0; i < ac.length; i++) if (!sameXml(ac[i], bc[i])) return false;

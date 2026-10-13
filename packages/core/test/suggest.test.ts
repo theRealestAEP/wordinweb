@@ -347,6 +347,18 @@ describe("suggesting mode — review all", () => {
     expect(serializeXml(doc.docRoot)).not.toMatch(/<w:move/);
   });
 
+  it("reject-all removes an inserted empty paragraph that a table follows", () => {
+    // Loading gives an empty paragraph a placeholder run, never saved, and
+    // that run counted as content: the paragraph stayed as a blank line
+    // before the table (compare benchmark, probe-pctcolumn with blocks moved).
+    const A = `w:author="B" w:date="2026-02-01T00:00:00Z"`;
+    const table = `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>kept</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const doc = loadDoc(p("Before") + `<w:p><w:pPr><w:rPr><w:ins w:id="1" ${A}/></w:rPr></w:pPr></w:p>` + table + p("After"));
+    expect(rejectAllRevisions(doc)).toBe(1);
+    const body = serializeXml(doc.docRoot);
+    expect(body.indexOf("<w:tbl>") - body.indexOf("Before</w:t></w:r></w:p>")).toBe("Before</w:t></w:r></w:p>".length);
+  });
+
   it("reject-all puts a move back at its source", () => {
     const doc = loadDoc(MOVED);
     expect(rejectAllRevisions(doc)).toBe(2);

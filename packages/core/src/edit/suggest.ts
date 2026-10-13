@@ -1,5 +1,5 @@
 import { DocxDocument, NotePart } from "../docx.js";
-import { XmlElement, cloneXml, localName } from "../xml.js";
+import { XmlElement, cloneXml, isEmptyPlaceholder, localName } from "../xml.js";
 
 /**
  * Suggesting mode — "my own tracked changes".
@@ -947,7 +947,8 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
   const next = parent.children[idx + 1];
   if (!next || localName(next.name) !== "p") {
     const goes = gone === "del" ? ["pPr", "del", "moveFrom", ...MOVE_RANGES] : ["pPr", "ins", "moveTo", ...MOVE_RANGES];
-    if (pEl.children.some((c) => !goes.includes(localName(c.name)))) return false;
+    // The editor's empty placeholder run is not content: it is never saved.
+    if (pEl.children.some((c) => !goes.includes(localName(c.name)) && !isEmptyPlaceholder(c))) return false;
     parent.children.splice(idx, 1);
     return true;
   }
