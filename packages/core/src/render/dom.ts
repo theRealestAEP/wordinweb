@@ -454,6 +454,9 @@ function renderPageShell(page: LaidOutPage, zoom: number, options: RenderOptions
   if (options.pageShadow !== false) {
     el.style.boxShadow = "var(--dxw-page-shadow, 0 1px 3px rgba(0,0,0,.28), 0 4px 14px rgba(0,0,0,.12))";
   }
+  // The page's own size, unzoomed, for print (printStylesheet).
+  el.dataset.pageWidth = String(page.width);
+  el.dataset.pageHeight = String(page.height);
   el.dataset.bodyTop = String(page.bodyTop);
   el.dataset.bodyBottom = String(page.bodyBottom);
   el.dataset.columnBands = JSON.stringify(page.columnBands);
@@ -856,12 +859,28 @@ export async function paintsSettled(): Promise<void> {
 }
 
 /**
- * The print rules: one sheet per page at the document's page size, screen
- * chrome (shadows, gaps, comment balloons) stripped.
+ * The print rules: one sheet per page, screen chrome (shadows, gaps, comment
+ * balloons) stripped. The given size is the default sheet. With `root`, every
+ * distinct page size under it also gets a named @page that its pages take, so
+ * a landscape section prints landscape instead of at the first page's size.
  */
-export function printStylesheet(pageWidthPx: number, pageHeightPx: number): string {
+export function printStylesheet(pageWidthPx: number, pageHeightPx: number, root?: ParentNode): string {
+  const inches = (px: number) => `${Math.round((px / 96) * 1000) / 1000}in`;
+  const sizes = new Set<string>();
+  for (const el of root ? Array.from(root.querySelectorAll<HTMLElement>(".dxw-page[data-page-width]")) : []) {
+    sizes.add(`${el.dataset.pageWidth}x${el.dataset.pageHeight}`);
+  }
+  const named = [...sizes].map((key) => {
+    const [w, h] = key.split("x");
+    const name = `dxw-${key.replace(/\./g, "_")}`;
+    return (
+      `@page ${name} { size: ${inches(Number(w))} ${inches(Number(h))}; margin: 0; }\n` +
+      `    .dxw-page[data-page-width="${w}"][data-page-height="${h}"] { page: ${name}; }`
+    );
+  });
   return `
-    @page { size: ${pageWidthPx / 96}in ${pageHeightPx / 96}in; margin: 0; }
+    @page { size: ${inches(pageWidthPx)} ${inches(pageHeightPx)}; margin: 0; }
+    ${named.join("\n    ")}
     html, body { margin: 0; padding: 0; }
     .dxw-pages { display: block !important; padding: 0 !important; gap: 0 !important; }
     .dxw-pages, .dxw-pages * {
@@ -885,7 +904,7 @@ export function buildPrintHtml(root: HTMLElement, pageWidthPx: number, pageHeigh
   for (const node of Array.from(document.head.querySelectorAll("style, link[rel=stylesheet]"))) {
     head.push((node as HTMLElement).outerHTML);
   }
-  head.push(`<style>${printStylesheet(pageWidthPx, pageHeightPx)}</style>`);
+  head.push(`<style>${printStylesheet(pageWidthPx, pageHeightPx, root)}</style>`);
   return `<!doctype html><html><head>${head.join("")}</head><body>${root.outerHTML}</body></html>`;
 }
 

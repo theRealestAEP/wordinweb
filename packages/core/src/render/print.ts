@@ -16,7 +16,7 @@ export async function renderForPrint(bytes: Uint8Array, container: HTMLElement):
 
   const first = layout.pages[0];
   const style = document.createElement("style");
-  style.textContent = printStylesheet(first?.width ?? 816, first?.height ?? 1056);
+  style.textContent = printStylesheet(first?.width ?? 816, first?.height ?? 1056, container);
   document.head.append(style);
 
   await paintsSettled();
