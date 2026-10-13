@@ -38,6 +38,13 @@ export class Package {
     return new Package(data instanceof Uint8Array ? data : new Uint8Array(data));
   }
 
+  /** A package over an already-unzipped entry map (DocxDocument.clone). */
+  static fromFiles(files: Record<string, Uint8Array>): Package {
+    const pkg = Object.create(Package.prototype) as Package;
+    pkg.files = files;
+    return pkg;
+  }
+
   has(name: string): boolean {
     return this.normalize(name) in this.files;
   }

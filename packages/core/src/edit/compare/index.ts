@@ -1,6 +1,6 @@
 import { diffArrays } from "diff";
 import { DocxDocument } from "../../docx.js";
-import { XmlElement, child, cloneXml, localName, serializeXml } from "../../xml.js";
+import { XmlElement, child, cloneXml, localName, sameXml, serializeXml } from "../../xml.js";
 import {
   RevisionMeta,
   markDeletedText,
@@ -136,14 +136,21 @@ export function compareDocuments(
   revised: DocxDocument,
   options: CompareOptions,
 ): DocxDocument {
-  const merged = DocxDocument.load(revised.save());
+  const merged = revised.clone();
+  // Every revision takes an id; with none issued the body is the clone's own,
+  // untouched, and its model needs no rebuild (refresh was a sixth of the time
+  // on a document compared with itself).
+  let issued = 0;
   const ctx: Ctx = {
     doc: merged,
     original,
     meta: {
       author: options.author,
       date: options.date,
-      nextId: () => merged.nextRevisionId(),
+      nextId: () => {
+        issued++;
+        return merged.nextRevisionId();
+      },
     },
     formatting: options.formatting !== false,
     whitespace: options.whitespace !== false,
@@ -161,7 +168,7 @@ export function compareDocuments(
   applyParagraphMarks(entries, ctx);
   mergedBody.children = [...entries.map((e) => e.el), ...tail];
 
-  merged.refresh();
+  if (issued > 0) merged.refresh();
   return merged;
 }
 
@@ -593,7 +600,7 @@ function wrapContainerContent(container: XmlElement, kind: "ins" | "del", ctx: C
 
 /** Diff one matched paragraph pair, mutating the revised element in place. */
 function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
-  if (serializeXml(oEl) === serializeXml(rEl)) return;
+  if (sameXml(oEl, rEl)) return;
 
   if (ctx.formatting) alignParagraphProps(rEl, child(rEl, "pPr"), child(oEl, "pPr"), ctx);
 
@@ -802,7 +809,7 @@ function changeSize(seg: Segment): number {
 // ---------------------------------------------------------------------------
 
 function compareTable(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
-  if (serializeXml(oTbl) === serializeXml(rTbl)) return;
+  if (sameXml(oTbl, rTbl)) return;
   if (ctx.formatting) {
     swapProps(rTbl, "tblPr", recordTableFormatChange, child(oTbl, "tblPr"), ctx);
     alignTableGrid(oTbl, rTbl, ctx);
@@ -884,7 +891,7 @@ function compareRow(oTr: XmlElement, rTr: XmlElement, ctx: Ctx): XmlElement[] {
 function alignTableGrid(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
   const oGrid = child(oTbl, "tblGrid");
   const rGrid = child(rTbl, "tblGrid");
-  if (!oGrid || !rGrid || serializeXml(oGrid) === serializeXml(rGrid)) return;
+  if (!oGrid || !rGrid || sameXml(oGrid, rGrid)) return;
   const live = rGrid.children.map(cloneXml);
   rGrid.children = oGrid.children.map(cloneXml);
   recordTableGridChange(rTbl, ctx.meta);

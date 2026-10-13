@@ -290,6 +290,41 @@ export function serializeXml(el: XmlElement, declaration = false): string {
   return out.join("");
 }
 
+/** The placeholder serializeXml leaves out: an omitWhenEmpty run holding only an empty w:t. */
+function omitted(e: XmlElement): boolean {
+  return (
+    !!e.omitWhenEmpty &&
+    Object.keys(e.attrs).length === 0 &&
+    e.text.length === 0 &&
+    e.children.length === 1 &&
+    localName(e.children[0].name) === "t" &&
+    e.children[0].children.length === 0 &&
+    e.children[0].text.length === 0 &&
+    Object.keys(e.children[0].attrs).every((key) => key === "xml:space" && e.children[0].attrs[key] === "preserve")
+  );
+}
+
+/**
+ * True when two elements write the same XML, attribute order aside, without
+ * building either string. compareDocuments asks this of every matched block,
+ * and serializing both sides to compare them was a quarter of its time on a
+ * document compared with itself.
+ */
+export function sameXml(a: XmlElement, b: XmlElement): boolean {
+  if (a.name !== b.name) return false;
+  const ak = Object.keys(a.attrs);
+  if (ak.length !== Object.keys(b.attrs).length) return false;
+  for (const k of ak) if (a.attrs[k] !== b.attrs[k]) return false;
+  // serializeXml writes text only for an element with no children.
+  if (a.children.length === 0 && b.children.length === 0) return a.text === b.text;
+  const ac = a.children.filter((c) => !omitted(c));
+  const bc = b.children.filter((c) => !omitted(c));
+  if (ac.length !== bc.length) return false;
+  if (ac.length === 0) return (a.children.length > 0 ? "" : a.text) === (b.children.length > 0 ? "" : b.text);
+  for (let i = 0; i < ac.length; i++) if (!sameXml(ac[i], bc[i])) return false;
+  return true;
+}
+
 /** Deep-clone an element (attrs and children copied, text preserved). */
 export function cloneXml(el: XmlElement): XmlElement {
   return {

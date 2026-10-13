@@ -2303,6 +2303,23 @@ export class DocxDocument {
     }
   }
 
+  /**
+   * An independent copy: what `DocxDocument.load(doc.save())` gives, without
+   * zipping the package and unzipping it again. compareDocuments starts from a
+   * copy of the revised document, and the round trip through the zip was a
+   * third of its time on a document that had not changed at all.
+   */
+  clone(): DocxDocument {
+    const journal: (() => void)[] = [];
+    this.saveJournal = journal;
+    try {
+      return new DocxDocument(Package.fromFiles(this.buildPackageFiles()));
+    } finally {
+      for (let i = journal.length - 1; i >= 0; i--) journal[i]();
+      this.saveJournal = null;
+    }
+  }
+
   saveAsync(): Promise<Uint8Array> {
     const journal: (() => void)[] = [];
     this.saveJournal = journal;
