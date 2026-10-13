@@ -846,33 +846,40 @@ function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
 function emitDeleted(el: XmlElement, ctx: Ctx): Entry {
   const clone = cloneXml(el);
   adoptFromOriginal(clone, ctx);
-  const ln = localName(clone.name);
-  if (ln === "p") {
-    wrapContainerContent(clone, "del", ctx);
-  } else if (ln === "tbl") {
-    for (const row of clone.children.filter((c) => localName(c.name) === "tr")) {
-      markRowRevision(row, "del", ctx.meta);
-      wrapRowContent(row, "del", ctx);
-    }
-  } else if (!isPassenger(ln)) {
-    ctx.note({ code: "untracked-block", detail: `a <${clone.name}> block was removed and is not expressible as a revision` });
-  }
+  markWholeBlock(clone, "del", ctx);
   return { el: clone, cls: "deleted" };
 }
 
 function emitInserted(el: XmlElement, ctx: Ctx): Entry {
+  markWholeBlock(el, "ins", ctx);
+  return { el, cls: "inserted" };
+}
+
+/**
+ * Mark a whole block removed or added: a paragraph's content (its mark is
+ * the mark pass's), a table's rows, and everything a block-level content
+ * control or custom XML element holds, its paragraphs' marks included, since
+ * the mark pass sees only the control. Left unmarked, a removed control came
+ * through accept-all whole (probe2-content-controls with blocks moved).
+ */
+function markWholeBlock(el: XmlElement, kind: "ins" | "del", ctx: Ctx): void {
   const ln = localName(el.name);
   if (ln === "p") {
-    wrapContainerContent(el, "ins", ctx);
+    wrapContainerContent(el, kind, ctx);
   } else if (ln === "tbl") {
     for (const row of el.children.filter((c) => localName(c.name) === "tr")) {
-      markRowRevision(row, "ins", ctx.meta);
-      wrapRowContent(row, "ins", ctx);
+      markRowRevision(row, kind, ctx.meta);
+      wrapRowContent(row, kind, ctx);
     }
-  } else if (!isPassenger(ln)) {
-    ctx.note({ code: "untracked-block", detail: `a <${el.name}> block was added and is not expressible as a revision` });
+  } else if (ln === "sdt" || ln === "customXml") {
+    const inner = ln === "sdt" ? child(el, "sdtContent") : el;
+    for (const block of inner?.children ?? []) {
+      markWholeBlock(block, kind, ctx);
+      if (isParagraph(block)) markParagraphGlyph(block, kind, ctx.meta);
+    }
+  } else if (!isPassenger(ln) && ln !== "sdtPr" && ln !== "sdtEndPr" && ln !== "customXmlPr") {
+    ctx.note({ code: "untracked-block", detail: `a <${el.name}> block was ${kind === "ins" ? "added" : "removed"} and is not expressible as a revision` });
   }
-  return { el, cls: "inserted" };
 }
 
 function wrapRowContent(row: XmlElement, kind: "ins" | "del", ctx: Ctx): void {

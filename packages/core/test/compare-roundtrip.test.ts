@@ -569,6 +569,16 @@ describe("compareDocuments — content controls and table rows", () => {
     expect(deletions(merged)).toEqual(["message"]);
   });
 
+  it("removes and adds a block-level content control whole", () => {
+    // Removed or added whole, the control was left unmarked and came through
+    // accept-all (or reject-all) as it was.
+    roundTrip(
+      para("Before.") + sdt(para("A control that goes.") + para("Its second paragraph.")) + para("After."),
+      para("Before.") + para("After."),
+    );
+    roundTrip(para("Before.") + para("After."), para("Before.") + sdt(para("A control that comes.")) + para("After."));
+  });
+
   it("marks an edit inside a row-level content control", () => {
     // A w:sdt holding rows (a repeating section) was set aside as a non-row
     // child: moved to the top of the table, its rows never compared.

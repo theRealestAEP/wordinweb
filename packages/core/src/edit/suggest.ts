@@ -950,6 +950,7 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
     // The editor's empty placeholder run is not content: it is never saved.
     if (pEl.children.some((c) => !goes.includes(localName(c.name)) && !isEmptyPlaceholder(c))) return false;
     parent.children.splice(idx, 1);
+    dropEmptiedControl(doc, parent);
     return true;
   }
   const moved = next.children.filter((c) => localName(c.name) !== "pPr");
@@ -1314,6 +1315,26 @@ function removeRow(doc: DocxDocument, ref: RevisionRef): boolean {
   const idx = tbl.children.indexOf(ref.row);
   if (idx === -1) return false;
   tbl.children.splice(idx, 1);
-  if (!tbl.children.some((c) => localName(c.name) === "tr")) removeEl(doc, tbl);
+  if (!tbl.children.some((c) => localName(c.name) === "tr")) {
+    const holder = doc.findParentOf(tbl);
+    removeEl(doc, tbl);
+    if (holder) dropEmptiedControl(doc, holder);
+  }
   return true;
+}
+
+/**
+ * A block-level content control (or custom XML element) whose last block a
+ * review just removed goes too: its content was removed or added whole, and
+ * an empty control left behind is a block neither document had.
+ */
+function dropEmptiedControl(doc: DocxDocument, container: XmlElement): void {
+  const ln = localName(container.name);
+  const control = ln === "sdtContent" ? doc.findParentOf(container) : ln === "customXml" ? container : undefined;
+  if (!control) return;
+  const left = container.children.filter((c) => !["customXmlPr"].includes(localName(c.name)));
+  if (left.length > 0) return;
+  const holder = doc.findParentOf(control);
+  removeEl(doc, control);
+  if (holder) dropEmptiedControl(doc, holder);
 }
