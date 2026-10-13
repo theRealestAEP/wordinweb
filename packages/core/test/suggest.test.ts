@@ -328,6 +328,32 @@ describe("suggesting mode — review all", () => {
     expect(finalText(doc, 0)).toBe("OneTwoThree");
     expect(doc.sections[0].blocks.filter((b) => b.type === "paragraph")).toHaveLength(1);
   });
+  // Word records a move as w:moveFrom at the source and w:moveTo at the
+  // destination, each inside range markers. Accept-all once left the moved
+  // text in both places.
+  const MOVED =
+    `<w:p><w:moveFromRangeStart w:id="1" w:name="mv1" w:author="B" w:date="2026-02-01T00:00:00Z"/>` +
+    `<w:moveFrom w:id="2" w:author="B" w:date="2026-02-01T00:00:00Z"><w:r><w:t xml:space="preserve">Moved. </w:t></w:r></w:moveFrom>` +
+    `<w:moveFromRangeEnd w:id="1"/><w:r><w:t>Stays.</w:t></w:r></w:p>` +
+    `<w:p><w:r><w:t xml:space="preserve">Here. </w:t></w:r><w:moveToRangeStart w:id="3" w:name="mv1" w:author="B" w:date="2026-02-01T00:00:00Z"/>` +
+    `<w:moveTo w:id="4" w:author="B" w:date="2026-02-01T00:00:00Z"><w:r><w:t>Moved.</w:t></w:r></w:moveTo><w:moveToRangeEnd w:id="3"/></w:p>`;
+
+  it("accept-all settles a move at its destination", () => {
+    const doc = loadDoc(MOVED);
+    expect(collectRevisions(doc).map((r) => r.kind)).toEqual(["deletion", "insertion"]);
+    expect(acceptAllRevisions(doc)).toBe(2);
+    expect(finalText(doc, 0)).toBe("Stays.");
+    expect(finalText(doc, 1)).toBe("Here. Moved.");
+    expect(serializeXml(doc.docRoot)).not.toMatch(/<w:move/);
+  });
+
+  it("reject-all puts a move back at its source", () => {
+    const doc = loadDoc(MOVED);
+    expect(rejectAllRevisions(doc)).toBe(2);
+    expect(finalText(doc, 0)).toBe("Moved. Stays.");
+    expect(finalText(doc, 1)).toBe("Here. ");
+    expect(serializeXml(doc.docRoot)).not.toMatch(/<w:move/);
+  });
 });
 
 describe("reviewing a revision inside a note part", () => {

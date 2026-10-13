@@ -946,7 +946,8 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
   const idx = parent.children.indexOf(pEl);
   const next = parent.children[idx + 1];
   if (!next || localName(next.name) !== "p") {
-    if (pEl.children.some((c) => localName(c.name) !== "pPr" && localName(c.name) !== gone)) return false;
+    const goes = gone === "del" ? ["pPr", "del", "moveFrom", ...MOVE_RANGES] : ["pPr", "ins", "moveTo", ...MOVE_RANGES];
+    if (pEl.children.some((c) => !goes.includes(localName(c.name)))) return false;
     parent.children.splice(idx, 1);
     return true;
   }
@@ -970,10 +971,12 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
     // they carry their owning paragraph, and never double-collect them as
     // run-level wrappers.
     if (ln === "pPr") return;
-    if (ln === "ins" || ln === "del") {
+    // A move is a deletion at its source (w:moveFrom) and an insertion at its
+    // destination (w:moveTo), and reviews as one.
+    if (ln === "ins" || ln === "del" || ln === "moveTo" || ln === "moveFrom") {
       out.push({
         el,
-        kind: ln === "ins" ? "insertion" : "deletion",
+        kind: ln === "ins" || ln === "moveTo" ? "insertion" : "deletion",
         author: attrByLocal(el, "author"),
       });
     }
@@ -1022,10 +1025,10 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
       const rPr = pPr?.children.find((c) => localName(c.name) === "rPr");
       for (const c of rPr?.children ?? []) {
         const cn = localName(c.name);
-        if (cn === "ins" || cn === "del") {
+        if (cn === "ins" || cn === "del" || cn === "moveTo" || cn === "moveFrom") {
           out.push({
             el: c,
-            kind: cn === "ins" ? "markInsertion" : "markDeletion",
+            kind: cn === "ins" || cn === "moveTo" ? "markInsertion" : "markDeletion",
             paragraph: el,
             author: attrByLocal(c, "author"),
           });
@@ -1241,10 +1244,29 @@ function applyToAll(
     for (const part of held) notes.add(part);
   }
   if (n > 0) {
+    dropSettledMoveRanges(doc);
     doc.markNotePartsChanged([...notes]);
     doc.refresh();
   }
   return n;
+}
+
+const MOVE_RANGES = ["moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd"];
+
+/**
+ * A move's range markers name the span its w:moveFrom / w:moveTo content
+ * covers. Once no move content is left, they mark nothing and go.
+ */
+function dropSettledMoveRanges(doc: DocxDocument): void {
+  const roots = doc.revisionRoots();
+  const has = (el: XmlElement): boolean =>
+    ["moveFrom", "moveTo"].includes(localName(el.name)) || el.children.some(has);
+  if (roots.some(has)) return;
+  const strip = (el: XmlElement): void => {
+    el.children = el.children.filter((c) => !MOVE_RANGES.includes(localName(c.name)));
+    for (const c of el.children) strip(c);
+  };
+  for (const root of roots) strip(root);
 }
 
 /**
