@@ -1186,8 +1186,8 @@ function wordSegments(a: readonly ContentToken[], b: readonly ContentToken[]): S
     for (let i = 1; i + 1 < segments.length; i++) {
       const seg = segments[i];
       if (!seg.equal) continue;
-      const len = seg.aEnd - seg.aStart;
-      const beside = Math.min(changeSize(segments[i - 1]), changeSize(segments[i + 1]));
+      const len = words(a, seg.aStart, seg.aEnd);
+      const beside = Math.min(changeSize(segments[i - 1], a, b), changeSize(segments[i + 1], a, b));
       if (len < COMPARE_TUNING.coalesceWindow || len * COMPARE_TUNING.coalesceRatio < beside) {
         seg.equal = false;
         absorbed = true;
@@ -1215,8 +1215,19 @@ function mergeChanges(segments: readonly Segment[]): Segment[] {
 }
 
 /** How much a change region touches: the larger of its two sides. */
-function changeSize(seg: Segment): number {
-  return Math.max(seg.aEnd - seg.aStart, seg.bEnd - seg.bStart);
+/**
+ * How big a change is, in tokens that are not whitespace: a space between two
+ * words is a token of its own, and counting it would make every stretch look
+ * twice its size to the coalescing rule calibrated on words.
+ */
+function changeSize(seg: Segment, a: readonly ContentToken[], b: readonly ContentToken[]): number {
+  return Math.max(words(a, seg.aStart, seg.aEnd), words(b, seg.bStart, seg.bEnd));
+}
+
+function words(tokens: readonly ContentToken[], from: number, to: number): number {
+  let n = 0;
+  for (let i = from; i < to; i++) if (tokens[i].atom || !/^\s+$/.test(tokens[i].text)) n++;
+  return n;
 }
 
 // ---------------------------------------------------------------------------

@@ -496,7 +496,7 @@ describe("compareDocuments — text inside a text box", () => {
     expect(kinds.filter((k) => k === "deletion")).toHaveLength(1);
     const xml = DocxDocument.load(merged.save()).pkg.text("word/document.xml") ?? "";
     expect((xml.match(/<w:drawing>/g) ?? []).length).toBe(1);
-    expect(xml).toMatch(/<w:txbxContent>(?:(?!<\/w:txbxContent>)[\s\S])*<w:delText[^>]*>finance /);
+    expect(xml).toMatch(/<w:txbxContent>(?:(?!<\/w:txbxContent>)[\s\S])*<w:delText[^>]*>finance</);
   });
 });
 
@@ -566,7 +566,7 @@ describe("compareDocuments — content controls and table rows", () => {
       para("Before.") + sdt(para("The message body goes here.")) + para("After."),
       para("Before.") + sdt(para("The letter body goes here.")) + para("After."),
     );
-    expect(deletions(merged)).toEqual(["message "]);
+    expect(deletions(merged)).toEqual(["message"]);
   });
 
   it("marks an edit inside a row-level content control", () => {

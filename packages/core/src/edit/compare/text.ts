@@ -47,9 +47,13 @@ export const COMPARE_TUNING = {
    * next to 1) while a rewritten clause becomes one (3 is small next to 7).
    *
    * Both numbers were settled against test/compare-corpus.test.ts; see the
-   * calibration note there for what each fixture pins down.
+   * calibration note there for what each fixture pins down. The ratio was 2
+   * while spaces rode on words: "hardware," and "hardware " differed, so the
+   * rewritten sentence of fixture 3 shared only three words. Matched exactly,
+   * it shares four ("shortage of test hardware") beside seven changed, which
+   * 1.5 absorbs (6 < 7) and 2 does not.
    */
-  coalesceRatio: 2,
+  coalesceRatio: 1.5,
 } as const;
 
 /** Collapse whitespace runs and trim, for fingerprinting and similarity. */
@@ -58,20 +62,24 @@ export function normalizeText(s: string): string {
 }
 
 /**
- * Split into word tokens, each carrying the whitespace that FOLLOWS it. An
- * inserted word is then inserted as one unit ("word "), instead of the classic
- * "delete the space, insert the word, insert another space" three-part mess;
- * deletions symmetrically take their trailing space with them, so surviving
- * text is not left double-spaced after an accept.
+ * Split into tokens: a word is letters, marks and digits, with inner
+ * apostrophes ("don't"); a run of whitespace is one token; every other
+ * character is a token of its own. The split is lossless.
  *
- * A word is letters, marks and digits, with inner apostrophes ("don't");
- * every other character is a token of its own. Keyed with its punctuation
+ * Whitespace once rode on the word before it ("word "), so a word at the end
+ * of a paragraph or before punctuation ("noqu", "hardware,") never matched the
+ * same word followed by a space: appending " as replaced" to a paragraph
+ * struck its last word and reinserted it, the commonest over-marking in the
+ * compare benchmark. Word marks only the words that changed and leaves the
+ * spaces between them alone, and so does this. The coalescing pass counts
+ * words, not spaces (see changeSize), so a rewrite still reads as one change.
+ * Keyed with its punctuation
  * attached, "writing." against "writing," struck and reinserted the whole
  * word ("writing.writing," to a reviewer), and a bold "Purpose:" whose colon
  * moved into the next run never matched "Purpose" at all.
  */
 export function wordTokens(s: string): string[] {
-  return s.match(/[\p{L}\p{M}\p{N}]+(?:['\u2019][\p{L}\p{M}\p{N}]+)*\s*|[^\s\p{L}\p{M}\p{N}]\s*|\s+/gu) ?? [];
+  return s.match(/[\p{L}\p{M}\p{N}]+(?:['\u2019][\p{L}\p{M}\p{N}]+)*|[^\s\p{L}\p{M}\p{N}]|\s+/gu) ?? [];
 }
 
 /** Lower-cased word tokens of the normalized string, for similarity only. */

@@ -65,8 +65,8 @@ describe("compare corpus — 1: a typo fixed inside a hundred words", () => {
     // FAILURE MODE: the whole paragraph deleted and reinserted.
     const doc = compare(para(HUNDRED), para(HUNDRED.replace("recieve", "receive")));
     expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
-    expect(revisionTexts(doc, "del")).toEqual(["recieve "]);
-    expect(revisionTexts(doc, "ins")).toEqual(["receive "]);
+    expect(revisionTexts(doc, "del")).toEqual(["recieve"]);
+    expect(revisionTexts(doc, "ins")).toEqual(["receive"]);
   });
 });
 
@@ -76,8 +76,8 @@ describe("compare corpus — 2: two words changed two hundred words apart", () =
     const filler = "filler word here ".repeat(40) + "omega beta " + "more filler text ".repeat(40);
     const doc = compare(para("Alpha " + filler + "final gamma"), para("ALPHA " + filler + "final GAMMA"));
     expect(kindCounts(doc)).toEqual({ deletion: 2, insertion: 2 });
-    expect(revisionTexts(doc, "del")).toEqual(["Alpha ", "gamma"]);
-    expect(revisionTexts(doc, "ins")).toEqual(["ALPHA ", "GAMMA"]);
+    expect(revisionTexts(doc, "del")).toEqual(["Alpha", "gamma"]);
+    expect(revisionTexts(doc, "ins")).toEqual(["ALPHA", "GAMMA"]);
   });
 });
 
@@ -219,7 +219,7 @@ describe("compare corpus — 10: whitespace only", () => {
     // FAILURE MODE: the paragraph fails to anchor and renders as a rewrite.
     const doc = compare(para("one  two three"), para("one two three"));
     expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
-    expect(revisionTexts(doc, "del")).toEqual(["one  "]);
+    expect(revisionTexts(doc, "del")).toEqual(["  "]);
   });
 
   it("records nothing with whitespace comparison off", () => {
@@ -242,7 +242,7 @@ describe("compare corpus — 11: the same heading in three chapters", () => {
       chapter(one) + chapter("Chapter two describes the method used to collect the survey data.") + chapter(three),
     );
     expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
-    expect(revisionTexts(doc, "del")).toEqual(["process "]);
+    expect(revisionTexts(doc, "del")).toEqual(["process"]);
     for (const at of [0, 1, 2, 4, 5]) expect(kindsIn(doc, at)).toEqual([]);
   });
 });
@@ -271,7 +271,7 @@ describe("compare corpus — calibration counter-cases for the coalescing ratio"
       para("alpha BRAVO charlie delta echo FOXTROT golf"),
     );
     expect(kindCounts(doc)).toEqual({ deletion: 2, insertion: 2 });
-    expect(revisionTexts(doc, "del")).toEqual(["bravo ", "foxtrot "]);
+    expect(revisionTexts(doc, "del")).toEqual(["bravo", "foxtrot"]);
   });
 
   it("a long untouched stretch between two big rewrites is not swallowed", () => {
@@ -282,7 +282,7 @@ describe("compare corpus — calibration counter-cases for the coalescing ratio"
     );
     expect(kindCounts(doc)).toEqual({ deletion: 2, insertion: 2 });
     expect(revisionTexts(doc, "ins")).toEqual([
-      "ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ",
+      "ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN",
       "AA BB CC DD EE FF GG HH II JJ",
     ]);
   });
@@ -309,7 +309,7 @@ describe("compare corpus — 13: boilerplate repeated across sections", () => {
       doc("Article 1 covers obligation number one of the agreement.", "Article 6 covers obligation number six of the agreement."),
     );
     expect(kindCounts(out)).toEqual({ deletion: 2, insertion: 2 });
-    expect(revisionTexts(out, "del")).toEqual(["1 ", "6 "]);
+    expect(revisionTexts(out, "del")).toEqual(["1", "6"]);
   });
 });
 
@@ -322,8 +322,8 @@ describe("compare corpus — 14: punctuation is its own token", () => {
       para("Every report values clear writing. Thanks to the editors."),
       para("Every report values clear writing, thanks to the editors."),
     );
-    expect(revisionTexts(doc, "del")).toEqual([". Thanks "]);
-    expect(revisionTexts(doc, "ins")).toEqual([", thanks "]);
+    expect(revisionTexts(doc, "del")).toEqual([". Thanks"]);
+    expect(revisionTexts(doc, "ins")).toEqual([", thanks"]);
   });
 
   it("keeps a bold label whose colon moved into the next run", () => {
@@ -401,8 +401,8 @@ describe("compare corpus — 18: a short paragraph edited in place", () => {
       para("The model below is rendered from its glTF source.") + para(heading, { pPr: HEADING }) + para("Rotate it with the mouse.");
     const doc = compare(body("Native 3D model"), body("Replaced 3D model"));
     expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
-    expect(revisionTexts(doc, "del")).toEqual(["Native "]);
-    expect(revisionTexts(doc, "ins")).toEqual(["Replaced "]);
+    expect(revisionTexts(doc, "del")).toEqual(["Native"]);
+    expect(revisionTexts(doc, "ins")).toEqual(["Replaced"]);
   });
 });
 
@@ -444,10 +444,20 @@ describe("compare corpus — 21: an edit inside a hyperlink", () => {
       `<w:p><w:r><w:t xml:space="preserve">Read </w:t></w:r><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">the ${word} report</w:t></w:r></w:hyperlink><w:r><w:t xml:space="preserve"> before Friday.</w:t></w:r></w:p>`;
     const doc = compare(link("quarterly"), link("annual"));
     expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
-    expect(revisionTexts(doc, "del")).toEqual(["quarterly "]);
+    expect(revisionTexts(doc, "del")).toEqual(["quarterly"]);
     const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml") ?? "";
     // Exactly one link, holding the revisions.
     expect((xml.match(/<w:hyperlink /g) ?? []).length).toBe(1);
     expect(/<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*<w:del /.test(xml)).toBe(true);
+  });
+});
+
+describe("compare corpus — 22: words appended to a paragraph", () => {
+  it("inserts only the new words, not the last word again", () => {
+    // FAILURE MODE: "noqu" at the end and "noqu " before the new words were
+    // different tokens, so the last word came out struck and reinserted.
+    const doc = compare(para("The terms are final and noqu"), para("The terms are final and noqu as replaced"));
+    expect(kindCounts(doc)).toEqual({ insertion: 1 });
+    expect(revisionTexts(doc, "ins")).toEqual([" as replaced"]);
   });
 });
