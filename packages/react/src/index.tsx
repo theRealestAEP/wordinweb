@@ -4181,7 +4181,7 @@ export function DocxView({
   );
 }
 
-export { DocxDocument, layoutDocument, renderToDom, printPages } from "@wordinweb/core";
+export { DocxDocument, layoutDocument, renderToDom, printPages, renderForPrint } from "@wordinweb/core";
 export type { CoverPageContent, DrawingTool, MergeRecord, RunFormatPatch, SelectionFormat, ParagraphAlignment, PageLayoutPatch, LineNumberingPatch, ShapePreset, WireRange, EncodedCaret, HostShortcutSection } from "@wordinweb/core";
 export { DocxToolbar, ToolbarMenuSelect, INSERT_COMMANDS } from "./toolbar.js";
 // Compare Documents: the engine call plus the browser plumbing a host needs
