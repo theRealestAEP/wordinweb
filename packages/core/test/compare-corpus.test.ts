@@ -357,3 +357,17 @@ describe("compare corpus — 15: the same text twice, aligned differently", () =
     expect(revisionTexts(doc, "del")).toEqual([T, "Second heading"]);
   });
 });
+
+describe("compare corpus — 16: a long stretch rewritten end to end", () => {
+  it("still pairs every paragraph in place past the gap cap", () => {
+    // FAILURE MODE: with no unchanged paragraph to anchor on, one gap holds
+    // the whole stretch, and pairing met every original block with every
+    // revised one: quadratic. Past the cap pairing is windowed; this checks
+    // the window still finds every in-place edit (300 x 300 is past it).
+    const n = 300;
+    const clause = (i: number, verb: string) => `Clause ${i}: the parties ${verb} to the terms set out in schedule ${i}.`;
+    const body = (verb: string) => Array.from({ length: n }, (_, i) => para(clause(i, verb))).join("");
+    const doc = compare(body("agree"), body("consent"));
+    expect(kindCounts(doc)).toEqual({ deletion: n, insertion: n });
+  });
+});

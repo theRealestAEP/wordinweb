@@ -333,6 +333,11 @@ function emitGap(
   }
 }
 
+/** Gap size (original x revised blocks) past which pairing turns windowed. */
+const GAP_PAIR_CAP = 200 * 200;
+/** How far either side of its own relative position a block looks, windowed. */
+const GAP_WINDOW = 50;
+
 function resolveGap(
   oBlocks: XmlElement[],
   rBlocks: XmlElement[],
@@ -351,13 +356,46 @@ function resolveGap(
   // and they are the shape a similarity pass would otherwise turn into
   // delete-one-insert-two, which reads as a rewrite of something nobody
   // rewrote.
-  const crosses = (o: number, r: number): boolean => out.some((p) => (o < p.o) !== (r < p.r));
+  // Accepted pairings are monotone, so a candidate crosses one exactly when
+  // it crosses a neighbour in o order: a binary search, not a scan of all.
+  const placed: Pairing[] = [];
+  const crosses = (o: number, r: number): boolean => {
+    let lo = 0;
+    let hi = placed.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (placed[mid].o < o) lo = mid + 1;
+      else hi = mid;
+    }
+    return (lo > 0 && placed[lo - 1].r >= r) || (lo < placed.length && placed[lo].r <= r);
+  };
+  const accept = (p: Pairing): void => {
+    out.push(p);
+    let at = placed.length;
+    while (at > 0 && placed[at - 1].o > p.o) at--;
+    placed.splice(at, 0, p);
+  };
+
+  // A long gap with nothing anchoring it (a stretch rewritten end to end) made
+  // every original block meet every revised one: quadratic in the gap. Past
+  // GAP_PAIR_CAP pairs, each original block meets only the revised blocks
+  // within GAP_WINDOW of its own relative position, which still finds every
+  // local edit and keeps the cost linear in the gap.
+  const oLen = oHi - oLo;
+  const rLen = rHi - rLo;
+  const windowed = oLen * rLen > GAP_PAIR_CAP;
+  const span = (i: number): [number, number] => {
+    if (!windowed) return [rLo, rHi];
+    const centre = rLo + Math.round(((i - oLo) * rLen) / Math.max(1, oLen));
+    return [Math.max(rLo, centre - GAP_WINDOW), Math.min(rHi, centre + GAP_WINDOW + 1)];
+  };
 
   for (let i = oLo; i < oHi; i++) {
-    for (let j = rLo; j + 1 < rHi; j++) {
+    const [jLo, jHi] = span(i);
+    for (let j = jLo; j + 1 < jHi; j++) {
       if (oUsed.has(i) || rUsed.has(j) || rUsed.has(j + 1) || crosses(i, j)) continue;
       if (concatMatches([oBlocks[i]], [rBlocks[j], rBlocks[j + 1]], ctx)) {
-        out.push({ kind: "split", o: i, r: j, other: j + 1 });
+        accept({ kind: "split", o: i, r: j, other: j + 1 });
         oUsed.add(i);
         rUsed.add(j);
         rUsed.add(j + 1);
@@ -365,10 +403,11 @@ function resolveGap(
     }
   }
   for (let i = oLo; i + 1 < oHi; i++) {
-    for (let j = rLo; j < rHi; j++) {
+    const [jLo, jHi] = span(i);
+    for (let j = jLo; j < jHi; j++) {
       if (oUsed.has(i) || oUsed.has(i + 1) || rUsed.has(j) || crosses(i, j)) continue;
       if (concatMatches([oBlocks[i], oBlocks[i + 1]], [rBlocks[j]], ctx)) {
-        out.push({ kind: "merge", o: i, r: j, other: i + 1 });
+        accept({ kind: "merge", o: i, r: j, other: i + 1 });
         oUsed.add(i);
         oUsed.add(i + 1);
         rUsed.add(j);
@@ -380,7 +419,8 @@ function resolveGap(
   const scored: { o: number; r: number; score: number }[] = [];
   for (let i = oLo; i < oHi; i++) {
     if (oUsed.has(i)) continue;
-    for (let j = rLo; j < rHi; j++) {
+    const [jLo, jHi] = span(i);
+    for (let j = jLo; j < jHi; j++) {
       if (rUsed.has(j)) continue;
       if (localName(oBlocks[i].name) !== localName(rBlocks[j].name)) continue;
       const a = paragraphText(oBlocks[i]);
@@ -395,7 +435,7 @@ function resolveGap(
     // Pairings must stay monotone: a crossing pair would put a deletion after
     // the insertion that replaced it and read as two unrelated edits.
     if (crosses(cand.o, cand.r)) continue;
-    out.push({ kind: "pair", o: cand.o, r: cand.r, other: -1 });
+    accept({ kind: "pair", o: cand.o, r: cand.r, other: -1 });
     oUsed.add(cand.o);
     rUsed.add(cand.r);
   }
@@ -416,7 +456,7 @@ function resolveGap(
       if (oUsed.has(i)) continue;
       for (let j = rLo; j < rHi; j++) {
         if (rUsed.has(j) || localName(oBlocks[i].name) !== localName(rBlocks[j].name)) continue;
-        out.push({ kind: "pair", o: i, r: j, other: -1 });
+        accept({ kind: "pair", o: i, r: j, other: -1 });
         break;
       }
     }
