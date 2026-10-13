@@ -122,6 +122,13 @@ interface Ctx {
   formatting: boolean;
   whitespace: boolean;
   note: (note: CompareNote) => void;
+  /**
+   * The parts whose relationships struck content resolves through: the
+   * header or footer part on each side, or null for the document part.
+   */
+  scope: { from: string | null; into: string | null };
+  /** Original note id -> the result's id for the same note (compareNotes). */
+  noteIds: Record<"footnote" | "endnote", Map<string, string>>;
 }
 
 /** Where a block ended up, which is what decides the paragraph-mark revisions. */
@@ -175,6 +182,8 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
     formatting: options.formatting !== false,
     whitespace: options.whitespace !== false,
     note: options.onNote ?? (() => {}),
+    scope: { from: null, into: null },
+    noteIds: { footnote: new Map(), endnote: new Map() },
   };
 
   const originalBody = child(original.docRoot, "body");
@@ -183,14 +192,157 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
 
   // Before the body is touched, merged holds exactly the revised parts.
   reportUncomparedParts(original, merged, ctx);
+  const headerFooterPairs = pairHeadersFooters(original, merged);
+  // Notes first: struck body text carries the ORIGINAL's note references,
+  // and adoptFromOriginal re-points them through the ids this settles.
+  compareNotes("footnote", original, merged, ctx);
+  compareNotes("endnote", original, merged, ctx);
 
   const tail = mergedBody.children.filter((c) => localName(c.name) === "sectPr");
   const entries = alignBlocks(blockList(originalBody, "sectPr"), blockList(mergedBody, "sectPr"), ctx);
   applyParagraphMarks(entries, ctx);
   mergedBody.children = [...entries.map((e) => e.el), ...tail];
 
+  for (const [from, into] of headerFooterPairs) {
+    const oRoot = original.headerFooterRoot(from);
+    const mRoot = merged.headerFooterRoot(into);
+    if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
+  }
+
   if (issued > 0) merged.refresh();
   return merged;
+}
+
+/** Align and diff one container's blocks in place (a header, a note). */
+function compareContainer(oRoot: XmlElement, mRoot: XmlElement, ctx: Ctx): void {
+  const o = blockList(oRoot);
+  const m = blockList(mRoot);
+  if (o.length === m.length && o.every((el, i) => sameXml(el, m[i]))) return;
+  const entries = alignBlocks(o, m, ctx);
+  applyParagraphMarks(entries, ctx);
+  // Keep the container's own non-block children (a note's properties) ahead.
+  const blocks = new Set(m);
+  mRoot.children = [...mRoot.children.filter((c) => !blocks.has(c) && !["p", "tbl", "sdt"].includes(localName(c.name))), ...entries.map((e) => e.el)];
+}
+
+/**
+ * Header and footer parts paired across the documents: section by section,
+ * kind by kind (default, first, even), each pair once.
+ */
+function pairHeadersFooters(original: DocxDocument, merged: DocxDocument): [string, string][] {
+  const refs = (doc: DocxDocument): Map<string, string> => {
+    const out = new Map<string, string>();
+    const body = child(doc.docRoot, "body");
+    const sects = (body?.children ?? []).flatMap((c) =>
+      localName(c.name) === "sectPr" ? [c] : localName(c.name) === "p" ? [child(child(c, "pPr"), "sectPr")].filter((x): x is XmlElement => !!x) : [],
+    );
+    sects.forEach((sp, i) => {
+      for (const ref of sp.children) {
+        const ln = localName(ref.name);
+        if (ln !== "headerReference" && ln !== "footerReference") continue;
+        const target = doc.documentRels.get(ref.attrs["r:id"])?.target;
+        if (target) out.set(`${i}:${ln}:${ref.attrs["w:type"] ?? "default"}`, target);
+      }
+    });
+    return out;
+  };
+  const mine = refs(merged);
+  const pairs: [string, string][] = [];
+  const done = new Set<string>();
+  for (const [key, from] of refs(original)) {
+    const into = mine.get(key);
+    if (!into || done.has(into)) continue;
+    done.add(into);
+    pairs.push([from, into]);
+  }
+  return pairs;
+}
+
+/**
+ * Footnotes or endnotes, paired in the order their references appear and
+ * compared inside. A note only the revised document has gets its content
+ * marked inserted; one only the original had is copied into the result
+ * under a fresh id with its content struck, and struck body text pointing
+ * at it is re-pointed (adoptFromOriginal, through ctx.noteIds).
+ */
+function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merged: DocxDocument, ctx: Ctx): void {
+  const tree = (doc: DocxDocument, create = false): XmlElement | null =>
+    kind === "footnote" ? doc.footnotesTree(create) : doc.endnotesTree(create);
+  const oRoot = tree(original);
+  const mRoot = tree(merged);
+  if (!oRoot && !mRoot) return;
+  const refName = `${kind}Reference`;
+  const inOrder = (doc: DocxDocument, root: XmlElement | null): XmlElement[] => {
+    if (!root) return [];
+    const byId = new Map(
+      root.children.filter((c) => localName(c.name) === kind && !c.attrs["w:type"]).map((c) => [c.attrs["w:id"], c] as const),
+    );
+    const out: XmlElement[] = [];
+    const seen = new Set<string>();
+    const walk = (e: XmlElement): void => {
+      if (localName(e.name) === refName) {
+        const id = e.attrs["w:id"];
+        const note = byId.get(id);
+        if (note && !seen.has(id)) {
+          seen.add(id);
+          out.push(note);
+        }
+      }
+      for (const c of e.children) walk(c);
+    };
+    walk(doc.docRoot);
+    return out;
+  };
+  const oNotes = inOrder(original, oRoot);
+  const rNotes = inOrder(merged, mRoot);
+  const text = (n: XmlElement): string => normalizeText(paragraphText(n));
+  // Anchors on text, then a single leftover on each side of a slot is that
+  // note, edited (the same rule as paragraphs).
+  const pairs: [number, number][] = [];
+  let oAt = 0;
+  let rAt = 0;
+  for (const a of [...histogramMatch(oNotes.map(text), rNotes.map(text)), { a: oNotes.length, b: rNotes.length }]) {
+    if (a.a - oAt === 1 && a.b - rAt === 1) pairs.push([oAt, rAt]);
+    if (a.a < oNotes.length && a.b < rNotes.length) pairs.push([a.a, a.b]);
+    oAt = a.a + 1;
+    rAt = a.b + 1;
+  }
+  const ids = ctx.noteIds[kind];
+  const pairedO = new Set(pairs.map((p) => p[0]));
+  const pairedR = new Set(pairs.map((p) => p[1]));
+  let changed = false;
+  for (const [i, j] of pairs) {
+    ids.set(oNotes[i].attrs["w:id"], rNotes[j].attrs["w:id"]);
+    const before = ctx.meta.nextId;
+    let touched = false;
+    compareContainer(oNotes[i], rNotes[j], { ...ctx, meta: { ...ctx.meta, nextId: () => ((touched = true), before()) } });
+    changed ||= touched;
+  }
+  rNotes.forEach((note, j) => {
+    if (pairedR.has(j)) return;
+    for (const block of blockList(note)) if (localName(block.name) === "p") wrapContainerContent(block, "ins", ctx);
+    changed = true;
+  });
+  const removed = oNotes.filter((_, i) => !pairedO.has(i));
+  if (removed.length > 0) {
+    const root = tree(merged, true);
+    if (root) {
+      let next = 1 + Math.max(0, ...root.children.map((c) => Number(c.attrs["w:id"]) || 0));
+      for (const o of removed) {
+        const copy = cloneXml(o);
+        copy.attrs["w:id"] = String(next);
+        ids.set(o.attrs["w:id"], String(next++));
+        for (const block of blockList(copy)) {
+          if (localName(block.name) !== "p") continue;
+          adoptFromOriginal(block, { ...ctx, scope: { from: null, into: null } });
+          wrapContainerContent(block, "del", ctx);
+        }
+        root.children.push(copy);
+      }
+      changed = true;
+    }
+  }
+  if (changed) merged.markNotePartsChanged([kind === "footnote" ? "footnotes" : "endnotes"]);
 }
 
 function blockList(container: XmlElement, ...skip: string[]): XmlElement[] {
@@ -199,17 +351,16 @@ function blockList(container: XmlElement, ...skip: string[]): XmlElement[] {
 
 /** Say so when a part outside the body differs, rather than imply it matched. */
 function reportUncomparedParts(original: DocxDocument, revised: DocxDocument, ctx: Ctx): void {
+  // Headers, footers and notes are compared (compareHeadersFooters,
+  // compareNotes). Style and numbering DEFINITIONS are not: Word's compare
+  // does not track them either, and their effect shows on the paragraphs.
   const parts: [string, XmlElement | null][] = [
     ["styles.xml", original.stylesTree()],
     ["numbering.xml", original.numberingTree()],
-    ["footnotes.xml", original.footnotesTree()],
-    ["endnotes.xml", original.endnotesTree()],
   ];
   const revisedTrees: Record<string, XmlElement | null> = {
     "styles.xml": revised.stylesTree(),
     "numbering.xml": revised.numberingTree(),
-    "footnotes.xml": revised.footnotesTree(),
-    "endnotes.xml": revised.endnotesTree(),
   };
   for (const [name, tree] of parts) {
     const other = revisedTrees[name];
@@ -218,11 +369,6 @@ function reportUncomparedParts(original: DocxDocument, revised: DocxDocument, ct
     if (a !== b) {
       ctx.note({ code: "part-not-compared", detail: `${name} differs; the result carries the revised document's` });
     }
-  }
-  const hf = (doc: DocxDocument): string =>
-    [...doc.headerRoots(), ...doc.footerRoots()].map((root) => serializeXml(root)).join("");
-  if (hf(original) !== hf(revised)) {
-    ctx.note({ code: "part-not-compared", detail: "headers/footers differ; the result carries the revised document's" });
   }
 }
 
@@ -572,10 +718,17 @@ const REL_ATTRS = ["id", "embed", "link", "pict", "dm", "lo", "qs", "cs"];
  * reported, rather than left dangling.
  */
 function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
-  const mine = ctx.doc.documentRels;
-  const theirs = ctx.original.documentRels;
+  const mine = ctx.doc.relationshipsOf(ctx.scope.into);
+  const theirs = ctx.original.relationshipsOf(ctx.scope.from);
   const remapped = new Map<string, string | null>();
   const walk = (el: XmlElement): void => {
+    // A note reference points into the ORIGINAL's notes; compareNotes has
+    // settled where that note lives in the result.
+    const ln = localName(el.name);
+    if (ln === "footnoteReference" || ln === "endnoteReference") {
+      const to = ctx.noteIds[ln === "footnoteReference" ? "footnote" : "endnote"].get(el.attrs["w:id"]);
+      if (to !== undefined) el.attrs["w:id"] = to;
+    }
     for (const key of Object.keys(el.attrs)) {
       if (!key.startsWith("r:") || !REL_ATTRS.includes(localName(key))) continue;
       const id = el.attrs[key];
@@ -585,7 +738,9 @@ function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
       if (here && here.target === source.target && here.type === source.type) continue;
       let replacement = remapped.get(id);
       if (replacement === undefined) {
-        replacement = source.external ? ctx.doc.addHyperlinkRel(source.target) : ctx.doc.adoptRelFrom(ctx.original, id);
+        replacement = source.external
+          ? ctx.doc.addHyperlinkRel(source.target, ctx.scope.into)
+          : ctx.doc.adoptRelFrom(ctx.original, id, ctx.scope);
         if (replacement === null) {
           ctx.note({
             code: "unresolved-relationship",

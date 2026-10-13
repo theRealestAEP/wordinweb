@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { compareDocuments, CompareNote } from "../src/edit/compare/index.js";
 import { acceptAllRevisions, collectRevisions, rejectAllRevisions } from "../src/edit/suggest.js";
-import { serializeXml } from "../src/xml.js";
-import { makeDocx, wrapDocument } from "./helpers.js";
+import { serializeXml, type XmlElement } from "../src/xml.js";
+import { makeDocx, wrapDocument, W_NS } from "./helpers.js";
 import { AUTHOR, DATE, canonicalBody, loadBody, para } from "./compare-helpers.js";
 
 /**
@@ -497,5 +497,57 @@ describe("compareDocuments — text inside a text box", () => {
     const xml = DocxDocument.load(merged.save()).pkg.text("word/document.xml") ?? "";
     expect((xml.match(/<w:drawing>/g) ?? []).length).toBe(1);
     expect(xml).toMatch(/<w:txbxContent>(?:(?!<\/w:txbxContent>)[\s\S])*<w:delText[^>]*>finance /);
+  });
+});
+
+describe("compareDocuments — headers, footers and notes", () => {
+  // FAILURE MODE: these parts were not compared at all; the result silently
+  // carried the revised versions, with a part-not-compared note.
+  const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const build = (noteText: string, headerText: string, withNote = true) =>
+    DocxDocument.load(
+      makeDocx({
+        "word/document.xml":
+          `<w:document ${W_NS} ${R}><w:body><w:p><w:r><w:t xml:space="preserve">Body text.</w:t></w:r>` +
+          (withNote ? `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="1"/></w:r>` : "") +
+          `</w:p><w:sectPr><w:headerReference w:type="default" r:id="rId2"/></w:sectPr></w:body></w:document>`,
+        "word/_rels/document.xml.rels":
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rId1" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rId2" Type="${REL}/header" Target="header1.xml"/></Relationships>`,
+        "word/footnotes.xml":
+          `<w:footnotes ${W_NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>` +
+          `<w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>` +
+          (withNote ? `<w:footnote w:id="1"><w:p><w:r><w:t xml:space="preserve">${noteText}</w:t></w:r></w:p></w:footnote>` : "") +
+          `</w:footnotes>`,
+        "word/header1.xml": `<w:hdr ${W_NS}><w:p><w:r><w:t xml:space="preserve">${headerText}</w:t></w:r></w:p></w:hdr>`,
+      }),
+    );
+  const texts = (doc: DocxDocument) => {
+    const d = DocxDocument.load(doc.save());
+    const note = d.footnotesTree()?.children.find((c) => c.attrs["w:id"] === "1");
+    const t = (el?: XmlElement) => (el ? [...serializeXml(el).matchAll(/<w:t[^>]*>([^<]*)/g)].map((m) => m[1]).join("") : "");
+    return { header: t(d.headerRoots()[0]), note: t(note) };
+  };
+  it("tracks edits in a header and a footnote, and round-trips them", () => {
+    const merged = compareDocuments(build("Source: annual report 2024.", "Draft for review"), build("Source: annual report 2025.", "Final for review"), { author: AUTHOR, date: DATE });
+    expect(collectRevisions(merged).filter((r) => r.kind === "deletion")).toHaveLength(2);
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    expect(texts(rejected)).toEqual({ header: "Draft for review", note: "Source: annual report 2024." });
+    const accepted = DocxDocument.load(merged.save());
+    acceptAllRevisions(accepted);
+    expect(texts(accepted)).toEqual({ header: "Final for review", note: "Source: annual report 2025." });
+  });
+  it("keeps a removed footnote reachable from its struck reference", () => {
+    const merged = compareDocuments(build("A note that goes.", "Header"), build("", "Header", false), { author: AUTHOR, date: DATE });
+    const d = DocxDocument.load(merged.save());
+    const ref = /<w:footnoteReference w:id="(\d+)"/.exec(d.pkg.text("word/document.xml") ?? "")?.[1];
+    expect(ref).toBeDefined();
+    const note = d.footnotesTree()?.children.find((c) => c.attrs["w:id"] === ref);
+    expect(note && serializeXml(note)).toContain("A note that goes.");
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    expect(collectRevisions(DocxDocument.load(rejected.save()))).toHaveLength(0);
   });
 });

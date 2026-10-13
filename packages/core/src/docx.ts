@@ -2064,6 +2064,11 @@ export class DocxDocument {
   /** The header part roots, in package order. A watermark is authored into
    * every one of them: Word paints it on every page, and a document with a
    * first-page or even-page header has more than one header part. */
+  /** The root of the header or footer part at `target`, if this document has one. */
+  headerFooterRoot(target: string): XmlElement | undefined {
+    return this.hfParts.find((p) => p.target === target)?.root;
+  }
+
   headerRoots(): XmlElement[] {
     return this.hfParts.filter((p) => p.isHeader).map((p) => p.root);
   }
@@ -2553,8 +2558,10 @@ export class DocxDocument {
    * its w:drawing, and without its image part the result's reject-all
    * brought the picture back as an empty frame.
    */
-  adoptRelFrom(source: DocxDocument, relId: string): string | null {
-    const rel = source.documentRels.get(relId);
+  adoptRelFrom(source: DocxDocument, relId: string, scope: { from?: string | null; into?: string | null } = {}): string | null {
+    // `from` / `into` name the header or footer part that owns the
+    // relationship on each side; omitted, it is the document part.
+    const rel = source.relationshipsOf(scope.from).get(relId);
     if (!rel || rel.external) return null;
     const copied = new Map<string, string>();
     const sameBytes = (path: string, bytes: Uint8Array): boolean => {
@@ -2588,7 +2595,8 @@ export class DocxDocument {
     };
     const part = copyPart(rel.target);
     if (!part) return null;
-    const rels = this.ensureRelsRoot();
+    const owner = this.relsOwnerOf(scope.into);
+    const rels = owner.relsRoot;
     let maxId = 0;
     for (const r of rels.children) {
       const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
@@ -2597,11 +2605,11 @@ export class DocxDocument {
     const id = `rId${maxId + 1}`;
     rels.children.push({
       name: "Relationship",
-      attrs: { Id: id, Type: rel.type, Target: relativePartPath(this.docPart, part) },
+      attrs: { Id: id, Type: rel.type, Target: relativePartPath(owner.partPath, part) },
       children: [],
       text: "",
     });
-    this.documentRels.set(id, { id, type: rel.type, target: part, external: false });
+    owner.relationships.set(id, { id, type: rel.type, target: part, external: false });
     return id;
   }
 
@@ -2628,8 +2636,9 @@ export class DocxDocument {
     }
   }
 
-  addHyperlinkRel(url: string): string {
-    const rels = this.ensureRelsRoot();
+  addHyperlinkRel(url: string, ownerPart?: string | null): string {
+    const owner = this.relsOwnerOf(ownerPart);
+    const rels = owner.relsRoot;
     let maxId = 0;
     for (const r of rels.children) {
       const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
@@ -2648,7 +2657,7 @@ export class DocxDocument {
       text: "",
     });
     // documentRels is what refresh() resolves r:id through - keep it live.
-    this.documentRels.set(id, { id, type: "hyperlink", target: url, external: true });
+    owner.relationships.set(id, { id, type: "hyperlink", target: url, external: true });
     return id;
   }
 
@@ -2660,6 +2669,25 @@ export class DocxDocument {
     const el = this.relsRoot?.children.find((r) => r.attrs["Id"] === relId);
     if (el) el.attrs["Target"] = url;
     return true;
+  }
+
+  /** The relationships owned by `part` (a header or footer part), or by the
+   * document part when null; a header or footer gets a rels root on demand. */
+  private relsOwnerOf(part: string | null | undefined): { relsRoot: XmlElement; relationships: Relationships; partPath: string } {
+    const owner = part ? this.hfParts.find((p) => p.target === part) : undefined;
+    if (!owner) return { relsRoot: this.ensureRelsRoot(), relationships: this.documentRels, partPath: this.docPart };
+    owner.relsRoot ??= {
+      name: "Relationships",
+      attrs: { xmlns: "http://schemas.openxmlformats.org/package/2006/relationships" },
+      children: [],
+      text: "",
+    };
+    return { relsRoot: owner.relsRoot, relationships: owner.rels, partPath: owner.target };
+  }
+
+  /** The relationships of `part` (a header or footer), or of the document part. */
+  relationshipsOf(part?: string | null): Relationships {
+    return (part ? this.hfParts.find((p) => p.target === part)?.rels : undefined) ?? this.documentRels;
   }
 
   /** The relationships of the part that holds `source`: a header or footer

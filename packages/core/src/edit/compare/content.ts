@@ -92,6 +92,13 @@ const CONTAINER_PROPS = new Set(["pPr", "sdtPr", "sdtEndPr", "smartTagPr", "cust
  * picture still keys apart.
  */
 function atomKey(atom: XmlElement): string {
+  // A note reference keys without its id: notes are paired by content
+  // (compareNotes), and the two documents may number them differently.
+  const ln = localName(atom.name);
+  if (ln === "footnoteReference" || ln === "endnoteReference") {
+    const { "w:id": _id, ...rest } = atom.attrs;
+    return serializeXml({ ...atom, attrs: rest });
+  }
   const strip = (e: XmlElement): XmlElement =>
     localName(e.name) === "txbxContent" ? { ...e, children: [], text: "" } : { ...e, children: e.children.map(strip) };
   return serializeXml(hasTextBox(atom) ? strip(atom) : atom);
