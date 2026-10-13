@@ -565,10 +565,11 @@ const REL_ATTRS = ["id", "embed", "link", "pict", "dm", "lo", "qs", "cs"];
  * or image is a reference into nothing, and Word refuses the file.
  *
  * An external target (a hyperlink) is re-added, which is exact. Anything else
- * points at a PART — an image, a chart, an embedded object — and carrying the
- * part across is out of this increment's scope, so the reference is dropped
- * and reported rather than left dangling: struck text with no picture beats a
- * document that will not open.
+ * points at a PART — an image, a chart, an embedded object — and that part is
+ * copied across with the parts it references (DocxDocument.adoptRelFrom), so
+ * reject-all brings a removed picture back with its image, not as an empty
+ * frame. Only a part the original does not actually carry is dropped and
+ * reported, rather than left dangling.
  */
 function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
   const mine = ctx.doc.documentRels;
@@ -584,7 +585,7 @@ function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
       if (here && here.target === source.target && here.type === source.type) continue;
       let replacement = remapped.get(id);
       if (replacement === undefined) {
-        replacement = source.external ? ctx.doc.addHyperlinkRel(source.target) : null;
+        replacement = source.external ? ctx.doc.addHyperlinkRel(source.target) : ctx.doc.adoptRelFrom(ctx.original, id);
         if (replacement === null) {
           ctx.note({
             code: "unresolved-relationship",

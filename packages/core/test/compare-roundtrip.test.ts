@@ -416,3 +416,38 @@ describe("compareDocuments — a word split across runs", () => {
     );
   });
 });
+
+describe("compareDocuments — a removed picture", () => {
+  it("carries the image part, so reject-all restores the picture", async () => {
+    const { makeDocxWithMedia, makeDocx, W_NS } = await import("./helpers.js");
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+    const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
+    const PIC = 'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline ${WP}><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture 1"/>` +
+      `<a:graphic ${A}><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic ${PIC}>` +
+      `<pic:nvPicPr><pic:cNvPr id="1" name="p.png"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip ${R} r:embed="rId5"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const doc = (body: string) => `<w:document ${W_NS} ${R}><w:body>${body}</w:body></w:document>`;
+    const rels =
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>`;
+    const original = DocxDocument.load(
+      makeDocxWithMedia({ "word/document.xml": doc(para("Before.") + picture + para("After.")), "word/_rels/document.xml.rels": rels }, { "word/media/image1.png": png }),
+    );
+    // Word drops the image part and its relationship once nothing uses them.
+    const revised = DocxDocument.load(makeDocx({ "word/document.xml": doc(para("Before.") + para("After.")) }));
+    const notes: CompareNote[] = [];
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE, onNote: (n) => notes.push(n) });
+    expect(notes.map((n) => n.code)).not.toContain("unresolved-relationship");
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    const back = DocxDocument.load(rejected.save());
+    const id = /r:embed="([^"]+)"/.exec(back.pkg.text("word/document.xml") ?? "")?.[1];
+    expect(id).toBeDefined();
+    const target = back.documentRels.get(id!)?.target;
+    expect(target && Array.from(back.media(target) ?? [])).toEqual(Array.from(png));
+  });
+});

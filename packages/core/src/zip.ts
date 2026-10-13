@@ -74,6 +74,15 @@ export class Package {
 }
 
 /** Resolve a relationship target relative to a source part. */
+/** The relationship Target that reaches `toPart` from `fromPart`'s folder. */
+export function relativePartPath(fromPart: string, toPart: string): string {
+  const fromDir = fromPart.split("/").slice(0, -1);
+  const to = toPart.split("/");
+  let i = 0;
+  while (i < fromDir.length && i < to.length - 1 && fromDir[i] === to[i]) i++;
+  return [...fromDir.slice(i).map(() => ".."), ...to.slice(i)].join("/");
+}
+
 export function resolvePartPath(sourcePart: string, target: string): string {
   if (target.startsWith("/")) return target.slice(1);
   const baseDir = sourcePart.includes("/")

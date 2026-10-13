@@ -1,4 +1,4 @@
-import { Package, FIXED_ZIP_MTIME, resolvePartPath } from "./zip.js";
+import { Package, FIXED_ZIP_MTIME, relativePartPath, resolvePartPath } from "./zip.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
 import { strFromU8, strToU8, zip, zipSync } from "fflate";
 import { pxToTwips, twipsToPx } from "./units.js";
@@ -2542,6 +2542,92 @@ export class DocxDocument {
   }
 
   /** Register an external hyperlink relationship and return its rId. */
+  /**
+   * Copy the part that `source`'s main-document relationship `relId` points
+   * at into this package, with every part it references in turn (a chart's
+   * embedded workbook, SmartArt's layout, style and colour parts) and their
+   * content types, and add a relationship to it. Returns the new
+   * relationship id, or null when the source has no such internal part.
+   *
+   * compareDocuments needs this for struck content: a removed picture keeps
+   * its w:drawing, and without its image part the result's reject-all
+   * brought the picture back as an empty frame.
+   */
+  adoptRelFrom(source: DocxDocument, relId: string): string | null {
+    const rel = source.documentRels.get(relId);
+    if (!rel || rel.external) return null;
+    const copied = new Map<string, string>();
+    const sameBytes = (path: string, bytes: Uint8Array): boolean => {
+      const have = this.pkg.binary(path);
+      return !!have && have.length === bytes.length && have.every((b, i) => b === bytes[i]);
+    };
+    const copyPart = (from: string): string | null => {
+      const known = copied.get(from);
+      if (known) return known;
+      const bytes = source.pkg.binary(from);
+      if (!bytes) return null;
+      // Same path and bytes: the part is already here. Same path, other
+      // bytes: take the next free name beside it.
+      let to = from;
+      for (let n = 2; this.pkg.has(to) && !sameBytes(to, bytes); n++) to = from.replace(/(\.[^./]+)?$/, `-${n}$1`);
+      copied.set(from, to);
+      if (this.pkg.has(to)) return to;
+      this.pkg.raw()[to] = bytes;
+      this.adoptContentType(source, from, to);
+      const relsXml = source.pkg.text(relsPathFor(from));
+      if (relsXml) {
+        const root = parseXml(relsXml);
+        for (const r of root.children) {
+          if (r.attrs.TargetMode === "External" || !r.attrs.Target) continue;
+          const sub = copyPart(resolvePartPath(from, r.attrs.Target));
+          if (sub) r.attrs.Target = relativePartPath(to, sub);
+        }
+        this.pkg.raw()[relsPathFor(to)] = strToU8(serializeXml(root, true));
+      }
+      return to;
+    };
+    const part = copyPart(rel.target);
+    if (!part) return null;
+    const rels = this.ensureRelsRoot();
+    let maxId = 0;
+    for (const r of rels.children) {
+      const m = /^rId(\d+)$/.exec(r.attrs["Id"] ?? "");
+      if (m) maxId = Math.max(maxId, parseInt(m[1], 10));
+    }
+    const id = `rId${maxId + 1}`;
+    rels.children.push({
+      name: "Relationship",
+      attrs: { Id: id, Type: rel.type, Target: relativePartPath(this.docPart, part) },
+      children: [],
+      text: "",
+    });
+    this.documentRels.set(id, { id, type: rel.type, target: part, external: false });
+    return id;
+  }
+
+  /** Give a part copied from `source` the content type it had there. */
+  private adoptContentType(source: DocxDocument, from: string, to: string): void {
+    const types = this.contentTypesRoot;
+    const theirs = source.contentTypesRoot;
+    if (!types || !theirs) return;
+    const override = theirs.children.find((c) => localName(c.name) === "Override" && c.attrs.PartName === `/${from}`);
+    const prefixEnd = types.name.indexOf(":") + 1;
+    const prefix = prefixEnd > 0 ? types.name.slice(0, prefixEnd) : "";
+    if (override) {
+      if (!types.children.some((c) => localName(c.name) === "Override" && c.attrs.PartName === `/${to}`)) {
+        types.children.push({ name: `${prefix}Override`, attrs: { PartName: `/${to}`, ContentType: override.attrs.ContentType }, children: [], text: "" });
+      }
+      return;
+    }
+    const ext = from.slice(from.lastIndexOf(".") + 1).toLowerCase();
+    const byExt = (root: XmlElement) =>
+      root.children.find((c) => localName(c.name) === "Default" && c.attrs.Extension?.toLowerCase() === ext);
+    const fallback = byExt(theirs);
+    if (fallback && !byExt(types)) {
+      types.children.unshift({ name: `${prefix}Default`, attrs: { Extension: ext, ContentType: fallback.attrs.ContentType }, children: [], text: "" });
+    }
+  }
+
   addHyperlinkRel(url: string): string {
     const rels = this.ensureRelsRoot();
     let maxId = 0;
