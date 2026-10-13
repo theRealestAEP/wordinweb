@@ -663,6 +663,19 @@ describe("compareDocuments — section breaks and notes when blocks move", () =>
     expect(headers(review(merged, rejectAllRevisions))).toEqual(["rId3"]);
   });
 
+  it("gives each note one reference when its paragraph moves", () => {
+    // The paragraph is struck at its old place and inserted at its new one,
+    // and both copies referenced the same note: Word refused to open it.
+    const original = text("Alpha has a note.", 1) + text("Beta.") + text("Gamma.") + text("Delta.");
+    const revised = text("Beta.") + text("Gamma.") + text("Alpha has a note.", 1) + text("Delta.");
+    const merged = DocxDocument.load(compareDocuments(load(original), load(revised), { author: AUTHOR, date: DATE }).save());
+    const ids = [...(merged.pkg.text("word/document.xml") ?? "").matchAll(/<w:footnoteReference w:id="(\d+)"/g)].map((m) => m[1]);
+    expect(ids.length).toBe(2);
+    expect(new Set(ids).size).toBe(2);
+    const notes = merged.pkg.text("word/footnotes.xml") ?? "";
+    for (const id of ids) expect(notes).toContain(`<w:footnote w:id="${id}">`);
+  });
+
   it("keeps each note attached to its reference when notes swap", () => {
     // The paragraphs stay and their notes swap. The body matched references
     // by position while notes paired in order: reject-all kept a reference

@@ -202,6 +202,8 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
   const entries = alignBlocks(blockList(originalBody, "sectPr"), blockList(mergedBody, "sectPr"), ctx);
   applyParagraphMarks(entries, ctx);
   mergedBody.children = [...entries.map((e) => e.el), ...tail];
+  giveStruckReferencesTheirOwnNotes("footnote", merged, ctx);
+  giveStruckReferencesTheirOwnNotes("endnote", merged, ctx);
 
   for (const [from, into] of headerFooterPairs) {
     const oRoot = original.headerFooterRoot(from);
@@ -358,6 +360,48 @@ function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merg
         }
         root.children.push(copy);
       }
+      changed = true;
+    }
+  }
+  if (changed) merged.markNotePartsChanged([kind === "footnote" ? "footnotes" : "endnotes"]);
+}
+
+/**
+ * One note, one reference. A paragraph that moved is struck at one place and
+ * inserted at another, and both copies referenced the same note, which Word
+ * refuses to open (parity2-notes with blocks moved). A struck reference gets
+ * a struck copy of its note instead, as Word gives one when it tracks the
+ * deletion of a reference.
+ */
+function giveStruckReferencesTheirOwnNotes(kind: "footnote" | "endnote", merged: DocxDocument, ctx: Ctx): void {
+  const root = kind === "footnote" ? merged.footnotesTree() : merged.endnotesTree();
+  if (!root) return;
+  const refName = `${kind}Reference`;
+  const refs = new Map<string, { ref: XmlElement; struck: boolean }[]>();
+  const walk = (e: XmlElement, struck: boolean): void => {
+    if (localName(e.name) === refName) {
+      const list = refs.get(e.attrs["w:id"]) ?? [];
+      list.push({ ref: e, struck });
+      refs.set(e.attrs["w:id"], list);
+    }
+    for (const c of e.children) walk(c, struck || localName(c.name) === "del");
+  };
+  walk(merged.docRoot, false);
+  let next = 1 + Math.max(0, ...root.children.map((c) => Number(c.attrs["w:id"]) || 0));
+  let changed = false;
+  for (const [id, list] of refs) {
+    if (list.length < 2) continue;
+    const note = root.children.find((c) => localName(c.name) === kind && c.attrs["w:id"] === id);
+    if (!note) continue;
+    // The live reference keeps the note; every struck one beyond it gets a copy.
+    const keep = list.find((r) => !r.struck) ?? list[0];
+    for (const r of list) {
+      if (r === keep || !r.struck) continue;
+      const copy = cloneXml(note);
+      copy.attrs["w:id"] = String(next);
+      r.ref.attrs["w:id"] = String(next++);
+      for (const block of blockList(copy)) if (localName(block.name) === "p") wrapContainerContent(block, "del", ctx);
+      root.children.push(copy);
       changed = true;
     }
   }
