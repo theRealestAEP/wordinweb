@@ -16,7 +16,7 @@ import {
   recordTableGridChange,
   revisionWrapper,
 } from "../suggest.js";
-import { CONTAINERS, ContentToken, Placed, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems } from "./content.js";
+import { CONTAINERS, ContentToken, Placed, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
 import { histogramMatch } from "./histogram.js";
 import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./text.js";
 
@@ -768,6 +768,23 @@ type Item = Placed & { kind: "ins" | "del" | null };
 /** Containers a revision may wrap whole (run content in the schema). */
 const WRAPPABLE_CONTAINERS = new Set(["sdt", "customXml"]);
 
+/**
+ * Compare the text boxes of a drawing matched by shape: each w:txbxContent
+ * is a small document of its own, aligned and word-diffed like the body. A
+ * shape stored twice (DrawingML with a VML fallback) carries the box twice,
+ * and the copies pair in order.
+ */
+function compareTextBoxes(oAtom: XmlElement, rAtom: XmlElement, ctx: Ctx): void {
+  const theirs = textBoxesIn(oAtom);
+  const mine = textBoxesIn(rAtom);
+  for (let i = 0; i < Math.min(theirs.length, mine.length); i++) {
+    if (sameXml(theirs[i], mine[i])) continue;
+    const entries = alignBlocks(blockList(theirs[i]), blockList(mine[i]), ctx);
+    applyParagraphMarks(entries, ctx);
+    mine[i].children = entries.map((e) => e.el);
+  }
+}
+
 /** Rebuild the container tree around flat items, wrapping each revised stretch. */
 function nestItems(items: Item[], depth: number, rEl: XmlElement, ctx: Ctx, fromOriginal: Set<XmlElement>): XmlElement[] {
   const out: XmlElement[] = [];
@@ -840,7 +857,7 @@ function emitEqualSpan(
   // properties at exactly that place. A word can now span runs (see
   // readParagraph), and taking the formatting of only its first piece put the
   // colon's bold of "Purpose:" onto the plain space after it.
-  type Unit = { token: ContentToken; run: XmlElement; t?: XmlElement; text: string; atom?: XmlElement; was: XmlElement };
+  type Unit = { token: ContentToken; run: XmlElement; t?: XmlElement; text: string; atom?: XmlElement; oAtom?: XmlElement; was: XmlElement };
   const units: Unit[] = [];
   const pieceAt = (pieces: NonNullable<ContentToken["pieces"]>, offset: number) => {
     let base = 0;
@@ -860,7 +877,7 @@ function emitEqualSpan(
     if (r.atom || !r.pieces || !o.pieces || o.text !== r.text) {
       // An atom, or a word matched by key with different whitespace (the
       // whitespace option off): token by token, as one stretch.
-      if (r.atom) units.push({ token: r, run: r.run, text: "", atom: r.atom, was: o.run });
+      if (r.atom) units.push({ token: r, run: r.run, text: "", atom: r.atom, oAtom: o.atom, was: o.run });
       else for (const p of r.pieces ?? []) units.push({ token: r, run: p.run, t: p.t, text: p.text, was: o.run });
       continue;
     }
@@ -903,7 +920,9 @@ function emitEqualSpan(
       open = { run: u.run, was, el, prev: child(u.was, "rPr") };
     }
     if (u.atom) {
-      open.el.children.push(cloneXml(u.atom));
+      const atom = cloneXml(u.atom);
+      if (u.oAtom && !sameXml(u.oAtom, u.atom)) compareTextBoxes(u.oAtom, atom, ctx);
+      open.el.children.push(atom);
       text = null;
       continue;
     }

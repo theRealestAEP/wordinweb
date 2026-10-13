@@ -165,7 +165,10 @@ export function markDeletedText(el: XmlElement): void {
   // Deleted text is w:delText and a deleted field instruction w:delInstrText;
   // Word refuses a w:del holding a plain w:instrText (a removed TOC entry's
   // PAGEREF field, in the compare benchmark's wild-gatech).
+  // A text box inside the run is a story of its own: its paragraphs keep
+  // w:t (w:delText outside a w:del is invalid), and the drawing goes whole.
   const walk = (e: XmlElement): void => {
+    if (localName(e.name) === "txbxContent") return;
     if (localName(e.name) === "t") e.name = e.name.replace(/t$/, "delText");
     else if (localName(e.name) === "instrText") e.name = e.name.replace(/instrText$/, "delInstrText");
     for (const c of e.children) walk(c);

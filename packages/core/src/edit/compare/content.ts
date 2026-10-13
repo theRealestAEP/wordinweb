@@ -85,6 +85,29 @@ export const CONTAINERS = new Set(["hyperlink", "smartTag", "fldSimple", "custom
 /** A container's own property elements: kept with the container, not diffed. */
 const CONTAINER_PROPS = new Set(["pPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr"]);
 
+/**
+ * An atom's identity for the word diff. A drawing that holds text boxes keys
+ * on its shape alone, so the same shape with edited text matches, and its
+ * text is then compared inside (emitEqualSpan); a changed shape, size or
+ * picture still keys apart.
+ */
+function atomKey(atom: XmlElement): string {
+  const strip = (e: XmlElement): XmlElement =>
+    localName(e.name) === "txbxContent" ? { ...e, children: [], text: "" } : { ...e, children: e.children.map(strip) };
+  return serializeXml(hasTextBox(atom) ? strip(atom) : atom);
+}
+
+/** True when an element holds a text box (w:txbxContent) anywhere inside. */
+export function hasTextBox(el: XmlElement): boolean {
+  return localName(el.name) === "txbxContent" || el.children.some(hasTextBox);
+}
+
+/** Every w:txbxContent inside an element, in document order. */
+export function textBoxesIn(el: XmlElement): XmlElement[] {
+  if (localName(el.name) === "txbxContent") return [el];
+  return el.children.flatMap(textBoxesIn);
+}
+
 /** Read a `w:p` into the token sequence the inner diff aligns. */
 export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): ParagraphContent {
   const keyOf = options.whitespace === false ? (word: string): string => word.trimEnd() : (word: string): string => word;
@@ -186,7 +209,7 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
           continue;
         }
         flush();
-        push({ key: "a\u0000" + serializeXml(rc), text: "", run: cEl, atom: rc, path });
+        push({ key: "a\u0000" + atomKey(rc), text: "", run: cEl, atom: rc, path });
       }
     }
   };

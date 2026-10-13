@@ -478,3 +478,24 @@ describe("compareDocuments — deleted field instructions", () => {
     expect(xml).not.toMatch(/<w:del [^>]*>(?:(?!<\/w:del>)[\s\S])*<w:instrText/);
   });
 });
+
+describe("compareDocuments — text inside a text box", () => {
+  // FAILURE MODE: a drawing was one atom keyed on all its XML, so one word
+  // changed inside a text box struck the whole shape and inserted a new one.
+  const box = (text: string) =>
+    `<w:p><w:r><w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="2" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+    `<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>` +
+    `<wp:extent cx="2000000" cy="500000"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="3" name="Text Box 3"/>` +
+    `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+    `<wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/><wps:spPr/>` +
+    `<wps:txbx><w:txbxContent><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp>` +
+    `</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r><w:r><w:t xml:space="preserve">Body text beside the box.</w:t></w:r></w:p>`;
+  it("marks the changed word inside the box and round-trips", () => {
+    const { merged } = roundTrip(box("Approved by the finance committee"), box("Approved by the audit committee"));
+    const kinds = collectRevisions(merged).map((r) => r.kind);
+    expect(kinds.filter((k) => k === "deletion")).toHaveLength(1);
+    const xml = DocxDocument.load(merged.save()).pkg.text("word/document.xml") ?? "";
+    expect((xml.match(/<w:drawing>/g) ?? []).length).toBe(1);
+    expect(xml).toMatch(/<w:txbxContent>(?:(?!<\/w:txbxContent>)[\s\S])*<w:delText[^>]*>finance /);
+  });
+});
