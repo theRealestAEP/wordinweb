@@ -587,8 +587,9 @@ function ensurePPrRPr(pEl: XmlElement): XmlElement {
   let rPr = pPr.children.find((c) => localName(c.name) === "rPr");
   if (!rPr) {
     rPr = el(`${w}rPr`);
-    // rPr is the last child of pPr in the schema; append is safe.
-    pPr.children.push(rPr);
+    // CT_PPr ends rPr, sectPr, pPrChange: rPr goes ahead of the other two.
+    const at = pPr.children.findIndex((c) => localName(c.name) === "sectPr" || localName(c.name) === "pPrChange");
+    pPr.children.splice(at === -1 ? pPr.children.length : at, 0, rPr);
   }
   return rPr;
 }
@@ -956,7 +957,36 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
   const moved = next.children.filter((c) => localName(c.name) !== "pPr");
   pEl.children.push(...moved);
   parent.children.splice(idx + 1, 1);
+  carrySectionBreak(pEl, next);
   return true;
+}
+
+/**
+ * A section break lives in a paragraph's mark. Joined, the two paragraphs end
+ * at the second one's mark, so the paragraph left carries ITS break, or none:
+ * the first paragraph's break went with its mark. Keeping the first
+ * paragraph's pPr whole lost a section whose break paragraph a removed
+ * paragraph joined into (wild-gatech with blocks moved: a footer went
+ * missing).
+ */
+function carrySectionBreak(pEl: XmlElement, next: XmlElement): void {
+  const pPrOf = (p: XmlElement) => p.children.find((c) => localName(c.name) === "pPr");
+  const sectOf = (p: XmlElement) => pPrOf(p)?.children.find((c) => localName(c.name) === "sectPr");
+  const mine = sectOf(pEl);
+  const theirs = sectOf(next);
+  if (!mine && !theirs) return;
+  let pPr = pPrOf(pEl);
+  if (!pPr) {
+    pPr = { name: "w:pPr", attrs: {}, children: [], text: "" };
+    pEl.children.unshift(pPr);
+  }
+  pPr.children = pPr.children.filter((c) => c !== mine);
+  if (theirs) {
+    // CT_PPr ends rPr, sectPr, pPrChange.
+    const at = pPr.children.findIndex((c) => localName(c.name) === "pPrChange");
+    pPr.children.splice(at === -1 ? pPr.children.length : at, 0, theirs);
+  }
+  if (pPr.children.length === 0) pEl.children.splice(pEl.children.indexOf(pPr), 1);
 }
 
 /**

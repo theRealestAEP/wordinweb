@@ -359,6 +359,28 @@ describe("suggesting mode — review all", () => {
     expect(body.indexOf("<w:tbl>") - body.indexOf("Before</w:t></w:r></w:p>")).toBe("Before</w:t></w:r></w:p>".length);
   });
 
+  it("accept-all keeps a section break that a removed paragraph joins into", () => {
+    // The break lives in the second paragraph's mark, which is the one left
+    // after the join; keeping the first paragraph's pPr whole lost the
+    // section (compare benchmark, wild-gatech with blocks moved).
+    const A = `w:author="B" w:date="2026-02-01T00:00:00Z"`;
+    const doc = loadDoc(
+      `<w:p><w:pPr><w:rPr><w:del w:id="1" ${A}/></w:rPr></w:pPr><w:del w:id="2" ${A}><w:r><w:delText>Gone.</w:delText></w:r></w:del></w:p>` +
+        `<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>` +
+        p("Next section."),
+    );
+    acceptAllRevisions(doc);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).not.toContain("Gone.");
+    expect(xml.match(/<w:sectPr>/g)?.length).toBe(1);
+  });
+
+  it("puts a paragraph mark's rPr ahead of its sectPr", () => {
+    const doc = loadDoc(`<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>` + p("After"));
+    markParagraphGlyph(paraEl(doc, 0), "ins", meta());
+    expect(serializeXml(paraEl(doc, 0))).toMatch(/<w:pPr><w:rPr><w:ins [^>]*\/><\/w:rPr><w:sectPr>/);
+  });
+
   it("reject-all puts a move back at its source", () => {
     const doc = loadDoc(MOVED);
     expect(rejectAllRevisions(doc)).toBe(2);

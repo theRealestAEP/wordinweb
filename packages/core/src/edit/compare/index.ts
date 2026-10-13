@@ -1604,7 +1604,11 @@ function markRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
 }
 
 function markParagraphRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
-  const shifted = start > 0 && isParagraph(entries[start - 1].el);
+  // A kept paragraph that ends a section does not lend its mark: the break
+  // lives in that mark, and reviewing it would move the break onto the
+  // paragraph that joins it. The stretch then marks its own paragraphs.
+  const before = start > 0 ? entries[start - 1].el : undefined;
+  const shifted = !!before && isParagraph(before) && !child(child(before, "pPr"), "sectPr");
   if (shifted) {
     for (let i = start; i <= end; i++) {
       if (!isParagraph(entries[i].el) || !isParagraph(entries[i - 1].el)) continue;
