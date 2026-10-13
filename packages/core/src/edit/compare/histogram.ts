@@ -93,9 +93,19 @@ interface Anchor {
 }
 
 /**
- * The common region whose most-repeated element is least repeated. Ties break
- * on length, then on relative position, so an anchor near where it "should" be
- * wins over an identical one far away.
+ * JGit's anchor choice: among common regions seeded by elements no more
+ * repeated than the best found so far, keep the LONGER one, or the one whose
+ * least-repeated element is rarer. Equal regions break on relative position,
+ * so an anchor near where it "should" be wins over an identical one far away.
+ *
+ * A region is an exact run of equal elements grown out from its seed, so a
+ * single rare element in it already proves where it belongs. Charging a region
+ * for its MOST-repeated element instead (as this once did) penalised exactly
+ * those runs: a true match through a section that crossed one boilerplate
+ * paragraph lost to a short run of twice-repeated paragraphs paired with the
+ * wrong section, and the true blocks came out deleted and reinserted (the NIH
+ * contract's "The ... for this ... is $ ." boilerplate, compared against a
+ * copy with scattered edits).
  *
  * Returns `undefined` when the two regions share no element at all, and `null`
  * when they share only elements above MAX_CHAIN (the caller's LCS fallback).
@@ -129,6 +139,9 @@ function lowestOccurrenceRegion(
     sawCommon = true;
     if (candidates.length > MAX_CHAIN) continue;
     sawUsable = true;
+    // A seed more common than the best region's rarest element cannot lead to
+    // a better anchor.
+    if (best !== undefined && candidates.length > bestCost) continue;
     for (const i of candidates) {
       // Grow the match outward from (i, j) as far as both sides agree.
       let aStart = i;
@@ -142,18 +155,15 @@ function lowestOccurrenceRegion(
         aEnd++;
       }
       const len = aEnd - aStart;
-      // The region's cost is its most-repeated element: a region built only
-      // from rare paragraphs is a far safer anchor than a long one built from
-      // "Introduction".
-      let cost = 0;
+      // The region's cost is its least-repeated element.
+      let cost = candidates.length;
       for (let k = aStart; k < aEnd; k++) {
-        cost = Math.max(cost, positions.get(a[k])?.length ?? 0);
+        cost = Math.min(cost, positions.get(a[k])?.length ?? cost);
       }
       const offset = Math.abs((aStart - aLo) / (aSpan || 1) - (bStart - bLo) / (bSpan || 1));
       const better =
-        cost < bestCost ||
-        (cost === bestCost && best !== undefined && len > best.len) ||
-        (cost === bestCost && best !== undefined && len === best.len && offset < bestOffset);
+        best !== undefined &&
+        (len > best.len || cost < bestCost || (len === best.len && cost === bestCost && offset < bestOffset));
       if (best === undefined || better) {
         best = { aStart, bStart, len };
         bestCost = cost;

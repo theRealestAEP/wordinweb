@@ -285,3 +285,28 @@ describe("compare corpus — calibration counter-cases for the coalescing ratio"
     ]);
   });
 });
+
+describe("compare corpus — 13: boilerplate repeated across sections", () => {
+  it("keeps every untouched section in place around two edits", () => {
+    // FAILURE MODE (the NIH contract): a true run through a section crossed a
+    // paragraph repeated in EVERY section, while another boilerplate line sat
+    // in only two of them. Charging a run for its most-repeated paragraph
+    // made that two-section line, paired with the WRONG section, the cheapest
+    // anchor, and whole identical sections came out deleted and reinserted.
+    // One edit alone never reaches the anchor search (the common prefix and
+    // suffix settle it), so there is an edit at each end.
+    const fee = "The fee for this section is $ .";
+    const terms = "Payment terms apply as stated above.";
+    const section = (k: number, body: string): string =>
+      para(`Article ${k}`, { pPr: HEADING }) + para(fee) + para(body) + (k === 3 || k === 4 ? para(terms) : "");
+    const body = (k: number) => `Article ${k} covers obligation number ${k} of the agreement.`;
+    const doc = (first: string, last: string): string =>
+      [1, 2, 3, 4, 5, 6].map((k) => section(k, k === 1 ? first : k === 6 ? last : body(k))).join("");
+    const out = compare(
+      doc(body(1), body(6)),
+      doc("Article 1 covers obligation number one of the agreement.", "Article 6 covers obligation number six of the agreement."),
+    );
+    expect(kindCounts(out)).toEqual({ deletion: 2, insertion: 2 });
+    expect(revisionTexts(out, "del")).toEqual(["1 ", "6 "]);
+  });
+});
