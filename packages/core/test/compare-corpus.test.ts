@@ -371,3 +371,21 @@ describe("compare corpus — 16: a long stretch rewritten end to end", () => {
     expect(kindCounts(doc)).toEqual({ deletion: n, insertion: n });
   });
 });
+
+describe("compare corpus — 17: inputs that already hold tracked changes", () => {
+  it("compares as if they were accepted, the way Word does", () => {
+    // FAILURE MODE: existing revisions passed straight through, so the
+    // result mixed an earlier review's changes with this comparison's, and
+    // reject-all undid both. Word compares documents "as if the tracked
+    // changes have been accepted".
+    const earlier = `<w:ins w:id="90" w:author="Earlier" w:date="2026-01-01T00:00:00Z"><w:r><w:t xml:space="preserve">signed </w:t></w:r></w:ins>`;
+    const original = `<w:p><w:r><w:t xml:space="preserve">The </w:t></w:r>${earlier}<w:r><w:t>agreement is final.</w:t></w:r></w:p>`;
+    const revised = para("The signed agreement is binding.");
+    const notes: string[] = [];
+    const doc = compare(original, revised, { onNote: (n: { code: string }) => notes.push(n.code) });
+    expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
+    expect(revisionTexts(doc, "del")).toEqual(["final"]);
+    expect(collectRevisions(doc).every((r) => r.author === AUTHOR)).toBe(true);
+    expect(notes).toContain("existing-revisions-accepted");
+  });
+});

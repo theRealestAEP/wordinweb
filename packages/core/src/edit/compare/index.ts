@@ -3,6 +3,8 @@ import { DocxDocument } from "../../docx.js";
 import { XmlElement, child, cloneXml, localName, sameXml, serializeXml } from "../../xml.js";
 import {
   RevisionMeta,
+  acceptAllRevisions,
+  collectRevisions,
   markDeletedText,
   markParagraphGlyph,
   markRowRevision,
@@ -85,7 +87,9 @@ export interface CompareNote {
     /** The documents share no paragraph at all; one paragraph mark goes untracked. */
     | "no-common-paragraph"
     /** Original-only content referencing a relationship the result does not have. */
-    | "unresolved-relationship";
+    | "unresolved-relationship"
+    /** An input held tracked changes; it was compared as if they were accepted. */
+    | "existing-revisions-accepted";
   detail: string;
 }
 
@@ -136,7 +140,23 @@ export function compareDocuments(
   revised: DocxDocument,
   options: CompareOptions,
 ): DocxDocument {
-  const merged = revised.clone();
+  // Word compares documents "as if the tracked changes have been accepted",
+  // and so does this: carried through, an earlier review's revisions mixed
+  // with this comparison's, and reject-all undid both.
+  const note = options.onNote ?? (() => {});
+  const accepted = (doc: DocxDocument, which: string): DocxDocument => {
+    if (collectRevisions(doc).length === 0) return doc;
+    const copy = doc.clone();
+    acceptAllRevisions(copy);
+    note({ code: "existing-revisions-accepted", detail: `the ${which} document held tracked changes; it was compared as if they were accepted` });
+    return copy;
+  };
+  const merged = accepted(revised, "revised");
+  // The result is always a copy: it must never share the revised input's tree.
+  return compareInto(accepted(original, "original"), merged === revised ? revised.clone() : merged, options);
+}
+
+function compareInto(original: DocxDocument, merged: DocxDocument, options: CompareOptions): DocxDocument {
   // Every revision takes an id; with none issued the body is the clone's own,
   // untouched, and its model needs no rebuild (refresh was a sixth of the time
   // on a document compared with itself).
@@ -161,7 +181,8 @@ export function compareDocuments(
   const mergedBody = child(merged.docRoot, "body");
   if (!originalBody || !mergedBody) throw new Error("document.xml has no w:body");
 
-  reportUncomparedParts(original, revised, ctx);
+  // Before the body is touched, merged holds exactly the revised parts.
+  reportUncomparedParts(original, merged, ctx);
 
   const tail = mergedBody.children.filter((c) => localName(c.name) === "sectPr");
   const entries = alignBlocks(blockList(originalBody, "sectPr"), blockList(mergedBody, "sectPr"), ctx);
