@@ -552,7 +552,13 @@ function wrapRowContent(row: XmlElement, kind: "ins" | "del", ctx: Ctx): void {
  * recursed into rather than wrapped, which is exactly what Word writes.
  */
 function wrapContainerContent(container: XmlElement, kind: "ins" | "del", ctx: Ctx): void {
-  const NESTED = ["hyperlink", "smartTag", "dir", "bdo"];
+  // Run containers the schema lets a revision sit INSIDE (a simple field's
+  // result runs among them), as opposed to an inline content control or a
+  // run-level customXml, which a revision may wrap whole. Left plain, a removed
+  // paragraph's checkbox controls ("☒ ☐") survived accept-all and joined the
+  // paragraph before (probe2-form-checkboxes).
+  const NESTED = ["hyperlink", "smartTag", "dir", "bdo", "fldSimple"];
+  const WRAPPABLE = ["r", "sdt", "customXml"];
   const out: XmlElement[] = [];
   let group: XmlElement[] = [];
   const flush = (): void => {
@@ -563,7 +569,7 @@ function wrapContainerContent(container: XmlElement, kind: "ins" | "del", ctx: C
   };
   for (const c of container.children) {
     const ln = localName(c.name);
-    if (ln === "r") {
+    if (WRAPPABLE.includes(ln)) {
       group.push(c);
       continue;
     }

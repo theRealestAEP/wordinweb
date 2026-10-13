@@ -383,3 +383,21 @@ describe("compareDocuments — a paragraph removed before a table", () => {
     );
   });
 });
+
+describe("compareDocuments — content controls and simple fields in removed paragraphs", () => {
+  // probe2-form-checkboxes: a removed paragraph's checkbox content controls
+  // were left unstruck, so accept-all carried "☒ ☐" onto the paragraph before.
+  const box = (mark: string) =>
+    `<w:sdt><w:sdtPr><w:alias w:val="Choice"/></w:sdtPr><w:sdtContent><w:r><w:t>${mark}</w:t></w:r></w:sdtContent></w:sdt>`;
+  const choices = `<w:p><w:r><w:t xml:space="preserve">Choices: </w:t></w:r>${box("☒")}<w:r><w:t xml:space="preserve"> A </w:t></w:r>${box("☐")}<w:r><w:t xml:space="preserve"> B</w:t></w:r></w:p>`;
+  const field = `<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>3</w:t></w:r></w:fldSimple></w:p>`;
+  it("strikes a removed paragraph's content controls", () => {
+    roundTrip(para("Before.") + choices + para("After."), para("Before.") + para("After."));
+  });
+  it("inserts a new paragraph's content controls", () => {
+    roundTrip(para("Before.") + para("After."), para("Before.") + choices + para("After."));
+  });
+  it("strikes a removed paragraph's simple field", () => {
+    roundTrip(para("Before.") + field + para("After."), para("Before.") + para("After."));
+  });
+});

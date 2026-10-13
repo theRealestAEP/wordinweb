@@ -898,7 +898,9 @@ function removeEl(doc: DocxDocument, el: XmlElement): boolean {
  * Containers that hold runs but no properties of their own, so one holding
  * nothing after a revision is removed is an empty shell, not content.
  */
-const RUN_CONTAINERS = ["hyperlink", "smartTag", "dir", "bdo"];
+// A w:fldSimple is here too: a field whose result runs were all reviewed away
+// (a removed paragraph's page number, say) is a field with nothing to show.
+const RUN_CONTAINERS = ["hyperlink", "smartTag", "dir", "bdo", "fldSimple"];
 
 /**
  * Remove a whole revision wrapper, and the run container it emptied.
