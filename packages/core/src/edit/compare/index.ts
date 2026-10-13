@@ -744,6 +744,10 @@ function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx): boolea
     const parts: string[] = [];
     for (const el of els) {
       if (localName(el.name) !== "p") return null;
+      // A section break is no split or merge: its mark is the break, and the
+      // join a review makes would move it (wild-gatech with blocks moved: an
+      // empty paragraph and an empty break merged into one, losing a footer).
+      if (child(child(el, "pPr"), "sectPr")) return null;
       const content = readParagraph(el, readOptions(ctx, oEls.includes(el)));
       if (!content.inlineDiffable) return null;
       for (const token of content.tokens) {
@@ -1604,11 +1608,14 @@ function markRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
 }
 
 function markParagraphRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
-  // A kept paragraph that ends a section does not lend its mark: the break
-  // lives in that mark, and reviewing it would move the break onto the
-  // paragraph that joins it. The stretch then marks its own paragraphs.
+  // Shifting moves each mark one paragraph up, and a section break lives in
+  // its paragraph's mark: shifted, a kept break would be lent to the stretch
+  // after it, and an added break would read as already there. So a stretch
+  // next to or holding a break marks its own paragraphs.
+  const endsSection = (el: XmlElement): boolean => isParagraph(el) && !!child(child(el, "pPr"), "sectPr");
   const before = start > 0 ? entries[start - 1].el : undefined;
-  const shifted = !!before && isParagraph(before) && !child(child(before, "pPr"), "sectPr");
+  const shifted =
+    !!before && isParagraph(before) && !endsSection(before) && !entries.slice(start, end + 1).some((e) => endsSection(e.el));
   if (shifted) {
     for (let i = start; i <= end; i++) {
       if (!isParagraph(entries[i].el) || !isParagraph(entries[i - 1].el)) continue;

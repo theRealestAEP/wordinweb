@@ -649,6 +649,20 @@ describe("compareDocuments — section breaks and notes when blocks move", () =>
     expect(headers(review(merged, acceptAllRevisions))).toEqual(["rId1", "rId2", "rId3"]);
   });
 
+  it("adds a section break where two empty paragraphs were", () => {
+    // Two empty paragraphs concatenate to the empty break paragraph's content,
+    // so they were taken for a merge into it: only the originals were emitted
+    // and the new break never reached accept-all.
+    const headers = (d: DocxDocument) => [...(d.pkg.text("word/document.xml") ?? "").matchAll(/<w:headerReference [^>]*r:id="(\w+)"/g)].map((m) => m[1]);
+    const merged = compareDocuments(
+      load(text("One.") + "<w:p/><w:p/>" + text("Two.")),
+      load(text("One.") + breakTo(1) + text("Two.")),
+      { author: AUTHOR, date: DATE },
+    );
+    expect(headers(review(merged, acceptAllRevisions))).toEqual(["rId1", "rId3"]);
+    expect(headers(review(merged, rejectAllRevisions))).toEqual(["rId3"]);
+  });
+
   it("keeps each note attached to its reference when notes swap", () => {
     // The paragraphs stay and their notes swap. The body matched references
     // by position while notes paired in order: reject-all kept a reference
