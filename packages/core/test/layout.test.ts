@@ -5567,3 +5567,37 @@ describe("term sheet parity (wild-termsheet-behinddoc)", () => {
     }
   });
 });
+
+describe("rules drawn only by the row above (probe-cellborder)", () => {
+  // LibreOffice gives body cells left, bottom and right rules but no top, so
+  // each inner rule is the bottom of the row above. Word sinks such a rule
+  // into the row below's top cell margin and charges only what the margin
+  // cannot hold; a row's own top rule charges in full.
+  const rule = (side: string, sz: number) => `<w:${side} w:val="single" w:sz="${sz}" w:space="0" w:color="000000"/>`;
+  const gap = (sides: string[], sz: number, marTop: number) => {
+    const row = (text: string) =>
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/><w:tcBorders>${sides.map((s) => rule(s, sz)).join("")}</w:tcBorders></w:tcPr>` +
+      `<w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:tc></w:tr>`;
+    const tbl =
+      `<w:tbl><w:tblPr><w:tblW w:w="3000" w:type="dxa"/><w:tblLayout w:type="fixed"/>` +
+      `<w:tblCellMar><w:top w:w="${marTop}" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>${row("first")}${row("second")}</w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(tbl + p("after")) });
+    return textItem(result, "second").lineTop - textItem(result, "first").lineTop;
+  };
+  const none = (marTop: number) => gap([], 4, marTop);
+
+  it("charges nothing for a bottom-only rule the top margin holds", () => {
+    expect(gap(["bottom"], 4, 60) - none(60)).toBeCloseTo(0, 2);
+  });
+
+  it("charges what the margin cannot hold", () => {
+    // sz-48 is 6pt = 8px; a 60tw (4px) margin holds half of it.
+    expect(gap(["bottom"], 48, 60) - none(60)).toBeCloseTo(4, 1);
+    expect(gap(["bottom"], 4, 0) - none(0)).toBeCloseTo(4 / 6, 2);
+  });
+
+  it("charges a row's own top rule in full", () => {
+    expect(gap(["top", "bottom"], 4, 60) - none(60)).toBeCloseTo(4 / 6, 2);
+  });
+});

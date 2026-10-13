@@ -7839,6 +7839,18 @@ class Engine {
     //  - conditional style edges charge through silent sides: LightGrid's
     //    firstRow bottom sz-18 against a sz-8 insideH (wild-multicolumn p30).
     //
+    //  - a rule only the row ABOVE draws (its bottom, with the row below
+    //    silent or nil on top) sinks into the row below's TOP cell margin,
+    //    and only what the margin cannot hold is charged. probe-cellborder
+    //    (compat 15 and 12 alike): bottom-only sz-4 and double sz-2 rules
+    //    inside 3pt margins charge nothing, sz-24 (3pt) charges 2pt inside
+    //    1pt margins and 0 inside 3pt, sz-48 (6pt) charges 3pt inside 3pt;
+    //    top 0 / bottom 3pt charges a 3pt rule in full, top 3pt / bottom 0
+    //    charges nothing. A row's own TOP rule always charges in full. This
+    //    is LibreOffice's table pattern (probe3-lo-provenance: no cell top
+    //    rules, rows 0.9px tall each), and doerfp's bottom-only roster rules
+    //    still charge in full because its cell margins are 0.
+    //
     // Outer edges take the same per-column resolution against the table's
     // top/bottom rule (probe-exactouter11/15: a live outer rule charges in
     // full, an all-nil row zeroes it, compat-invariant).
@@ -7859,15 +7871,21 @@ class Engine {
       while (out.length < nCols) out.push(bw(fallback));
       return out;
     };
+    /** Each grid column's top cell margin in row `r`. */
+    const colTopPads = (r: number): number[] => {
+      const fallback = this.cellMarginsOf(tbl, false).top ?? 0;
+      return rows[r].cells.flatMap((c) => Array<number>(Math.max(1, c.props.gridSpan)).fill(c.props.margins?.top ?? fallback));
+    };
     const boundary = (k: number): number => {
       if (k === 0) return Math.max(0, ...colWidths(0, "top", tb?.top));
       if (k === rows.length)
         return Math.max(0, ...colWidths(rows.length - 1, "bottom", tb?.bottom));
       const above = colWidths(k - 1, "bottom", tb?.insideH);
       const below = colWidths(k, "top", tb?.insideH);
+      const topPads = colTopPads(k);
       const n = Math.max(above.length, below.length);
       let w = 0;
-      for (let i = 0; i < n; i++) w = Math.max(w, Math.max(above[i] ?? 0, below[i] ?? 0));
+      for (let i = 0; i < n; i++) w = Math.max(w, below[i] ?? 0, (above[i] ?? 0) - (topPads[i] ?? 0));
       return w;
     };
     return { top: boundary(ri), bottom: boundary(ri + 1) };
