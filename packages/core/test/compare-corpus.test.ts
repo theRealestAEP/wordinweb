@@ -389,3 +389,19 @@ describe("compare corpus — 17: inputs that already hold tracked changes", () =
     expect(notes).toContain("existing-revisions-accepted");
   });
 });
+
+describe("compare corpus — 18: a short paragraph edited in place", () => {
+  it("marks the changed word, not the whole heading", () => {
+    // FAILURE MODE: 91% of the compare benchmark's misses. A short paragraph
+    // (under 5 words) pairs only at 0.8 character similarity, so one new word
+    // in a 3-word heading struck the heading and inserted a new one. With
+    // exactly one leftover paragraph on each side of the same slot, the
+    // paragraph was edited where it stands, and Word marks just the word.
+    const body = (heading: string) =>
+      para("The model below is rendered from its glTF source.") + para(heading, { pPr: HEADING }) + para("Rotate it with the mouse.");
+    const doc = compare(body("Native 3D model"), body("Replaced 3D model"));
+    expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
+    expect(revisionTexts(doc, "del")).toEqual(["Native "]);
+    expect(revisionTexts(doc, "ins")).toEqual(["Replaced "]);
+  });
+});

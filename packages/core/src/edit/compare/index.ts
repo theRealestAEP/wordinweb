@@ -461,6 +461,30 @@ function resolveGap(
     rUsed.add(cand.r);
   }
 
+  // A slot between two settled pairings (or a gap's ends) that holds exactly
+  // one leftover paragraph on each side is that paragraph, edited where it
+  // stands. Similarity cannot see it when the paragraph is short: one new word
+  // in a 3-word heading misses the 0.8 short-paragraph floor, and the heading
+  // came out struck and reinserted whole (91% of the compare benchmark's
+  // misses). A MOVED item never lands here: it leaves a removal in one slot
+  // and an insertion in another, so a reordered list still reads as a move.
+  const settled = [...out].sort((a, b) => a.o - b.o);
+  let oFrom = oLo;
+  let rFrom = rLo;
+  for (const p of [...settled, { kind: "pair" as const, o: oHi, r: rHi, other: -1 }]) {
+    const os: number[] = [];
+    const rs: number[] = [];
+    for (let i = oFrom; i < p.o; i++) if (!oUsed.has(i)) os.push(i);
+    for (let j = rFrom; j < p.r; j++) if (!rUsed.has(j)) rs.push(j);
+    if (os.length === 1 && rs.length === 1 && isParagraph(oBlocks[os[0]]) && isParagraph(rBlocks[rs[0]])) {
+      accept({ kind: "pair", o: os[0], r: rs[0], other: -1 });
+      oUsed.add(os[0]);
+      rUsed.add(rs[0]);
+    }
+    oFrom = p.kind === "merge" ? p.other + 1 : p.o + 1;
+    rFrom = p.kind === "split" ? p.other + 1 : p.r + 1;
+  }
+
   // A gap that OPENS the container and pairs nothing has to pair something
   // anyway. Every added or removed paragraph is recorded by striking the
   // pilcrow of the paragraph BEFORE it (see applyParagraphMarks), so a
