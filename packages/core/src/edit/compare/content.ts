@@ -27,6 +27,13 @@ export interface ContentToken {
   text: string;
   /** The `w:r` this token came from. */
   run: XmlElement;
+  /**
+   * The run containers the token sits inside, outermost first: hyperlinks,
+   * content controls, simple fields, smart tags. Revisions go INSIDE them
+   * (the schema puts w:ins inside a w:hyperlink, not around it), so the
+   * emitter rebuilds each container around its own words.
+   */
+  path: readonly XmlElement[];
   /** Word tokens: the `w:t` and the slice inside it (the first piece's). */
   t?: XmlElement;
   start?: number;
@@ -54,11 +61,9 @@ export interface ParagraphContent {
   /** The paragraph's full text. */
   text: string;
   /**
-   * True when every child of the paragraph is `w:pPr`, `w:r` or a passenger.
-   * A paragraph holding a hyperlink, a content control, a smart tag or inline
-   * math is NOT word-diffable here: its content would have to be rebuilt, and
-   * a revision wrapper may not sit around a `w:hyperlink` (the schema puts
-   * `w:ins` inside it, not around it). Such a paragraph is compared whole.
+   * False when the paragraph holds content no word diff can rebuild, inline
+   * math above all; such a paragraph is compared whole. Runs inside run
+   * containers (CONTAINERS) are diffable: each token records its path.
    */
   inlineDiffable: boolean;
 }
@@ -74,6 +79,11 @@ export interface ReadOptions {
 }
 
 const WORD_CHAR = /[\p{L}\p{M}\p{N}]/u;
+
+/** Run containers a word diff descends into; revisions sit inside them. */
+export const CONTAINERS = new Set(["hyperlink", "smartTag", "fldSimple", "customXml", "dir", "bdo", "sdt"]);
+/** A container's own property elements: kept with the container, not diffed. */
+const CONTAINER_PROPS = new Set(["pPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr"]);
 
 /** Read a `w:p` into the token sequence the inner diff aligns. */
 export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): ParagraphContent {
@@ -100,6 +110,7 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
   // records only the colon's lost bold.
   type Piece = { run: XmlElement; t: XmlElement; text: string };
   let segment: Piece[] = [];
+  let segmentPath: readonly XmlElement[] = [];
   const flush = (): void => {
     if (segment.length === 0) return;
     const text = segment.map((p) => p.text).join("");
@@ -133,7 +144,7 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
         base += p.text.length;
       }
       const first = pieces[0];
-      push({ key: "w\u0000" + keyOf(word), text: word, run: first.run, t: first.t, start: first.start, end: first.end, pieces });
+      push({ key: "w\u0000" + keyOf(word), text: word, run: first.run, t: first.t, start: first.start, end: first.end, pieces, path: segmentPath });
       at = end;
     }
     // An empty w:t contributes nothing to the alignment, which is right:
@@ -141,30 +152,45 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
     segment = [];
   };
 
-  for (const cEl of pEl.children) {
-    const ln = localName(cEl.name);
-    if (ln === "pPr") continue;
-    if (PASSENGERS.has(ln)) {
-      flush();
-      pending.push(cEl);
-      continue;
-    }
-    if (ln !== "r") {
-      flush();
-      inlineDiffable = false;
-      continue;
-    }
-    for (const rc of cEl.children) {
-      const rln = localName(rc.name);
-      if (rln === "rPr") continue;
-      if (rln === "t") {
-        segment.push({ run: cEl, t: rc, text: rc.text });
+  const walk = (kids: readonly XmlElement[], path: readonly XmlElement[]): void => {
+    for (const cEl of kids) {
+      const ln = localName(cEl.name);
+      if (CONTAINER_PROPS.has(ln)) continue;
+      if (PASSENGERS.has(ln)) {
+        flush();
+        pending.push(cEl);
         continue;
       }
-      flush();
-      push({ key: "a\u0000" + serializeXml(rc), text: "", run: cEl, atom: rc });
+      if (CONTAINERS.has(ln)) {
+        // A content control's words sit in its w:sdtContent; the others hold
+        // their runs directly.
+        const inner = ln === "sdt" ? cEl.children.find((c) => localName(c.name) === "sdtContent") : cEl;
+        if (!inner) continue;
+        flush();
+        walk(inner.children, [...path, cEl]);
+        flush();
+        continue;
+      }
+      if (ln !== "r") {
+        flush();
+        inlineDiffable = false;
+        continue;
+      }
+      if (segment.length > 0 && segmentPath !== path) flush();
+      segmentPath = path;
+      for (const rc of cEl.children) {
+        const rln = localName(rc.name);
+        if (rln === "rPr") continue;
+        if (rln === "t") {
+          segment.push({ run: cEl, t: rc, text: rc.text });
+          continue;
+        }
+        flush();
+        push({ key: "a\u0000" + serializeXml(rc), text: "", run: cEl, atom: rc, path });
+      }
     }
-  }
+  };
+  walk(pEl.children, []);
   flush();
 
   return { tokens, tail: pending, text: paragraphText(pEl), inlineDiffable };
@@ -194,23 +220,29 @@ export function paragraphText(el: XmlElement): string {
  * hold, and drops passengers — a bookmark inside struck text has nothing left
  * to point at.
  */
-export function sliceContent(
+/** An emitted element and the containers it belongs inside. */
+export interface Placed {
+  el: XmlElement;
+  path: readonly XmlElement[];
+}
+
+export function sliceItems(
   tokens: readonly ContentToken[],
   from: number,
   to: number,
   deleted: boolean,
-): XmlElement[] {
-  const out: XmlElement[] = [];
+): Placed[] {
+  const out: Placed[] = [];
   // One output run per source run, so run properties are never lost and
   // never invented; consecutive slices of one w:t collapse back into one
   // text element. A token spanning runs contributes a piece to each.
   let open: { run: XmlElement; el: XmlElement } | null = null;
   let text: { t: XmlElement; el: XmlElement } | null = null;
-  const runFor = (run: XmlElement): XmlElement => {
+  const runFor = (run: XmlElement, path: readonly XmlElement[]): XmlElement => {
     if (open?.run === run) return open.el;
     const rPr = run.children.find((c) => localName(c.name) === "rPr");
     const el: XmlElement = { name: run.name, attrs: { ...run.attrs }, children: rPr ? [cloneXml(rPr)] : [], text: "" };
-    out.push(el);
+    out.push({ el, path });
     open = { run, el };
     text = null;
     return el;
@@ -218,17 +250,17 @@ export function sliceContent(
   for (let i = from; i < to; i++) {
     const token = tokens[i];
     if (!deleted && token.lead) {
-      out.push(...token.lead.map(cloneXml));
+      out.push(...token.lead.map((el) => ({ el: cloneXml(el), path: token.path })));
       open = null;
       text = null;
     }
     if (token.atom) {
-      runFor(token.run).children.push(cloneXml(token.atom));
+      runFor(token.run, token.path).children.push(cloneXml(token.atom));
       text = null;
       continue;
     }
     for (const piece of token.pieces ?? []) {
-      const el = runFor(piece.run);
+      const el = runFor(piece.run, token.path);
       if (text && text.t === piece.t) {
         text.el.text += piece.text;
         continue;

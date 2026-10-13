@@ -162,8 +162,12 @@ export function revisionWrapper(
 
 /** Retype every w:t below `el` as w:delText, the form a w:del must hold. */
 export function markDeletedText(el: XmlElement): void {
+  // Deleted text is w:delText and a deleted field instruction w:delInstrText;
+  // Word refuses a w:del holding a plain w:instrText (a removed TOC entry's
+  // PAGEREF field, in the compare benchmark's wild-gatech).
   const walk = (e: XmlElement): void => {
     if (localName(e.name) === "t") e.name = e.name.replace(/t$/, "delText");
+    else if (localName(e.name) === "instrText") e.name = e.name.replace(/instrText$/, "delInstrText");
     for (const c of e.children) walk(c);
   };
   walk(el);
@@ -869,6 +873,8 @@ function convertDelTextToText(el: XmlElement): void {
   const walk = (e: XmlElement): void => {
     if (localName(e.name) === "delText") {
       e.name = e.name.replace(/delText$/, "t");
+    } else if (localName(e.name) === "delInstrText") {
+      e.name = e.name.replace(/delInstrText$/, "instrText");
     }
     for (const c of e.children) walk(c);
   };

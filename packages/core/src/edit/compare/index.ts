@@ -16,7 +16,7 @@ import {
   recordTableGridChange,
   revisionWrapper,
 } from "../suggest.js";
-import { ContentToken, isPassenger, paragraphText, readParagraph, runPropsKey, sliceContent } from "./content.js";
+import { CONTAINERS, ContentToken, Placed, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems } from "./content.js";
 import { histogramMatch } from "./histogram.js";
 import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./text.js";
 
@@ -524,7 +524,7 @@ function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx): boolea
       if (!content.inlineDiffable) return null;
       for (const token of content.tokens) {
         const props = token.pieces ? token.pieces.map((p) => `${p.text.length}:${runPropsKey(p.run)}`).join("|") : runPropsKey(token.run);
-        parts.push(token.key + "\u0002" + props);
+        parts.push(token.key + "\u0002" + props + "\u0002" + token.path.map((c) => serializeXml({ ...c, children: c.children.filter((k) => /Pr$/.test(localName(k.name))) })).join(">"));
       }
     }
     return parts.join("\u0001");
@@ -714,7 +714,7 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
       ];
       ctx.note({
         code: "coarse-paragraph",
-        detail: "a paragraph holding a hyperlink, content control, smart tag or inline math changed; struck and reinserted whole",
+        detail: "a paragraph holding inline math or other content a word diff cannot rebuild changed; struck and reinserted whole",
       });
     }
     return;
@@ -726,26 +726,96 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
   // When the runs split differently on the two sides (a bold "Purpose:"
   // against bold "Purpose" + plain ":"), fall through to the rebuild below,
   // which records formatting token by token.
-  if (!changed && (!ctx.formatting || alignRunPropsInPlace(oEl, rEl, ctx))) return;
+  // The in-place shortcut sees top-level runs only, so a paragraph with run
+  // containers (a hyperlink, a content control) always takes the rebuild.
+  const flat = oc.tokens.every((t) => t.path.length === 0) && rc.tokens.every((t) => t.path.length === 0);
+  if (!changed && (!ctx.formatting || (flat && alignRunPropsInPlace(oEl, rEl, ctx)))) return;
 
+  // Emit flat, each element with its containers and its revision kind, then
+  // nest: revisions go INSIDE a hyperlink or content control, never around
+  // a hyperlink. Struck words from a container the revised paragraph still
+  // has (matched through an unchanged word inside it) go into that
+  // container; a container only the original had is carried across.
   const pPr = child(rEl, "pPr");
-  const out: XmlElement[] = [];
+  const items: Item[] = [];
+  const counterpart = new Map<XmlElement, XmlElement>();
   for (const seg of segments) {
     if (seg.equal) {
-      out.push(...emitEqualSpan(oc.tokens, rc.tokens, seg, ctx));
+      for (const it of emitEqualSpan(oc.tokens, rc.tokens, seg, ctx, counterpart)) items.push({ ...it, kind: null });
       continue;
     }
     if (seg.aEnd > seg.aStart) {
-      const struck = sliceContent(oc.tokens, seg.aStart, seg.aEnd, true);
-      for (const run of struck) adoptFromOriginal(run, ctx);
-      out.push(revisionWrapper(rEl, "del", struck, ctx.meta));
+      for (const it of sliceItems(oc.tokens, seg.aStart, seg.aEnd, true)) {
+        adoptFromOriginal(it.el, ctx);
+        markDeletedText(it.el);
+        items.push({ ...it, kind: "del" });
+      }
     }
     if (seg.bEnd > seg.bStart) {
-      out.push(revisionWrapper(rEl, "ins", sliceContent(rc.tokens, seg.bStart, seg.bEnd, false), ctx.meta));
+      for (const it of sliceItems(rc.tokens, seg.bStart, seg.bEnd, false)) items.push({ ...it, kind: "ins" });
     }
   }
-  out.push(...rc.tail.map(cloneXml));
-  rEl.children = [...(pPr ? [pPr] : []), ...out];
+  for (const it of items) if (it.kind === "del") it.path = it.path.map((c) => counterpart.get(c) ?? c);
+  for (const el of rc.tail) items.push({ el: cloneXml(el), path: [], kind: null });
+  // Containers met in the original paragraph: any still in a path after the
+  // mapping above has no revised counterpart and is carried across.
+  const fromOriginal = new Set(oc.tokens.flatMap((t) => t.path));
+  rEl.children = [...(pPr ? [pPr] : []), ...nestItems(items, 0, rEl, ctx, fromOriginal)];
+}
+
+type Item = Placed & { kind: "ins" | "del" | null };
+
+/** Containers a revision may wrap whole (run content in the schema). */
+const WRAPPABLE_CONTAINERS = new Set(["sdt", "customXml"]);
+
+/** Rebuild the container tree around flat items, wrapping each revised stretch. */
+function nestItems(items: Item[], depth: number, rEl: XmlElement, ctx: Ctx, fromOriginal: Set<XmlElement>): XmlElement[] {
+  const out: XmlElement[] = [];
+  let i = 0;
+  while (i < items.length) {
+    const c = items[i].path[depth];
+    let j = i + 1;
+    if (c) {
+      while (j < items.length && items[j].path[depth] === c) j++;
+      const group = items.slice(i, j);
+      const kind = group[0].kind;
+      if (kind && WRAPPABLE_CONTAINERS.has(localName(c.name)) && group.every((it) => it.kind === kind)) {
+        // A whole content control added or removed: wrap it, so review takes
+        // the control itself away rather than leaving an empty one.
+        const plain = group.map((it) => ({ ...it, kind: null }));
+        out.push(revisionWrapper(rEl, kind, [containerShell(c, nestItems(plain, depth + 1, rEl, ctx, fromOriginal), fromOriginal.has(c), ctx)], ctx.meta));
+      } else {
+        out.push(containerShell(c, nestItems(group, depth + 1, rEl, ctx, fromOriginal), fromOriginal.has(c), ctx));
+      }
+    } else {
+      const kind = items[i].kind;
+      while (j < items.length && !items[j].path[depth] && items[j].kind === kind) j++;
+      const els = items.slice(i, j).map((it) => it.el);
+      if (kind) out.push(revisionWrapper(rEl, kind, els, ctx.meta));
+      else out.push(...els);
+    }
+    i = j;
+  }
+  return out;
+}
+
+/** A fresh copy of a run container around new content, keeping its own properties. */
+function containerShell(c: XmlElement, content: XmlElement[], fromOriginal: boolean, ctx: Ctx): XmlElement {
+  const isSdt = localName(c.name) === "sdt";
+  const inner = isSdt ? c.children.find((k) => localName(k.name) === "sdtContent") : undefined;
+  const shell: XmlElement = {
+    name: c.name,
+    attrs: { ...c.attrs },
+    // Property children only (sdtPr, smartTagPr, ...): the content is new.
+    children: c.children.filter((k) => /Pr$/.test(localName(k.name))).map(cloneXml),
+    text: "",
+  };
+  // A container copied from the original points into ITS package (a
+  // hyperlink's r:id); adopt it before the already-adopted content goes in.
+  if (fromOriginal) adoptFromOriginal(shell, ctx);
+  if (isSdt) shell.children.push({ name: inner?.name ?? c.name.replace(/sdt$/, "sdtContent"), attrs: { ...(inner?.attrs ?? {}) }, children: content, text: "" });
+  else shell.children.push(...content);
+  return shell;
 }
 
 /** The element with its properties child removed, for a shape comparison. */
@@ -763,7 +833,8 @@ function emitEqualSpan(
   rTokens: readonly ContentToken[],
   seg: Segment,
   ctx: Ctx,
-): XmlElement[] {
+  counterpart: Map<XmlElement, XmlElement>,
+): Placed[] {
   // Matched words are emitted from the REVISED runs, split wherever EITHER
   // side changes run, so each stretch compares with the original's
   // properties at exactly that place. A word can now span runs (see
@@ -782,6 +853,10 @@ function emitEqualSpan(
   for (let k = 0; k < seg.bEnd - seg.bStart; k++) {
     const o = oTokens[seg.aStart + k];
     const r = rTokens[seg.bStart + k];
+    // A word matched inside a container on both sides pairs the containers.
+    for (let d = 0; d < Math.min(o.path.length, r.path.length); d++) {
+      if (localName(o.path[d].name) === localName(r.path[d].name)) counterpart.set(o.path[d], r.path[d]);
+    }
     if (r.atom || !r.pieces || !o.pieces || o.text !== r.text) {
       // An atom, or a word matched by key with different whitespace (the
       // whitespace option off): token by token, as one stretch.
@@ -804,7 +879,7 @@ function emitEqualSpan(
     }
   }
 
-  const out: XmlElement[] = [];
+  const out: Placed[] = [];
   let open: { run: XmlElement; was: string; el: XmlElement; prev: XmlElement | undefined } | null = null;
   let text: { t: XmlElement; el: XmlElement } | null = null;
   const close = (): void => {
@@ -816,7 +891,7 @@ function emitEqualSpan(
   for (const u of units) {
     if (u.token !== lastToken && u.token.lead) {
       close();
-      out.push(...u.token.lead.map(cloneXml));
+      out.push(...u.token.lead.map((el) => ({ el: cloneXml(el), path: u.token.path })));
     }
     lastToken = u.token;
     const was = runPropsKey(u.was);
@@ -824,7 +899,7 @@ function emitEqualSpan(
       close();
       const rPr = u.run.children.find((c) => localName(c.name) === "rPr");
       const el: XmlElement = { name: u.run.name, attrs: { ...u.run.attrs }, children: rPr ? [cloneXml(rPr)] : [], text: "" };
-      out.push(el);
+      out.push({ el, path: u.token.path });
       open = { run: u.run, was, el, prev: child(u.was, "rPr") };
     }
     if (u.atom) {

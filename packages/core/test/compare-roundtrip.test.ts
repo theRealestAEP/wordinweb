@@ -240,14 +240,20 @@ describe("compareDocuments — accept/reject round trip", () => {
     expect(notes.map((n) => n.code)).toContain("no-common-paragraph");
   });
 
-  it("a hyperlink paragraph, coarsely, still round-trips", () => {
+  it("a hyperlink paragraph is diffed inside the link and round-trips", () => {
     const link = (text: string): string =>
       `<w:p><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:hyperlink></w:p>`;
     const { notes } = roundTrip(
       para("Before") + link("the quarterly report for the finance team"),
       para("Before") + link("the quarterly report for the accounting team"),
     );
-    expect(notes.map((n) => n.code)).toContain("coarse-paragraph");
+    expect(notes.map((n) => n.code)).not.toContain("coarse-paragraph");
+  });
+
+  it("round-trips words added to a content control", () => {
+    const control = (text: string): string =>
+      `<w:p><w:r><w:t xml:space="preserve">Name: </w:t></w:r><w:sdt><w:sdtPr><w:alias w:val="Name"/></w:sdtPr><w:sdtContent><w:r><w:t>${text}</w:t></w:r></w:sdtContent></w:sdt></w:p>`;
+    roundTrip(control("Jordan Rivera"), control("Jordan A. Rivera"));
   });
 
   it("comparing a document with itself changes nothing", () => {
@@ -449,5 +455,26 @@ describe("compareDocuments — a removed picture", () => {
     expect(id).toBeDefined();
     const target = back.documentRels.get(id!)?.target;
     expect(target && Array.from(back.media(target) ?? [])).toEqual(Array.from(png));
+  });
+});
+
+describe("compareDocuments — deleted field instructions", () => {
+  // A removed TOC entry's PAGEREF field kept w:instrText inside its w:del;
+  // Word requires w:delInstrText there and refused to open the file
+  // (wild-gatech in the compare benchmark).
+  const fieldPara = (page: string) =>
+    `<w:p><w:r><w:t xml:space="preserve">Chapter one </w:t></w:r>` +
+    `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGEREF _Toc1 \\h </w:instrText></w:r>` +
+    `<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${page}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>`;
+  it("strikes a removed paragraph's field instruction as w:delInstrText", () => {
+    const { merged } = roundTrip(para("Before.") + fieldPara("7") + para("After."), para("Before.") + para("After."));
+    const xml = DocxDocument.load(merged.save()).pkg.text("word/document.xml") ?? "";
+    expect(xml).toContain("<w:delInstrText");
+    expect(xml).not.toMatch(/<w:del [^>]*>(?:(?!<\/w:del>)[\s\S])*<w:instrText/);
+  });
+  it("strikes a field instruction removed from a kept paragraph", () => {
+    const { merged } = roundTrip(fieldPara("7"), para("Chapter one 7"));
+    const xml = DocxDocument.load(merged.save()).pkg.text("word/document.xml") ?? "";
+    expect(xml).not.toMatch(/<w:del [^>]*>(?:(?!<\/w:del>)[\s\S])*<w:instrText/);
   });
 });

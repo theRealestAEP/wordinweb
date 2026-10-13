@@ -434,3 +434,20 @@ describe("compare corpus — 20: a word glued to a differently formatted number"
     expect(revisionTexts(doc, "ins")).toEqual(["2"]);
   });
 });
+
+describe("compare corpus — 21: an edit inside a hyperlink", () => {
+  it("marks the word inside the link instead of rewriting the paragraph", () => {
+    // FAILURE MODE: a paragraph holding a hyperlink was struck and reinserted
+    // whole, because a revision may not wrap a w:hyperlink. The words inside
+    // are now diffed and the w:ins / w:del sit inside the link.
+    const link = (word: string) =>
+      `<w:p><w:r><w:t xml:space="preserve">Read </w:t></w:r><w:hyperlink r:id="rId9"><w:r><w:t xml:space="preserve">the ${word} report</w:t></w:r></w:hyperlink><w:r><w:t xml:space="preserve"> before Friday.</w:t></w:r></w:p>`;
+    const doc = compare(link("quarterly"), link("annual"));
+    expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
+    expect(revisionTexts(doc, "del")).toEqual(["quarterly "]);
+    const xml = DocxDocument.load(doc.save()).pkg.text("word/document.xml") ?? "";
+    // Exactly one link, holding the revisions.
+    expect((xml.match(/<w:hyperlink /g) ?? []).length).toBe(1);
+    expect(/<w:hyperlink [^>]*>(?:(?!<\/w:hyperlink>)[\s\S])*<w:del /.test(xml)).toBe(true);
+  });
+});
