@@ -339,3 +339,21 @@ describe("compare corpus — 14: punctuation is its own token", () => {
     expect(kindCounts(doc)).toEqual({ runFormat: 1 });
   });
 });
+
+describe("compare corpus — 15: the same text twice, aligned differently", () => {
+  it("removes the copy that went, and leaves the other alone", () => {
+    // FAILURE MODE (probe3-thai): the same paragraph justified and then left
+    // aligned. The fingerprint saw only text and style, so with the justified
+    // copy removed the matcher could anchor the survivor on the WRONG copy:
+    // the kept paragraph then showed an alignment change, and the paragraph
+    // that really went was the other one.
+    const T = "The journey of a thousand miles begins with a single step.";
+    const jc = (v: string) => `<w:jc w:val="${v}"/>`;
+    const doc = compare(
+      para("Intro") + para(T, { pPr: jc("both") }) + para("Second heading") + para(T, { pPr: jc("left") }) + para("End"),
+      para("Intro") + para(T, { pPr: jc("left") }) + para("End"),
+    );
+    expect(kindCounts(doc)).not.toHaveProperty("paragraphFormat");
+    expect(revisionTexts(doc, "del")).toEqual([T, "Second heading"]);
+  });
+});

@@ -254,7 +254,10 @@ function blockFingerprint(el: XmlElement): string {
     const pPr = child(el, "pPr");
     const style = child(pPr, "pStyle")?.attrs["w:val"] ?? "";
     const numPr = child(pPr, "numPr");
-    return `P\u0000${normalizeText(paragraphText(el))}\u0000${style}\u0000${numPr ? serializeXml(numPr) : ""}`;
+    // Alignment too: probe3-thai holds the same paragraph justified and then
+    // left-aligned, and without it the matcher anchored on the wrong copy.
+    const jc = child(pPr, "jc")?.attrs["w:val"] ?? "";
+    return `P\u0000${normalizeText(paragraphText(el))}\u0000${style}\u0000${numPr ? serializeXml(numPr) : ""}\u0000${jc}`;
   }
   if (ln === "tbl") return `T\u0000${normalizeText(paragraphText(el))}`;
   return `X\u0000${serializeXml(el)}`;
