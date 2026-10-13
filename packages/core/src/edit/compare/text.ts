@@ -30,6 +30,15 @@ export const COMPARE_TUNING = {
   /** Levenshtein ratio a short paragraph pair must reach instead of minDice. */
   minShortRatio: 0.8,
   /**
+   * Or the share of words a short pair has in common (Dice over words), which
+   * a one-word edit in a short heading or list item keeps at half or more
+   * ("Bullet one" / "Bullet updated", "Alignment and flow" / "Alignment and
+   * flow as amended") while its character ratio falls under minShortRatio.
+   * Below it, those came out struck and reinserted whole: 99% of the compare
+   * benchmark's whole-paragraph misses were paragraphs under five words.
+   */
+  minShortWordDice: 0.5,
+  /**
    * ABSOLUTE floor for the coalescing pass: a matched run shorter than this,
    * sitting between two changes in the inner word diff, is absorbed into the
    * surrounding change however small those changes are. This is the stopword
@@ -127,8 +136,9 @@ function levenshtein(a: string, b: string): number {
 /**
  * How alike two paragraphs are, in [0, 1]. Short paragraphs (under
  * COMPARE_TUNING.shortParagraphTokens words on EITHER side) are scored by
- * normalized Levenshtein ratio, because a bigram set that small is noise;
- * everything else is scored by Dice over word bigrams.
+ * the words they share or, when it is high, their normalized Levenshtein
+ * ratio, because a bigram set that small is noise; everything else is scored
+ * by Dice over word bigrams.
  *
  * The caller compares the result against `similarityFloor` for the same pair,
  * which is the threshold matching whichever measure was used.
@@ -142,7 +152,11 @@ export function similarity(a: string, b: string): number {
     const nb = normalizeText(b).toLowerCase();
     const longest = Math.max(na.length, nb.length);
     if (longest === 0) return 1;
-    return 1 - levenshtein(na, nb) / longest;
+    const ratio = 1 - levenshtein(na, nb) / longest;
+    // Either measure may carry the pair; scored on one scale whose floor is
+    // minShortWordDice, a ratio counts only once it reaches its own floor.
+    const words = dice(new Set(ta), new Set(tb));
+    return Math.max(words, ratio >= COMPARE_TUNING.minShortRatio ? ratio : 0);
   }
   return dice(bigrams(ta), bigrams(tb));
 }
@@ -151,7 +165,7 @@ export function similarity(a: string, b: string): number {
 export function similarityFloor(a: string, b: string): number {
   const la = similarityTokens(a).length;
   const lb = similarityTokens(b).length;
-  return isShortPair(la, lb) ? COMPARE_TUNING.minShortRatio : COMPARE_TUNING.minDice;
+  return isShortPair(la, lb) ? COMPARE_TUNING.minShortWordDice : COMPARE_TUNING.minDice;
 }
 
 function isShortPair(la: number, lb: number): boolean {

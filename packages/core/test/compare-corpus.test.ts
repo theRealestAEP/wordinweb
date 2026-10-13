@@ -461,3 +461,19 @@ describe("compare corpus — 22: words appended to a paragraph", () => {
     expect(revisionTexts(doc, "ins")).toEqual([" as replaced"]);
   });
 });
+
+describe("compare corpus — 23: a short list item edited beside a removed and an added paragraph", () => {
+  it("marks the changed word, not the whole item", () => {
+    // FAILURE MODE: the gap holds two leftovers on each side, so the
+    // one-leftover slot rule cannot pair the item, and its character ratio
+    // ("Bullet one" / "Bullet updated") is under the short-paragraph floor:
+    // it came out struck and reinserted whole.
+    const keep = "This paragraph stays exactly as it was in both documents.";
+    const doc = compare(
+      para(keep) + para("Bullet one") + para("Quarterly figures for the northern region were lower.") + para(keep + " Again."),
+      para(keep) + para("Bullet updated") + para("Shipping moves to a new carrier from next spring.") + para(keep + " Again."),
+    );
+    expect(revisionTexts(doc, "del")).toContain("one");
+    expect(revisionTexts(doc, "ins")).toContain("updated");
+  });
+});
