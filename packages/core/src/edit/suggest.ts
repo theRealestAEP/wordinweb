@@ -945,21 +945,31 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
   const parent = doc.findParentOf(pEl);
   if (!parent) return false;
   const idx = parent.children.indexOf(pEl);
-  const next = parent.children[idx + 1];
+  // Range markers between two paragraphs (a bookmark's end at body level)
+  // are not blocks: the paragraph after them is still the next one, and they
+  // move into the join with it.
+  let at = idx + 1;
+  while (at < parent.children.length && MARKERS.includes(localName(parent.children[at].name))) at++;
+  const next = parent.children[at];
   if (!next || localName(next.name) !== "p") {
-    const goes = gone === "del" ? ["pPr", "del", "moveFrom", ...MOVE_RANGES] : ["pPr", "ins", "moveTo", ...MOVE_RANGES];
-    // The editor's empty placeholder run is not content: it is never saved.
+    // Spelling and grammar marks go with the paragraph; the editor's empty
+    // placeholder run is not content either, it is never saved.
+    const goes = gone === "del" ? ["pPr", "del", "moveFrom", "proofErr", ...MOVE_RANGES] : ["pPr", "ins", "moveTo", "proofErr", ...MOVE_RANGES];
     if (pEl.children.some((c) => !goes.includes(localName(c.name)) && !isEmptyPlaceholder(c))) return false;
     parent.children.splice(idx, 1);
     dropEmptiedControl(doc, parent);
     return true;
   }
+  const between = parent.children.slice(idx + 1, at);
   const moved = next.children.filter((c) => localName(c.name) !== "pPr");
-  pEl.children.push(...moved);
-  parent.children.splice(idx + 1, 1);
+  pEl.children.push(...between, ...moved);
+  parent.children.splice(idx + 1, at - idx);
   carrySectionBreak(pEl, next);
   return true;
 }
+
+/** Range markers that may sit between two body paragraphs. */
+const MARKERS = ["bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "permStart", "permEnd", "proofErr"];
 
 /**
  * A section break lives in a paragraph's mark. Joined, the two paragraphs end

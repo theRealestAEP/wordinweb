@@ -375,6 +375,22 @@ describe("suggesting mode — review all", () => {
     expect(xml.match(/<w:sectPr>/g)?.length).toBe(1);
   });
 
+  it("accept-all joins a removed paragraph past a bookmark's end and its spelling marks", () => {
+    // A body-level bookmarkEnd hid the next paragraph, and the removed one's
+    // w:proofErr marks counted as content: it stayed as an empty paragraph
+    // (compare benchmark, wild3-template-nps-science-report with blocks moved).
+    const A = `w:author="B" w:date="2026-02-01T00:00:00Z"`;
+    const doc = loadDoc(
+      `<w:p><w:pPr><w:rPr><w:del w:id="1" ${A}/></w:rPr></w:pPr><w:bookmarkStart w:id="0" w:name="top"/><w:proofErr w:type="spellStart"/>` +
+        `<w:del w:id="2" ${A}><w:r><w:delText>Gone.</w:delText></w:r></w:del><w:proofErr w:type="spellEnd"/></w:p>` +
+        `<w:bookmarkEnd w:id="0"/>` +
+        p("Kept."),
+    );
+    acceptAllRevisions(doc);
+    expect(doc.sections[0].blocks.filter((b) => b.type === "paragraph")).toHaveLength(1);
+    expect(finalText(doc, 0)).toBe("Kept.");
+  });
+
   it("puts a paragraph mark's rPr ahead of its sectPr", () => {
     const doc = loadDoc(`<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>` + p("After"));
     markParagraphGlyph(paraEl(doc, 0), "ins", meta());
