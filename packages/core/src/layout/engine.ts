@@ -3466,9 +3466,9 @@ class Engine {
       // routing measured from Word PDFs (phase23 + wild2-legal-ca-agreement p2): a literal
       // Unicode bullet declared in a symbol-encoded face falls back to
       // Microsoft JhengHei (17.0pt lines at 11pt); a PUA bullet in Symbol
-      // keeps Symbol's hhea 1.2734em (14.0pt lines among 13.5pt Calibri;
-      // 10pt Symbol bullet = 12.25pt line among TNR 11.5pt); other symbol
-      // faces (Wingdings/Webdings) measure the body font's line.
+      // keeps Symbol's ascent + descent, 1.2251em (10pt Symbol bullet =
+      // 12.25pt line among TNR 11.5pt; 11pt = 13.5pt among TNR 11pt); other
+      // symbol faces (Wingdings/Webdings) measure the body font's line.
       let metricsFace: string | undefined;
       if (code >= 0x100 && !(code >= 0xf000 && code <= 0xf0ff)) {
         metricsFace = "Microsoft JhengHei";
@@ -7025,7 +7025,14 @@ class Engine {
     // writes tcW on every cell it serializes. Generator files often carry a
     // plausible-looking grid with no tcW anywhere - Word ignores it and
     // autofits, so must we.
-    const cellsDeclareWidths = tbl.rows.some((r) => r.cells.some((c) => c.props.width !== undefined));
+    // A pct tcW counts too: the term sheet (wild-termsheet-behinddoc) gives
+    // every cell tcW 970 / 4030 pct over a matching [1981, 8229]tw grid, and
+    // Word keeps that 19.4% / 80.6% split. Treated as width-less, the table
+    // content-autofit instead and squeezed the label column to its longest
+    // word, 28px narrower than Word's, so every row wrapped differently.
+    const cellsDeclareWidths = tbl.rows.some((r) =>
+      r.cells.some((c) => c.props.width !== undefined || c.props.widthPct !== undefined),
+    );
     // Word retains the cached grid for a right-aligned percentage directory
     // table containing a hyperlink when every cell explicitly carries
     // tcW=auto. Preserve that explicit-auto signal; ordinary form grids and
@@ -8728,7 +8735,18 @@ class Engine {
       if (boundaryPara === undefined) continue;
       const above = keptTops.filter((t) => paraOfTop(part.keep, t) === boundaryPara);
       const below = restTops.filter((t) => paraOfTop(part.rest, t) === boundaryPara);
-      if (below.length !== 1 || above.length === 0) continue;
+      if (above.length === 0) continue;
+      // An orphan - the paragraph's lone first line above the cut - moves
+      // down too (wild-termsheet-behinddoc p2/p3: the cell's "It is
+      // hilefilonula…" paragraph starts page 3 in Word; with an explicit
+      // widowControl=0 on it, Word keeps that line on page 2).
+      if (above.length === 1 && below.length > 1) {
+        const moved = part.keep.filter((it) => topOf(it) >= above[0] - 0.01);
+        part.keep = part.keep.filter((it) => topOf(it) < above[0] - 0.01);
+        part.rest = [...moved, ...part.rest];
+        continue;
+      }
+      if (below.length !== 1) continue;
       // ≥3 lines above: pull one (2+/2). 1-2 above: the paragraph cannot
       // split legally (widow or orphan either way) — move it whole.
       const moveTop = above.length >= 3 ? above[above.length - 1] : above[0];

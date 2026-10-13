@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { strFromU8, unzipSync } from "fflate";
 import { DocxDocument } from "../src/docx.js";
 import { layoutDocument, layoutDocumentAsync } from "../src/layout/engine.js";
-import { ApproxMeasurer, type TextMeasurer } from "../src/layout/measure.js";
+import { ApproxMeasurer, CanvasMeasurer, type TextMeasurer } from "../src/layout/measure.js";
 import { formatNumber } from "../src/parse/numbering.js";
 import { makeDocx, wrapDocument, p, W_NS } from "./helpers.js";
 import { layoutMath } from "../src/layout/math.js";
@@ -5477,5 +5477,93 @@ describe("percentage table widths above 100%", () => {
 
   it("still fits a 100% table to the column", () => {
     expect(tableWidth(5000)).toBeLessThanOrEqual(625);
+  });
+});
+
+describe("term sheet parity (wild-termsheet-behinddoc)", () => {
+  const LETTER =
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>`;
+
+  it("keeps a pct tcW column split instead of content-autofitting it", () => {
+    // tblW 5454 pct over a [1981, 8229]tw grid, every cell tcW 970 / 4030 pct.
+    // Word keeps the 1981tw = 132.07px label column; content autofit squeezed
+    // it to the label's width because the body cell's text is far wider.
+    const body = Array.from({ length: 120 }, (_, i) => `word${i}`).join(" ");
+    const row = (label: string, text: string) =>
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="970" w:type="pct"/></w:tcPr><w:p><w:r><w:t>${label}</w:t></w:r></w:p></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="4030" w:type="pct"/></w:tcPr><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:tc></w:tr>`;
+    const table =
+      `<w:tbl><w:tblPr><w:tblW w:w="5454" w:type="pct"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="1981"/><w:gridCol w:w="8229"/></w:tblGrid>${row("LABEL", body)}</w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(table + p("After") + LETTER) });
+    const label = textItem(result, "LABEL");
+    const first = result.pages[0].items.find((i) => i.kind === "text" && i.text.startsWith("word0"));
+    if (first?.kind !== "text") throw new Error("no body text");
+    expect(first.x - label.x).toBeCloseTo(1981 / 15, 0);
+  });
+
+  it("moves a split row's lone first paragraph line to the next page", () => {
+    // Word's orphan control inside a row that breaks across pages: the term
+    // sheet's "It is hilefilonula" paragraph starts page 3 in Word, and stays
+    // on page 2 only when the paragraph declares widowControl=0.
+    const lines = (tag: string, n: number) =>
+      Array.from({ length: n }, (_, i) => `<w:r><w:t>${tag} ${i}</w:t>${i < n - 1 ? "<w:br/>" : ""}</w:r>`).join("");
+    const row = (betaPPr: string) =>
+      `<w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc>` +
+      `<w:p>${lines("alpha", 5)}</w:p><w:p>${betaPPr}${lines("beta", 4)}</w:p></w:tc></w:tr></w:tbl>`;
+    const section =
+      `<w:sectPr><w:pgSz w:w="12240" w:h="3600"/>` +
+      `<w:pgMar w:top="360" w:right="720" w:bottom="360" w:left="720"/></w:sectPr>`;
+    const pageOf = (result: ReturnType<typeof layoutDocument>, text: string) =>
+      result.pages.findIndex((_, i) => pageText(result, i).includes(text));
+    // Find the filler count that leaves exactly beta's first line on page 1
+    // when widow control is off, so the test does not depend on line metrics.
+    let filler: string | undefined;
+    for (let k = 0; k < 12 && filler === undefined; k++) {
+      const f = Array.from({ length: k }, (_, i) => p(`filler ${i}`)).join("");
+      const { result } = layout({
+        "word/document.xml": wrapDocument(f + row(`<w:pPr><w:widowControl w:val="0"/></w:pPr>`) + section),
+      });
+      if (pageOf(result, "alpha 4") === 0 && pageOf(result, "beta 0") === 0 && pageOf(result, "beta 1") === 1) filler = f;
+    }
+    expect(filler).toBeDefined();
+    const { result } = layout({ "word/document.xml": wrapDocument(filler + row("") + section) });
+    expect(pageOf(result, "alpha 4")).toBe(0);
+    expect(pageOf(result, "beta 0")).toBe(1);
+  });
+
+  it("sizes an 11pt Symbol bullet line at 13.5pt among 11pt Times New Roman", () => {
+    // Word's PDF of the term sheet: an 11pt Symbol bullet line runs 13.5pt
+    // (Symbol's ascent + descent), not 14.0pt (+ its 0.048em line gap). Each
+    // bullet item gained 0.7px, so the list ended 2.8px low.
+    class FakeOffscreenCanvas {
+      getContext() {
+        return { font: "", measureText: (text: string) => ({ width: text.length * 6 }) };
+      }
+    }
+    vi.stubGlobal("OffscreenCanvas", FakeOffscreenCanvas);
+    try {
+      const numbering =
+        `<?xml version="1.0"?><w:numbering ${W_NS}>` +
+        `<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/>` +
+        `<w:numFmt w:val="bullet"/><w:lvlText w:val="&#xF0B7;"/><w:lvlJc w:val="left"/>` +
+        `<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>` +
+        `<w:rPr><w:rFonts w:ascii="Symbol" w:hAnsi="Symbol"/></w:rPr></w:lvl></w:abstractNum>` +
+        `<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>`;
+      const tnr = `<w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="22"/></w:rPr>`;
+      const bullet =
+        `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>${tnr}</w:pPr>` +
+        `<w:r>${tnr}<w:t>item</w:t></w:r></w:p>`;
+      const next = `<w:p><w:pPr>${tnr}</w:pPr><w:r>${tnr}<w:t>next</w:t></w:r></w:p>`;
+      const doc = DocxDocument.load(
+        makeDocx({ "word/document.xml": wrapDocument(bullet + next + LETTER), "word/numbering.xml": numbering }),
+      );
+      const result = layoutDocument(doc, { measurer: new CanvasMeasurer() });
+      const pitch = textItem(result, "next").lineTop - textItem(result, "item").lineTop;
+      expect(pitch).toBeCloseTo((13.5 * 96) / 72, 1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -878,6 +878,8 @@ export interface Paragraph {
 export interface TableCellProps {
   /** Preferred width px (from tcW when dxa). */
   width?: number;
+  /** Preferred width as a fraction of the table width (from tcW when pct). */
+  widthPct?: number;
   /** The source explicitly declares tcW type="auto" (distinct from no tcW). */
   widthAuto?: boolean;
   gridSpan: number;

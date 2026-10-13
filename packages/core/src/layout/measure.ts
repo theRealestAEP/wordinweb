@@ -154,7 +154,11 @@ const WORD_FONT_METRICS: Record<string, { asc: number; desc: number; gap: number
   // lineGap 99 / upem 2048 = 1.2734em (14.0pt at 11pt - phase23's sub-bullet
   // lists run 14.0pt/line among 13.5pt Calibri text).
   symbol: { asc: 1.005371, desc: 0.219727, gap: 0.04834 },
-  symbolmt: { asc: 1.005371, desc: 0.219727, gap: 0.04834 },
+  // A Symbol bullet LABEL (the engine's metrics face) sizes its line without
+  // the lineGap: Word runs an 11pt bullet at 13.5pt among 11pt Times New
+  // Roman (wild-termsheet-behinddoc) and a 10pt one at 12.25pt, both
+  // asc + desc; with the gap they would be 14.0pt and 12.75pt.
+  symbolmt: { asc: 1.005371, desc: 0.219727, gap: 0 },
   "pingfang sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   "songti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },
   "heiti sc": { asc: 2.2700, desc: 0.7627, gap: 0 },

@@ -2658,6 +2658,11 @@ function parseCell(tc: XmlElement, ctx: DocParseContext): TableCell {
     if (tcW && attr(tcW, "type") === "dxa") {
       const w = intAttr(tcW, "w");
       if (w) props.width = twipsToPx(w);
+    } else if (tcW && attr(tcW, "type") === "pct") {
+      // Same encoding as tblW pct: "NN%" or fiftieths of a percent.
+      const raw = attr(tcW, "w");
+      const num = raw !== undefined ? parseFloat(raw) : NaN;
+      if (Number.isFinite(num) && num > 0) props.widthPct = raw!.trim().endsWith("%") ? num / 100 : num / 5000;
     } else if (tcW && attr(tcW, "type") === "auto") {
       props.widthAuto = true;
     }
