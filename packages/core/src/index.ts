@@ -347,6 +347,7 @@ export { documentTextStatistics } from "./word-count.js";
 export type { TextStatistics } from "./word-count.js";
 export { deleteMath, linearizeMath, parseMathLinear, setMathLinear, moveMath, insertMathAt, mathLinearOf } from "./edit/math.js";
 export { printPages, buildPrintHtml } from "./render/dom.js";
+export { renderForPrint } from "./render/print.js";
 export type { FindMatch, FindOptions, FindStory, ReplaceAllResult, ReplaceAllCompilation, ReplaceIntentBody, WireRange } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";

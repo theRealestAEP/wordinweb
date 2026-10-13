@@ -840,6 +840,40 @@ export function renderToDom(
 }
 
 /**
+ * WMF and EMF images convert after renderToDom returns and set their src when
+ * done. Printing has to wait for them, so each conversion is tracked here.
+ */
+const pendingPaints = new Set<Promise<unknown>>();
+
+function trackPaint(work: Promise<unknown>): void {
+  pendingPaints.add(work);
+  void work.finally(() => pendingPaints.delete(work));
+}
+
+/** Resolves once every image conversion started by a render has finished. */
+export async function paintsSettled(): Promise<void> {
+  while (pendingPaints.size > 0) await Promise.allSettled([...pendingPaints]);
+}
+
+/**
+ * The print rules: one sheet per page at the document's page size, screen
+ * chrome (shadows, gaps, comment balloons) stripped.
+ */
+export function printStylesheet(pageWidthPx: number, pageHeightPx: number): string {
+  return `
+    @page { size: ${pageWidthPx / 96}in ${pageHeightPx / 96}in; margin: 0; }
+    html, body { margin: 0; padding: 0; }
+    .dxw-pages { display: block !important; padding: 0 !important; gap: 0 !important; }
+    .dxw-pages, .dxw-pages * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
+    .dxw-page { box-shadow: none !important; margin: 0 !important; break-after: page; }
+    .dxw-comment-card, .dxw-hf-marker { display: none !important; }
+  `;
+}
+
+/**
  * Build a standalone print document (page DOM plus the host page's styles,
  * screen chrome stripped) as an HTML string. Shared by the browser print
  * path and hosts that render the pages elsewhere (e.g. a desktop shell's
@@ -851,17 +885,7 @@ export function buildPrintHtml(root: HTMLElement, pageWidthPx: number, pageHeigh
   for (const node of Array.from(document.head.querySelectorAll("style, link[rel=stylesheet]"))) {
     head.push((node as HTMLElement).outerHTML);
   }
-  head.push(`<style>
-    @page { size: ${pageWidthPx / 96}in ${pageHeightPx / 96}in; margin: 0; }
-    html, body { margin: 0; padding: 0; }
-    .dxw-pages { display: block !important; padding: 0 !important; gap: 0 !important; }
-    .dxw-pages, .dxw-pages * {
-      -webkit-print-color-adjust: exact !important;
-      print-color-adjust: exact !important;
-    }
-    .dxw-page { box-shadow: none !important; margin: 0 !important; break-after: page; }
-    .dxw-comment-card, .dxw-hf-marker { display: none !important; }
-  </style>`);
+  head.push(`<style>${printStylesheet(pageWidthPx, pageHeightPx)}</style>`);
   return `<!doctype html><html><head>${head.join("")}</head><body>${root.outerHTML}</body></html>`;
 }
 
@@ -2351,13 +2375,13 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
         if (cachedWmf) {
           decoded = cachedWmf;
         } else {
-          void import("./wmf.js").then(({ renderWmf }) => {
+          trackPaint(import("./wmf.js").then(({ renderWmf }) => {
             const url = renderWmf(bytes, item.width, item.height);
             if (url) {
               setDocDerivedSrc(doc, wmfKey, url);
               img.src = url;
             }
-          });
+          }));
         }
       } else if (ext === "emf") {
         const emfKey = `emf:${item.part}`;
@@ -2366,14 +2390,14 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
           decoded = cachedEmf;
         } else {
           const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-          void import("emf-converter")
+          trackPaint(import("emf-converter")
             .then(({ convertEmfToDataUrl }) => convertEmfToDataUrl(buf))
             .then((url) => {
               if (url) {
                 setDocDerivedSrc(doc, emfKey, url);
                 img.src = url;
               }
-            });
+            }));
         }
       }
       if (decoded) {
