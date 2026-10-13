@@ -391,6 +391,40 @@ describe("suggesting mode — review all", () => {
     expect(finalText(doc, 0)).toBe("Kept.");
   });
 
+  it("accept-all removes a paragraph holding bookmarks, keeping the bookmarks", () => {
+    // Its bookmark markers counted as content: the paragraph stayed as a
+    // blank line before the table (wild-hamburg with blocks moved).
+    const A = `w:author="B" w:date="2026-02-01T00:00:00Z"`;
+    const table = `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`;
+    const doc = loadDoc(
+      p("Before.") +
+        `<w:p><w:pPr><w:rPr><w:del w:id="1" ${A}/></w:rPr></w:pPr><w:bookmarkStart w:id="5" w:name="_Toc1"/>` +
+        `<w:del w:id="2" ${A}><w:r><w:delText>Gone.</w:delText></w:r></w:del><w:bookmarkEnd w:id="5"/></w:p>` +
+        table +
+        p("After."),
+    );
+    acceptAllRevisions(doc);
+    const xml = serializeXml(doc.docRoot);
+    expect(doc.sections[0].blocks.filter((b) => b.type === "paragraph")).toHaveLength(2);
+    expect(xml).toContain('<w:bookmarkStart w:id="5" w:name="_Toc1"/><w:bookmarkEnd w:id="5"/><w:tbl>');
+  });
+
+  it("accept-all removes a whole content control whose paragraphs hold links", () => {
+    // A paragraph whose deleted text sat inside a w:hyperlink did not count as
+    // all deleted, so the control kept an empty paragraph (wild-athabasca's
+    // table of contents with blocks moved).
+    const A = `w:author="B" w:date="2026-02-01T00:00:00Z"`;
+    const entry = (t: string, id: number) =>
+      `<w:p><w:pPr><w:rPr><w:del w:id="${id}" ${A}/></w:rPr></w:pPr><w:hyperlink w:anchor="_Toc${id}"><w:del w:id="${id + 50}" ${A}><w:r><w:delText>${t}</w:delText></w:r></w:del></w:hyperlink></w:p>`;
+    const doc = loadDoc(
+      p("Before.") + `<w:sdt><w:sdtPr><w:id w:val="9"/></w:sdtPr><w:sdtContent>${entry("Heading one", 1)}${entry("Heading two", 2)}</w:sdtContent></w:sdt>` + p("After."),
+    );
+    acceptAllRevisions(doc);
+    const xml = serializeXml(doc.docRoot);
+    expect(xml).not.toContain("<w:sdt>");
+    expect(doc.sections[0].blocks.filter((b) => b.type === "paragraph")).toHaveLength(2);
+  });
+
   it("puts a paragraph mark's rPr ahead of its sectPr", () => {
     const doc = loadDoc(`<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>` + p("After"));
     markParagraphGlyph(paraEl(doc, 0), "ins", meta());

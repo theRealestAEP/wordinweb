@@ -954,9 +954,18 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
   if (!next || localName(next.name) !== "p") {
     // Spelling and grammar marks go with the paragraph; the editor's empty
     // placeholder run is not content either, it is never saved.
+    // A bookmark or comment range stays, lifted out to where the paragraph
+    // was: range markers may stand between blocks.
     const goes = gone === "del" ? ["pPr", "del", "moveFrom", "proofErr", ...MOVE_RANGES] : ["pPr", "ins", "moveTo", "proofErr", ...MOVE_RANGES];
-    if (pEl.children.some((c) => !goes.includes(localName(c.name)) && !isEmptyPlaceholder(c))) return false;
-    parent.children.splice(idx, 1);
+    const stays = MARKERS.filter((m) => m !== "proofErr");
+    // A hyperlink or simple field whose content is all `gone` goes as well.
+    const removable = (c: XmlElement): boolean =>
+      goes.includes(localName(c.name)) ||
+      stays.includes(localName(c.name)) ||
+      isEmptyPlaceholder(c) ||
+      (RUN_CONTAINERS.includes(localName(c.name)) && c.children.every(removable));
+    if (!pEl.children.every(removable)) return false;
+    parent.children.splice(idx, 1, ...pEl.children.filter((c) => stays.includes(localName(c.name))));
     dropEmptiedControl(doc, parent);
     return true;
   }
@@ -1372,9 +1381,12 @@ function dropEmptiedControl(doc: DocxDocument, container: XmlElement): void {
   const ln = localName(container.name);
   const control = ln === "sdtContent" ? doc.findParentOf(container) : ln === "customXml" ? container : undefined;
   if (!control) return;
-  const left = container.children.filter((c) => !["customXmlPr"].includes(localName(c.name)));
-  if (left.length > 0) return;
+  // Range markers left inside (a bookmark lifted out of a removed paragraph)
+  // are no content: they move out to where the control was.
+  const left = container.children.filter((c) => localName(c.name) !== "customXmlPr");
+  if (left.some((c) => !MARKERS.includes(localName(c.name)))) return;
   const holder = doc.findParentOf(control);
-  removeEl(doc, control);
-  if (holder) dropEmptiedControl(doc, holder);
+  if (!holder) return;
+  holder.children.splice(holder.children.indexOf(control), 1, ...left.filter((c) => localName(c.name) !== "proofErr"));
+  dropEmptiedControl(doc, holder);
 }
