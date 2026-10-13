@@ -70,6 +70,11 @@ export interface ParagraphContent {
 
 export interface ReadOptions {
   /**
+   * A note reference's identity: which note pairing it belongs to (see
+   * compareNotes). Without it a reference keys on its kind alone.
+   */
+  noteKey?: (ref: XmlElement) => string;
+  /**
    * Whether a whitespace-only difference counts. With it off, a token keys on
    * its word alone, so "double space becomes single" leaves the paragraph
    * matching — Word offers the same switch. It is lossy on purpose: a
@@ -91,13 +96,16 @@ const CONTAINER_PROPS = new Set(["pPr", "sdtPr", "sdtEndPr", "smartTagPr", "cust
  * text is then compared inside (emitEqualSpan); a changed shape, size or
  * picture still keys apart.
  */
-function atomKey(atom: XmlElement): string {
-  // A note reference keys without its id: notes are paired by content
-  // (compareNotes), and the two documents may number them differently.
+function atomKey(atom: XmlElement, noteKey?: (ref: XmlElement) => string): string {
+  // A note reference keys on its note's PAIRING, not its id: the two
+  // documents may number the same note differently, and two references match
+  // only when compareNotes paired their notes. Keyed by position alone, a
+  // moved note's reference matched another note's, and reject-all kept the
+  // reference while emptying the note it pointed to.
   const ln = localName(atom.name);
   if (ln === "footnoteReference" || ln === "endnoteReference") {
     const { "w:id": _id, ...rest } = atom.attrs;
-    return serializeXml({ ...atom, attrs: rest });
+    return serializeXml({ ...atom, attrs: rest }) + (noteKey ? "\u0000" + noteKey(atom) : "");
   }
   const strip = (e: XmlElement): XmlElement =>
     localName(e.name) === "txbxContent" ? { ...e, children: [], text: "" } : { ...e, children: e.children.map(strip) };
@@ -216,7 +224,7 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
           continue;
         }
         flush();
-        push({ key: "a\u0000" + atomKey(rc), text: "", run: cEl, atom: rc, path });
+        push({ key: "a\u0000" + atomKey(rc, options.noteKey), text: "", run: cEl, atom: rc, path });
       }
     }
   };

@@ -16,7 +16,7 @@ import {
   recordTableGridChange,
   revisionWrapper,
 } from "../suggest.js";
-import { CONTAINERS, ContentToken, Placed, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
+import { CONTAINERS, ContentToken, Placed, ReadOptions, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
 import { histogramMatch } from "./histogram.js";
 import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./text.js";
 
@@ -296,14 +296,33 @@ function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merg
   const oNotes = inOrder(original, oRoot);
   const rNotes = inOrder(merged, mRoot);
   const text = (n: XmlElement): string => normalizeText(paragraphText(n));
-  // Anchors on text, then a single leftover on each side of a slot is that
-  // note, edited (the same rule as paragraphs).
+  // A note with the same text on both sides is the same note wherever its
+  // reference now sits: a note's place is its reference's, so moving the
+  // paragraph that holds it must not unpair it. Equal texts pair first, in
+  // reference order.
   const pairs: [number, number][] = [];
+  const waiting = new Map<string, number[]>();
+  rNotes.forEach((n, j) => {
+    const list = waiting.get(text(n));
+    if (list) list.push(j);
+    else waiting.set(text(n), [j]);
+  });
+  oNotes.forEach((n, i) => {
+    const j = waiting.get(text(n))?.shift();
+    if (j !== undefined) pairs.push([i, j]);
+  });
+  // The rest anchor in reference order, and a single leftover on each side of
+  // a slot is that note, edited (the same rule as paragraphs).
+  const exactO = new Set(pairs.map((p) => p[0]));
+  const exactR = new Set(pairs.map((p) => p[1]));
+  const oRest = oNotes.map((_, i) => i).filter((i) => !exactO.has(i));
+  const rRest = rNotes.map((_, j) => j).filter((j) => !exactR.has(j));
   let oAt = 0;
   let rAt = 0;
-  for (const a of [...histogramMatch(oNotes.map(text), rNotes.map(text)), { a: oNotes.length, b: rNotes.length }]) {
-    if (a.a - oAt === 1 && a.b - rAt === 1) pairs.push([oAt, rAt]);
-    if (a.a < oNotes.length && a.b < rNotes.length) pairs.push([a.a, a.b]);
+  const rest = histogramMatch(oRest.map((i) => text(oNotes[i])), rRest.map((j) => text(rNotes[j])));
+  for (const a of [...rest, { a: oRest.length, b: rRest.length }]) {
+    if (a.a - oAt === 1 && a.b - rAt === 1) pairs.push([oRest[oAt], rRest[rAt]]);
+    if (a.a < oRest.length && a.b < rRest.length) pairs.push([oRest[a.a], rRest[a.b]]);
     oAt = a.a + 1;
     rAt = a.b + 1;
   }
@@ -393,7 +412,10 @@ function reportUncomparedParts(original: DocxDocument, revised: DocxDocument, ct
  *     unreadable output.
  */
 function alignBlocks(oBlocks: XmlElement[], rBlocks: XmlElement[], ctx: Ctx): Entry[] {
-  const anchors = histogramMatch(oBlocks.map(blockFingerprint), rBlocks.map(blockFingerprint));
+  const anchors = histogramMatch(
+    oBlocks.map((el) => blockFingerprint(el, ctx.original)),
+    rBlocks.map((el) => blockFingerprint(el, ctx.doc)),
+  );
   const entries: Entry[] = [];
   let oAt = 0;
   let rAt = 0;
@@ -415,7 +437,7 @@ function alignBlocks(oBlocks: XmlElement[], rBlocks: XmlElement[], ctx: Ctx): En
  * numbering, and the fingerprint carries both, so histogram's lowest-
  * occurrence rule has something to separate them by.
  */
-function blockFingerprint(el: XmlElement): string {
+function blockFingerprint(el: XmlElement, doc: DocxDocument): string {
   const ln = localName(el.name);
   if (ln === "p") {
     const pPr = child(el, "pPr");
@@ -424,7 +446,9 @@ function blockFingerprint(el: XmlElement): string {
     // Alignment too: probe3-thai holds the same paragraph justified and then
     // left-aligned, and without it the matcher anchored on the wrong copy.
     const jc = child(pPr, "jc")?.attrs["w:val"] ?? "";
-    return `P\u0000${normalizeText(paragraphText(el))}\u0000${style}\u0000${numPr ? serializeXml(numPr) : ""}\u0000${jc}`;
+    // And the section it ends, if any: see pairable.
+    const sect = sectionKey(el, doc);
+    return `P\u0000${normalizeText(paragraphText(el))}\u0000${style}\u0000${numPr ? serializeXml(numPr) : ""}\u0000${jc}\u0000${sect}`;
   }
   if (ln === "tbl") return `T\u0000${normalizeText(paragraphText(el))}`;
   return `X\u0000${serializeXml(el)}`;
@@ -589,7 +613,7 @@ function resolveGap(
     const [jLo, jHi] = span(i);
     for (let j = jLo; j < jHi; j++) {
       if (rUsed.has(j)) continue;
-      if (localName(oBlocks[i].name) !== localName(rBlocks[j].name)) continue;
+      if (!pairable(oBlocks[i], rBlocks[j], ctx)) continue;
       const a = paragraphText(oBlocks[i]);
       const b = paragraphText(rBlocks[j]);
       const score = similarity(a, b);
@@ -624,7 +648,7 @@ function resolveGap(
     const rs: number[] = [];
     for (let i = oFrom; i < p.o; i++) if (!oUsed.has(i)) os.push(i);
     for (let j = rFrom; j < p.r; j++) if (!rUsed.has(j)) rs.push(j);
-    if (os.length === 1 && rs.length === 1 && sameShape(oBlocks[os[0]], rBlocks[rs[0]])) {
+    if (os.length === 1 && rs.length === 1 && sameShape(oBlocks[os[0]], rBlocks[rs[0]], ctx)) {
       accept({ kind: "pair", o: os[0], r: rs[0], other: -1 });
       oUsed.add(os[0]);
       rUsed.add(rs[0]);
@@ -648,7 +672,7 @@ function resolveGap(
     for (let i = oLo; i < oHi && out.length === 0; i++) {
       if (oUsed.has(i)) continue;
       for (let j = rLo; j < rHi; j++) {
-        if (rUsed.has(j) || localName(oBlocks[i].name) !== localName(rBlocks[j].name)) continue;
+        if (rUsed.has(j) || !pairable(oBlocks[i], rBlocks[j], ctx)) continue;
         accept({ kind: "pair", o: i, r: j, other: -1 });
         break;
       }
@@ -658,11 +682,38 @@ function resolveGap(
 }
 
 /**
+ * Two blocks of one kind that may be paired and diffed in place. A paragraph
+ * that ends a section pairs only with one ending the SAME section: the break
+ * lives in the paragraph mark, a pPrChange cannot carry it, and a sectPrChange
+ * cannot carry header or footer references. Paired anyway, the original's
+ * section was lost on reject-all (probe-headerheight with blocks moved: six
+ * empty section-break paragraphs shared one fingerprint, the H721 break was
+ * anchored to the H720 one, and its header went missing). A changed break
+ * shows as struck and reinserted, which reviews back to either side.
+ */
+function pairable(a: XmlElement, b: XmlElement, ctx: Ctx): boolean {
+  if (localName(a.name) !== localName(b.name)) return false;
+  if (!isParagraph(a)) return true;
+  return sectionKey(a, ctx.original) === sectionKey(b, ctx.doc);
+}
+
+/**
+ * The section a paragraph ends, as its w:sectPr with each relationship id
+ * replaced by the part it points to, so the two documents' ids compare; "" for
+ * a paragraph that ends no section.
+ */
+function sectionKey(el: XmlElement, doc: DocxDocument): string {
+  const sectPr = child(child(el, "pPr"), "sectPr");
+  if (!sectPr) return "";
+  return serializeXml(sectPr).replace(/r:id="([^"]*)"/g, (_, id: string) => `r:id="${doc.documentRels.get(id)?.target ?? id}"`);
+}
+
+/**
  * Two paragraphs, two tables, two block-level content controls (or custom XML
  * elements), or two table rows with the same number of cells.
  */
-function sameShape(a: XmlElement, b: XmlElement): boolean {
-  if (isParagraph(a) && isParagraph(b)) return true;
+function sameShape(a: XmlElement, b: XmlElement, ctx: Ctx): boolean {
+  if (isParagraph(a) && isParagraph(b)) return pairable(a, b, ctx);
   if (localName(a.name) === localName(b.name) && ["tbl", "sdt", "customXml"].includes(localName(a.name))) return true;
   const cells = (tr: XmlElement) => tr.children.filter((c) => localName(c.name) === "tc").length;
   return localName(a.name) === "tr" && localName(b.name) === "tr" && cells(a) === cells(b);
@@ -674,12 +725,26 @@ function sameShape(a: XmlElement, b: XmlElement): boolean {
  * a split or a merge emit ONE paragraph-mark revision and no text revision,
  * and what makes rejecting it restore the original byte for byte.
  */
+/**
+ * How to read a paragraph from one side. A note reference keys on the revised
+ * id its note maps to: the original's through compareNotes' pairing (a removed
+ * note's copy has an id no revised reference carries), the revised's as is.
+ */
+function readOptions(ctx: Ctx, original: boolean): ReadOptions {
+  const noteKey = (ref: XmlElement): string => {
+    const kind = localName(ref.name) === "footnoteReference" ? "footnote" : "endnote";
+    const id = ref.attrs["w:id"];
+    return original ? `${ctx.noteIds[kind].get(id) ?? `original ${id}`}` : id;
+  };
+  return { whitespace: ctx.whitespace, noteKey };
+}
+
 function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx): boolean {
   const key = (els: XmlElement[]): string | null => {
     const parts: string[] = [];
     for (const el of els) {
       if (localName(el.name) !== "p") return null;
-      const content = readParagraph(el, { whitespace: ctx.whitespace });
+      const content = readParagraph(el, readOptions(ctx, oEls.includes(el)));
       if (!content.inlineDiffable) return null;
       for (const token of content.tokens) {
         const props = token.pieces ? token.pieces.map((p) => `${p.text.length}:${runPropsKey(p.run)}`).join("|") : runPropsKey(token.run);
@@ -872,8 +937,8 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
 
   if (ctx.formatting) alignParagraphProps(rEl, child(rEl, "pPr"), child(oEl, "pPr"), ctx);
 
-  const oc = readParagraph(oEl, { whitespace: ctx.whitespace });
-  const rc = readParagraph(rEl, { whitespace: ctx.whitespace });
+  const oc = readParagraph(oEl, readOptions(ctx, true));
+  const rc = readParagraph(rEl, readOptions(ctx, false));
   if (!oc.inlineDiffable || !rc.inlineDiffable) {
     if (oc.text !== rc.text || serializeXml(stripProps(oEl)) !== serializeXml(stripProps(rEl))) {
       // Too structured to rebuild safely: strike the old content whole and
