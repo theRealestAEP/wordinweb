@@ -27,10 +27,16 @@ export interface ContentToken {
   text: string;
   /** The `w:r` this token came from. */
   run: XmlElement;
-  /** Word tokens: the `w:t` and the slice inside it. */
+  /** Word tokens: the `w:t` and the slice inside it (the first piece's). */
   t?: XmlElement;
   start?: number;
   end?: number;
+  /**
+   * Word tokens: every `w:t` slice the word covers, in order. A word Word
+   * split across runs that share the same properties ("Purp" + "ose") is
+   * one token with two pieces, so it matches "Purpose" on the other side.
+   */
+  pieces?: { run: XmlElement; t: XmlElement; start: number; end: number; text: string }[];
   /** Atom tokens: the element itself. */
   atom?: XmlElement;
   /**
@@ -67,6 +73,8 @@ export interface ReadOptions {
   whitespace?: boolean;
 }
 
+const WORD_CHAR = /[\p{L}\p{M}\p{N}]/u;
+
 /** Read a `w:p` into the token sequence the inner diff aligns. */
 export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): ParagraphContent {
   const keyOf = options.whitespace === false ? (word: string): string => word.trimEnd() : (word: string): string => word;
@@ -82,14 +90,67 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
     tokens.push(token);
   };
 
+  // Text is tokenized per SEGMENT: the w:t elements of consecutive runs with
+  // nothing but text between them, whatever their properties. Word splits
+  // runs for reasons no reader sees (editing sessions, proofing marks), and
+  // tokenized run by run a word cut in two ("Purp" + "ose") never matched
+  // "Purpose" and read as a change. Word boundaries must not depend on run
+  // boundaries at all: formatting is compared piece by piece instead
+  // (emitEqualSpan), so a bold "Purpose:" against bold "Purpose" + plain ":"
+  // records only the colon's lost bold.
+  type Piece = { run: XmlElement; t: XmlElement; text: string };
+  let segment: Piece[] = [];
+  const flush = (): void => {
+    if (segment.length === 0) return;
+    const text = segment.map((p) => p.text).join("");
+    // Letters and digits run on across a run boundary only when both runs
+    // carry the same properties: a word glued to a superscript note number
+    // ("הלשון" + "1") is two tokens, so editing the number does not mark the
+    // word. Punctuation and spaces are tokens of their own either way.
+    const cuts: number[] = [];
+    let base = 0;
+    for (let i = 0; i + 1 < segment.length; i++) {
+      base += segment[i].text.length;
+      if (WORD_CHAR.test(text[base - 1] ?? "") && WORD_CHAR.test(text[base] ?? "") && runPropsKey(segment[i].run) !== runPropsKey(segment[i + 1].run)) {
+        cuts.push(base);
+      }
+    }
+    const words: string[] = [];
+    let from = 0;
+    for (const cut of [...cuts, text.length]) {
+      words.push(...wordTokens(text.slice(from, cut)));
+      from = cut;
+    }
+    let at = 0;
+    for (const word of words) {
+      const end = at + word.length;
+      const pieces: NonNullable<ContentToken["pieces"]> = [];
+      let base = 0;
+      for (const p of segment) {
+        const from = Math.max(at, base);
+        const to = Math.min(end, base + p.text.length);
+        if (from < to) pieces.push({ run: p.run, t: p.t, start: from - base, end: to - base, text: text.slice(from, to) });
+        base += p.text.length;
+      }
+      const first = pieces[0];
+      push({ key: "w\u0000" + keyOf(word), text: word, run: first.run, t: first.t, start: first.start, end: first.end, pieces });
+      at = end;
+    }
+    // An empty w:t contributes nothing to the alignment, which is right:
+    // it is a placeholder, not content.
+    segment = [];
+  };
+
   for (const cEl of pEl.children) {
     const ln = localName(cEl.name);
     if (ln === "pPr") continue;
     if (PASSENGERS.has(ln)) {
+      flush();
       pending.push(cEl);
       continue;
     }
     if (ln !== "r") {
+      flush();
       inlineDiffable = false;
       continue;
     }
@@ -97,18 +158,14 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
       const rln = localName(rc.name);
       if (rln === "rPr") continue;
       if (rln === "t") {
-        let at = 0;
-        for (const word of wordTokens(rc.text)) {
-          push({ key: "w\u0000" + keyOf(word), text: word, run: cEl, t: rc, start: at, end: at + word.length });
-          at += word.length;
-        }
-        // An empty w:t contributes nothing to the alignment, which is right:
-        // it is a placeholder, not content.
+        segment.push({ run: cEl, t: rc, text: rc.text });
         continue;
       }
+      flush();
       push({ key: "a\u0000" + serializeXml(rc), text: "", run: cEl, atom: rc });
     }
   }
+  flush();
 
   return { tokens, tail: pending, text: paragraphText(pEl), inlineDiffable };
 }
@@ -144,33 +201,42 @@ export function sliceContent(
   deleted: boolean,
 ): XmlElement[] {
   const out: XmlElement[] = [];
-  let i = from;
-  while (i < to) {
-    const token = tokens[i];
-    if (!deleted && token.lead) out.push(...token.lead.map(cloneXml));
-    const run = token.run;
+  // One output run per source run, so run properties are never lost and
+  // never invented; consecutive slices of one w:t collapse back into one
+  // text element. A token spanning runs contributes a piece to each.
+  let open: { run: XmlElement; el: XmlElement } | null = null;
+  let text: { t: XmlElement; el: XmlElement } | null = null;
+  const runFor = (run: XmlElement): XmlElement => {
+    if (open?.run === run) return open.el;
     const rPr = run.children.find((c) => localName(c.name) === "rPr");
-    const children: XmlElement[] = rPr ? [cloneXml(rPr)] : [];
-    // One output run per source run, so run properties are never lost and
-    // never invented.
-    while (i < to && tokens[i].run === run) {
-      const cur = tokens[i];
-      if (cur.atom) {
-        children.push(cloneXml(cur.atom));
-        i++;
+    const el: XmlElement = { name: run.name, attrs: { ...run.attrs }, children: rPr ? [cloneXml(rPr)] : [], text: "" };
+    out.push(el);
+    open = { run, el };
+    text = null;
+    return el;
+  };
+  for (let i = from; i < to; i++) {
+    const token = tokens[i];
+    if (!deleted && token.lead) {
+      out.push(...token.lead.map(cloneXml));
+      open = null;
+      text = null;
+    }
+    if (token.atom) {
+      runFor(token.run).children.push(cloneXml(token.atom));
+      text = null;
+      continue;
+    }
+    for (const piece of token.pieces ?? []) {
+      const el = runFor(piece.run);
+      if (text && text.t === piece.t) {
+        text.el.text += piece.text;
         continue;
       }
-      // Consecutive word tokens out of the same w:t are contiguous by
-      // construction, so they collapse back into one text element.
-      const t = cur.t!;
-      let text = "";
-      while (i < to && tokens[i].run === run && tokens[i].t === t) {
-        text += tokens[i].text;
-        i++;
-      }
-      children.push(textElement(t, text, deleted));
+      const te = textElement(piece.t, piece.text, deleted);
+      el.children.push(te);
+      text = { t: piece.t, el: te };
     }
-    out.push({ name: run.name, attrs: { ...run.attrs }, children, text: "" });
   }
   return out;
 }

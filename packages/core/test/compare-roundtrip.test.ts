@@ -401,3 +401,18 @@ describe("compareDocuments — content controls and simple fields in removed par
     roundTrip(para("Before.") + field + para("After."), para("Before.") + para("After."));
   });
 });
+
+describe("compareDocuments — a word split across runs", () => {
+  it("round-trips an edit beside a split word", () => {
+    roundTrip(
+      para("Purpose of the work."),
+      `<w:p><w:r><w:t>Purp</w:t></w:r><w:r><w:t xml:space="preserve">ose of the project.</w:t></w:r></w:p>`,
+    );
+  });
+  it("round-trips a word split across runs that differ in formatting", () => {
+    roundTrip(
+      para("Purpose of the work."),
+      `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Purp</w:t></w:r><w:r><w:t xml:space="preserve">ose of the work.</w:t></w:r></w:p>`,
+    );
+  });
+});

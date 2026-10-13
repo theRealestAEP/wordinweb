@@ -522,7 +522,10 @@ function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx): boolea
       if (localName(el.name) !== "p") return null;
       const content = readParagraph(el, { whitespace: ctx.whitespace });
       if (!content.inlineDiffable) return null;
-      for (const token of content.tokens) parts.push(token.key + "\u0002" + runPropsKey(token.run));
+      for (const token of content.tokens) {
+        const props = token.pieces ? token.pieces.map((p) => `${p.text.length}:${runPropsKey(p.run)}`).join("|") : runPropsKey(token.run);
+        parts.push(token.key + "\u0002" + props);
+      }
     }
     return parts.join("\u0001");
   };
@@ -760,30 +763,83 @@ function emitEqualSpan(
   seg: Segment,
   ctx: Ctx,
 ): XmlElement[] {
-  const out: XmlElement[] = [];
-  let at = seg.bStart;
-  while (at < seg.bEnd) {
-    const run = rTokens[at].run;
-    const oKey = runPropsKey(oTokens[seg.aStart + (at - seg.bStart)].run);
-    let end = at + 1;
-    while (
-      end < seg.bEnd &&
-      rTokens[end].run === run &&
-      runPropsKey(oTokens[seg.aStart + (end - seg.bStart)].run) === oKey
-    ) {
-      end++;
+  // Matched words are emitted from the REVISED runs, split wherever EITHER
+  // side changes run, so each stretch compares with the original's
+  // properties at exactly that place. A word can now span runs (see
+  // readParagraph), and taking the formatting of only its first piece put the
+  // colon's bold of "Purpose:" onto the plain space after it.
+  type Unit = { token: ContentToken; run: XmlElement; t?: XmlElement; text: string; atom?: XmlElement; was: XmlElement };
+  const units: Unit[] = [];
+  const pieceAt = (pieces: NonNullable<ContentToken["pieces"]>, offset: number) => {
+    let base = 0;
+    for (const p of pieces) {
+      if (offset < base + p.text.length) return p;
+      base += p.text.length;
     }
-    const piece = sliceContent(rTokens, at, end, false);
-    if (ctx.formatting && oKey !== runPropsKey(run)) {
-      for (const el of piece) {
-        if (localName(el.name) === "r") {
-          swapRunProps(el, child(oTokens[seg.aStart + (at - seg.bStart)].run, "rPr"), ctx);
-        }
-      }
+    return pieces[pieces.length - 1];
+  };
+  for (let k = 0; k < seg.bEnd - seg.bStart; k++) {
+    const o = oTokens[seg.aStart + k];
+    const r = rTokens[seg.bStart + k];
+    if (r.atom || !r.pieces || !o.pieces || o.text !== r.text) {
+      // An atom, or a word matched by key with different whitespace (the
+      // whitespace option off): token by token, as one stretch.
+      if (r.atom) units.push({ token: r, run: r.run, text: "", atom: r.atom, was: o.run });
+      else for (const p of r.pieces ?? []) units.push({ token: r, run: p.run, t: p.t, text: p.text, was: o.run });
+      continue;
     }
-    out.push(...piece);
-    at = end;
+    const cuts = new Set<number>([0, r.text.length]);
+    for (const pieces of [o.pieces, r.pieces]) {
+      let base = 0;
+      for (const p of pieces) cuts.add((base += p.text.length));
+    }
+    const sorted = [...cuts].sort((x, y) => x - y);
+    for (let c = 0; c + 1 < sorted.length; c++) {
+      const from = sorted[c];
+      const to = sorted[c + 1];
+      if (from === to) continue;
+      const rp = pieceAt(r.pieces, from);
+      units.push({ token: r, run: rp.run, t: rp.t, text: r.text.slice(from, to), was: pieceAt(o.pieces, from).run });
+    }
   }
+
+  const out: XmlElement[] = [];
+  let open: { run: XmlElement; was: string; el: XmlElement; prev: XmlElement | undefined } | null = null;
+  let text: { t: XmlElement; el: XmlElement } | null = null;
+  const close = (): void => {
+    if (open && ctx.formatting && open.was !== runPropsKey(open.run)) swapRunProps(open.el, open.prev, ctx);
+    open = null;
+    text = null;
+  };
+  let lastToken: ContentToken | null = null;
+  for (const u of units) {
+    if (u.token !== lastToken && u.token.lead) {
+      close();
+      out.push(...u.token.lead.map(cloneXml));
+    }
+    lastToken = u.token;
+    const was = runPropsKey(u.was);
+    if (!open || open.run !== u.run || open.was !== was) {
+      close();
+      const rPr = u.run.children.find((c) => localName(c.name) === "rPr");
+      const el: XmlElement = { name: u.run.name, attrs: { ...u.run.attrs }, children: rPr ? [cloneXml(rPr)] : [], text: "" };
+      out.push(el);
+      open = { run: u.run, was, el, prev: child(u.was, "rPr") };
+    }
+    if (u.atom) {
+      open.el.children.push(cloneXml(u.atom));
+      text = null;
+      continue;
+    }
+    if (text && text.t === u.t) {
+      text.el.text += u.text;
+      continue;
+    }
+    const te: XmlElement = { name: u.t!.name, attrs: { ...u.t!.attrs, "xml:space": "preserve" }, children: [], text: u.text };
+    open.el.children.push(te);
+    text = { t: u.t!, el: te };
+  }
+  close();
   return out;
 }
 

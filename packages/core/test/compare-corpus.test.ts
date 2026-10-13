@@ -405,3 +405,32 @@ describe("compare corpus — 18: a short paragraph edited in place", () => {
     expect(revisionTexts(doc, "ins")).toEqual(["Replaced "]);
   });
 });
+
+describe("compare corpus — 19: a word Word split across runs", () => {
+  // FAILURE MODE: tokens stopped at each w:t, so "Purp" + "ose" (two runs
+  // with the same properties, as Word leaves after an edit session or a
+  // proofing mark) never matched "Purpose" and read as a change.
+  const split = (rest: string) =>
+    `<w:p><w:r><w:t>Purp</w:t></w:r><w:r><w:t xml:space="preserve">ose of the ${rest}</w:t></w:r></w:p>`;
+  it("finds nothing when only the run split differs", () => {
+    expect(collectRevisions(compare(para("Purpose of the work."), split("work."))).length).toBe(0);
+  });
+  it("marks only the edited word around a split", () => {
+    const doc = compare(para("Purpose of the work."), split("project."));
+    expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
+    expect(revisionTexts(doc, "del")).toEqual(["work"]);
+    expect(revisionTexts(doc, "ins")).toEqual(["project"]);
+  });
+});
+
+describe("compare corpus — 20: a word glued to a differently formatted number", () => {
+  it("marks only the number when the note number changes", () => {
+    // A word followed directly by a superscript note number ("text1"): the
+    // two are separate tokens, so renumbering the note does not mark the word.
+    const p = (n: string) =>
+      `<w:p><w:r><w:t>See the text</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>${n}</w:t></w:r></w:p>`;
+    const doc = compare(p("1"), p("2"));
+    expect(revisionTexts(doc, "del")).toEqual(["1"]);
+    expect(revisionTexts(doc, "ins")).toEqual(["2"]);
+  });
+});
