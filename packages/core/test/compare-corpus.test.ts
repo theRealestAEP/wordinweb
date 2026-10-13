@@ -96,8 +96,10 @@ describe("compare corpus — 3: one sentence rewritten out of five", () => {
     // exists for.
     const doc = compare(para(S1 + S2 + OLD + S4 + S5), para(S1 + S2 + NEW + S4 + S5));
     expect(kindCounts(doc)).toEqual({ deletion: 1, insertion: 1 });
-    expect(revisionTexts(doc, "del")).toEqual([OLD]);
-    expect(revisionTexts(doc, "ins")).toEqual([NEW]);
+    // Both sentences end in ". ", and the full stop is a token of its own, so
+    // it stays unmarked between the strike and the insertion.
+    expect(revisionTexts(doc, "del")).toEqual([OLD.slice(0, -2)]);
+    expect(revisionTexts(doc, "ins")).toEqual([NEW.slice(0, -2)]);
   });
 });
 
@@ -308,5 +310,32 @@ describe("compare corpus — 13: boilerplate repeated across sections", () => {
     );
     expect(kindCounts(out)).toEqual({ deletion: 2, insertion: 2 });
     expect(revisionTexts(out, "del")).toEqual(["1 ", "6 "]);
+  });
+});
+
+describe("compare corpus — 14: punctuation is its own token", () => {
+  it("strikes only a changed full stop, not the word it touches", () => {
+    // FAILURE MODE: words keyed with their punctuation attached, so
+    // "writing." -> "writing," struck the whole word and reinserted it, which
+    // a reviewer reads as "writing.writing,".
+    const doc = compare(
+      para("Every report values clear writing. Thanks to the editors."),
+      para("Every report values clear writing, thanks to the editors."),
+    );
+    expect(revisionTexts(doc, "del")).toEqual([". Thanks "]);
+    expect(revisionTexts(doc, "ins")).toEqual([", thanks "]);
+  });
+
+  it("keeps a bold label whose colon moved into the next run", () => {
+    // FAILURE MODE: "Purpose:" in one bold run against "Purpose" bold + ":"
+    // plain. Keyed whole, "Purpose:" and "Purpose" never matched, and the
+    // label came out deleted and reinserted where only the colon's formatting
+    // changed.
+    const rest = `<w:r><w:t xml:space="preserve"> To describe the work.</w:t></w:r>`;
+    const doc = compare(
+      `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Purpose:</w:t></w:r>${rest}</w:p>`,
+      `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Purpose</w:t></w:r><w:r><w:t>:</w:t></w:r>${rest}</w:p>`,
+    );
+    expect(kindCounts(doc)).toEqual({ runFormat: 1 });
   });
 });

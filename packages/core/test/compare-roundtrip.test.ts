@@ -327,3 +327,22 @@ describe("compareDocuments — relationships in removed content", () => {
     expect(serializeXml(merged.docRoot)).not.toContain('r:embed="rId9"');
   });
 });
+
+describe("compareDocuments — punctuation tokens", () => {
+  it("round-trips a changed full stop", () => {
+    roundTrip(
+      para("Every report values clear writing. Thanks to the editors."),
+      para("Every report values clear writing, thanks to the editors."),
+    );
+  });
+
+  it("round-trips a colon that moved out of a bold run", () => {
+    // The words match; only the colon's bold changed, and the runs split
+    // differently. Rejecting must give the colon its bold back.
+    const rest = `<w:r><w:t xml:space="preserve"> To describe the work.</w:t></w:r>`;
+    roundTrip(
+      `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Purpose:</w:t></w:r>${rest}</w:p>`,
+      `<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Purpose</w:t></w:r><w:r><w:t>:</w:t></w:r>${rest}</w:p>`,
+    );
+  });
+});

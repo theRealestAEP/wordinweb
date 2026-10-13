@@ -610,11 +610,11 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
 
   const segments = wordSegments(oc.tokens, rc.tokens);
   const changed = segments.some((s) => !s.equal);
-  if (!changed) {
-    // Same words in the same order: any remaining difference is formatting.
-    if (ctx.formatting) alignRunPropsInPlace(oEl, rEl, ctx);
-    return;
-  }
+  // Same words in the same order: any remaining difference is formatting.
+  // When the runs split differently on the two sides (a bold "Purpose:"
+  // against bold "Purpose" + plain ":"), fall through to the rebuild below,
+  // which records formatting token by token.
+  if (!changed && (!ctx.formatting || alignRunPropsInPlace(oEl, rEl, ctx))) return;
 
   const pPr = child(rEl, "pPr");
   const out: XmlElement[] = [];
@@ -682,16 +682,18 @@ function emitEqualSpan(
 /**
  * Formatting-only change with the run partition intact on both sides: record
  * the difference on the revised runs where they stand, rather than rebuilding
- * the paragraph and splitting runs for no reason.
+ * the paragraph and splitting runs for no reason. False when the partitions
+ * differ, so the caller can rebuild instead.
  */
-function alignRunPropsInPlace(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
+function alignRunPropsInPlace(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): boolean {
   const oRuns = oEl.children.filter((c) => localName(c.name) === "r");
   const rRuns = rEl.children.filter((c) => localName(c.name) === "r");
-  if (oRuns.length !== rRuns.length) return;
+  if (oRuns.length !== rRuns.length) return false;
   for (let i = 0; i < rRuns.length; i++) {
-    if (paragraphText(oRuns[i]) !== paragraphText(rRuns[i])) return;
+    if (paragraphText(oRuns[i]) !== paragraphText(rRuns[i])) return false;
   }
   for (let i = 0; i < rRuns.length; i++) swapRunProps(rRuns[i], child(oRuns[i], "rPr"), ctx);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

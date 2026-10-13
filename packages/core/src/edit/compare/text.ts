@@ -63,9 +63,15 @@ export function normalizeText(s: string): string {
  * "delete the space, insert the word, insert another space" three-part mess;
  * deletions symmetrically take their trailing space with them, so surviving
  * text is not left double-spaced after an accept.
+ *
+ * A word is letters, marks and digits, with inner apostrophes ("don't");
+ * every other character is a token of its own. Keyed with its punctuation
+ * attached, "writing." against "writing," struck and reinserted the whole
+ * word ("writing.writing," to a reviewer), and a bold "Purpose:" whose colon
+ * moved into the next run never matched "Purpose" at all.
  */
 export function wordTokens(s: string): string[] {
-  return s.match(/\S+\s*|\s+/g) ?? [];
+  return s.match(/[\p{L}\p{M}\p{N}]+(?:['\u2019][\p{L}\p{M}\p{N}]+)*\s*|[^\s\p{L}\p{M}\p{N}]\s*|\s+/gu) ?? [];
 }
 
 /** Lower-cased word tokens of the normalized string, for similarity only. */
