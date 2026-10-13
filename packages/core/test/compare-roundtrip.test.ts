@@ -594,3 +594,68 @@ describe("compareDocuments — content controls and table rows", () => {
     expect(collectRevisions(merged).filter((r) => r.kind === "rowDeletion")).toHaveLength(0);
   });
 });
+
+describe("compareDocuments — section breaks and notes when blocks move", () => {
+  const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const RELS =
+    `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+    `<Relationship Id="rIdN" Type="${REL}/footnotes" Target="footnotes.xml"/>` +
+    [1, 2, 3].map((n) => `<Relationship Id="rId${n}" Type="${REL}/header" Target="header${n}.xml"/>`).join("") +
+    `</Relationships>`;
+  const text = (t: string, note?: number) =>
+    `<w:p><w:r><w:t xml:space="preserve">${t}</w:t></w:r>` +
+    (note ? `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="${note}"/></w:r>` : "") +
+    `</w:p>`;
+  const breakTo = (n: number) => `<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId${n}"/></w:sectPr></w:pPr></w:p>`;
+  const load = (blocks: string) =>
+    DocxDocument.load(
+      makeDocx({
+        "word/document.xml":
+          `<w:document ${W_NS} ${R}><w:body>${blocks}` +
+          `<w:sectPr><w:headerReference w:type="default" r:id="rId3"/></w:sectPr></w:body></w:document>`,
+        "word/_rels/document.xml.rels": RELS,
+        "word/footnotes.xml":
+          `<w:footnotes ${W_NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>` +
+          [1, 2, 3].map((n) => `<w:footnote w:id="${n}"><w:p><w:r><w:t xml:space="preserve">Note number ${n}.</w:t></w:r></w:p></w:footnote>`).join("") +
+          `</w:footnotes>`,
+        ...Object.fromEntries([1, 2, 3].map((n) => [`word/header${n}.xml`, `<w:hdr ${W_NS}><w:p><w:r><w:t>Header ${n}</w:t></w:r></w:p></w:hdr>`])),
+      }),
+    );
+  const review = (merged: DocxDocument, apply: (d: DocxDocument) => number) => {
+    const d = DocxDocument.load(merged.save());
+    apply(d);
+    return DocxDocument.load(d.save());
+  };
+
+  it("keeps each section break with its own section", () => {
+    // Every break paragraph is empty, so they shared one fingerprint: the
+    // first break anchored to the other, and reject-all lost a header.
+    const original = text("One.") + breakTo(1) + text("Two.") + breakTo(2) + text("Three.");
+    const revised = text("Two.") + breakTo(1) + breakTo(2) + text("One.") + text("Three.");
+    const merged = compareDocuments(load(original), load(revised), { author: AUTHOR, date: DATE });
+    const headers = (d: DocxDocument) => [...(d.pkg.text("word/document.xml") ?? "").matchAll(/<w:headerReference [^>]*r:id="(\w+)"/g)].map((m) => m[1]);
+    expect(headers(review(merged, rejectAllRevisions))).toEqual(["rId1", "rId2", "rId3"]);
+    expect(headers(review(merged, acceptAllRevisions))).toEqual(["rId1", "rId2", "rId3"]);
+  });
+
+  it("keeps each note attached to its reference when notes swap", () => {
+    // The paragraphs stay and their notes swap. The body matched references
+    // by position while notes paired in order: reject-all kept a reference
+    // and emptied the note it pointed to.
+    const original = text("Alpha has a note.", 1) + text("Beta has a note.", 2) + text("Gamma has a note.", 3);
+    const revised = text("Alpha has a note.", 2) + text("Beta has a note.", 1) + text("Gamma has a note.", 3);
+    const merged = compareDocuments(load(original), load(revised), { author: AUTHOR, date: DATE });
+    const notesByReference = (d: DocxDocument) => {
+      const notes = new Map(
+        [...(d.pkg.text("word/footnotes.xml") ?? "").matchAll(/<w:footnote w:id="(\d+)">([\s\S]*?)<\/w:footnote>/g)].map((m) => [
+          m[1],
+          [...m[2].matchAll(/<w:t[^>]*>([^<]*)/g)].map((t) => t[1]).join(""),
+        ]),
+      );
+      return [...(d.pkg.text("word/document.xml") ?? "").matchAll(/<w:footnoteReference w:id="(\d+)"/g)].map((m) => notes.get(m[1]));
+    };
+    expect(notesByReference(review(merged, rejectAllRevisions))).toEqual(["Note number 1.", "Note number 2.", "Note number 3."]);
+    expect(notesByReference(review(merged, acceptAllRevisions))).toEqual(["Note number 2.", "Note number 1.", "Note number 3."]);
+  });
+});
