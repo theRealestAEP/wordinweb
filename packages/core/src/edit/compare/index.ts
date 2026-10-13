@@ -384,8 +384,12 @@ function giveStruckReferencesTheirOwnNotes(kind: "footnote" | "endnote", merged:
       list.push({ ref: e, struck });
       refs.set(e.attrs["w:id"], list);
     }
-    for (const c of e.children) walk(c, struck || localName(c.name) === "del");
+    for (const c of e.children) walk(c, struck || localName(c.name) === "del" || rowDeleted(c));
   };
+  // A deleted row records it in its trPr, and its cells (a nested table's
+  // too) may hold references with no w:del around them.
+  const rowDeleted = (tr: XmlElement): boolean =>
+    localName(tr.name) === "tr" && !!child(child(tr, "trPr"), "del");
   walk(merged.docRoot, false);
   let next = 1 + Math.max(0, ...root.children.map((c) => Number(c.attrs["w:id"]) || 0));
   let changed = false;
