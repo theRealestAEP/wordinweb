@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { compareFiles } from "./compare.js";
 
 const USAGE = `Usage: docx-compare ORIGINAL.docx REVISED.docx -o RESULT.docx --author NAME [options]
@@ -10,52 +13,103 @@ reject all of them to get the original.
 Options:
   -o, --out FILE      the result (required)
   --author NAME       who the tracked changes are attributed to (required)
-  --date ISO          the date on every tracked change (default: now)
+  --date ISO          the date on every tracked change, such as 2026-10-14T09:30:00Z (default: now)
   --no-formatting     do not report formatting-only differences
   --no-whitespace     do not report whitespace-only differences
   --temp-dir DIR      where the working files go (default: the system's)
   --quiet             do not print notes about differences that could not be expressed exactly
   -h, --help          show this help`;
 
+/** A mistake in the command line: reported with exit code 2. */
+class UsageError extends Error {}
+
+const VALUED = new Set(["out", "author", "date", "temp-dir"]);
+const SWITCHES = new Set(["no-formatting", "no-whitespace", "quiet", "help"]);
+
 function parseArgs(argv: string[]): { files: string[]; flags: Record<string, string | boolean> } {
   const files: string[] = [];
   const flags: Record<string, string | boolean> = {};
-  const valued = new Set(["out", "author", "date", "temp-dir"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    const key = arg === "-o" ? "out" : arg === "-h" ? "help" : arg.startsWith("--") ? arg.slice(2) : null;
-    if (key === null) files.push(arg);
-    else if (valued.has(key)) {
-      if (i + 1 >= argv.length) throw new Error(`${arg} needs a value`);
+    if (!arg.startsWith("-") || arg === "-") {
+      files.push(arg);
+      continue;
+    }
+    const key = arg === "-o" ? "out" : arg === "-h" ? "help" : arg.startsWith("--") ? arg.slice(2) : "";
+    if (VALUED.has(key)) {
+      if (i + 1 >= argv.length) throw new UsageError(`${arg} needs a value`);
       flags[key] = argv[++i];
-    } else flags[key] = true;
+    } else if (SWITCHES.has(key)) {
+      flags[key] = true;
+    } else {
+      throw new UsageError(`unknown option ${arg}`);
+    }
   }
   return { files, flags };
 }
 
+function isFolder(path: string): boolean {
+  return !!statSync(path, { throwIfNoEntry: false })?.isDirectory();
+}
+
+/** An xsd:dateTime as Word writes it: date, time, and Z or an offset. */
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+
 async function main(): Promise<void> {
-  const { files, flags: args } = parseArgs(process.argv.slice(2));
-  if (args.help) {
+  const { files, flags } = parseArgs(process.argv.slice(2));
+  if (flags.help) {
     console.log(USAGE);
     return;
   }
   const [original, revised, ...extra] = files;
-  if (!original || !revised || extra.length > 0 || typeof args.out !== "string" || typeof args.author !== "string") {
-    console.error(USAGE);
-    process.exitCode = 2;
-    return;
+  if (!original || !revised) throw new UsageError("give the original and the revised document");
+  if (extra.length > 0) throw new UsageError(`unexpected argument ${extra[0]}`);
+  if (typeof flags.out !== "string") throw new UsageError("-o RESULT.docx is required");
+  if (typeof flags.author !== "string" || flags.author.trim() === "") throw new UsageError("--author NAME is required");
+  if (typeof flags.date === "string" && !ISO_DATE.test(flags.date)) {
+    throw new UsageError(`--date ${flags.date} is not a date and time such as 2026-10-14T09:30:00Z`);
   }
-  await compareFiles(original, revised, args.out, {
-    author: args.author,
-    date: typeof args.date === "string" ? args.date : undefined,
-    formatting: !args["no-formatting"],
-    whitespace: !args["no-whitespace"],
-    tempDir: typeof args["temp-dir"] === "string" ? args["temp-dir"] : undefined,
-    onNote: args.quiet ? undefined : (note) => console.error(`note: ${note.code}: ${note.detail}`),
-  });
+
+  // The result is written beside its final name and renamed into place, so a
+  // failed or interrupted run leaves no half-written file, and the result may
+  // replace an input. The working files are removed on Ctrl-C too.
+  const out = flags.out;
+  if (!isFolder(dirname(resolve(out)))) throw new Error(`${out}: the folder for the result does not exist`);
+  const tempDir = typeof flags["temp-dir"] === "string" ? flags["temp-dir"] : tmpdir();
+  if (!isFolder(tempDir)) throw new Error(`${tempDir}: the --temp-dir folder does not exist`);
+  const partial = `${out}.${process.pid}.partial`;
+  const work = mkdtempSync(join(tempDir, "docx-compare-"));
+  const cleanUp = (): void => {
+    rmSync(partial, { force: true });
+    rmSync(work, { recursive: true, force: true });
+  };
+  const stop = (code: number) => () => {
+    cleanUp();
+    process.exit(code);
+  };
+  process.once("SIGINT", stop(130));
+  process.once("SIGTERM", stop(143));
+  try {
+    await compareFiles(original, revised, partial, {
+      author: flags.author,
+      date: typeof flags.date === "string" ? flags.date : undefined,
+      formatting: !flags["no-formatting"],
+      whitespace: !flags["no-whitespace"],
+      tempDir: work,
+      onNote: flags.quiet ? undefined : (note) => console.error(`note: ${note.code}: ${note.detail}`),
+    });
+    renameSync(partial, out);
+  } finally {
+    cleanUp();
+  }
 }
 
 main().catch((error: unknown) => {
+  if (error instanceof UsageError) {
+    console.error(`docx-compare: ${error.message}\nRun docx-compare --help for the options.`);
+    process.exitCode = 2;
+    return;
+  }
   console.error(`docx-compare: ${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });

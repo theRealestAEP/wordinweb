@@ -51,7 +51,13 @@ export class ZipReader {
   /** An entry's content, inflated in memory. For small parts only. */
   read(entry: ZipEntry): Buffer {
     const raw = this.bytes(this.dataOffset(entry), entry.compressedSize);
-    const data = entry.method === 8 ? inflateRawSync(raw) : raw;
+    let data: Buffer;
+    try {
+      // Never inflate past the size the directory gives: a zip bomb stops here.
+      data = entry.method === 8 ? inflateRawSync(raw, { maxOutputLength: Math.max(1, entry.size) }) : raw;
+    } catch {
+      throw new Error(`${this.path}: ${entry.name} is corrupt`);
+    }
     if (data.length !== entry.size || crc32(data) !== entry.crc) throw new Error(`${this.path}: ${entry.name} is corrupt`);
     return data;
   }
@@ -61,11 +67,14 @@ export class ZipReader {
     const start = this.dataOffset(entry);
     let size = 0;
     let crc = 0;
+    const path = this.path;
     const check = new Transform({
       transform(chunk: Buffer, _encoding, done) {
         size += chunk.length;
         crc = crc32(chunk, crc);
-        done(null, chunk);
+        // Stop as soon as the entry outgrows the size the directory gives.
+        if (size > entry.size) done(new Error(`${path}: ${entry.name} is corrupt`));
+        else done(null, chunk);
       },
     });
     // createReadStream's `end` is inclusive, and a zero-length range must not read byte `start`.
@@ -108,7 +117,11 @@ export class ZipReader {
     const tail = this.bytes(fileSize - tailLength, tailLength);
     let eocd = tail.length - 22;
     while (eocd >= 0 && tail.readUInt32LE(eocd) !== 0x06054b50) eocd--;
-    if (eocd < 0) throw new Error(`${this.path}: not a zip file`);
+    if (eocd < 0) {
+      // A .doc file, and a password-protected .docx, are OLE compound files.
+      const ole = fileSize >= 8 && this.bytes(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+      throw new Error(`${this.path}: not a .docx file${ole ? " (it is a .doc file or a password-protected document)" : ""}`);
+    }
     let count = tail.readUInt16LE(eocd + 10);
     let cdSize = tail.readUInt32LE(eocd + 12);
     let cdOffset = tail.readUInt32LE(eocd + 16);

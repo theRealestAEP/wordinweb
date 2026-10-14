@@ -83,6 +83,6 @@ describe("ZipWriter and ZipReader", () => {
 
   it("rejects a file that is not a zip", () => {
     writeFileSync(join(dir, "not.zip"), "hello");
-    expect(() => ZipReader.open(join(dir, "not.zip"))).toThrow(/not a zip/);
+    expect(() => ZipReader.open(join(dir, "not.zip"))).toThrow(/not a \.docx file/);
   });
 });

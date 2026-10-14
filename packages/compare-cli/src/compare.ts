@@ -1,6 +1,6 @@
-import { closeSync, mkdtempSync, openSync, rmSync, statfsSync, writeSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
 import { XmlElement, child, parseXml, serializeXml } from "../../core/src/xml.js";
 import { histogramMatch } from "../../core/src/edit/compare/histogram.js";
@@ -28,7 +28,7 @@ import {
   reportUncomparedParts,
   resolveGap,
 } from "../../core/src/edit/compare/index.js";
-import { Input, readInput, stubSource } from "./input.js";
+import { Input, Side, readInput, stubSource } from "./input.js";
 import { BlockStore } from "./store.js";
 import { ZipReader, ZipWriter } from "./zip.js";
 
@@ -50,6 +50,14 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
  * memory, and each binary part is copied from the input zip unread.
  */
 export async function compareFiles(originalPath: string, revisedPath: string, outPath: string, options: CompareFilesOptions): Promise<void> {
+  for (const [which, path] of [["original", originalPath], ["revised", revisedPath]]) {
+    const stat = statSync(path, { throwIfNoEntry: false });
+    if (!stat) throw new Error(`${path}: the ${which} file does not exist`);
+    if (!stat.isFile()) throw new Error(`${path}: the ${which} file is not a file`);
+  }
+  // The result is written while the inputs are still read.
+  if ([originalPath, revisedPath].some((path) => resolve(path) === resolve(outPath))) throw new Error(`${outPath}: the result must not overwrite an input`);
+  if (!statSync(dirname(resolve(outPath)), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`${outPath}: the result's folder does not exist`);
   const dir = mkdtempSync(join(options.tempDir ?? tmpdir(), "docx-compare-"));
   const zips: ZipReader[] = [];
   const stores: BlockStore[] = [];
@@ -60,9 +68,9 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     zips.push(rZip);
     checkDiskSpace(dir, [oZip, rZip]);
 
-    const O = await readInput(oZip, "original", dir);
+    const O = await readNamed(oZip, "original", dir);
     stores.push(O.blocks, O.texts);
-    const R = await readInput(rZip, "revised", dir);
+    const R = await readNamed(rZip, "revised", dir);
     stores.push(R.blocks, R.texts);
 
     const note = options.onNote ?? (() => {});
@@ -97,6 +105,16 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     for (const store of stores) store.close();
     for (const zip of zips) zip.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** readInput, with the input's path on any error that does not already name it. */
+async function readNamed(zip: ZipReader, side: Side, dir: string): Promise<Input> {
+  try {
+    return await readInput(zip, side, dir);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message.startsWith(zip.path) ? message : `${zip.path}: ${message}`);
   }
 }
 

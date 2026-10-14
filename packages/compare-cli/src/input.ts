@@ -77,11 +77,16 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
   const starts: number[] = [];
   const ends: number[] = [];
   const names: string[] = [];
-  const bounds = scanBody(docFile, (c) => {
-    starts.push(c.start);
-    ends.push(c.end);
-    names.push(c.name);
-  });
+  let bounds;
+  try {
+    bounds = scanBody(docFile, (c) => {
+      starts.push(c.start);
+      ends.push(c.end);
+      names.push(c.name);
+    });
+  } catch (error) {
+    throw new Error(`${docPart}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 
   const fd = openSync(docFile, "r");
   try {

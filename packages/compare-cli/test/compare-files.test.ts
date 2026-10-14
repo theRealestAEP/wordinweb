@@ -113,3 +113,30 @@ describe("compareFiles", () => {
     expect(canonicalBody(rejected)).toBe(canonicalBody(expected));
   });
 });
+
+describe("compareFiles errors", () => {
+  const good = join(dir, "good.docx");
+  writeFileSync(good, makeDocx({ "word/document.xml": wrapDocument(para("Text.")) }));
+  const options = { author: AUTHOR, date: DATE };
+  const fails = (original: string, revised: string, out: string) => expect(compareFiles(original, revised, out, options)).rejects;
+
+  it("names a missing input, a folder, and a file that is not a .docx", async () => {
+    await fails(join(dir, "missing.docx"), good, join(dir, "x.docx")).toThrow(/missing\.docx: the original file does not exist/);
+    await fails(good, dir, join(dir, "x.docx")).toThrow(/the revised file is not a file/);
+    writeFileSync(join(dir, "text.docx"), "not a zip");
+    await fails(join(dir, "text.docx"), good, join(dir, "x.docx")).toThrow(/text\.docx: not a \.docx file$/);
+    writeFileSync(join(dir, "ole.docx"), Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0]));
+    await fails(join(dir, "ole.docx"), good, join(dir, "x.docx")).toThrow(/a \.doc file or a password-protected document/);
+  });
+
+  it("names the input and part whose XML cannot be read", async () => {
+    const broken = join(dir, "broken.docx");
+    writeFileSync(broken, makeDocx({ "word/document.xml": wrapDocument(para("Text.")).replace("</w:body>", "<!-- never closed") }));
+    await fails(good, broken, join(dir, "x.docx")).toThrow(/broken\.docx: word\/document\.xml: unterminated comment/);
+  });
+
+  it("refuses to overwrite an input, and to write into a missing folder", async () => {
+    await fails(good, good, good).toThrow(/must not overwrite an input/);
+    await fails(good, good, join(dir, "no-such-folder", "x.docx")).toThrow(/folder does not exist/);
+  });
+});

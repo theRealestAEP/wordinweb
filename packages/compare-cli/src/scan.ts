@@ -64,7 +64,7 @@ class Scanner {
       }
       let lt = this.buf.indexOf(LT, pos);
       while (lt === -1) {
-        if (!this.more()) throw new Error(inBody ? "document.xml: the body is not closed" : "document.xml: no w:body");
+        if (!this.more()) throw new Error(inBody ? "the body is not closed" : "no w:body: it is not a Word document");
         lt = this.buf.indexOf(LT, pos);
       }
       const at = this.base + lt;
@@ -75,7 +75,7 @@ class Scanner {
       } else if (next === 0x21 /* ! */) {
         if (this.startsWith("<!--", lt)) end = this.find("-->", lt + 4, "comment");
         else if (this.startsWith("<![CDATA[", lt)) end = this.find("]]>", lt + 9, "CDATA section");
-        else throw new Error("document.xml: a document type declaration is not allowed");
+        else throw new Error("a document type declaration is not allowed");
       } else if (next === SLASH) {
         end = this.find(">", lt + 2, "end tag");
         depth--;
@@ -90,7 +90,7 @@ class Scanner {
           inBody = true;
           contentStart = end;
         } else if (inBody && depth === 2) {
-          if (localName(name) === "body") throw new Error("document.xml: a w:body inside the body");
+          if (localName(name) === "body") throw new Error("a w:body inside the body");
           if (selfClosing) {
             onChild({ start: at, end: end, name });
           } else {
@@ -124,7 +124,7 @@ class Scanner {
   }
 
   private byteAt(i: number): number {
-    while (i >= this.buf.length) if (!this.more()) throw new Error("document.xml: unexpected end of file");
+    while (i >= this.buf.length) if (!this.more()) throw new Error("unexpected end of file");
     return this.buf[i];
   }
 
@@ -140,7 +140,7 @@ class Scanner {
       if (i !== -1) return this.base + i + text.length;
       // Keep looking from where a match could still start.
       from = Math.max(from, this.buf.length - text.length + 1);
-      if (!this.more()) throw new Error(`document.xml: unterminated ${what}`);
+      if (!this.more()) throw new Error(`unterminated ${what}`);
     }
   }
 
@@ -148,13 +148,13 @@ class Scanner {
   private tagEnd(from: number): number {
     let quote = 0;
     for (let i = from; ; i++) {
-      if (i >= this.buf.length && !this.more()) throw new Error("document.xml: unterminated start tag");
+      if (i >= this.buf.length && !this.more()) throw new Error("unterminated start tag");
       const c = this.buf[i];
       if (quote) {
         if (c === quote) quote = 0;
       } else if (c === 0x22 || c === 0x27) quote = c;
       else if (c === GT) return this.base + i + 1;
-      else if (c === LT) throw new Error("document.xml: '<' inside a start tag");
+      else if (c === LT) throw new Error("'<' inside a start tag");
     }
   }
 
