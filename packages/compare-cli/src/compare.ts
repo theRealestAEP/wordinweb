@@ -33,7 +33,7 @@ import {
   reportUncomparedParts,
   resolveGap,
 } from "../../core/src/edit/compare/index.js";
-import { Input, ROW_SLOT, readInput, stubSource } from "./input.js";
+import { Input, ROW_SLOT, dropNotesModel, readInput, stubSource } from "./input.js";
 import { BlockStore } from "./store.js";
 import { ZipReader, ZipWriter } from "./zip.js";
 
@@ -85,6 +85,8 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     for (const kind of ["footnote", "endnote"] as const) {
       compareNotes(kind, O.shell, R.shell, ctx, { original: O.noteRefs[kind], merged: R.noteRefs[kind] });
     }
+    // Changed notes rebuild the model.
+    dropNotesModel(R.shell);
 
     const plan = planBody(O, R, ctx);
     const body = new BlockStore(join(dir, "result-blocks"));

@@ -312,10 +312,21 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     }
     flush();
     input.hadRevisions = hadRevisions;
+    dropNotesModel(shell);
     return input;
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * The notes' editing model (id -> blocks) is built by every load and again
+ * by each markNotePartsChanged. A compare reads the retained trees, never
+ * the model, and the model is as large again as the trees.
+ */
+export function dropNotesModel(shell: DocxDocument): void {
+  shell.footnotes.clear();
+  shell.endnotes.clear();
 }
 
 /** A paragraph whose mark is deleted or moved away: accepting it joins the next block. */
