@@ -136,8 +136,6 @@ interface Ctx {
   scope: { from: string | null; into: string | null };
   /** Original note id -> the result's id for the same note (compareNotes). */
   noteIds: Record<"footnote" | "endnote", Map<string, string>>;
-  /** Each paragraph's split/merge key parts, read once (see concatMatches). */
-  concatParts: WeakMap<XmlElement, string[] | null>;
 }
 
 /** Where a block ended up, which is what decides the paragraph-mark revisions. */
@@ -195,7 +193,6 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
     note: options.onNote ?? (() => {}),
     scope: { from: null, into: null },
     noteIds: { footnote: new Map(), endnote: new Map() },
-    concatParts: new WeakMap(),
   };
 
   const originalBody = child(original.docRoot, "body");
@@ -603,6 +600,7 @@ function resolveGap(
   const oUsed = new Set<number>();
   const rUsed = new Set<number>();
 
+  const keys: KeyCache = new Map();
   // Splits and merges first: they are exact (the content keys concatenate),
   // and they are the shape a similarity pass would otherwise turn into
   // delete-one-insert-two, which reads as a rewrite of something nobody
@@ -645,7 +643,7 @@ function resolveGap(
     const [jLo, jHi] = span(i);
     for (let j = jLo; j + 1 < jHi; j++) {
       if (oUsed.has(i) || rUsed.has(j) || rUsed.has(j + 1) || crosses(i, j)) continue;
-      if (concatMatches([oBlocks[i]], [rBlocks[j], rBlocks[j + 1]], ctx)) {
+      if (concatMatches([oBlocks[i]], [rBlocks[j], rBlocks[j + 1]], ctx, keys)) {
         accept({ kind: "split", o: i, r: j, other: j + 1 });
         oUsed.add(i);
         rUsed.add(j);
@@ -657,7 +655,7 @@ function resolveGap(
     const [jLo, jHi] = span(i);
     for (let j = jLo; j < jHi; j++) {
       if (oUsed.has(i) || oUsed.has(i + 1) || rUsed.has(j) || crosses(i, j)) continue;
-      if (concatMatches([oBlocks[i], oBlocks[i + 1]], [rBlocks[j]], ctx)) {
+      if (concatMatches([oBlocks[i], oBlocks[i + 1]], [rBlocks[j]], ctx, keys)) {
         accept({ kind: "merge", o: i, r: j, other: i + 1 });
         oUsed.add(i);
         oUsed.add(i + 1);
@@ -799,17 +797,20 @@ function readOptions(ctx: Ctx, original: boolean): ReadOptions {
   return { whitespace: ctx.whitespace, noteKey };
 }
 
-function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx): boolean {
-  const a = concatKey(oEls, true, ctx);
+function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx, keys: KeyCache): boolean {
+  const a = concatKey(oEls, true, ctx, keys);
   if (!a) return false;
-  const b = concatKey(rEls, false, ctx);
+  const b = concatKey(rEls, false, ctx, keys);
   return !!b && a.length === b.length && a.every((part, i) => part === b[i]);
 }
 
-function concatKey(els: XmlElement[], original: boolean, ctx: Ctx): string[] | null {
+/** Split/merge key parts per paragraph, kept for the one gap that tries them. */
+type KeyCache = Map<XmlElement, string[] | null>;
+
+function concatKey(els: XmlElement[], original: boolean, ctx: Ctx, keys: KeyCache): string[] | null {
   const out: string[] = [];
   for (const el of els) {
-    const parts = paragraphKeyParts(el, original, ctx);
+    const parts = paragraphKeyParts(el, original, ctx, keys);
     if (!parts) return null;
     for (const part of parts) out.push(part);
   }
@@ -818,13 +819,14 @@ function concatKey(els: XmlElement[], original: boolean, ctx: Ctx): string[] | n
 
 /**
  * One paragraph's tokens with their run properties and containers, or null
- * when it cannot take part in a split or merge. Read once per compare: the
+ * when it cannot take part in a split or merge. Read once per gap: the
  * split and merge passes try every nearby pair, and re-reading both
  * paragraphs for each try was half the time of a long rewritten document
- * (the Yiddish novel, 90% of paragraphs edited: 3.4 of 6.9 s).
+ * (the Yiddish novel, 90% of paragraphs edited: 3.4 of 6.9 s). Kept for one
+ * gap only, so a long document's keys are not all alive at once.
  */
-function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx): string[] | null {
-  const cached = ctx.concatParts.get(el);
+function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx, keys: KeyCache): string[] | null {
+  const cached = keys.get(el);
   if (cached !== undefined) return cached;
   let parts: string[] | null = null;
   // A section break is no split or merge: its mark is the break, and the
@@ -839,7 +841,7 @@ function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx): string[
       });
     }
   }
-  ctx.concatParts.set(el, parts);
+  keys.set(el, parts);
   return parts;
 }
 
