@@ -97,3 +97,32 @@ export function resolvePartPath(sourcePart: string, target: string): string {
   }
   return out.join("/");
 }
+
+/**
+ * Each entry's uncompressed size, read from the zip's central directory
+ * without inflating anything. Throws when the bytes are not a zip.
+ */
+export function zipEntrySizes(data: Uint8Array): Map<string, number> {
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  // The end-of-central-directory record closes the file, after a comment of
+  // at most 65535 bytes.
+  let end = data.length - 22;
+  const stop = Math.max(0, data.length - 22 - 65535);
+  while (end >= stop && view.getUint32(end, true) !== 0x06054b50) end--;
+  if (end < stop) throw new Error("not a zip: no end-of-central-directory record");
+  const count = view.getUint16(end + 10, true);
+  let at = view.getUint32(end + 16, true);
+  const sizes = new Map<string, number>();
+  const decoder = new TextDecoder();
+  for (let i = 0; i < count; i++) {
+    if (at + 46 > data.length || view.getUint32(at, true) !== 0x02014b50) throw new Error("not a zip: bad central directory");
+    const size = view.getUint32(at + 24, true);
+    const nameLength = view.getUint16(at + 28, true);
+    const extra = view.getUint16(at + 30, true);
+    const comment = view.getUint16(at + 32, true);
+    // 0xFFFFFFFF marks a ZIP64 size: over 4 GB, far past any limit.
+    sizes.set(decoder.decode(data.subarray(at + 46, at + 46 + nameLength)), size === 0xffffffff ? Infinity : size);
+    at += 46 + nameLength + extra + comment;
+  }
+  return sizes;
+}

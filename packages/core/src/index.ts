@@ -103,6 +103,8 @@ export type {
   DeleteRange,
 } from "./edit/suggest.js";
 export { compareDocuments } from "./edit/compare/index.js";
+export { estimateCompareMemory } from "./edit/compare/memory.js";
+export type { CompareMemoryEstimate } from "./edit/compare/memory.js";
 export type { CompareOptions, CompareNote } from "./edit/compare/index.js";
 export { COMPARE_TUNING } from "./edit/compare/text.js";
 export { EditHistory } from "./edit/history.js";

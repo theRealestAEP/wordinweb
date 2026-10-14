@@ -71,6 +71,17 @@ export const DEFAULT_XML_LIMITS: XmlParseLimits = {
   maxDepth: 512,
 };
 
+/**
+ * A copy of `s` that does not point into the string it was cut from. V8
+ * makes a substring of 13 or more characters a view into its source, so one
+ * long text run kept a document part's whole decoded XML alive after parsing
+ * (32 MB for the Yiddish novel's 16 million characters). Concatenating and
+ * slicing again copies just this text.
+ */
+function own(s: string): string {
+  return s.length < 13 ? s : (" " + s).slice(1);
+}
+
 export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIMITS): XmlElement {
   if (input.length > limits.maxLength) {
     throw new Error(`XML parse error: input exceeds ${limits.maxLength} bytes`);
@@ -89,11 +100,12 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
   // (w:rPr, w:val, "24"): reusing one copy took a fifth off the parsed tree.
   const strings = new Map<string, string>();
   const intern = (value: string): string => {
-    if (value.length > 32) return value;
+    if (value.length > 32) return own(value);
     const known = strings.get(value);
     if (known !== undefined) return known;
-    strings.set(value, value);
-    return value;
+    const copy = own(value);
+    strings.set(copy, copy);
+    return copy;
   };
 
   const fail = (msg: string): never => {
@@ -107,7 +119,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
       const text = input.slice(i, lt);
       if (text.trim().length > 0 || stack.length > 1) {
         const top = stack[stack.length - 1];
-        if (top !== root) top.text += decodeEntities(text);
+        if (top !== root) top.text += own(decodeEntities(text));
       }
     }
     i = lt;
@@ -125,7 +137,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
         const end = input.indexOf("]]>", i + 9);
         if (end === -1) fail("unterminated CDATA");
         const top = stack[stack.length - 1];
-        if (top !== root) top.text += input.slice(i + 9, end);
+        if (top !== root) top.text += own(input.slice(i + 9, end));
         i = end + 3;
       } else {
         // DOCTYPE or other declaration — skip to next '>'
@@ -171,7 +183,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
             // Unquoted value (not valid XML, but be lenient)
             let m = k;
             while (m < n && !isWhitespace(input.charCodeAt(m)) && input[m] !== ">") m++;
-            el.attrs[attrName] = decodeEntities(input.slice(k, m));
+            el.attrs[attrName] = own(decodeEntities(input.slice(k, m)));
             j = m;
           }
         } else {
