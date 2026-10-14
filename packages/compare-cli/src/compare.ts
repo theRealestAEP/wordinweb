@@ -2,8 +2,9 @@ import { closeSync, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSy
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
-import { XmlElement, child, parseXml, serializeXml } from "../../core/src/xml.js";
+import { XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
 import { histogramMatch } from "../../core/src/edit/compare/histogram.js";
+import { paragraphText } from "../../core/src/edit/compare/content.js";
 import {
   BlockClass,
   CompareOptions,
@@ -15,12 +16,16 @@ import {
   compareContainer,
   compareContext,
   compareNotes,
+  compareRow,
+  compareTableProps,
   copyNotesForStruckReferences,
+  deletedRow,
   emitDeleted,
   emitGapOp,
   emitInserted,
   emitMatched,
   gapOps,
+  insertedRow,
   noteRefsIn,
   pairHeadersFooters,
   paragraphKeyParts,
@@ -28,7 +33,7 @@ import {
   reportUncomparedParts,
   resolveGap,
 } from "../../core/src/edit/compare/index.js";
-import { Input, Side, readInput, stubSource } from "./input.js";
+import { Input, ROW_SLOT, Side, dropNotesModel, readInput, stubSource } from "./input.js";
 import { BlockStore } from "./store.js";
 import { ZipReader, ZipWriter } from "./zip.js";
 
@@ -44,10 +49,11 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
  *
  * Memory does not grow with the size of the documents' bodies. Each body is
  * written to disk block by block with a small index (hashes, kinds, section
- * breaks); the alignment runs on the index, and the blocks are read back one
- * pair at a time to be compared and written out. Everything outside the
- * body (styles, numbering, headers, footers, notes, comments) is held in
- * memory, and each binary part is copied from the input zip unread.
+ * breaks), a table's rows as blocks of their own; the alignment runs on the
+ * index, and the blocks are read back one pair at a time to be compared and
+ * written out. Everything outside the body (styles, numbering, headers,
+ * footers, notes, comments) is held in memory, and each binary part is
+ * copied from the input zip unread.
  */
 export async function compareFiles(originalPath: string, revisedPath: string, outPath: string, options: CompareFilesOptions): Promise<void> {
   for (const [which, path] of [["original", originalPath], ["revised", revisedPath]]) {
@@ -69,9 +75,9 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     checkDiskSpace(dir, [oZip, rZip]);
 
     const O = await readNamed(oZip, "original", dir);
-    stores.push(O.blocks, O.texts);
+    stores.push(O.blocks, O.texts, O.rows);
     const R = await readNamed(rZip, "revised", dir);
-    stores.push(R.blocks, R.texts);
+    stores.push(R.blocks, R.texts, R.rows);
 
     const note = options.onNote ?? (() => {});
     for (const input of [O, R]) {
@@ -87,6 +93,8 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     for (const kind of ["footnote", "endnote"] as const) {
       compareNotes(kind, O.shell, R.shell, ctx, { original: O.noteRefs[kind], merged: R.noteRefs[kind] });
     }
+    // Changed notes rebuild the model.
+    dropNotesModel(R.shell);
 
     const plan = planBody(O, R, ctx);
     const body = new BlockStore(join(dir, "result-blocks"));
@@ -275,11 +283,14 @@ const NOTE_REF = /<w:(?:footnote|endnote)Reference /;
 const GLYPH = { ins: 1, del: 2 } as const;
 
 interface Emitted {
-  /** The result blocks that hold note references. */
+  /** The result pieces that hold note references. */
   withNoteRefs: number[];
   /** Relationship ids the result body uses, when the save would otherwise drop parts it cannot see used. */
   relIds: Set<string> | null;
 }
+
+/** Takes one piece of the result's body: a block, or part of a table. */
+type Emit = (xml: string) => void;
 
 function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Emitted {
   const n = plan.n;
@@ -314,6 +325,11 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Em
   // A save drops a chart part whose relationship the body it sees does not use.
   const relIds = [O, R].some((input) => [...input.shell.documentRels.values()].some((rel) => rel.type.endsWith("/chart"))) ? new Set<string>() : null;
   const withNoteRefs: number[] = [];
+  const emit: Emit = (text) => {
+    const k = out.add(text);
+    if (NOTE_REF.test(text)) withNoteRefs.push(k);
+    if (relIds) for (const m of text.matchAll(/="(rId\d+)"/g)) relIds.add(m[1]);
+  };
   // The second entry of a split or merge, emitted with the first.
   let second: Entry | null = null;
 
@@ -334,6 +350,14 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Em
     const op = plan.op[k];
     const o = plan.o[k];
     const r = plan.r[k];
+    emittedUpTo = k;
+    // A table is on disk as its shell and rows, and takes no mark.
+    if ((plan.fromOriginal(k) ? O.kinds[o] : R.kinds[r]) === "tbl") {
+      if (op === DELETED) emitTableThrough(O, o, (tbl) => emitDeleted(tbl, ctx).el, emit);
+      else if (op === INSERTED) emitTableThrough(R, r, (tbl) => emitInserted(tbl, ctx).el, emit);
+      else emitMatchedTables(O, o, R, r, ctx, emit);
+      continue;
+    }
     let entry: Entry | null = null;
     let xml: string | null = null;
     if (op === COPY) {
@@ -355,7 +379,6 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Em
       entry = second;
       second = null;
     }
-    emittedUpTo = k;
     if (entry) {
       const self = entry;
       const at = (): Entry => self;
@@ -363,20 +386,152 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Em
       if (props[k] !== -1) applyMarkStep({ kind: "props", at: k, follower: props[k] }, at, pPrOf, ctx);
       xml = serializeXml(entry.el);
     }
-    const text = xml as string;
-    out.add(text);
-    if (NOTE_REF.test(text)) withNoteRefs.push(k);
-    if (relIds) for (const m of text.matchAll(/="(rId\d+)"/g)) relIds.add(m[1]);
+    emit(xml as string);
   }
   return { withNoteRefs, relIds };
 }
 
-/** Per result block: note kind -> the reference's place among that kind's references in the block -> its new id. */
+// ---------------------------------------------------------------------------
+// Tables: the shell in memory, the rows read one at a time
+// ---------------------------------------------------------------------------
+
+/** A deleted or inserted table's children go through `emitWhole` about this much XML at a time. */
+const TABLE_CHUNK_BYTES = 1 << 20;
+
+/** A row's slot in a serialized shell. */
+const ROW_SLOT_XML = serializeXml(ROW_SLOT);
+
+/** `el`'s start tag and end tag, as serializeXml writes them around its children. */
+function tagsOf(el: XmlElement): [string, string] {
+  return serializeXml({ ...el, children: [ROW_SLOT] }).split(ROW_SLOT_XML) as [string, string];
+}
+
+/**
+ * A table whose every child is emitted alike (emitDeleted, emitInserted):
+ * the children go through `emitWhole` in a stand-in table, a chunk at a
+ * time, and come out in document order. One chunk is what compareDocuments
+ * does; a table over TABLE_CHUNK_BYTES whose rows share a relationship the
+ * result lacks (a struck image) gets it adopted once per chunk, not once.
+ */
+function emitTableThrough(input: Input, i: number, emitWhole: (tbl: XmlElement) => XmlElement, emit: Emit): void {
+  const shell = parseXml(input.blocks.read(i));
+  if (shell.children.length === 0) {
+    emit(serializeXml(emitWhole(shell)));
+    return;
+  }
+  let [next] = input.tables.get(i) as [number, number];
+  let chunk: XmlElement[] = [];
+  let bytes = 0;
+  let tail = "";
+  const flush = (): void => {
+    const done = emitWhole({ ...shell, children: chunk });
+    if (!tail) {
+      const tags = tagsOf(done);
+      emit(tags[0]);
+      tail = tags[1];
+    }
+    for (const c of done.children) emit(serializeXml(c));
+    chunk = [];
+    bytes = 0;
+  };
+  for (const c of shell.children) {
+    if (c.name === ROW_SLOT.name) {
+      const xml = input.rows.read(next++);
+      chunk.push(parseXml(xml));
+      bytes += xml.length;
+    } else chunk.push(c);
+    if (bytes >= TABLE_CHUNK_BYTES) flush();
+  }
+  flush();
+  emit(tail);
+}
+
+/** Whether two tables write the same XML, as compareTable asks of a matched pair. */
+function sameTables(O: Input, o: number, R: Input, r: number): boolean {
+  const [oFrom, oTo] = O.tables.get(o) as [number, number];
+  const [rFrom, rTo] = R.tables.get(r) as [number, number];
+  if (oTo - oFrom !== rTo - rFrom) return false;
+  const same = (a: string, b: string): boolean => a === b || sameXml(parseXml(a), parseXml(b));
+  if (!same(O.blocks.read(o), R.blocks.read(r))) return false;
+  for (let i = 0; i < oTo - oFrom; i++) if (!same(O.rows.read(oFrom + i), R.rows.read(rFrom + i))) return false;
+  return true;
+}
+
+/** A matched table pair, as emitMatched compares it: the same table unchanged, else compareTable. */
+function emitMatchedTables(O: Input, o: number, R: Input, r: number, ctx: Ctx, emit: Emit): void {
+  const shell = parseXml(R.blocks.read(r));
+  const [rFrom, rTo] = R.tables.get(r) as [number, number];
+  if (sameTables(O, o, R, r)) {
+    // Unchanged: the revised table as it was, its rows back in their slots.
+    const parts = serializeXml(shell).split(ROW_SLOT_XML);
+    for (let i = 0; i < rTo - rFrom; i++) emit(parts[i] + R.rows.read(rFrom + i));
+    emit(parts[rTo - rFrom]);
+    return;
+  }
+  compareTableProps(parseXml(O.blocks.read(o)), shell, ctx);
+  // compareRows puts the rows after the table's other children.
+  shell.children = [...shell.children.filter((c) => c.name !== ROW_SLOT.name), ROW_SLOT];
+  const [head, tail] = serializeXml(shell).split(ROW_SLOT_XML);
+  emit(head);
+  const [oFrom, oTo] = O.tables.get(o) as [number, number];
+  emitComparedRows(O, oFrom, oTo, R, rFrom, rTo, ctx, emit);
+  emit(tail);
+}
+
+/** compareRows over two tables' rows on disk: the result's rows, in order. */
+function emitComparedRows(O: Input, oFrom: number, oTo: number, R: Input, rFrom: number, rTo: number, ctx: Ctx, emit: Emit): void {
+  const oN = oTo - oFrom;
+  const rN = rTo - rFrom;
+  const anchors = histogramMatch(O.rowFingerprints.slice(oFrom, oTo), R.rowFingerprints.slice(rFrom, rTo));
+  const oSide = rowSide(O, oFrom);
+  const rSide = rowSide(R, rFrom);
+  const parseO = (i: number): XmlElement => parseXml(O.rows.read(oFrom + i));
+  const parseR = (j: number): XmlElement => parseXml(R.rows.read(rFrom + j));
+  const emitRows = (rows: XmlElement[]): void => {
+    for (const row of rows) emit(serializeXml(row));
+  };
+  let oAt = 0;
+  let rAt = 0;
+  for (const anchor of [...anchors, { a: oN, b: rN }]) {
+    const pairings = resolveGap(oSide, rSide, oAt, anchor.a, rAt, anchor.b).filter((p) => p.kind === "pair");
+    let oi = oAt;
+    let ri = rAt;
+    for (const pairing of [...pairings, { kind: "pair" as const, o: anchor.a, r: anchor.b, other: -1 }]) {
+      for (let i = oi; i < pairing.o; i++) emitRows([deletedRow(parseO(i), ctx)]);
+      for (let j = ri; j < pairing.r; j++) emitRows([insertedRow(parseR(j), ctx)]);
+      oi = pairing.o;
+      ri = pairing.r;
+      if (pairing.o >= anchor.a || pairing.r >= anchor.b) break;
+      emitRows(compareRow(parseO(pairing.o), parseR(pairing.r), ctx));
+      oi = pairing.o + 1;
+      ri = pairing.r + 1;
+    }
+    if (anchor.a < oN && anchor.b < rN) emitRows(compareRow(parseO(anchor.a), parseR(anchor.b), ctx));
+    oAt = anchor.a + 1;
+    rAt = anchor.b + 1;
+  }
+}
+
+/** One table's rows as a gap side, indexed from `base`: what treeSide answers for rows. */
+function rowSide(input: Input, base: number): GapSide {
+  const texts = new Lru<string>(1024);
+  const row = (i: number): XmlElement => parseXml(input.rows.read(base + i));
+  return {
+    kind: (i) => input.rowKinds[base + i],
+    text: (i) => texts.get(i, () => paragraphText(row(i))),
+    // A row ends no section, and is no paragraph to split or merge.
+    section: () => "",
+    cells: (i) => row(i).children.filter((c) => localName(c.name) === "tc").length,
+    keyParts: () => null,
+  };
+}
+
+/** Per result piece: note kind -> the reference's place among that kind's references in the piece -> its new id. */
 type NoteIdChanges = Map<number, Record<"footnote" | "endnote", Map<number, string>>>;
 
 /**
  * giveStruckReferencesTheirOwnNotes for a body on disk: the references are
- * read from the blocks that hold them, the notes copied, and the new ids
+ * read from the pieces that hold them, the notes copied, and the new ids
  * returned for the writer to put in.
  */
 function giveStruckReferencesTheirOwnNotes(body: BlockStore, withNoteRefs: number[], R: Input, ctx: Ctx): NoteIdChanges {
@@ -385,7 +540,8 @@ function giveStruckReferencesTheirOwnNotes(body: BlockStore, withNoteRefs: numbe
     const refs: { el: { attrs: Record<string, string> }; struck: boolean; block: number; place: number }[] = [];
     for (const k of withNoteRefs) {
       const found: NoteRef[] = [];
-      noteRefsIn(parseXml(body.read(k)), kind, false, found);
+      // Walked as a child, so a piece that is a deleted row counts as struck.
+      noteRefsIn({ name: "w:dxw-piece", attrs: {}, children: [parseXml(body.read(k))], text: "" }, kind, false, found);
       found.forEach((ref, place) => refs.push({ el: { attrs: { "w:id": ref.el.attrs["w:id"] } }, struck: ref.struck, block: k, place }));
     }
     for (const [i, id] of copyNotesForStruckReferences(kind, R.shell, ctx, refs)) {

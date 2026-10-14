@@ -5,8 +5,8 @@ import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, child, cyrb53, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { acceptAllRevisions, collectRevisions } from "../../core/src/edit/suggest.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
-import { blockFingerprint, sectionKey } from "../../core/src/edit/compare/index.js";
-import { scanBody } from "./scan.js";
+import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionKey, tableFingerprint } from "../../core/src/edit/compare/index.js";
+import { scanBody, scanChildren } from "./scan.js";
 import { BlockStore } from "./store.js";
 import { ZipReader } from "./zip.js";
 
@@ -33,7 +33,14 @@ const TRACKED_CHANGE =
 /** Blocks with tracked changes are accepted in batches of about this much XML. */
 const BATCH_BYTES = 4 << 20;
 
-/** One input document: its body on disk, block by block, and everything else in a shell. */
+/** Stands where a row sits in a table's shell. */
+export const ROW_SLOT: XmlElement = { name: "w:dxw-row", attrs: {}, children: [], text: "" };
+
+/**
+ * One input document: its body on disk, block by block, and everything else
+ * in a shell. A table's rows are blocks of their own: the table's block is
+ * its shell, the table element with a ROW_SLOT where each row sits.
+ */
 export interface Input {
   side: Side;
   zip: ZipReader;
@@ -47,10 +54,10 @@ export interface Input {
   blocks: BlockStore;
   /** Each block's paragraphText. */
   texts: BlockStore;
-  /** Each block's blockFingerprint, hashed: the anchor pass's keys. */
-  fingerprints: string[];
-  /** A hash of each block's XML. */
-  hashes: string[];
+  /** Each block's blockFingerprint, hashed to a number: the anchor pass's keys. */
+  fingerprints: number[];
+  /** A hash of each block's XML, as a number. */
+  hashes: number[];
   /** Each block's local name. */
   kinds: string[];
   /** Whether each block is a paragraph that ends a section. */
@@ -59,6 +66,14 @@ export interface Input {
   sectionKeys: Map<number, string>;
   /** The w:sectPr of each block that ends a section, in order. */
   sectPrs: XmlElement[];
+  /** Every table's row-level children (tr, sdt, customXml) as XML, in document order. */
+  rows: BlockStore;
+  /** Each row's rowFingerprint, hashed to a number. */
+  rowFingerprints: number[];
+  /** Each row's local name. */
+  rowKinds: string[];
+  /** Each table block's rows: [from, to) in `rows`. */
+  tables: Map<number, [number, number]>;
   /** Note reference ids in document order. */
   noteRefs: Record<"footnote" | "endnote", string[]>;
   /** Whether the input held tracked changes, now accepted. */
@@ -131,17 +146,31 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       endsSection: [],
       sectionKeys: new Map(),
       sectPrs: [],
+      rows: new BlockStore(join(dir, `${side}-rows`)),
+      rowFingerprints: [],
+      rowKinds: [],
+      tables: new Map(),
       noteRefs: { footnote: [], endnote: [] },
       hadRevisions,
     };
 
-    const add = (el: XmlElement): void => {
+    const noteRefsIn = (e: XmlElement): void => {
+      const ln = localName(e.name);
+      if (ln === "footnoteReference") input.noteRefs.footnote.push(e.attrs["w:id"]);
+      else if (ln === "endnoteReference") input.noteRefs.endnote.push(e.attrs["w:id"]);
+      for (const c of e.children) noteRefsIn(c);
+    };
+
+    /** cyrb53 as a number: eight bytes in an array of them, where its string is forty. */
+    const hash = (s: string): number => parseInt(cyrb53(s), 36);
+
+    /** One block's index entry: its XML, the hash of the XML it stands for, its text and its fingerprint. */
+    const index = (el: XmlElement, xml: string, xmlHash: number, text: string, fingerprint: number): void => {
       const i = input.blocks.count;
-      const xml = serializeXml(el);
       input.blocks.add(xml);
-      input.texts.add(paragraphText(el));
-      input.fingerprints.push(cyrb53(blockFingerprint(el, shell)));
-      input.hashes.push(cyrb53(xml));
+      input.texts.add(text);
+      input.fingerprints.push(fingerprint);
+      input.hashes.push(xmlHash);
       input.kinds.push(localName(el.name));
       const sectPr = localName(el.name) === "p" ? child(child(el, "pPr"), "sectPr") : undefined;
       input.endsSection.push(!!sectPr);
@@ -149,36 +178,135 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
         input.sectionKeys.set(i, sectionKey(el, shell));
         input.sectPrs.push(sectPr);
       }
-      const walk = (e: XmlElement): void => {
-        const ln = localName(e.name);
-        if (ln === "footnoteReference") input.noteRefs.footnote.push(e.attrs["w:id"]);
-        else if (ln === "endnoteReference") input.noteRefs.endnote.push(e.attrs["w:id"]);
-        for (const c of e.children) walk(c);
+      noteRefsIn(el);
+    };
+
+    const add = (el: XmlElement): void => {
+      const xml = serializeXml(el);
+      index(el, xml, hash(xml), paragraphText(el), hash(blockFingerprint(el, shell)));
+    };
+
+    /**
+     * A table, one child at a time: its rows go to `rows`, and its block is
+     * the shell. The table's text, fingerprint and hash are those of the
+     * whole element.
+     */
+    const beginTable = (open: XmlElement) => {
+      const from = input.rows.count;
+      const shell: XmlElement = { ...open, children: [] };
+      let text = "";
+      let rowHashes = "";
+      return {
+        open,
+        /** How many w:tr rows it holds. */
+        trs: 0,
+        take(el: XmlElement): void {
+          const xml = serializeXml(el);
+          text += paragraphText(el);
+          const rowKind = ROW_LEVEL.indexOf(localName(el.name));
+          if (rowKind === -1) {
+            shell.children.push(el);
+            return;
+          }
+          if (ROW_LEVEL[rowKind] === "tr") this.trs++;
+          input.rows.add(xml);
+          input.rowFingerprints.push(hash(rowFingerprint(el)));
+          input.rowKinds.push(ROW_LEVEL[rowKind]);
+          rowHashes += cyrb53(xml);
+          shell.children.push(ROW_SLOT);
+          noteRefsIn(el);
+        },
+        end(): void {
+          input.tables.set(input.blocks.count, [from, input.rows.count]);
+          const xml = serializeXml(shell);
+          index(shell, xml, hash(xml + rowHashes), text, hash(tableFingerprint(text)));
+        },
       };
-      walk(el);
     };
 
     // Blocks with tracked changes go through the shell's body, a batch at a
-    // time, to be accepted as acceptAllRevisions accepts a whole document. A
-    // deleted paragraph mark joins its paragraph to the next block, so a
-    // batch never ends on one.
+    // time, to be accepted as acceptAllRevisions accepts a whole document.
+    // `wrap` is the body child the batch sat in: a table around its rows,
+    // or null for body blocks.
     const body = child(shell.docRoot, "body");
     if (!body) throw new Error(`${zip.path}: document.xml has no w:body`);
     const tail = body.children;
+    const accept = (els: XmlElement[], wrap: XmlElement | null): XmlElement[] => {
+      body.children = [...(wrap ? [{ ...wrap, children: els }] : els), ...tail];
+      acceptAllRevisions(shell);
+      const kept = body.children.filter((c) => !tail.includes(c));
+      body.children = tail;
+      return wrap ? kept.flatMap((t) => t.children) : kept;
+    };
+
+    /**
+     * Read a table's children. Rows with tracked changes are accepted a batch
+     * at a time, any other child on its own: a batch whose rows are all
+     * deleted takes its stand-in table with it, and must take nothing else.
+     * Null when accepting removed the table, as it does when the last w:tr
+     * row is deleted.
+     */
+    const readTable = (start: number, name: string) => {
+      const childStarts: number[] = [];
+      const childEnds: number[] = [];
+      const content = scanChildren(fd, start, (c) => {
+        childStarts.push(c.start);
+        childEnds.push(c.end);
+      });
+      const openTag = range(start, content.contentStart).toString("utf8");
+      const table = beginTable(parseXml(openTag.endsWith("/>") ? openTag : `${openTag}</${name}>`));
+      let rows: XmlElement[] = [];
+      let rowBytes = 0;
+      let hadTr = false;
+      const flushRows = (): void => {
+        if (rows.length > 0) for (const el of accept(rows, table.open)) table.take(el);
+        rows = [];
+        rowBytes = 0;
+      };
+      for (let k = 0; k < childStarts.length; k++) {
+        const xml = range(childStarts[k], childEnds[k]).toString("utf8");
+        const el = parseXml(xml);
+        const tracked = TRACKED_CHANGE.test(xml);
+        if (tracked) hadRevisions = true;
+        if (!ROW_LEVEL.includes(localName(el.name))) {
+          flushRows();
+          if (tracked) for (const e of accept([el], table.open)) table.take(e);
+          else table.take(el);
+          continue;
+        }
+        hadTr ||= localName(el.name) === "tr";
+        if (rows.length > 0 || tracked) {
+          rows.push(el);
+          rowBytes += xml.length;
+          if (rowBytes >= BATCH_BYTES) flushRows();
+        } else table.take(el);
+      }
+      flushRows();
+      return hadTr && table.trs === 0 ? null : table;
+    };
+
+    // A deleted paragraph mark joins its paragraph to the next block, so a
+    // batch never ends on one. A table is accepted apart: a batch open when
+    // one comes is flushed once the table stands, as nothing joins across a
+    // table, and goes on when accepting removed the table, as the join then
+    // crosses where it stood.
     let batch: XmlElement[] = [];
     let batchBytes = 0;
     const flush = (): void => {
-      if (batch.length === 0) return;
-      body.children = [...batch, ...tail];
-      acceptAllRevisions(shell);
-      const accepted = body.children.filter((c) => !tail.includes(c));
-      body.children = tail;
+      if (batch.length > 0) for (const el of accept(batch, null)) add(el);
       batch = [];
       batchBytes = 0;
-      for (const el of accepted) add(el);
     };
     for (let i = 0; i < names.length; i++) {
       if (isSectPr(i)) continue;
+      if (localName(names[i]) === "tbl") {
+        const table = readTable(starts[i], names[i]);
+        if (table) {
+          flush();
+          table.end();
+        }
+        continue;
+      }
       const xml = range(starts[i], ends[i]).toString("utf8");
       const el = parseXml(xml);
       if (batch.length > 0 || TRACKED_CHANGE.test(xml)) {
@@ -192,10 +320,21 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     }
     flush();
     input.hadRevisions = hadRevisions;
+    dropNotesModel(shell);
     return input;
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * The notes' editing model (id -> blocks) is built by every load and again
+ * by each markNotePartsChanged. A compare reads the retained trees, never
+ * the model, and the model is as large again as the trees.
+ */
+export function dropNotesModel(shell: DocxDocument): void {
+  shell.footnotes.clear();
+  shell.endnotes.clear();
 }
 
 /** A paragraph whose mark is deleted or moved away: accepting it joins the next block. */

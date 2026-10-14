@@ -41,19 +41,22 @@ export interface KeyMatch {
  */
 const MAX_CHAIN = 64;
 
+/** A sequence element: compared with ===, so a hash number serves as well as a string. */
+export type Key = string | number;
+
 /**
  * Matched index pairs, strictly increasing on both sides. Everything not
  * returned is a deletion (left) or an insertion (right).
  */
-export function histogramMatch(a: readonly string[], b: readonly string[]): KeyMatch[] {
+export function histogramMatch(a: readonly Key[], b: readonly Key[]): KeyMatch[] {
   const out: KeyMatch[] = [];
   region(a, b, 0, a.length, 0, b.length, out);
   return out;
 }
 
 function region(
-  a: readonly string[],
-  b: readonly string[],
+  a: readonly Key[],
+  b: readonly Key[],
   aLo: number,
   aHi: number,
   bLo: number,
@@ -111,14 +114,14 @@ interface Anchor {
  * when they share only elements above MAX_CHAIN (the caller's LCS fallback).
  */
 function lowestOccurrenceRegion(
-  a: readonly string[],
-  b: readonly string[],
+  a: readonly Key[],
+  b: readonly Key[],
   aLo: number,
   aHi: number,
   bLo: number,
   bHi: number,
 ): Anchor | null | undefined {
-  const positions = new Map<string, number[]>();
+  const positions = new Map<Key, number[]>();
   for (let i = aLo; i < aHi; i++) {
     const list = positions.get(a[i]);
     if (list) list.push(i);
@@ -177,8 +180,8 @@ function lowestOccurrenceRegion(
 }
 
 function lcsFallback(
-  a: readonly string[],
-  b: readonly string[],
+  a: readonly Key[],
+  b: readonly Key[],
   aLo: number,
   aHi: number,
   bLo: number,
@@ -187,7 +190,7 @@ function lcsFallback(
 ): void {
   let ai = aLo;
   let bi = bLo;
-  for (const part of diffArrays(a.slice(aLo, aHi) as string[], b.slice(bLo, bHi) as string[])) {
+  for (const part of diffArrays(a.slice(aLo, aHi) as Key[], b.slice(bLo, bHi) as Key[])) {
     const n = part.value.length;
     if (part.added) bi += n;
     else if (part.removed) ai += n;

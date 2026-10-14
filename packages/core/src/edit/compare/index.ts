@@ -560,8 +560,13 @@ export function blockFingerprint(el: XmlElement, doc: DocxDocument): string {
     const sect = sectionKey(el, doc);
     return `P\u0000${normalizeText(paragraphText(el))}\u0000${style}\u0000${numPr ? serializeXml(numPr) : ""}\u0000${jc}\u0000${sect}`;
   }
-  if (ln === "tbl") return `T\u0000${normalizeText(paragraphText(el))}`;
+  if (ln === "tbl") return tableFingerprint(paragraphText(el));
   return `X\u0000${serializeXml(el)}`;
+}
+
+/** blockFingerprint of a table, from its paragraphText. */
+export function tableFingerprint(text: string): string {
+  return `T\u0000${normalizeText(text)}`;
 }
 
 export interface Pairing {
@@ -712,6 +717,16 @@ export function resolveGap(
   rHi: number,
   needsAnchor = false,
 ): Pairing[] {
+  // One block on each side: paired when they are the same shape, as the
+  // single-leftover rule would pair them, or else when scoring would.
+  // Settled first, so two long tables are not tokenized to be scored.
+  if (oHi - oLo === 1 && rHi - rLo === 1) {
+    const pair =
+      sameShape(O, oLo, R, rLo) ||
+      (pairable(O, oLo, R, rLo) && (needsAnchor || similarity(O.text(oLo), R.text(rLo)) >= similarityFloor(O.text(oLo), R.text(rLo))));
+    return pair ? [{ kind: "pair", o: oLo, r: rLo, other: -1 }] : [];
+  }
+
   const out: Pairing[] = [];
   const oUsed = new Set<number>();
   const rUsed = new Set<number>();
@@ -780,7 +795,10 @@ export function resolveGap(
   }
 
   // Then similarity, best score first, over the gap's cross-product only.
-  const scored: { o: number; r: number; score: number }[] = [];
+  // The candidates are three columns, not objects: a windowed gap holds up
+  // to 2 × GAP_WINDOW of them per original block, and a long rewritten list
+  // held millions.
+  const scored = new Candidates();
   for (let i = oLo; i < oHi; i++) {
     if (oUsed.has(i)) continue;
     const [jLo, jHi] = span(i);
@@ -790,18 +808,19 @@ export function resolveGap(
       const a = O.text(i);
       const b = R.text(j);
       const score = similarity(a, b);
-      if (score >= similarityFloor(a, b)) scored.push({ o: i, r: j, score });
+      if (score >= similarityFloor(a, b)) scored.push(i, j, score);
     }
   }
-  scored.sort((x, y) => y.score - x.score || x.o - y.o);
-  for (const cand of scored) {
-    if (oUsed.has(cand.o) || rUsed.has(cand.r)) continue;
+  for (const k of scored.byScore()) {
+    const o = scored.o[k];
+    const r = scored.r[k];
+    if (oUsed.has(o) || rUsed.has(r)) continue;
     // Pairings must stay monotone: a crossing pair would put a deletion after
     // the insertion that replaced it and read as two unrelated edits.
-    if (crosses(cand.o, cand.r)) continue;
-    accept({ kind: "pair", o: cand.o, r: cand.r, other: -1 });
-    oUsed.add(cand.o);
-    rUsed.add(cand.r);
+    if (crosses(o, r)) continue;
+    accept({ kind: "pair", o, r, other: -1 });
+    oUsed.add(o);
+    rUsed.add(r);
   }
 
   // A slot between two settled pairings (or a gap's ends) that holds exactly
@@ -852,6 +871,39 @@ export function resolveGap(
     }
   }
   return out.sort((a, b) => a.o - b.o);
+}
+
+/** The scored pairs of a gap, as three columns. */
+class Candidates {
+  o = new Int32Array(1024);
+  r = new Int32Array(1024);
+  score = new Float64Array(1024);
+  n = 0;
+
+  push(o: number, r: number, score: number): void {
+    if (this.n === this.o.length) {
+      const o2 = new Int32Array(this.n * 2);
+      o2.set(this.o);
+      this.o = o2;
+      const r2 = new Int32Array(this.n * 2);
+      r2.set(this.r);
+      this.r = r2;
+      const score2 = new Float64Array(this.n * 2);
+      score2.set(this.score);
+      this.score = score2;
+    }
+    this.o[this.n] = o;
+    this.r[this.n] = r;
+    this.score[this.n] = score;
+    this.n++;
+  }
+
+  /** The candidates' indexes, best score first, then by original block, then as pushed. */
+  byScore(): Uint32Array {
+    const order = new Uint32Array(this.n);
+    for (let k = 0; k < this.n; k++) order[k] = k;
+    return order.sort((x, y) => this.score[y] - this.score[x] || this.o[x] - this.o[y] || x - y);
+  }
 }
 
 /**
@@ -1503,16 +1555,19 @@ function words(tokens: readonly ContentToken[], from: number, to: number): numbe
 
 function compareTable(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
   if (sameXml(oTbl, rTbl)) return;
-  if (ctx.formatting) {
-    swapProps(rTbl, "tblPr", recordTableFormatChange, child(oTbl, "tblPr"), ctx);
-    alignTableGrid(oTbl, rTbl, ctx);
-  }
-
+  compareTableProps(oTbl, rTbl, ctx);
   compareRows(oTbl, rTbl, ctx);
 }
 
+/** A matched table pair's own properties and grid, before its rows are compared. */
+export function compareTableProps(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
+  if (!ctx.formatting) return;
+  swapProps(rTbl, "tblPr", recordTableFormatChange, child(oTbl, "tblPr"), ctx);
+  alignTableGrid(oTbl, rTbl, ctx);
+}
+
 /** Row-level children: rows, and content controls or custom XML holding rows. */
-const ROW_LEVEL = ["tr", "sdt", "customXml"];
+export const ROW_LEVEL = ["tr", "sdt", "customXml"];
 
 /**
  * Align and diff the rows of a table, or of a row-level content control (a
@@ -1560,7 +1615,7 @@ function compareRows(oParent: XmlElement, rParent: XmlElement, ctx: Ctx): void {
   rParent.children = [...rParent.children.filter((c) => !ROW_LEVEL.includes(localName(c.name))), ...rows];
 }
 
-function rowFingerprint(tr: XmlElement): string {
+export function rowFingerprint(tr: XmlElement): string {
   if (localName(tr.name) !== "tr") return `X\u0000${serializeXml(tr)}`;
   const cells = tr.children.filter((c) => localName(c.name) === "tc");
   return `${cells.length}\u0000${normalizeText(paragraphText(tr))}`;
@@ -1573,7 +1628,7 @@ function rowsIn(el: XmlElement): XmlElement[] {
   return (inner?.children ?? []).filter((c) => ROW_LEVEL.includes(localName(c.name))).flatMap(rowsIn);
 }
 
-function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
+export function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
   const clone = cloneXml(el);
   for (const tr of rowsIn(clone)) {
     markRowRevision(tr, "del", ctx.meta);
@@ -1582,7 +1637,7 @@ function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
   return clone;
 }
 
-function insertedRow(el: XmlElement, ctx: Ctx): XmlElement {
+export function insertedRow(el: XmlElement, ctx: Ctx): XmlElement {
   for (const tr of rowsIn(el)) {
     markRowRevision(tr, "ins", ctx.meta);
     wrapRowContent(tr, "ins", ctx);
@@ -1591,7 +1646,7 @@ function insertedRow(el: XmlElement, ctx: Ctx): XmlElement {
 }
 
 /** A matched row pair, or — when the cell counts differ — two coarse rows. */
-function compareRow(oTr: XmlElement, rTr: XmlElement, ctx: Ctx): XmlElement[] {
+export function compareRow(oTr: XmlElement, rTr: XmlElement, ctx: Ctx): XmlElement[] {
   if (localName(oTr.name) !== "tr") {
     const inner = (el: XmlElement) => (localName(el.name) === "sdt" ? child(el, "sdtContent") : el);
     const o = inner(oTr);

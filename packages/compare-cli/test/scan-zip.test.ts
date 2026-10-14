@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { scanBody, type BodyChild } from "../src/scan.js";
+import { scanBody, type Child } from "../src/scan.js";
 import { ZipReader, ZipWriter } from "../src/zip.js";
 
 const dir = mkdtempSync(join(tmpdir(), "scan-zip-test-"));
@@ -12,7 +12,7 @@ let files = 0;
 function scan(xml: string): { children: string[]; body: string } {
   const path = join(dir, `${files++}.xml`);
   writeFileSync(path, xml);
-  const found: BodyChild[] = [];
+  const found: Child[] = [];
   const bounds = scanBody(path, (c) => found.push(c));
   const bytes = readFileSync(path);
   return {

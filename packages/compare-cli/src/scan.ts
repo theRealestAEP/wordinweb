@@ -1,18 +1,18 @@
 import { closeSync, openSync, readSync } from "node:fs";
 
-/** One child of w:body: its bytes are [start, end) of the file. */
-export interface BodyChild {
+/** One child of an element: its bytes are [start, end) of the file. */
+export interface Child {
   start: number;
   end: number;
   /** Its qualified name, such as w:p. */
   name: string;
 }
 
-/** Where the body's content sits in the file. */
-export interface BodyBounds {
-  /** Just after the w:body start tag. */
+/** Where an element's content sits in the file. */
+export interface Bounds {
+  /** Just after the start tag. */
   contentStart: number;
-  /** At the w:body end tag. */
+  /** At the end tag. */
   contentEnd: number;
 }
 
@@ -27,13 +27,24 @@ const SLASH = 0x2f;
  * skipped; a document type declaration, an unterminated construct or a
  * missing body is an error.
  */
-export function scanBody(path: string, onChild: (child: BodyChild) => void): BodyBounds {
+export function scanBody(path: string, onChild: (child: Child) => void): Bounds {
   const fd = openSync(path, "r");
   try {
-    return new Scanner(fd).run(onChild);
+    return new Scanner(fd, 0).run({ depth: 1, name: "body" }, onChild);
   } finally {
     closeSync(fd);
   }
+}
+
+/** Find each child element of the element whose start tag is at byte `start`, as scanBody finds the body's. */
+export function scanChildren(fd: number, start: number, onChild: (child: Child) => void): Bounds {
+  return new Scanner(fd, start).run({ depth: 0 }, onChild);
+}
+
+/** The element whose children are wanted: its depth below the scan's start, and its local name if it must be found by name. */
+interface Container {
+  depth: number;
+  name?: string;
 }
 
 class Scanner {
@@ -41,15 +52,18 @@ class Scanner {
   private store = Buffer.allocUnsafe(2 * CHUNK);
   /** The read part of `store`. */
   private buf = this.store.subarray(0, 0);
-  private base = 0;
   private eof = false;
 
-  constructor(private readonly fd: number) {}
+  constructor(
+    private readonly fd: number,
+    private base: number,
+  ) {}
 
-  run(onChild: (child: BodyChild) => void): BodyBounds {
-    // Open elements: the root is depth 1, the body depth 2, its children 3.
+  run(container: Container, onChild: (child: Child) => void): Bounds {
+    // Open elements: the container's children are one deeper than it.
+    const cd = container.depth;
     let depth = 0;
-    let inBody = false;
+    let inside = false;
     let contentStart = -1;
     let childStart = -1;
     let childName = "";
@@ -64,7 +78,7 @@ class Scanner {
       }
       let lt = this.buf.indexOf(LT, pos);
       while (lt === -1) {
-        if (!this.more()) throw new Error(inBody ? "the body is not closed" : "no w:body: it is not a Word document");
+        if (!this.more()) throw new Error(inside ? "an element is not closed" : "no w:body: it is not a Word document");
         lt = this.buf.indexOf(LT, pos);
       }
       const at = this.base + lt;
@@ -79,18 +93,18 @@ class Scanner {
       } else if (next === SLASH) {
         end = this.find(">", lt + 2, "end tag");
         depth--;
-        if (inBody && depth === 1) return { contentStart, contentEnd: at };
-        if (inBody && depth === 2) onChild({ start: childStart, end: end, name: childName });
+        if (inside && depth === cd) return { contentStart, contentEnd: at };
+        if (inside && depth === cd + 1) onChild({ start: childStart, end: end, name: childName });
       } else {
         end = this.tagEnd(lt + 1);
         const selfClosing = this.buf[end - this.base - 2] === SLASH;
         const name = this.nameAt(lt + 1);
-        if (!inBody && depth === 1 && localName(name) === "body") {
+        if (!inside && depth === cd && (!container.name || localName(name) === container.name)) {
           if (selfClosing) return { contentStart: end, contentEnd: end };
-          inBody = true;
+          inside = true;
           contentStart = end;
-        } else if (inBody && depth === 2) {
-          if (localName(name) === "body") throw new Error("a w:body inside the body");
+        } else if (inside && depth === cd + 1) {
+          if (container.name && localName(name) === container.name) throw new Error(`a w:${container.name} inside the ${container.name}`);
           if (selfClosing) {
             onChild({ start: at, end: end, name });
           } else {
