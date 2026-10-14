@@ -112,6 +112,13 @@ export interface CompareOptions {
   whitespace?: boolean;
   /** Called once per difference that could not be expressed faithfully. */
   onNote?: (note: CompareNote) => void;
+  /**
+   * Write the result into `revised` instead of a copy of it, and return
+   * `revised`. A copy is a whole second document in memory (114 MB for a
+   * 217-page book), so a caller that does not need `revised` afterwards
+   * should pass this. `original` is never changed either way.
+   */
+  reuseRevised?: boolean;
 }
 
 interface Ctx {
@@ -129,6 +136,8 @@ interface Ctx {
   scope: { from: string | null; into: string | null };
   /** Original note id -> the result's id for the same note (compareNotes). */
   noteIds: Record<"footnote" | "endnote", Map<string, string>>;
+  /** Each paragraph's split/merge key parts, read once (see concatMatches). */
+  concatParts: WeakMap<XmlElement, string[] | null>;
 }
 
 /** Where a block ended up, which is what decides the paragraph-mark revisions. */
@@ -151,16 +160,18 @@ export function compareDocuments(
   // and so does this: carried through, an earlier review's revisions mixed
   // with this comparison's, and reject-all undid both.
   const note = options.onNote ?? (() => {});
-  const accepted = (doc: DocxDocument, which: string): DocxDocument => {
+  const accepted = (doc: DocxDocument, which: string, inPlace: boolean): DocxDocument => {
     if (collectRevisions(doc).length === 0) return doc;
-    const copy = doc.clone();
+    const copy = inPlace ? doc : doc.clone();
     acceptAllRevisions(copy);
     note({ code: "existing-revisions-accepted", detail: `the ${which} document held tracked changes; it was compared as if they were accepted` });
     return copy;
   };
-  const merged = accepted(revised, "revised");
-  // The result is always a copy: it must never share the revised input's tree.
-  return compareInto(accepted(original, "original"), merged === revised ? revised.clone() : merged, options);
+  const reuse = options.reuseRevised === true;
+  const merged = accepted(revised, "revised", reuse);
+  // Unless the caller gave it up, the result is a copy: it must never share
+  // the revised input's tree.
+  return compareInto(accepted(original, "original", false), merged === revised && !reuse ? revised.clone() : merged, options);
 }
 
 function compareInto(original: DocxDocument, merged: DocxDocument, options: CompareOptions): DocxDocument {
@@ -184,6 +195,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
     note: options.onNote ?? (() => {}),
     scope: { from: null, into: null },
     noteIds: { footnote: new Map(), endnote: new Map() },
+    concatParts: new WeakMap(),
   };
 
   const originalBody = child(original.docRoot, "body");
@@ -788,26 +800,47 @@ function readOptions(ctx: Ctx, original: boolean): ReadOptions {
 }
 
 function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx): boolean {
-  const key = (els: XmlElement[]): string | null => {
-    const parts: string[] = [];
-    for (const el of els) {
-      if (localName(el.name) !== "p") return null;
-      // A section break is no split or merge: its mark is the break, and the
-      // join a review makes would move it (wild-gatech with blocks moved: an
-      // empty paragraph and an empty break merged into one, losing a footer).
-      if (child(child(el, "pPr"), "sectPr")) return null;
-      const content = readParagraph(el, readOptions(ctx, oEls.includes(el)));
-      if (!content.inlineDiffable) return null;
-      for (const token of content.tokens) {
+  const a = concatKey(oEls, true, ctx);
+  if (!a) return false;
+  const b = concatKey(rEls, false, ctx);
+  return !!b && a.length === b.length && a.every((part, i) => part === b[i]);
+}
+
+function concatKey(els: XmlElement[], original: boolean, ctx: Ctx): string[] | null {
+  const out: string[] = [];
+  for (const el of els) {
+    const parts = paragraphKeyParts(el, original, ctx);
+    if (!parts) return null;
+    for (const part of parts) out.push(part);
+  }
+  return out;
+}
+
+/**
+ * One paragraph's tokens with their run properties and containers, or null
+ * when it cannot take part in a split or merge. Read once per compare: the
+ * split and merge passes try every nearby pair, and re-reading both
+ * paragraphs for each try was half the time of a long rewritten document
+ * (the Yiddish novel, 90% of paragraphs edited: 3.4 of 6.9 s).
+ */
+function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx): string[] | null {
+  const cached = ctx.concatParts.get(el);
+  if (cached !== undefined) return cached;
+  let parts: string[] | null = null;
+  // A section break is no split or merge: its mark is the break, and the
+  // join a review makes would move it (wild-gatech with blocks moved: an
+  // empty paragraph and an empty break merged into one, losing a footer).
+  if (localName(el.name) === "p" && !child(child(el, "pPr"), "sectPr")) {
+    const content = readParagraph(el, readOptions(ctx, original));
+    if (content.inlineDiffable) {
+      parts = content.tokens.map((token) => {
         const props = token.pieces ? token.pieces.map((p) => `${p.text.length}:${runPropsKey(p.run)}`).join("|") : runPropsKey(token.run);
-        parts.push(token.key + "\u0002" + props + "\u0002" + token.path.map((c) => serializeXml({ ...c, children: c.children.filter((k) => /Pr$/.test(localName(k.name))) })).join(">"));
-      }
+        return token.key + "\u0002" + props + "\u0002" + token.path.map((c) => serializeXml({ ...c, children: c.children.filter((k) => /Pr$/.test(localName(k.name))) })).join(">");
+      });
     }
-    return parts.join("\u0001");
-  };
-  const a = key(oEls);
-  const b = key(rEls);
-  return a !== null && b !== null && a === b;
+  }
+  ctx.concatParts.set(el, parts);
+  return parts;
 }
 
 // ---------------------------------------------------------------------------

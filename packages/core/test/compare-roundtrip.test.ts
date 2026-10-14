@@ -696,3 +696,19 @@ describe("compareDocuments — section breaks and notes when blocks move", () =>
     expect(notesByReference(review(merged, acceptAllRevisions))).toEqual(["Note number 2.", "Note number 1.", "Note number 3."]);
   });
 });
+
+describe("compareDocuments — reuseRevised", () => {
+  it("writes the result into the revised document, byte for byte the same as a copy", () => {
+    const original = para("The quick brown fox jumps over the lazy dog.") + para("A second paragraph.");
+    const revised = para("The quick brown cat jumps over the lazy dog.") + para("A second paragraph, edited.");
+    const options = { author: AUTHOR, date: DATE };
+    const viaCopy = compareDocuments(loadBody(original), loadBody(revised), options).save();
+    const originalDoc = loadBody(original);
+    const before = originalDoc.save();
+    const revisedDoc = loadBody(revised);
+    const result = compareDocuments(originalDoc, revisedDoc, { ...options, reuseRevised: true });
+    expect(result).toBe(revisedDoc);
+    expect(result.save()).toEqual(viaCopy);
+    expect(originalDoc.save()).toEqual(before);
+  });
+});
