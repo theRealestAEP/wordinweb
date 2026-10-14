@@ -250,14 +250,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
      * row is deleted.
      */
     const readTable = (start: number, name: string) => {
-      const childStarts: number[] = [];
-      const childEnds: number[] = [];
-      const content = scanChildren(fd, start, (c) => {
-        childStarts.push(c.start);
-        childEnds.push(c.end);
-      });
-      const openTag = range(start, content.contentStart).toString("utf8");
-      const table = beginTable(parseXml(openTag.endsWith("/>") ? openTag : `${openTag}</${name}>`));
+      let table!: ReturnType<typeof beginTable>;
       let rows: XmlElement[] = [];
       let rowBytes = 0;
       let hadTr = false;
@@ -266,24 +259,33 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
         rows = [];
         rowBytes = 0;
       };
-      for (let k = 0; k < childStarts.length; k++) {
-        const xml = range(childStarts[k], childEnds[k]).toString("utf8");
-        const el = parseXml(xml);
-        const tracked = TRACKED_CHANGE.test(xml);
-        if (tracked) hadRevisions = true;
-        if (!ROW_LEVEL.includes(localName(el.name))) {
-          flushRows();
-          if (tracked) for (const e of accept([el], table.open)) table.take(e);
-          else table.take(el);
-          continue;
-        }
-        hadTr ||= localName(el.name) === "tr";
-        if (rows.length > 0 || tracked) {
-          rows.push(el);
-          rowBytes += xml.length;
-          if (rowBytes >= BATCH_BYTES) flushRows();
-        } else table.take(el);
-      }
+      // Each child is taken as the scan finds it: a table's children are too many to list first.
+      scanChildren(
+        fd,
+        start,
+        (contentStart) => {
+          const openTag = range(start, contentStart).toString("utf8");
+          table = beginTable(parseXml(openTag.endsWith("/>") ? openTag : `${openTag}</${name}>`));
+        },
+        (c) => {
+          const xml = range(c.start, c.end).toString("utf8");
+          const el = parseXml(xml);
+          const tracked = TRACKED_CHANGE.test(xml);
+          if (tracked) hadRevisions = true;
+          if (!ROW_LEVEL.includes(localName(el.name))) {
+            flushRows();
+            if (tracked) for (const e of accept([el], table.open)) table.take(e);
+            else table.take(el);
+            return;
+          }
+          hadTr ||= localName(el.name) === "tr";
+          if (rows.length > 0 || tracked) {
+            rows.push(el);
+            rowBytes += xml.length;
+            if (rowBytes >= BATCH_BYTES) flushRows();
+          } else table.take(el);
+        },
+      );
       flushRows();
       return hadTr && table.trs === 0 ? null : table;
     };

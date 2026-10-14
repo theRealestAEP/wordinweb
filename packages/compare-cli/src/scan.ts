@@ -36,9 +36,13 @@ export function scanBody(path: string, onChild: (child: Child) => void): Bounds 
   }
 }
 
-/** Find each child element of the element whose start tag is at byte `start`, as scanBody finds the body's. */
-export function scanChildren(fd: number, start: number, onChild: (child: Child) => void): Bounds {
-  return new Scanner(fd, start).run({ depth: 0 }, onChild);
+/**
+ * Find each child element of the element whose start tag is at byte `start`,
+ * as scanBody finds the body's. `onOpen` gets the end of the start tag before
+ * the first child.
+ */
+export function scanChildren(fd: number, start: number, onOpen: (contentStart: number) => void, onChild: (child: Child) => void): Bounds {
+  return new Scanner(fd, start).run({ depth: 0 }, onChild, onOpen);
 }
 
 /** The element whose children are wanted: its depth below the scan's start, and its local name if it must be found by name. */
@@ -66,7 +70,7 @@ class Scanner {
     private base: number,
   ) {}
 
-  run(container: Container, onChild: (child: Child) => void): Bounds {
+  run(container: Container, onChild: (child: Child) => void, onOpen?: (contentStart: number) => void): Bounds {
     // Open elements: the container's children are one deeper than it.
     const cd = container.depth;
     let depth = 0;
@@ -107,6 +111,7 @@ class Scanner {
         const selfClosing = this.buf[end - this.base - 2] === SLASH;
         const name = this.nameAt(lt + 1);
         if (!inside && depth === cd && (!container.name || localName(name) === container.name)) {
+          onOpen?.(end);
           if (selfClosing) return { contentStart: end, contentEnd: end };
           inside = true;
           contentStart = end;
