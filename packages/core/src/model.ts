@@ -871,6 +871,11 @@ export interface Paragraph {
   /** Final revision view: the paragraph mark AND all content are tracked
    * deletions — the paragraph does not exist (no line, no numbering). */
   revisionHidden?: boolean;
+  /** Markup view: the paragraph mark itself is a tracked insertion or
+   * deletion (a suggested line break, or a suggested merge). Layout draws it
+   * as a pilcrow in the revision's colors after the paragraph's content; it is
+   * not text, so find, word count and the like never see it. */
+  markRevision?: "ins" | "del";
   /** Source w:p element. */
   src?: XmlElement;
 }

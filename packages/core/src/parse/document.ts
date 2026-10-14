@@ -222,6 +222,13 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
     }
   }
   ensureCaretAnchor(p, para);
+  // Markup view: a paragraph mark that is a tracked insertion or deletion
+  // is drawn as a pilcrow in the revision's colors (see markRevision).
+  if (ctx.revisionView === "markup" && pPr) {
+    const markRPr = child(pPr, "rPr");
+    if (markRPr && child(markRPr, "del")) para.markRevision = "del";
+    else if (markRPr && child(markRPr, "ins")) para.markRevision = "ins";
+  }
   return para;
 }
 

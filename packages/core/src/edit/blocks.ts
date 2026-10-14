@@ -500,7 +500,42 @@ export function mergeParagraphBackward(doc: DocxDocument, pEl: XmlElement): bool
   const moved = pEl.children.filter((c) => localName(c.name) !== "pPr" && !isPlaceholderRun(c));
   prev.children.push(...moved);
   parent.children.splice(idx, 1);
+  carryMarkRevision(prev, pEl);
   return finishMerge(prev);
+}
+
+/**
+ * The merged paragraph ends at the second paragraph's mark, so it carries
+ * that mark's tracked state (w:ins / w:del in pPr/rPr), not the first's. The
+ * first paragraph's mark is the one the merge removed: when it was a
+ * suggested paragraph break, keeping its w:ins left a suggestion for a break
+ * that no longer exists.
+ */
+function carryMarkRevision(survivor: XmlElement, gone: XmlElement): void {
+  const markOf = (p: XmlElement) =>
+    p.children.find((c) => localName(c.name) === "pPr")?.children.find((c) => localName(c.name) === "rPr");
+  const isRev = (c: XmlElement) => localName(c.name) === "ins" || localName(c.name) === "del";
+  const theirs = markOf(gone)?.children.filter(isRev) ?? [];
+  let pPr = survivor.children.find((c) => localName(c.name) === "pPr");
+  let rPr = markOf(survivor);
+  if (!rPr && theirs.length === 0) return;
+  if (!rPr) {
+    const w = survivor.name.includes(":") ? survivor.name.slice(0, survivor.name.indexOf(":") + 1) : "";
+    if (!pPr) {
+      pPr = { name: `${w}pPr`, attrs: {}, children: [], text: "" };
+      survivor.children.unshift(pPr);
+    }
+    rPr = { name: `${w}rPr`, attrs: {}, children: [], text: "" };
+    // CT_PPr ends rPr, sectPr, pPrChange.
+    const at = pPr.children.findIndex((c) => localName(c.name) === "sectPr" || localName(c.name) === "pPrChange");
+    pPr.children.splice(at === -1 ? pPr.children.length : at, 0, rPr);
+  }
+  // ins/del lead rPr in the schema.
+  rPr.children = [...theirs, ...rPr.children.filter((c) => !isRev(c))];
+  if (rPr.children.length === 0 && pPr) {
+    pPr.children.splice(pPr.children.indexOf(rPr), 1);
+    if (pPr.children.length === 0) survivor.children.splice(survivor.children.indexOf(pPr), 1);
+  }
 }
 
 /** First w:t element inside a paragraph (document order), if any. */

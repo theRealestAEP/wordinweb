@@ -4089,6 +4089,23 @@ function buildAtoms(
     if (childEl.type === "run") pushRun(childEl);
     else for (const r of childEl.runs) pushRun(r, childEl.href ?? (childEl.anchor ? "#" + childEl.anchor : undefined));
   }
+  // A tracked paragraph mark shows as a pilcrow in the revision's colors: a
+  // suggested line break is otherwise only text that moved down. It has no
+  // source element, so it is never hit-tested, saved or edited.
+  if (para.markRevision) {
+    const last = para.children.at(-1);
+    const lastRun = last?.type === "hyperlink" ? last.runs.at(-1) : last;
+    const deleted = para.markRevision === "del";
+    pushRun({
+      type: "run",
+      props: {
+        ...(lastRun?.props ?? {}),
+        color: deleted ? "#D93025" : "#188038",
+        ...(deleted ? { strike: true } : { underline: "single" }),
+      },
+      content: [{ kind: "text", text: "\u00B6" }],
+    });
+  }
   // East Asian punctuation compression: Word gives a fullwidth comma/period
   // a 5/8-em advance when Latin text immediately follows it in a document-grid
   // paragraph. The glyph still paints at its full em and overlaps the next

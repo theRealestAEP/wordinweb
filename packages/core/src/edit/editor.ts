@@ -7351,23 +7351,7 @@ export class DocxEditor {
           // cell, where there is no previous paragraph to merge into.
           if (this.clearListAtCaret()) return;
           // Start of paragraph: merge into the previous paragraph.
-          const prev = siblingParagraph(this.host.doc, pEl, -1);
-          if (!prev) return;
-          const junction = lastTextOf(prev);
-          // Collab: capture the merged paragraph's stable id BEFORE the merge
-          // retires it, and emit the intent so every replica merges too (this
-          // was a silent local-only mutation — Backspace across a paragraph
-          // boundary desynced the doc).
-          const mergeBlockId = this.host.onIntent && this.host.doc.stableIds
-            ? this.host.doc.stableIds.idOf(pEl)
-            : undefined;
-          if (mergeParagraphBackward(this.host.doc, pEl)) {
-            if (mergeBlockId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeBlockId });
-            const target = junction && paragraphOf(this.host.doc, junction) ? junction : caret.t;
-            this.caret = { t: target, run: caret.run, offset: target === junction ? target.text.length : 0 };
-            invalidateParagraphSignature(paragraphOf(this.host.doc, target) ?? pEl);
-            this.commit(false, "local", true);
-          }
+          this.mergeIntoPrevious(pEl);
           return;
         }
         if (!this.stepToNeighbor(-1)) return;
@@ -7392,25 +7376,8 @@ export class DocxEditor {
         const pEl = paragraphOf(this.host.doc, caret.t);
         if (pEl && lastTextOf(pEl) === caret.t) {
           // End of paragraph: merge the next paragraph into this one.
-          const next = siblingParagraph(this.host.doc, pEl, 1);
-          if (!next) return;
           this.host.history?.checkpoint();
-          const mergeNextId = this.host.onIntent && this.host.doc.stableIds
-            ? this.host.doc.stableIds.idOf(next)
-            : undefined;
-          if (mergeParagraphBackward(this.host.doc, next)) {
-            if (mergeNextId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeNextId });
-            // When THIS paragraph was empty, the merge drops it whole and the
-            // NEXT paragraph survives (Word keeps the surviving text's style).
-            // The caret's w:t left the tree with it — rebind to the surviving
-            // paragraph's first text or every later gesture dangles detached.
-            if (!paragraphOf(this.host.doc, caret.t)) {
-              const t = firstTextOf(next);
-              if (t) this.caret = { t, run: caret.run, offset: 0 };
-            }
-            invalidateParagraphSignature(paragraphOf(this.host.doc, this.caret?.t ?? caret.t) ?? pEl);
-            this.commit(false, "local", true);
-          }
+          this.mergeNextInto(pEl);
           return;
         }
         if (!this.stepToNeighbor(1)) return;
@@ -7430,6 +7397,59 @@ export class DocxEditor {
 
   private emitDelete(blockId: number, runId: number, start: number, end: number): void {
     if (end > start) this.host.onIntent?.({ kind: "deleteText", blockId, runId, start, end });
+  }
+
+  /** Backspace at the start of `pEl`: merge it into the previous paragraph. */
+  private mergeIntoPrevious(pEl: XmlElement): void {
+    const caret = this.caret;
+    if (!caret) return;
+    const prev = siblingParagraph(this.host.doc, pEl, -1);
+    if (!prev) return;
+    const junction = lastTextOf(prev);
+    // Collab: capture the merged paragraph's stable id BEFORE the merge
+    // retires it, and emit the intent so every replica merges too (this
+    // was a silent local-only mutation — Backspace across a paragraph
+    // boundary desynced the doc).
+    const mergeBlockId = this.host.onIntent && this.host.doc.stableIds
+      ? this.host.doc.stableIds.idOf(pEl)
+      : undefined;
+    if (mergeParagraphBackward(this.host.doc, pEl)) {
+      if (mergeBlockId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeBlockId });
+      const target = junction && paragraphOf(this.host.doc, junction) ? junction : caret.t;
+      this.caret = { t: target, run: caret.run, offset: target === junction ? target.text.length : 0 };
+      invalidateParagraphSignature(paragraphOf(this.host.doc, target) ?? pEl);
+      this.commit(false, "local", true);
+    }
+  }
+
+  /** Delete at the end of `pEl`: merge the next paragraph into it. */
+  private mergeNextInto(pEl: XmlElement): void {
+    const caret = this.caret;
+    if (!caret) return;
+    const next = siblingParagraph(this.host.doc, pEl, 1);
+    if (!next) return;
+    const mergeNextId = this.host.onIntent && this.host.doc.stableIds
+      ? this.host.doc.stableIds.idOf(next)
+      : undefined;
+    if (mergeParagraphBackward(this.host.doc, next)) {
+      if (mergeNextId !== undefined) this.host.onIntent?.({ kind: "mergeParagraph", blockId: mergeNextId });
+      // When THIS paragraph was empty, the merge drops it whole and the
+      // NEXT paragraph survives (Word keeps the surviving text's style).
+      // The caret's w:t left the tree with it — rebind to the surviving
+      // paragraph's first text or every later gesture dangles detached.
+      if (!paragraphOf(this.host.doc, caret.t)) {
+        const t = firstTextOf(next);
+        if (t) this.caret = { t, run: caret.run, offset: 0 };
+      }
+      invalidateParagraphSignature(paragraphOf(this.host.doc, this.caret?.t ?? caret.t) ?? pEl);
+      this.commit(false, "local", true);
+    }
+  }
+
+  /** True when `pEl`'s paragraph mark is a break this author suggested. */
+  private ownSuggestedBreak(pEl: XmlElement): boolean {
+    const mark = paragraphGlyphRevision(pEl, "ins");
+    return !!mark && attr(mark, "author") === this.revisionAuthor;
   }
 
   /** Backspace/Delete in suggesting mode: mark one character (or a paragraph
@@ -7459,6 +7479,13 @@ export class DocxEditor {
           // (a merge). Don't actually join — Word keeps both until accepted.
           const prev = siblingParagraph(doc, pEl, -1);
           if (!prev) return;
+          // Your own suggested break goes outright, as your own suggested text
+          // does: the text below moves back up instead of a struck break
+          // piling onto the inserted one.
+          if (this.ownSuggestedBreak(prev)) {
+            this.mergeIntoPrevious(pEl);
+            return;
+          }
           if (paragraphGlyphRevision(prev, "del")) {
             // Its mark is already struck; move the caret up so a further press
             // eats the previous paragraph's text.
@@ -7491,7 +7518,12 @@ export class DocxEditor {
     if (caret.offset >= caret.t.text.length) {
       const pEl = paragraphOf(doc, caret.t);
       if (pEl && lastTextOf(pEl) === caret.t) {
-        // End of paragraph: suggest deleting THIS paragraph's mark (merge fwd).
+        // End of paragraph: suggest deleting THIS paragraph's mark (merge fwd),
+        // or take back a break this author suggested.
+        if (this.ownSuggestedBreak(pEl)) {
+          this.mergeNextInto(pEl);
+          return;
+        }
         if (paragraphGlyphRevision(pEl, "del")) {
           this.stepToNeighbor(1);
           this.positionCaret();
