@@ -1,6 +1,6 @@
 {
   "name": "@wordinweb/agent",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Complete, schema-enforced DOCX creation, inspection, and editing tools for AI agents",
   "license": "MIT",
   "repository": {
