@@ -1,6 +1,6 @@
 {
   "name": "wordinweb",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "description": "React component for high-fidelity DOCX viewing and editing",
   "license": "MIT",
   "repository": {
