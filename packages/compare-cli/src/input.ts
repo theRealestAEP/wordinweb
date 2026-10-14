@@ -54,10 +54,10 @@ export interface Input {
   blocks: BlockStore;
   /** Each block's paragraphText. */
   texts: BlockStore;
-  /** Each block's blockFingerprint, hashed: the anchor pass's keys. */
-  fingerprints: string[];
-  /** A hash of each block's XML. */
-  hashes: string[];
+  /** Each block's blockFingerprint, hashed to a number: the anchor pass's keys. */
+  fingerprints: number[];
+  /** A hash of each block's XML, as a number. */
+  hashes: number[];
   /** Each block's local name. */
   kinds: string[];
   /** Whether each block is a paragraph that ends a section. */
@@ -156,13 +156,16 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       for (const c of e.children) noteRefsIn(c);
     };
 
+    /** cyrb53 as a number: eight bytes in an array of them, where its string is forty. */
+    const hash = (s: string): number => parseInt(cyrb53(s), 36);
+
     /** One block's index entry: its XML, the hash of the XML it stands for, its text and its fingerprint. */
-    const index = (el: XmlElement, xml: string, hash: string, text: string, fingerprint: string): void => {
+    const index = (el: XmlElement, xml: string, xmlHash: number, text: string, fingerprint: number): void => {
       const i = input.blocks.count;
       input.blocks.add(xml);
       input.texts.add(text);
       input.fingerprints.push(fingerprint);
-      input.hashes.push(hash);
+      input.hashes.push(xmlHash);
       input.kinds.push(localName(el.name));
       const sectPr = localName(el.name) === "p" ? child(child(el, "pPr"), "sectPr") : undefined;
       input.endsSection.push(!!sectPr);
@@ -175,7 +178,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
 
     const add = (el: XmlElement): void => {
       const xml = serializeXml(el);
-      index(el, xml, cyrb53(xml), paragraphText(el), cyrb53(blockFingerprint(el, shell)));
+      index(el, xml, hash(xml), paragraphText(el), hash(blockFingerprint(el, shell)));
     };
 
     /**
@@ -202,7 +205,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
           }
           if (ROW_LEVEL[rowKind] === "tr") this.trs++;
           input.rows.add(xml);
-          input.rowFingerprints.push(parseInt(cyrb53(rowFingerprint(el)), 36));
+          input.rowFingerprints.push(hash(rowFingerprint(el)));
           input.rowKinds.push(ROW_LEVEL[rowKind]);
           rowHashes += cyrb53(xml);
           shell.children.push(ROW_SLOT);
@@ -211,7 +214,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
         end(): void {
           input.tables.set(input.blocks.count, [from, input.rows.count]);
           const xml = serializeXml(shell);
-          index(shell, xml, cyrb53(xml + rowHashes), text, cyrb53(tableFingerprint(text)));
+          index(shell, xml, hash(xml + rowHashes), text, hash(tableFingerprint(text)));
         },
       };
     };

@@ -464,7 +464,7 @@ function emitMatchedTables(O: Input, o: number, R: Input, r: number, ctx: Ctx, e
 function emitComparedRows(O: Input, oFrom: number, oTo: number, R: Input, rFrom: number, rTo: number, ctx: Ctx, emit: Emit): void {
   const oN = oTo - oFrom;
   const rN = rTo - rFrom;
-  const anchors = histogramMatch(O.rowFingerprints.slice(oFrom, oTo).map(String), R.rowFingerprints.slice(rFrom, rTo).map(String));
+  const anchors = histogramMatch(O.rowFingerprints.slice(oFrom, oTo), R.rowFingerprints.slice(rFrom, rTo));
   const oSide = rowSide(O, oFrom);
   const rSide = rowSide(R, rFrom);
   const parseO = (i: number): XmlElement => parseXml(O.rows.read(oFrom + i));
