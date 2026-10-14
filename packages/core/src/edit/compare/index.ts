@@ -243,18 +243,32 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
  * which save() rewrites from the model) goes through compareDocuments.
  */
 export function compareDocx(original: Uint8Array, revised: Uint8Array, options: CompareOptions): Uint8Array {
-  const o = DocxDocument.load(original, { deferBody: true });
-  const r = DocxDocument.load(revised, { deferBody: true });
-  if (needsWholeTree(o) || needsWholeTree(r)) {
+  const lean = readLeanBodies(original, revised);
+  if (!lean) {
     return compareDocuments(DocxDocument.load(original), DocxDocument.load(revised), { ...options, reuseRevised: true }).save();
   }
-  const lean: LeanBodies = { original: readDeferredBody(o, false), merged: readDeferredBody(r, true) };
-  return compareInto(o, r, options, lean).save();
+  return compareInto(lean.original.doc, lean.merged.doc, options, lean).save();
 }
 
+/**
+ * Both bodies loaded deferred, or null when either needs the whole tree. On
+ * null the deferred loads are already unreachable, so the whole-tree compare
+ * does not hold them too.
+ */
+function readLeanBodies(original: Uint8Array, revised: Uint8Array): LeanBodies | null {
+  const o = DocxDocument.load(original, { deferBody: true });
+  if (needsWholeTree(o)) return null;
+  const r = DocxDocument.load(revised, { deferBody: true });
+  if (needsWholeTree(r)) return null;
+  return { original: readDeferredBody(o, false), merged: readDeferredBody(r, true) };
+}
+
+/** Tracked-change markup. */
+export const TRACKED_CHANGE =
+  /<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange|tblPrChange|tblGridChange|trPrChange|tcPrChange|numberingChange|cellIns|cellDel|cellMerge)[\s>/]/;
+
 /** What compareDocx cannot do block by block (see compareDocx). */
-const WHOLE_TREE =
-  /<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange|tblPrChange|tblGridChange|trPrChange|tcPrChange|numberingChange|cellIns|cellDel|cellMerge)[\s>/]|<w:tblW\b[^>]*w:w="[^"]*%"|ProgID="Package"/;
+export const WHOLE_TREE = new RegExp(`${TRACKED_CHANGE.source}|<w:tblW\\b[^>]*w:w="[^"]*%"|ProgID="Package"`);
 
 function needsWholeTree(doc: DocxDocument): boolean {
   if (doc.docRoot.name !== "w:document") return true;

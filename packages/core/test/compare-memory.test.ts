@@ -36,4 +36,35 @@ describe("estimateCompareMemory", () => {
     expect(estimateCompareMemory(large, large, { reuseRevised: true }).heapBytes).toBeLessThan(b.heapBytes);
     expect(b.totalBytes).toBeGreaterThan(b.heapBytes);
   });
+
+  it("is higher when an input holds tracked changes", () => {
+    const clean = docx(5000);
+    const tracked = makeDocx({
+      "word/document.xml": wrapDocument(
+        Array.from({ length: 5000 }, (_, i) => p(`Paragraph ${i} of the test.`)).join("") +
+          '<w:p><w:ins w:id="1" w:author="a"><w:r><w:t>new</w:t></w:r></w:ins></w:p>',
+      ),
+    });
+    for (const options of [{}, { reuseRevised: true }]) {
+      const base = estimateCompareMemory(clean, clean, options).heapBytes;
+      expect(estimateCompareMemory(tracked, clean, options).heapBytes).toBeGreaterThan(base);
+      expect(estimateCompareMemory(clean, tracked, options).heapBytes).toBeGreaterThan(base);
+    }
+  });
+
+  it("is lower for compareDocx, unless an input needs the whole tree", () => {
+    const clean = docx(5000);
+    const percentTable = makeDocx({
+      "word/document.xml": wrapDocument(
+        Array.from({ length: 5000 }, (_, i) => p(`Paragraph ${i} of the test.`)).join("") +
+          '<w:tbl><w:tblPr><w:tblW w:w="5000%" w:type="pct"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>',
+      ),
+    });
+    expect(estimateCompareMemory(clean, clean, { compareDocx: true }).heapBytes).toBeLessThan(
+      estimateCompareMemory(clean, clean, { reuseRevised: true }).heapBytes,
+    );
+    expect(estimateCompareMemory(clean, percentTable, { compareDocx: true }).heapBytes).toBe(
+      estimateCompareMemory(clean, percentTable, { reuseRevised: true }).heapBytes,
+    );
+  });
 });
