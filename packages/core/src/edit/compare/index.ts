@@ -560,8 +560,13 @@ export function blockFingerprint(el: XmlElement, doc: DocxDocument): string {
     const sect = sectionKey(el, doc);
     return `P\u0000${normalizeText(paragraphText(el))}\u0000${style}\u0000${numPr ? serializeXml(numPr) : ""}\u0000${jc}\u0000${sect}`;
   }
-  if (ln === "tbl") return `T\u0000${normalizeText(paragraphText(el))}`;
+  if (ln === "tbl") return tableFingerprint(paragraphText(el));
   return `X\u0000${serializeXml(el)}`;
+}
+
+/** blockFingerprint of a table, from its paragraphText. */
+export function tableFingerprint(text: string): string {
+  return `T\u0000${normalizeText(text)}`;
 }
 
 export interface Pairing {
@@ -1503,16 +1508,19 @@ function words(tokens: readonly ContentToken[], from: number, to: number): numbe
 
 function compareTable(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
   if (sameXml(oTbl, rTbl)) return;
-  if (ctx.formatting) {
-    swapProps(rTbl, "tblPr", recordTableFormatChange, child(oTbl, "tblPr"), ctx);
-    alignTableGrid(oTbl, rTbl, ctx);
-  }
-
+  compareTableProps(oTbl, rTbl, ctx);
   compareRows(oTbl, rTbl, ctx);
 }
 
+/** A matched table pair's own properties and grid, before its rows are compared. */
+export function compareTableProps(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
+  if (!ctx.formatting) return;
+  swapProps(rTbl, "tblPr", recordTableFormatChange, child(oTbl, "tblPr"), ctx);
+  alignTableGrid(oTbl, rTbl, ctx);
+}
+
 /** Row-level children: rows, and content controls or custom XML holding rows. */
-const ROW_LEVEL = ["tr", "sdt", "customXml"];
+export const ROW_LEVEL = ["tr", "sdt", "customXml"];
 
 /**
  * Align and diff the rows of a table, or of a row-level content control (a
@@ -1560,7 +1568,7 @@ function compareRows(oParent: XmlElement, rParent: XmlElement, ctx: Ctx): void {
   rParent.children = [...rParent.children.filter((c) => !ROW_LEVEL.includes(localName(c.name))), ...rows];
 }
 
-function rowFingerprint(tr: XmlElement): string {
+export function rowFingerprint(tr: XmlElement): string {
   if (localName(tr.name) !== "tr") return `X\u0000${serializeXml(tr)}`;
   const cells = tr.children.filter((c) => localName(c.name) === "tc");
   return `${cells.length}\u0000${normalizeText(paragraphText(tr))}`;
@@ -1573,7 +1581,7 @@ function rowsIn(el: XmlElement): XmlElement[] {
   return (inner?.children ?? []).filter((c) => ROW_LEVEL.includes(localName(c.name))).flatMap(rowsIn);
 }
 
-function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
+export function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
   const clone = cloneXml(el);
   for (const tr of rowsIn(clone)) {
     markRowRevision(tr, "del", ctx.meta);
@@ -1582,7 +1590,7 @@ function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
   return clone;
 }
 
-function insertedRow(el: XmlElement, ctx: Ctx): XmlElement {
+export function insertedRow(el: XmlElement, ctx: Ctx): XmlElement {
   for (const tr of rowsIn(el)) {
     markRowRevision(tr, "ins", ctx.meta);
     wrapRowContent(tr, "ins", ctx);
@@ -1591,7 +1599,7 @@ function insertedRow(el: XmlElement, ctx: Ctx): XmlElement {
 }
 
 /** A matched row pair, or — when the cell counts differ — two coarse rows. */
-function compareRow(oTr: XmlElement, rTr: XmlElement, ctx: Ctx): XmlElement[] {
+export function compareRow(oTr: XmlElement, rTr: XmlElement, ctx: Ctx): XmlElement[] {
   if (localName(oTr.name) !== "tr") {
     const inner = (el: XmlElement) => (localName(el.name) === "sdt" ? child(el, "sdtContent") : el);
     const o = inner(oTr);
