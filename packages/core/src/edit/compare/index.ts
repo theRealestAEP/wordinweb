@@ -17,7 +17,7 @@ import {
   revisionWrapper,
 } from "../suggest.js";
 import { CONTAINERS, ContentToken, Placed, ReadOptions, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
-import { histogramMatch } from "./histogram.js";
+import { Key, histogramMatch } from "./histogram.js";
 import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./text.js";
 
 /**
@@ -287,13 +287,56 @@ export function pairHeadersFooters(
 }
 
 /**
+ * A footnotes or endnotes part, as compareNotes and
+ * copyNotesForStruckReferences read and change it. compareDocuments reads it
+ * from the document's tree (treeNotes); a caller holding the notes elsewhere
+ * can answer from there.
+ */
+export interface NotesPart {
+  /** The note with this id that holds content (no w:type): the last one, when ids repeat. */
+  content(id: string): XmlElement | undefined;
+  /** What two equal notes share: normalizeText of the content note's paragraphText. */
+  key(id: string): Key;
+  /** The part's first note with this id, of any type. */
+  first(id: string): XmlElement | undefined;
+  /** Keep the changes made to a content note. A tree's note is changed in place. */
+  update(id: string, note: XmlElement): void;
+  /** Add a note at the end of the part. */
+  append(note: XmlElement): void;
+  /** One more than the highest id of any child of the part; at least 1. */
+  nextId(): number;
+}
+
+/** The notes part in a document's tree, or null when it has none (and `create` is false). */
+function treeNotes(kind: "footnote" | "endnote", doc: DocxDocument, create = false): NotesPart | null {
+  const root = kind === "footnote" ? doc.footnotesTree(create) : doc.endnotesTree(create);
+  if (!root) return null;
+  const byId = new Map(
+    root.children.filter((c) => localName(c.name) === kind && !c.attrs["w:type"]).map((c) => [c.attrs["w:id"], c] as const),
+  );
+  return {
+    content: (id) => byId.get(id),
+    key: (id) => normalizeText(paragraphText(byId.get(id) as XmlElement)),
+    first: (id) => root.children.find((c) => localName(c.name) === kind && c.attrs["w:id"] === id),
+    update: () => {},
+    append: (note) => root.children.push(note),
+    nextId: () => {
+      let next = 1;
+      for (const c of root.children) next = Math.max(next, 1 + (Number(c.attrs["w:id"]) || 0));
+      return next;
+    },
+  };
+}
+
+/**
  * Footnotes or endnotes, paired in the order their references appear and
  * compared inside. A note only the revised document has gets its content
  * marked inserted; one only the original had is copied into the result
  * under a fresh id with its content struck, and struck body text pointing
  * at it is re-pointed (adoptFromOriginal, through ctx.noteIds). `refs` gives
  * each side's reference ids that are not in its tree, in order, ahead of
- * those that are.
+ * those that are; `parts` gives each side's notes part when it is not in
+ * the tree.
  */
 export function compareNotes(
   kind: "footnote" | "endnote",
@@ -301,25 +344,20 @@ export function compareNotes(
   merged: DocxDocument,
   ctx: Ctx,
   refs?: { original: string[]; merged: string[] },
+  parts?: { original: NotesPart | null; merged: NotesPart | null },
 ): void {
-  const tree = (doc: DocxDocument, create = false): XmlElement | null =>
-    kind === "footnote" ? doc.footnotesTree(create) : doc.endnotesTree(create);
-  const oRoot = tree(original);
-  const mRoot = tree(merged);
-  if (!oRoot && !mRoot) return;
+  const oPart = parts ? parts.original : treeNotes(kind, original);
+  let mPart = parts ? parts.merged : treeNotes(kind, merged);
+  if (!oPart && !mPart) return;
   const refName = `${kind}Reference`;
-  const inOrder = (doc: DocxDocument, root: XmlElement | null): XmlElement[] => {
-    if (!root) return [];
-    const byId = new Map(
-      root.children.filter((c) => localName(c.name) === kind && !c.attrs["w:type"]).map((c) => [c.attrs["w:id"], c] as const),
-    );
-    const out: XmlElement[] = [];
+  const inOrder = (doc: DocxDocument, part: NotesPart | null): string[] => {
+    if (!part) return [];
+    const out: string[] = [];
     const seen = new Set<string>();
     const take = (id: string): void => {
-      const note = byId.get(id);
-      if (note && !seen.has(id)) {
+      if (part.content(id) && !seen.has(id)) {
         seen.add(id);
-        out.push(note);
+        out.push(id);
       }
     };
     const walk = (e: XmlElement): void => {
@@ -330,22 +368,24 @@ export function compareNotes(
     walk(doc.docRoot);
     return out;
   };
-  const oNotes = inOrder(original, oRoot);
-  const rNotes = inOrder(merged, mRoot);
-  const text = (n: XmlElement): string => normalizeText(paragraphText(n));
+  // Each side's content notes, by id, in reference order.
+  const oNotes = inOrder(original, oPart);
+  const rNotes = inOrder(merged, mPart);
+  const oKey = (i: number): Key => (oPart as NotesPart).key(oNotes[i]);
+  const rKey = (j: number): Key => (mPart as NotesPart).key(rNotes[j]);
   // A note with the same text on both sides is the same note wherever its
   // reference now sits: a note's place is its reference's, so moving the
   // paragraph that holds it must not unpair it. Equal texts pair first, in
   // reference order.
   const pairs: [number, number][] = [];
-  const waiting = new Map<string, number[]>();
-  rNotes.forEach((n, j) => {
-    const list = waiting.get(text(n));
+  const waiting = new Map<Key, number[]>();
+  rNotes.forEach((_, j) => {
+    const list = waiting.get(rKey(j));
     if (list) list.push(j);
-    else waiting.set(text(n), [j]);
+    else waiting.set(rKey(j), [j]);
   });
-  oNotes.forEach((n, i) => {
-    const j = waiting.get(text(n))?.shift();
+  oNotes.forEach((_, i) => {
+    const j = waiting.get(oKey(i))?.shift();
     if (j !== undefined) pairs.push([i, j]);
   });
   // The rest anchor in reference order, and a single leftover on each side of
@@ -356,7 +396,7 @@ export function compareNotes(
   const rRest = rNotes.map((_, j) => j).filter((j) => !exactR.has(j));
   let oAt = 0;
   let rAt = 0;
-  const rest = histogramMatch(oRest.map((i) => text(oNotes[i])), rRest.map((j) => text(rNotes[j])));
+  const rest = histogramMatch(oRest.map(oKey), rRest.map(rKey));
   for (const a of [...rest, { a: oRest.length, b: rRest.length }]) {
     if (a.a - oAt === 1 && a.b - rAt === 1) pairs.push([oRest[oAt], rRest[rAt]]);
     if (a.a < oRest.length && a.b < rRest.length) pairs.push([oRest[a.a], rRest[a.b]]);
@@ -368,32 +408,36 @@ export function compareNotes(
   const pairedR = new Set(pairs.map((p) => p[1]));
   let changed = false;
   for (const [i, j] of pairs) {
-    ids.set(oNotes[i].attrs["w:id"], rNotes[j].attrs["w:id"]);
+    ids.set(oNotes[i], rNotes[j]);
     const before = ctx.meta.nextId;
     let touched = false;
-    compareContainer(oNotes[i], rNotes[j], { ...ctx, meta: { ...ctx.meta, nextId: () => ((touched = true), before()) } });
+    const note = (mPart as NotesPart).content(rNotes[j]) as XmlElement;
+    compareContainer((oPart as NotesPart).content(oNotes[i]) as XmlElement, note, { ...ctx, meta: { ...ctx.meta, nextId: () => ((touched = true), before()) } });
+    (mPart as NotesPart).update(rNotes[j], note);
     changed ||= touched;
   }
-  rNotes.forEach((note, j) => {
+  rNotes.forEach((id, j) => {
     if (pairedR.has(j)) return;
+    const note = (mPart as NotesPart).content(id) as XmlElement;
     for (const block of blockList(note)) if (localName(block.name) === "p") wrapContainerContent(block, "ins", ctx);
+    (mPart as NotesPart).update(id, note);
     changed = true;
   });
   const removed = oNotes.filter((_, i) => !pairedO.has(i));
   if (removed.length > 0) {
-    const root = tree(merged, true);
-    if (root) {
-      let next = 1 + Math.max(0, ...root.children.map((c) => Number(c.attrs["w:id"]) || 0));
-      for (const o of removed) {
-        const copy = cloneXml(o);
+    mPart ??= treeNotes(kind, merged, true);
+    if (mPart) {
+      let next = mPart.nextId();
+      for (const id of removed) {
+        const copy = cloneXml((oPart as NotesPart).content(id) as XmlElement);
         copy.attrs["w:id"] = String(next);
-        ids.set(o.attrs["w:id"], String(next++));
+        ids.set(id, String(next++));
         for (const block of blockList(copy)) {
           if (localName(block.name) !== "p") continue;
           adoptFromOriginal(block, { ...ctx, scope: { from: null, into: null } });
           wrapContainerContent(block, "del", ctx);
         }
-        root.children.push(copy);
+        mPart.append(copy);
       }
       changed = true;
     }
@@ -441,22 +485,21 @@ export function copyNotesForStruckReferences(
   merged: DocxDocument,
   ctx: Ctx,
   refs: readonly { el: { attrs: Record<string, string> }; struck: boolean }[],
+  part: NotesPart | null = treeNotes(kind, merged),
 ): Map<number, string> {
   const ids = new Map<number, string>();
-  const root = kind === "footnote" ? merged.footnotesTree() : merged.endnotesTree();
-  if (!root) return ids;
+  if (!part) return ids;
   const byId = new Map<string, number[]>();
   refs.forEach((ref, i) => {
     const list = byId.get(ref.el.attrs["w:id"]);
     if (list) list.push(i);
     else byId.set(ref.el.attrs["w:id"], [i]);
   });
-  let next = 1;
-  for (const c of root.children) next = Math.max(next, 1 + (Number(c.attrs["w:id"]) || 0));
+  let next = part.nextId();
   let changed = false;
   for (const [id, list] of byId) {
     if (list.length < 2) continue;
-    const note = root.children.find((c) => localName(c.name) === kind && c.attrs["w:id"] === id);
+    const note = part.first(id);
     if (!note) continue;
     // The live reference keeps the note; every struck one beyond it gets a copy.
     const keep = list.find((i) => !refs[i].struck) ?? list[0];
@@ -466,7 +509,7 @@ export function copyNotesForStruckReferences(
       copy.attrs["w:id"] = String(next);
       ids.set(i, String(next++));
       for (const block of blockList(copy)) if (localName(block.name) === "p") wrapContainerContent(block, "del", ctx);
-      root.children.push(copy);
+      part.append(copy);
       changed = true;
     }
   }
