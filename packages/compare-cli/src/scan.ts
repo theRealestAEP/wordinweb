@@ -47,9 +47,16 @@ interface Container {
   name?: string;
 }
 
+/** The first read of a scan; each read after it is twice the last, up to CHUNK. */
+const FIRST_READ = 64 * 1024;
+
 class Scanner {
-  /** Holds the file from byte `base` on, as far as it has been read. */
-  private store = Buffer.allocUnsafe(2 * CHUNK);
+  /**
+   * Holds the file from byte `base` on, as far as it has been read. It starts
+   * small: a document scans one table at a time, and most tables are small.
+   */
+  private store = Buffer.allocUnsafe(2 * FIRST_READ);
+  private readSize = FIRST_READ;
   /** The read part of `store`. */
   private buf = this.store.subarray(0, 0);
   private eof = false;
@@ -122,13 +129,13 @@ class Scanner {
   private more(): boolean {
     if (this.eof) return false;
     const length = this.buf.length;
-    if (length + CHUNK > this.store.length) {
-      // One token longer than the buffer: grow it.
-      const bigger = Buffer.allocUnsafe(2 * (length + CHUNK));
+    if (length + this.readSize > this.store.length) {
+      const bigger = Buffer.allocUnsafe(2 * (length + this.readSize));
       this.store.copy(bigger, 0, 0, length);
       this.store = bigger;
     }
-    const n = readSync(this.fd, this.store, length, CHUNK, this.base + length);
+    const n = readSync(this.fd, this.store, length, this.readSize, this.base + length);
+    this.readSize = Math.min(CHUNK, 2 * this.readSize);
     if (n === 0) {
       this.eof = true;
       return false;
