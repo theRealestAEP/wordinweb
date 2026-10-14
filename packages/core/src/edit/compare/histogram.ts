@@ -50,19 +50,28 @@ export type Key = string | number;
  */
 export function histogramMatch(a: readonly Key[], b: readonly Key[]): KeyMatch[] {
   const out: KeyMatch[] = [];
-  region(a, b, 0, a.length, 0, b.length, out);
+  // A stack of work, taken in document order: regions still to align, and
+  // matches waiting for the regions before them. Recursion went one call
+  // deeper per anchor, and 50k paragraphs with every tenth edited overflowed
+  // the call stack.
+  const work: (Region | KeyMatch[])[] = [{ aLo: 0, aHi: a.length, bLo: 0, bHi: b.length }];
+  while (work.length > 0) {
+    const next = work.pop() as Region | KeyMatch[];
+    if (Array.isArray(next)) for (const m of next) out.push(m);
+    else region(a, b, next, out, work);
+  }
   return out;
 }
 
-function region(
-  a: readonly Key[],
-  b: readonly Key[],
-  aLo: number,
-  aHi: number,
-  bLo: number,
-  bHi: number,
-  out: KeyMatch[],
-): void {
+interface Region {
+  aLo: number;
+  aHi: number;
+  bLo: number;
+  bHi: number;
+}
+
+/** Align one region: its matches go to `out` now or onto `work` behind what must come first. */
+function region(a: readonly Key[], b: readonly Key[], { aLo, aHi, bLo, bHi }: Region, out: KeyMatch[], work: (Region | KeyMatch[])[]): void {
   // Common prefix and suffix are unambiguous matches; peeling them first is
   // both cheaper and more stable than letting the anchor search find them.
   while (aLo < aHi && bLo < bHi && a[aLo] === b[bLo]) {
@@ -72,12 +81,17 @@ function region(
   while (aLo < aHi && bLo < bHi && a[aHi - 1] === b[bHi - 1]) {
     suffix.push({ a: --aHi, b: --bHi });
   }
+  work.push(suffix.reverse());
   if (aLo < aHi && bLo < bHi) {
     const best = lowestOccurrenceRegion(a, b, aLo, aHi, bLo, bHi);
     if (best) {
-      region(a, b, aLo, best.aStart, bLo, best.bStart, out);
-      for (let k = 0; k < best.len; k++) out.push({ a: best.aStart + k, b: best.bStart + k });
-      region(a, b, best.aStart + best.len, aHi, best.bStart + best.len, bHi, out);
+      const anchor: KeyMatch[] = [];
+      for (let k = 0; k < best.len; k++) anchor.push({ a: best.aStart + k, b: best.bStart + k });
+      work.push(
+        { aLo: best.aStart + best.len, aHi, bLo: best.bStart + best.len, bHi },
+        anchor,
+        { aLo, aHi: best.aStart, bLo, bHi: best.bStart },
+      );
     } else if (best === null) {
       // Every common element is over MAX_CHAIN: hand the region to the library
       // LCS rather than chasing hundreds of equally bad anchors.
@@ -86,7 +100,6 @@ function region(
     // `undefined` means the region has no common element at all — nothing to
     // match, so it is a pure delete plus a pure insert.
   }
-  for (let i = suffix.length - 1; i >= 0; i--) out.push(suffix[i]);
 }
 
 interface Anchor {
@@ -135,6 +148,12 @@ function lowestOccurrenceRegion(
   let sawUsable = false;
   const aSpan = aHi - aLo;
   const bSpan = bHi - bLo;
+  // Every point of a run grows into the same run, and the run's verdict
+  // stands while the best does not change. Growing it again from each of its
+  // points was quadratic in its length: 200k unchanged table rows took 107 s.
+  // So each diagonal keeps the last run grown on it, and when (`version`).
+  const grown = new Map<number, { aStart: number; aEnd: number; version: number }>();
+  let version = 0;
 
   for (let j = bLo; j < bHi; j++) {
     const candidates = positions.get(b[j]);
@@ -146,6 +165,8 @@ function lowestOccurrenceRegion(
     // a better anchor.
     if (best !== undefined && candidates.length > bestCost) continue;
     for (const i of candidates) {
+      const last = grown.get(i - j);
+      if (last && last.version === version && i >= last.aStart && i < last.aEnd) continue;
       // Grow the match outward from (i, j) as far as both sides agree.
       let aStart = i;
       let bStart = j;
@@ -171,7 +192,9 @@ function lowestOccurrenceRegion(
         best = { aStart, bStart, len };
         bestCost = cost;
         bestOffset = offset;
+        version++;
       }
+      grown.set(i - j, { aStart, aEnd, version });
     }
   }
   if (best) return best;
