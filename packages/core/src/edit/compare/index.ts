@@ -121,7 +121,7 @@ export interface CompareOptions {
   reuseRevised?: boolean;
 }
 
-interface Ctx {
+export interface Ctx {
   doc: DocxDocument;
   /** The document deleted content is cloned OUT of; see adoptFromOriginal. */
   original: DocxDocument;
@@ -139,9 +139,9 @@ interface Ctx {
 }
 
 /** Where a block ended up, which is what decides the paragraph-mark revisions. */
-type BlockClass = "kept" | "inserted" | "deleted";
+export type BlockClass = "kept" | "inserted" | "deleted";
 
-interface Entry {
+export interface Entry {
   el: XmlElement;
   cls: BlockClass;
 }
@@ -177,23 +177,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
   // untouched, and its model needs no rebuild (refresh was a sixth of the time
   // on a document compared with itself).
   let issued = 0;
-  const ctx: Ctx = {
-    doc: merged,
-    original,
-    meta: {
-      author: options.author,
-      date: options.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-      nextId: () => {
-        issued++;
-        return merged.nextRevisionId();
-      },
-    },
-    formatting: options.formatting !== false,
-    whitespace: options.whitespace !== false,
-    note: options.onNote ?? (() => {}),
-    scope: { from: null, into: null },
-    noteIds: { footnote: new Map(), endnote: new Map() },
-  };
+  const ctx = compareContext(original, merged, options, () => issued++);
 
   const originalBody = child(original.docRoot, "body");
   const mergedBody = child(merged.docRoot, "body");
@@ -224,8 +208,32 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
   return merged;
 }
 
+/**
+ * What one compare carries through every step. Revisions are written into
+ * `merged`; `onIssue` is called for each revision id taken.
+ */
+export function compareContext(original: DocxDocument, merged: DocxDocument, options: CompareOptions, onIssue: () => void = () => {}): Ctx {
+  return {
+    doc: merged,
+    original,
+    meta: {
+      author: options.author,
+      date: options.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      nextId: () => {
+        onIssue();
+        return merged.nextRevisionId();
+      },
+    },
+    formatting: options.formatting !== false,
+    whitespace: options.whitespace !== false,
+    note: options.onNote ?? (() => {}),
+    scope: { from: null, into: null },
+    noteIds: { footnote: new Map(), endnote: new Map() },
+  };
+}
+
 /** Align and diff one container's blocks in place (a header, a note). */
-function compareContainer(oRoot: XmlElement, mRoot: XmlElement, ctx: Ctx): void {
+export function compareContainer(oRoot: XmlElement, mRoot: XmlElement, ctx: Ctx): void {
   const o = blockList(oRoot);
   const m = blockList(mRoot);
   if (o.length === m.length && o.every((el, i) => sameXml(el, m[i]))) return;
@@ -238,15 +246,24 @@ function compareContainer(oRoot: XmlElement, mRoot: XmlElement, ctx: Ctx): void 
 
 /**
  * Header and footer parts paired across the documents: section by section,
- * kind by kind (default, first, even), each pair once.
+ * kind by kind (default, first, even), each pair once. `sections` gives each
+ * side's section breaks that are not in its tree, in order, ahead of those
+ * that are.
  */
-function pairHeadersFooters(original: DocxDocument, merged: DocxDocument): [string, string][] {
+export function pairHeadersFooters(
+  original: DocxDocument,
+  merged: DocxDocument,
+  sections?: { original: XmlElement[]; merged: XmlElement[] },
+): [string, string][] {
   const refs = (doc: DocxDocument): Map<string, string> => {
     const out = new Map<string, string>();
     const body = child(doc.docRoot, "body");
-    const sects = (body?.children ?? []).flatMap((c) =>
-      localName(c.name) === "sectPr" ? [c] : localName(c.name) === "p" ? [child(child(c, "pPr"), "sectPr")].filter((x): x is XmlElement => !!x) : [],
-    );
+    const sects = [
+      ...((doc === original ? sections?.original : sections?.merged) ?? []),
+      ...(body?.children ?? []).flatMap((c) =>
+        localName(c.name) === "sectPr" ? [c] : localName(c.name) === "p" ? [child(child(c, "pPr"), "sectPr")].filter((x): x is XmlElement => !!x) : [],
+      ),
+    ];
     sects.forEach((sp, i) => {
       for (const ref of sp.children) {
         const ln = localName(ref.name);
@@ -274,9 +291,17 @@ function pairHeadersFooters(original: DocxDocument, merged: DocxDocument): [stri
  * compared inside. A note only the revised document has gets its content
  * marked inserted; one only the original had is copied into the result
  * under a fresh id with its content struck, and struck body text pointing
- * at it is re-pointed (adoptFromOriginal, through ctx.noteIds).
+ * at it is re-pointed (adoptFromOriginal, through ctx.noteIds). `refs` gives
+ * each side's reference ids that are not in its tree, in order, ahead of
+ * those that are.
  */
-function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merged: DocxDocument, ctx: Ctx): void {
+export function compareNotes(
+  kind: "footnote" | "endnote",
+  original: DocxDocument,
+  merged: DocxDocument,
+  ctx: Ctx,
+  refs?: { original: string[]; merged: string[] },
+): void {
   const tree = (doc: DocxDocument, create = false): XmlElement | null =>
     kind === "footnote" ? doc.footnotesTree(create) : doc.endnotesTree(create);
   const oRoot = tree(original);
@@ -290,17 +315,18 @@ function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merg
     );
     const out: XmlElement[] = [];
     const seen = new Set<string>();
-    const walk = (e: XmlElement): void => {
-      if (localName(e.name) === refName) {
-        const id = e.attrs["w:id"];
-        const note = byId.get(id);
-        if (note && !seen.has(id)) {
-          seen.add(id);
-          out.push(note);
-        }
+    const take = (id: string): void => {
+      const note = byId.get(id);
+      if (note && !seen.has(id)) {
+        seen.add(id);
+        out.push(note);
       }
+    };
+    const walk = (e: XmlElement): void => {
+      if (localName(e.name) === refName) take(e.attrs["w:id"]);
       for (const c of e.children) walk(c);
     };
+    for (const id of (doc === original ? refs?.original : refs?.merged) ?? []) take(id);
     walk(doc.docRoot);
     return out;
   };
@@ -383,50 +409,77 @@ function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merg
  * deletion of a reference.
  */
 function giveStruckReferencesTheirOwnNotes(kind: "footnote" | "endnote", merged: DocxDocument, ctx: Ctx): void {
-  const root = kind === "footnote" ? merged.footnotesTree() : merged.endnotesTree();
-  if (!root) return;
-  const refName = `${kind}Reference`;
-  const refs = new Map<string, { ref: XmlElement; struck: boolean }[]>();
-  const walk = (e: XmlElement, struck: boolean): void => {
-    if (localName(e.name) === refName) {
-      const list = refs.get(e.attrs["w:id"]) ?? [];
-      list.push({ ref: e, struck });
-      refs.set(e.attrs["w:id"], list);
-    }
-    for (const c of e.children) walk(c, struck || localName(c.name) === "del" || rowDeleted(c));
-  };
+  const refs: NoteRef[] = [];
+  noteRefsIn(merged.docRoot, kind, false, refs);
+  for (const [i, id] of copyNotesForStruckReferences(kind, merged, ctx, refs)) refs[i].el.attrs["w:id"] = id;
+}
+
+/** A note reference, and whether a revision strikes it. */
+export interface NoteRef {
+  el: XmlElement;
+  struck: boolean;
+}
+
+/** The `kind` note references inside `el`, in document order, onto `out`. */
+export function noteRefsIn(el: XmlElement, kind: "footnote" | "endnote", struck: boolean, out: NoteRef[]): void {
+  if (localName(el.name) === `${kind}Reference`) out.push({ el, struck });
   // A deleted row records it in its trPr, and its cells (a nested table's
   // too) may hold references with no w:del around them.
   const rowDeleted = (tr: XmlElement): boolean =>
     localName(tr.name) === "tr" && !!child(child(tr, "trPr"), "del");
-  walk(merged.docRoot, false);
-  let next = 1 + Math.max(0, ...root.children.map((c) => Number(c.attrs["w:id"]) || 0));
+  for (const c of el.children) noteRefsIn(c, kind, struck || localName(c.name) === "del" || rowDeleted(c), out);
+}
+
+/**
+ * The note side of giveStruckReferencesTheirOwnNotes. `refs` are every
+ * `kind` reference in the body, in order. Each struck reference beyond the
+ * one that keeps its note gets a struck copy of the note; the result maps
+ * such a reference's index in `refs` to its copy's id.
+ */
+export function copyNotesForStruckReferences(
+  kind: "footnote" | "endnote",
+  merged: DocxDocument,
+  ctx: Ctx,
+  refs: readonly { el: { attrs: Record<string, string> }; struck: boolean }[],
+): Map<number, string> {
+  const ids = new Map<number, string>();
+  const root = kind === "footnote" ? merged.footnotesTree() : merged.endnotesTree();
+  if (!root) return ids;
+  const byId = new Map<string, number[]>();
+  refs.forEach((ref, i) => {
+    const list = byId.get(ref.el.attrs["w:id"]);
+    if (list) list.push(i);
+    else byId.set(ref.el.attrs["w:id"], [i]);
+  });
+  let next = 1;
+  for (const c of root.children) next = Math.max(next, 1 + (Number(c.attrs["w:id"]) || 0));
   let changed = false;
-  for (const [id, list] of refs) {
+  for (const [id, list] of byId) {
     if (list.length < 2) continue;
     const note = root.children.find((c) => localName(c.name) === kind && c.attrs["w:id"] === id);
     if (!note) continue;
     // The live reference keeps the note; every struck one beyond it gets a copy.
-    const keep = list.find((r) => !r.struck) ?? list[0];
-    for (const r of list) {
-      if (r === keep || !r.struck) continue;
+    const keep = list.find((i) => !refs[i].struck) ?? list[0];
+    for (const i of list) {
+      if (i === keep || !refs[i].struck) continue;
       const copy = cloneXml(note);
       copy.attrs["w:id"] = String(next);
-      r.ref.attrs["w:id"] = String(next++);
+      ids.set(i, String(next++));
       for (const block of blockList(copy)) if (localName(block.name) === "p") wrapContainerContent(block, "del", ctx);
       root.children.push(copy);
       changed = true;
     }
   }
   if (changed) merged.markNotePartsChanged([kind === "footnote" ? "footnotes" : "endnotes"]);
+  return ids;
 }
 
-function blockList(container: XmlElement, ...skip: string[]): XmlElement[] {
+export function blockList(container: XmlElement, ...skip: string[]): XmlElement[] {
   return container.children.filter((c) => !skip.includes(localName(c.name)));
 }
 
 /** Say so when a part outside the body differs, rather than imply it matched. */
-function reportUncomparedParts(original: DocxDocument, revised: DocxDocument, ctx: Ctx): void {
+export function reportUncomparedParts(original: DocxDocument, revised: DocxDocument, ctx: Ctx): void {
   // Headers, footers and notes are compared (compareHeadersFooters,
   // compareNotes). Style and numbering DEFINITIONS are not: Word's compare
   // does not track them either, and their effect shows on the paragraphs.
@@ -494,7 +547,7 @@ function alignBlocks(oBlocks: XmlElement[], rBlocks: XmlElement[], ctx: Ctx): En
  * numbering, and the fingerprint carries both, so histogram's lowest-
  * occurrence rule has something to separate them by.
  */
-function blockFingerprint(el: XmlElement, doc: DocxDocument): string {
+export function blockFingerprint(el: XmlElement, doc: DocxDocument): string {
   const ln = localName(el.name);
   if (ln === "p") {
     const pPr = child(el, "pPr");
@@ -511,7 +564,7 @@ function blockFingerprint(el: XmlElement, doc: DocxDocument): string {
   return `X\u0000${serializeXml(el)}`;
 }
 
-interface Pairing {
+export interface Pairing {
   kind: "pair" | "split" | "merge";
   o: number;
   r: number;
@@ -541,44 +594,108 @@ function emitGap(
   // opening the container, must pair something and diff it in place.
   const before = entries[entries.length - 1];
   const unanchored = (!before || !isParagraph(before.el)) && (rHi >= rBlocks.length || !isParagraph(rBlocks[rHi]));
-  const pairings = resolveGap(oBlocks, rBlocks, oLo, oHi, rLo, rHi, ctx, (oLo === 0 && rLo === 0) || unanchored);
+  const pairings = resolveGap(
+    treeSide(oBlocks, ctx.original, true, ctx),
+    treeSide(rBlocks, ctx.doc, false, ctx),
+    oLo,
+    oHi,
+    rLo,
+    rHi,
+    (oLo === 0 && rLo === 0) || unanchored,
+  );
+  for (const op of gapOps(pairings, oLo, oHi, rLo, rHi)) {
+    for (const entry of emitGapOp(op, (i) => oBlocks[i], (j) => rBlocks[j], ctx)) entries.push(entry);
+  }
+}
+
+/** One step of a gap's emission, in document order. */
+export type GapOp =
+  | { kind: "deleted"; o: number }
+  | { kind: "inserted"; r: number }
+  | Pairing;
+
+/** A gap's pairings as the steps that emit it, in document order. */
+export function* gapOps(pairings: readonly Pairing[], oLo: number, oHi: number, rLo: number, rHi: number): Generator<GapOp> {
   let oAt = oLo;
   let rAt = rLo;
   for (const pairing of [...pairings, { kind: "pair" as const, o: oHi, r: rHi, other: -1 }]) {
-    for (let i = oAt; i < pairing.o; i++) entries.push(emitDeleted(oBlocks[i], ctx));
-    for (let j = rAt; j < pairing.r; j++) entries.push(emitInserted(rBlocks[j], ctx));
-    oAt = pairing.o;
-    rAt = pairing.r;
-    if (pairing.o >= oHi || pairing.r >= rHi) break;
-    if (pairing.kind === "split") {
-      // One original paragraph became two. Their content already IS the
-      // original's, word for word and property for property, so there is no
-      // text revision to make — only the new pilcrow between them, which the
-      // mark pass records against the first paragraph.
-      alignParagraphProps(rBlocks[pairing.r], child(rBlocks[pairing.r], "pPr"), child(oBlocks[pairing.o], "pPr"), ctx);
-      entries.push({ el: rBlocks[pairing.r], cls: "kept" });
-      entries.push({ el: rBlocks[pairing.other], cls: "inserted" });
-      oAt = pairing.o + 1;
-      rAt = pairing.other + 1;
-    } else if (pairing.kind === "merge") {
-      // Two originals became one: both are emitted, and the pilcrow between
-      // them is struck. Their content is already what the revised paragraph
-      // holds, so there is no text revision to make.
-      const first = cloneXml(oBlocks[pairing.o]);
-      adoptFromOriginal(first, ctx);
-      alignParagraphProps(first, child(rBlocks[pairing.r], "pPr"), child(oBlocks[pairing.o], "pPr"), ctx);
-      entries.push({ el: first, cls: "kept" });
-      const second = cloneXml(oBlocks[pairing.other]);
-      adoptFromOriginal(second, ctx);
-      entries.push({ el: second, cls: "deleted" });
-      oAt = pairing.other + 1;
-      rAt = pairing.r + 1;
-    } else {
-      entries.push(emitMatched(oBlocks[pairing.o], rBlocks[pairing.r], ctx));
-      oAt = pairing.o + 1;
-      rAt = pairing.r + 1;
-    }
+    for (let i = oAt; i < pairing.o; i++) yield { kind: "deleted", o: i };
+    for (let j = rAt; j < pairing.r; j++) yield { kind: "inserted", r: j };
+    if (pairing.o >= oHi || pairing.r >= rHi) return;
+    yield pairing;
+    oAt = pairing.kind === "merge" ? pairing.other + 1 : pairing.o + 1;
+    rAt = pairing.kind === "split" ? pairing.other + 1 : pairing.r + 1;
   }
+}
+
+/** Emit one gap step: the entries it adds, given each side's blocks by index. */
+export function emitGapOp(op: GapOp, o: (i: number) => XmlElement, r: (j: number) => XmlElement, ctx: Ctx): Entry[] {
+  if (op.kind === "deleted") return [emitDeleted(o(op.o), ctx)];
+  if (op.kind === "inserted") return [emitInserted(r(op.r), ctx)];
+  if (op.kind === "split") {
+    // One original paragraph became two. Their content already IS the
+    // original's, word for word and property for property, so there is no
+    // text revision to make — only the new pilcrow between them, which the
+    // mark pass records against the first paragraph.
+    const kept = r(op.r);
+    alignParagraphProps(kept, child(kept, "pPr"), child(o(op.o), "pPr"), ctx);
+    return [
+      { el: kept, cls: "kept" },
+      { el: r(op.other), cls: "inserted" },
+    ];
+  }
+  if (op.kind === "merge") {
+    // Two originals became one: both are emitted, and the pilcrow between
+    // them is struck. Their content is already what the revised paragraph
+    // holds, so there is no text revision to make.
+    const first = cloneXml(o(op.o));
+    adoptFromOriginal(first, ctx);
+    alignParagraphProps(first, child(r(op.r), "pPr"), child(o(op.o), "pPr"), ctx);
+    const second = cloneXml(o(op.other));
+    adoptFromOriginal(second, ctx);
+    return [
+      { el: first, cls: "kept" },
+      { el: second, cls: "deleted" },
+    ];
+  }
+  return [emitMatched(o(op.o), r(op.r), ctx)];
+}
+
+/**
+ * One side of a gap, read by index: what resolveGap needs from each block.
+ * compareDocuments reads it from the tree; a caller holding blocks elsewhere
+ * can answer from there.
+ */
+export interface GapSide {
+  /** The block's local name: p, tbl, sdt, tr... */
+  kind(i: number): string;
+  /** paragraphText of the block. */
+  text(i: number): string;
+  /** sectionKey of the block, against its own document. */
+  section(i: number): string;
+  /** A table row's cell count. */
+  cells(i: number): number;
+  /** paragraphKeyParts of the block. */
+  keyParts(i: number): string[] | null;
+}
+
+/** A gap side over blocks in the tree. Its key parts are kept for the one gap that reads them. */
+function treeSide(els: XmlElement[], doc: DocxDocument, original: boolean, ctx: Ctx): GapSide {
+  const keys = new Map<number, string[] | null>();
+  return {
+    kind: (i) => localName(els[i].name),
+    text: (i) => paragraphText(els[i]),
+    section: (i) => sectionKey(els[i], doc),
+    cells: (i) => els[i].children.filter((c) => localName(c.name) === "tc").length,
+    keyParts: (i) => {
+      let parts = keys.get(i);
+      if (parts === undefined) {
+        parts = paragraphKeyParts(els[i], original, ctx);
+        keys.set(i, parts);
+      }
+      return parts;
+    },
+  };
 }
 
 /** Gap size (original x revised blocks) past which pairing turns windowed. */
@@ -586,21 +703,19 @@ const GAP_PAIR_CAP = 200 * 200;
 /** How far either side of its own relative position a block looks, windowed. */
 const GAP_WINDOW = 50;
 
-function resolveGap(
-  oBlocks: XmlElement[],
-  rBlocks: XmlElement[],
+export function resolveGap(
+  O: GapSide,
+  R: GapSide,
   oLo: number,
   oHi: number,
   rLo: number,
   rHi: number,
-  ctx: Ctx,
   needsAnchor = false,
 ): Pairing[] {
   const out: Pairing[] = [];
   const oUsed = new Set<number>();
   const rUsed = new Set<number>();
 
-  const keys: KeyCache = new Map();
   // Splits and merges first: they are exact (the content keys concatenate),
   // and they are the shape a similarity pass would otherwise turn into
   // delete-one-insert-two, which reads as a rewrite of something nobody
@@ -643,7 +758,7 @@ function resolveGap(
     const [jLo, jHi] = span(i);
     for (let j = jLo; j + 1 < jHi; j++) {
       if (oUsed.has(i) || rUsed.has(j) || rUsed.has(j + 1) || crosses(i, j)) continue;
-      if (concatMatches([oBlocks[i]], [rBlocks[j], rBlocks[j + 1]], ctx, keys)) {
+      if (concatMatches(O, [i], R, [j, j + 1])) {
         accept({ kind: "split", o: i, r: j, other: j + 1 });
         oUsed.add(i);
         rUsed.add(j);
@@ -655,7 +770,7 @@ function resolveGap(
     const [jLo, jHi] = span(i);
     for (let j = jLo; j < jHi; j++) {
       if (oUsed.has(i) || oUsed.has(i + 1) || rUsed.has(j) || crosses(i, j)) continue;
-      if (concatMatches([oBlocks[i], oBlocks[i + 1]], [rBlocks[j]], ctx, keys)) {
+      if (concatMatches(O, [i, i + 1], R, [j])) {
         accept({ kind: "merge", o: i, r: j, other: i + 1 });
         oUsed.add(i);
         oUsed.add(i + 1);
@@ -671,9 +786,9 @@ function resolveGap(
     const [jLo, jHi] = span(i);
     for (let j = jLo; j < jHi; j++) {
       if (rUsed.has(j)) continue;
-      if (!pairable(oBlocks[i], rBlocks[j], ctx)) continue;
-      const a = paragraphText(oBlocks[i]);
-      const b = paragraphText(rBlocks[j]);
+      if (!pairable(O, i, R, j)) continue;
+      const a = O.text(i);
+      const b = R.text(j);
       const score = similarity(a, b);
       if (score >= similarityFloor(a, b)) scored.push({ o: i, r: j, score });
     }
@@ -706,7 +821,7 @@ function resolveGap(
     const rs: number[] = [];
     for (let i = oFrom; i < p.o; i++) if (!oUsed.has(i)) os.push(i);
     for (let j = rFrom; j < p.r; j++) if (!rUsed.has(j)) rs.push(j);
-    if (os.length === 1 && rs.length === 1 && sameShape(oBlocks[os[0]], rBlocks[rs[0]], ctx)) {
+    if (os.length === 1 && rs.length === 1 && sameShape(O, os[0], R, rs[0])) {
       accept({ kind: "pair", o: os[0], r: rs[0], other: -1 });
       oUsed.add(os[0]);
       rUsed.add(rs[0]);
@@ -730,7 +845,7 @@ function resolveGap(
     for (let i = oLo; i < oHi && out.length === 0; i++) {
       if (oUsed.has(i)) continue;
       for (let j = rLo; j < rHi; j++) {
-        if (rUsed.has(j) || !pairable(oBlocks[i], rBlocks[j], ctx)) continue;
+        if (rUsed.has(j) || !pairable(O, i, R, j)) continue;
         accept({ kind: "pair", o: i, r: j, other: -1 });
         break;
       }
@@ -749,10 +864,10 @@ function resolveGap(
  * anchored to the H720 one, and its header went missing). A changed break
  * shows as struck and reinserted, which reviews back to either side.
  */
-function pairable(a: XmlElement, b: XmlElement, ctx: Ctx): boolean {
-  if (localName(a.name) !== localName(b.name)) return false;
-  if (!isParagraph(a)) return true;
-  return sectionKey(a, ctx.original) === sectionKey(b, ctx.doc);
+function pairable(O: GapSide, i: number, R: GapSide, j: number): boolean {
+  if (O.kind(i) !== R.kind(j)) return false;
+  if (O.kind(i) !== "p") return true;
+  return O.section(i) === R.section(j);
 }
 
 /**
@@ -760,7 +875,7 @@ function pairable(a: XmlElement, b: XmlElement, ctx: Ctx): boolean {
  * replaced by the part it points to, so the two documents' ids compare; "" for
  * a paragraph that ends no section.
  */
-function sectionKey(el: XmlElement, doc: DocxDocument): string {
+export function sectionKey(el: XmlElement, doc: DocxDocument): string {
   const sectPr = child(child(el, "pPr"), "sectPr");
   if (!sectPr) return "";
   return serializeXml(sectPr).replace(/r:id="([^"]*)"/g, (_, id: string) => `r:id="${doc.documentRels.get(id)?.target ?? id}"`);
@@ -770,11 +885,10 @@ function sectionKey(el: XmlElement, doc: DocxDocument): string {
  * Two paragraphs, two tables, two block-level content controls (or custom XML
  * elements), or two table rows with the same number of cells.
  */
-function sameShape(a: XmlElement, b: XmlElement, ctx: Ctx): boolean {
-  if (isParagraph(a) && isParagraph(b)) return pairable(a, b, ctx);
-  if (localName(a.name) === localName(b.name) && ["tbl", "sdt", "customXml"].includes(localName(a.name))) return true;
-  const cells = (tr: XmlElement) => tr.children.filter((c) => localName(c.name) === "tc").length;
-  return localName(a.name) === "tr" && localName(b.name) === "tr" && cells(a) === cells(b);
+function sameShape(O: GapSide, i: number, R: GapSide, j: number): boolean {
+  if (O.kind(i) === "p" && R.kind(j) === "p") return pairable(O, i, R, j);
+  if (O.kind(i) === R.kind(j) && ["tbl", "sdt", "customXml"].includes(O.kind(i))) return true;
+  return O.kind(i) === "tr" && R.kind(j) === "tr" && O.cells(i) === R.cells(j);
 }
 
 /**
@@ -788,7 +902,7 @@ function sameShape(a: XmlElement, b: XmlElement, ctx: Ctx): boolean {
  * id its note maps to: the original's through compareNotes' pairing (a removed
  * note's copy has an id no revised reference carries), the revised's as is.
  */
-function readOptions(ctx: Ctx, original: boolean): ReadOptions {
+export function readOptions(ctx: Ctx, original: boolean): ReadOptions {
   const noteKey = (ref: XmlElement): string => {
     const kind = localName(ref.name) === "footnoteReference" ? "footnote" : "endnote";
     const id = ref.attrs["w:id"];
@@ -797,20 +911,17 @@ function readOptions(ctx: Ctx, original: boolean): ReadOptions {
   return { whitespace: ctx.whitespace, noteKey };
 }
 
-function concatMatches(oEls: XmlElement[], rEls: XmlElement[], ctx: Ctx, keys: KeyCache): boolean {
-  const a = concatKey(oEls, true, ctx, keys);
+function concatMatches(O: GapSide, oAt: number[], R: GapSide, rAt: number[]): boolean {
+  const a = concatKey(O, oAt);
   if (!a) return false;
-  const b = concatKey(rEls, false, ctx, keys);
+  const b = concatKey(R, rAt);
   return !!b && a.length === b.length && a.every((part, i) => part === b[i]);
 }
 
-/** Split/merge key parts per paragraph, kept for the one gap that tries them. */
-type KeyCache = Map<XmlElement, string[] | null>;
-
-function concatKey(els: XmlElement[], original: boolean, ctx: Ctx, keys: KeyCache): string[] | null {
+function concatKey(side: GapSide, at: number[]): string[] | null {
   const out: string[] = [];
-  for (const el of els) {
-    const parts = paragraphKeyParts(el, original, ctx, keys);
+  for (const i of at) {
+    const parts = side.keyParts(i);
     if (!parts) return null;
     for (const part of parts) out.push(part);
   }
@@ -819,15 +930,13 @@ function concatKey(els: XmlElement[], original: boolean, ctx: Ctx, keys: KeyCach
 
 /**
  * One paragraph's tokens with their run properties and containers, or null
- * when it cannot take part in a split or merge. Read once per gap: the
- * split and merge passes try every nearby pair, and re-reading both
+ * when it cannot take part in a split or merge. A gap side reads it once per
+ * gap: the split and merge passes try every nearby pair, and re-reading both
  * paragraphs for each try was half the time of a long rewritten document
  * (the Yiddish novel, 90% of paragraphs edited: 3.4 of 6.9 s). Kept for one
  * gap only, so a long document's keys are not all alive at once.
  */
-function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx, keys: KeyCache): string[] | null {
-  const cached = keys.get(el);
-  if (cached !== undefined) return cached;
+export function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx): string[] | null {
   let parts: string[] | null = null;
   // A section break is no split or merge: its mark is the break, and the
   // join a review makes would move it (wild-gatech with blocks moved: an
@@ -841,7 +950,6 @@ function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx, keys: Ke
       });
     }
   }
-  keys.set(el, parts);
   return parts;
 }
 
@@ -853,7 +961,7 @@ function paragraphKeyParts(el: XmlElement, original: boolean, ctx: Ctx, keys: Ke
  * A matched pair. Both sides are always the same kind of block: fingerprints
  * are namespaced by kind, and the gap pass refuses to pair across kinds.
  */
-function emitMatched(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): Entry {
+export function emitMatched(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): Entry {
   const ln = localName(oEl.name);
   if (ln === "p") comparePair(oEl, rEl, ctx);
   else if (ln === "tbl") compareTable(oEl, rEl, ctx);
@@ -890,7 +998,7 @@ const REL_ATTRS = ["id", "embed", "link", "pict", "dm", "lo", "qs", "cs"];
  * frame. Only a part the original does not actually carry is dropped and
  * reported, rather than left dangling.
  */
-function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
+export function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
   const mine = ctx.doc.relationshipsOf(ctx.scope.into);
   const theirs = ctx.original.relationshipsOf(ctx.scope.from);
   const remapped = new Map<string, string | null>();
@@ -930,14 +1038,14 @@ function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
   walk(root);
 }
 
-function emitDeleted(el: XmlElement, ctx: Ctx): Entry {
+export function emitDeleted(el: XmlElement, ctx: Ctx): Entry {
   const clone = cloneXml(el);
   adoptFromOriginal(clone, ctx);
   markWholeBlock(clone, "del", ctx);
   return { el: clone, cls: "deleted" };
 }
 
-function emitInserted(el: XmlElement, ctx: Ctx): Entry {
+export function emitInserted(el: XmlElement, ctx: Ctx): Entry {
   markWholeBlock(el, "ins", ctx);
   return { el, cls: "inserted" };
 }
@@ -985,7 +1093,7 @@ function wrapRowContent(row: XmlElement, kind: "ins" | "del", ctx: Ctx): void {
  * w:ins inside it — so a container child that holds runs of its own is
  * recursed into rather than wrapped, which is exactly what Word writes.
  */
-function wrapContainerContent(container: XmlElement, kind: "ins" | "del", ctx: Ctx): void {
+export function wrapContainerContent(container: XmlElement, kind: "ins" | "del", ctx: Ctx): void {
   // Run containers the schema lets a revision sit INSIDE (a simple field's
   // result runs among them), as opposed to an inline content control or a
   // run-level customXml, which a revision may wrap whole. Left plain, a removed
@@ -1422,7 +1530,14 @@ function compareRows(oParent: XmlElement, rParent: XmlElement, ctx: Ctx): void {
   for (const anchor of [...anchors, { a: oRows.length, b: rRows.length }]) {
     // Rows inside a gap pair up by similarity, exactly like paragraphs, so a
     // row whose one cell changed is an edited row and not a replaced one.
-    const pairings = resolveGap(oRows, rRows, oAt, anchor.a, rAt, anchor.b, ctx).filter((p) => p.kind === "pair");
+    const pairings = resolveGap(
+      treeSide(oRows, ctx.original, true, ctx),
+      treeSide(rRows, ctx.doc, false, ctx),
+      oAt,
+      anchor.a,
+      rAt,
+      anchor.b,
+    ).filter((p) => p.kind === "pair");
     let oi = oAt;
     let ri = rAt;
     for (const pairing of [...pairings, { kind: "pair" as const, o: anchor.a, r: anchor.b, other: -1 }]) {
@@ -1530,7 +1645,7 @@ const PARA_KEPT = ["rPr", "sectPr"];
  * below: the paragraph a reviewer ends up with must wear the properties of
  * whichever document they chose, and only a pPrChange can hold both answers.
  */
-function alignParagraphProps(
+export function alignParagraphProps(
   pEl: XmlElement,
   live: XmlElement | undefined,
   previous: XmlElement | undefined,
@@ -1658,66 +1773,85 @@ function prefixOf(name: string): string {
  * same-class chain takes a w:pPrChange to carry the other document's answer.
  */
 function applyParagraphMarks(entries: Entry[], ctx: Ctx): void {
+  const infos = entries.map((e) => ({ cls: e.cls, paragraph: isParagraph(e.el), endsSection: endsSection(e.el) }));
+  paragraphMarkSteps(
+    infos.length,
+    (i) => infos[i],
+    (step) => applyMarkStep(step, (i) => entries[i], (i) => child(entries[i].el, "pPr"), ctx),
+  );
+}
+
+/** What the mark pass needs to know of one entry. */
+export interface MarkInfo {
+  cls: BlockClass;
+  paragraph: boolean;
+  /** A paragraph that ends a section: its mark is the break. */
+  endsSection: boolean;
+}
+
+/**
+ * One step of the mark pass: mark entry `at`'s pilcrow; let the head of a
+ * same-class chain wear either document's paragraph properties, the other
+ * one being its `follower`'s; or report a final mark that cannot be tracked.
+ */
+export type MarkStep =
+  | { kind: "glyph"; at: number; glyph: "ins" | "del" }
+  | { kind: "props"; at: number; follower: number }
+  | { kind: "untracked" };
+
+/** The mark pass over `n` entries, step by step, in the order applyParagraphMarks applies them. */
+export function paragraphMarkSteps(n: number, info: (i: number) => MarkInfo, step: (s: MarkStep) => void): void {
   let i = 0;
-  while (i < entries.length) {
-    if (entries[i].cls === "kept") {
+  while (i < n) {
+    if (info(i).cls === "kept") {
       i++;
       continue;
     }
     let end = i;
-    while (end + 1 < entries.length && entries[end + 1].cls !== "kept") end++;
-    markRun(entries, i, end, ctx);
+    while (end + 1 < n && info(end + 1).cls !== "kept") end++;
+    // Tables carry their own row revisions and no pilcrow, so the paragraphs
+    // between them are marked stretch by stretch: a stretch after a table has
+    // no paragraph before it to take a mark from, exactly like one opening the
+    // container, and marks its own (a paragraph removed right after a removed
+    // table used to get no mark at all, and survived accept-all empty).
+    let at = i;
+    while (at <= end) {
+      if (!info(at).paragraph) {
+        at++;
+        continue;
+      }
+      let last = at;
+      while (last + 1 <= end && info(last + 1).paragraph) last++;
+      paragraphRunSteps(n, info, at, last, step);
+      at = last + 1;
+    }
     i = end + 1;
   }
 }
 
-function markRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
-  // Tables carry their own row revisions and no pilcrow, so the paragraphs
-  // between them are marked stretch by stretch: a stretch after a table has
-  // no paragraph before it to take a mark from, exactly like one opening the
-  // container, and marks its own (a paragraph removed right after a removed
-  // table used to get no mark at all, and survived accept-all empty).
-  let at = start;
-  while (at <= end) {
-    if (!isParagraph(entries[at].el)) {
-      at++;
-      continue;
-    }
-    let last = at;
-    while (last + 1 <= end && isParagraph(entries[last + 1].el)) last++;
-    markParagraphRun(entries, at, last, ctx);
-    at = last + 1;
-  }
-}
-
-function markParagraphRun(entries: Entry[], start: number, end: number, ctx: Ctx): void {
+function paragraphRunSteps(n: number, info: (i: number) => MarkInfo, start: number, end: number, step: (s: MarkStep) => void): void {
   // Shifting moves each mark one paragraph up, and a section break lives in
   // its paragraph's mark: shifted, a kept break would be lent to the stretch
   // after it, and an added break would read as already there. So a stretch
   // next to or holding a break marks its own paragraphs.
-  const endsSection = (el: XmlElement): boolean => isParagraph(el) && !!child(child(el, "pPr"), "sectPr");
-  const before = start > 0 ? entries[start - 1].el : undefined;
-  const shifted =
-    !!before && isParagraph(before) && !endsSection(before) && !entries.slice(start, end + 1).some((e) => endsSection(e.el));
+  let shifted = start > 0 && info(start - 1).paragraph && !info(start - 1).endsSection;
+  for (let k = start; shifted && k <= end; k++) if (info(k).endsSection) shifted = false;
   if (shifted) {
-    for (let i = start; i <= end; i++) {
-      if (!isParagraph(entries[i].el) || !isParagraph(entries[i - 1].el)) continue;
-      markParagraphGlyph(entries[i - 1].el, glyphKind(entries[i].cls), ctx.meta);
+    for (let k = start; k <= end; k++) {
+      if (!info(k).paragraph || !info(k - 1).paragraph) continue;
+      step({ kind: "glyph", at: k - 1, glyph: glyphKind(info(k).cls) });
     }
     return;
   }
 
-  const hasFollower = end + 1 < entries.length;
-  for (let i = start; i <= end; i++) {
-    if (!isParagraph(entries[i].el)) continue;
-    if (i === end && !hasFollower) {
-      ctx.note({
-        code: "no-common-paragraph",
-        detail: "the documents share no paragraph, so the final paragraph mark difference is left untracked",
-      });
+  const hasFollower = end + 1 < n;
+  for (let k = start; k <= end; k++) {
+    if (!info(k).paragraph) continue;
+    if (k === end && !hasFollower) {
+      step({ kind: "untracked" });
       continue;
     }
-    markParagraphGlyph(entries[i].el, glyphKind(entries[i].cls), ctx.meta);
+    step({ kind: "glyph", at: k, glyph: glyphKind(info(k).cls) });
   }
 
   // Self-marked paragraphs join with the FOLLOWING one when reviewed, so the
@@ -1726,22 +1860,41 @@ function markParagraphRun(entries: Entry[], start: number, end: number, ctx: Ctx
   let at = start;
   while (at <= end) {
     let last = at;
-    while (last + 1 <= end && entries[last + 1].cls === entries[at].cls) last++;
-    const follower = entries[last + 1];
-    if (follower && isParagraph(entries[at].el) && isParagraph(follower.el)) {
-      const own = child(entries[at].el, "pPr");
-      const other = child(follower.el, "pPr");
-      if (entries[at].cls === "deleted") alignParagraphProps(entries[at].el, other, own, ctx);
-      else alignParagraphProps(entries[at].el, own, other, ctx);
-    }
+    while (last + 1 <= end && info(last + 1).cls === info(at).cls) last++;
+    if (last + 1 < n && info(at).paragraph && info(last + 1).paragraph) step({ kind: "props", at, follower: last + 1 });
     at = last + 1;
   }
 }
 
-function glyphKind(cls: BlockClass): "ins" | "del" {
+/**
+ * Apply one mark step. `entry` gives an entry by index; `pPrOf` gives an
+ * entry's paragraph properties as they stand once it is emitted.
+ */
+export function applyMarkStep(step: MarkStep, entry: (i: number) => Entry, pPrOf: (i: number) => XmlElement | undefined, ctx: Ctx): void {
+  if (step.kind === "untracked") {
+    ctx.note({
+      code: "no-common-paragraph",
+      detail: "the documents share no paragraph, so the final paragraph mark difference is left untracked",
+    });
+  } else if (step.kind === "glyph") {
+    markParagraphGlyph(entry(step.at).el, step.glyph, ctx.meta);
+  } else {
+    const head = entry(step.at);
+    const own = child(head.el, "pPr");
+    const other = pPrOf(step.follower);
+    if (head.cls === "deleted") alignParagraphProps(head.el, other, own, ctx);
+    else alignParagraphProps(head.el, own, other, ctx);
+  }
+}
+
+function endsSection(el: XmlElement): boolean {
+  return isParagraph(el) && !!child(child(el, "pPr"), "sectPr");
+}
+
+export function glyphKind(cls: BlockClass): "ins" | "del" {
   return cls === "inserted" ? "ins" : "del";
 }
 
-function isParagraph(el: XmlElement): boolean {
+export function isParagraph(el: XmlElement): boolean {
   return localName(el.name) === "p";
 }
