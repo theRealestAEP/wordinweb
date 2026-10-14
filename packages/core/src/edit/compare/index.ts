@@ -717,6 +717,16 @@ export function resolveGap(
   rHi: number,
   needsAnchor = false,
 ): Pairing[] {
+  // One block on each side: paired when they are the same shape, as the
+  // single-leftover rule would pair them, or else when scoring would.
+  // Settled first, so two long tables are not tokenized to be scored.
+  if (oHi - oLo === 1 && rHi - rLo === 1) {
+    const pair =
+      sameShape(O, oLo, R, rLo) ||
+      (pairable(O, oLo, R, rLo) && (needsAnchor || similarity(O.text(oLo), R.text(rLo)) >= similarityFloor(O.text(oLo), R.text(rLo))));
+    return pair ? [{ kind: "pair", o: oLo, r: rLo, other: -1 }] : [];
+  }
+
   const out: Pairing[] = [];
   const oUsed = new Set<number>();
   const rUsed = new Set<number>();
@@ -785,7 +795,10 @@ export function resolveGap(
   }
 
   // Then similarity, best score first, over the gap's cross-product only.
-  const scored: { o: number; r: number; score: number }[] = [];
+  // The candidates are three columns, not objects: a windowed gap holds up
+  // to 2 × GAP_WINDOW of them per original block, and a long rewritten list
+  // held millions.
+  const scored = new Candidates();
   for (let i = oLo; i < oHi; i++) {
     if (oUsed.has(i)) continue;
     const [jLo, jHi] = span(i);
@@ -795,18 +808,19 @@ export function resolveGap(
       const a = O.text(i);
       const b = R.text(j);
       const score = similarity(a, b);
-      if (score >= similarityFloor(a, b)) scored.push({ o: i, r: j, score });
+      if (score >= similarityFloor(a, b)) scored.push(i, j, score);
     }
   }
-  scored.sort((x, y) => y.score - x.score || x.o - y.o);
-  for (const cand of scored) {
-    if (oUsed.has(cand.o) || rUsed.has(cand.r)) continue;
+  for (const k of scored.byScore()) {
+    const o = scored.o[k];
+    const r = scored.r[k];
+    if (oUsed.has(o) || rUsed.has(r)) continue;
     // Pairings must stay monotone: a crossing pair would put a deletion after
     // the insertion that replaced it and read as two unrelated edits.
-    if (crosses(cand.o, cand.r)) continue;
-    accept({ kind: "pair", o: cand.o, r: cand.r, other: -1 });
-    oUsed.add(cand.o);
-    rUsed.add(cand.r);
+    if (crosses(o, r)) continue;
+    accept({ kind: "pair", o, r, other: -1 });
+    oUsed.add(o);
+    rUsed.add(r);
   }
 
   // A slot between two settled pairings (or a gap's ends) that holds exactly
@@ -857,6 +871,39 @@ export function resolveGap(
     }
   }
   return out.sort((a, b) => a.o - b.o);
+}
+
+/** The scored pairs of a gap, as three columns. */
+class Candidates {
+  o = new Int32Array(1024);
+  r = new Int32Array(1024);
+  score = new Float64Array(1024);
+  n = 0;
+
+  push(o: number, r: number, score: number): void {
+    if (this.n === this.o.length) {
+      const o2 = new Int32Array(this.n * 2);
+      o2.set(this.o);
+      this.o = o2;
+      const r2 = new Int32Array(this.n * 2);
+      r2.set(this.r);
+      this.r = r2;
+      const score2 = new Float64Array(this.n * 2);
+      score2.set(this.score);
+      this.score = score2;
+    }
+    this.o[this.n] = o;
+    this.r[this.n] = r;
+    this.score[this.n] = score;
+    this.n++;
+  }
+
+  /** The candidates' indexes, best score first, then by original block, then as pushed. */
+  byScore(): Uint32Array {
+    const order = new Uint32Array(this.n);
+    for (let k = 0; k < this.n; k++) order[k] = k;
+    return order.sort((x, y) => this.score[y] - this.score[x] || this.o[x] - this.o[y] || x - y);
+  }
 }
 
 /**
