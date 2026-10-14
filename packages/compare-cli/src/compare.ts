@@ -246,13 +246,27 @@ function diskSide(input: Input, original: boolean, ctx: Ctx): GapSide {
   const keys = new Lru<string[] | null>(256);
   return {
     kind: (i) => input.kinds[i],
-    text: (i) => texts.get(i, () => input.texts.read(i)),
+    text: (i) => texts.get(i, () => (input.kinds[i] === "tbl" ? tableText(input, i) : input.texts.read(i))),
     section: (i) => input.sectionKeys.get(i) ?? "",
     // Body blocks are never table rows.
     cells: () => 0,
     keyParts: (i) =>
       keys.get(i, () => (input.kinds[i] === "p" && !input.endsSection[i] ? paragraphKeyParts(parseXml(input.blocks.read(i)), original, ctx) : null)),
   };
+}
+
+/**
+ * How much of a table's text a gap scores it by. Its start tells one table
+ * from another as well as the whole does, and the whole runs to megabytes.
+ */
+const TABLE_TEXT_CAP = 64 * 1024;
+
+/** A table's paragraphText, from its rows, to about TABLE_TEXT_CAP. Its other children hold no text. */
+function tableText(input: Input, i: number): string {
+  const [from, to] = input.tables.get(i) as [number, number];
+  let text = "";
+  for (let k = from; k < to && text.length < TABLE_TEXT_CAP; k++) text += paragraphText(parseXml(input.rows.read(k)));
+  return text;
 }
 
 /** The most recently used values, by index. */

@@ -1,3 +1,4 @@
+import { Hash, createHash } from "node:crypto";
 import { closeSync, openSync, readSync, fstatSync } from "node:fs";
 import { join } from "node:path";
 import { zipSync } from "fflate";
@@ -5,7 +6,8 @@ import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, child, cyrb53, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { acceptAllRevisions, collectRevisions } from "../../core/src/edit/suggest.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
-import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionKey, tableFingerprint } from "../../core/src/edit/compare/index.js";
+import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionKey } from "../../core/src/edit/compare/index.js";
+import { normalizeText } from "../../core/src/edit/compare/text.js";
 import { scanBody, scanChildren } from "./scan.js";
 import { BlockStore } from "./store.js";
 import { ZipReader } from "./zip.js";
@@ -52,7 +54,7 @@ export interface Input {
   shell: DocxDocument;
   /** Each body block as XML, with tracked changes accepted. */
   blocks: BlockStore;
-  /** Each block's paragraphText. */
+  /** Each block's paragraphText; a table's is "", read from its rows when wanted. */
   texts: BlockStore;
   /** Each block's blockFingerprint, hashed to a number: the anchor pass's keys. */
   fingerprints: number[];
@@ -188,21 +190,22 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
 
     /**
      * A table, one child at a time: its rows go to `rows`, and its block is
-     * the shell. The table's text, fingerprint and hash are those of the
-     * whole element.
+     * the shell. The table's fingerprint and hash are those of the whole
+     * element, taken as the children pass: a table's text runs to megabytes,
+     * and is never held whole.
      */
     const beginTable = (open: XmlElement) => {
       const from = input.rows.count;
       const shell: XmlElement = { ...open, children: [] };
-      let text = "";
-      let rowHashes = "";
+      const text = new TextHasher();
+      const rowXml = createHash("sha1");
       return {
         open,
         /** How many w:tr rows it holds. */
         trs: 0,
         take(el: XmlElement): void {
           const xml = serializeXml(el);
-          text += paragraphText(el);
+          text.add(paragraphText(el));
           const rowKind = ROW_LEVEL.indexOf(localName(el.name));
           if (rowKind === -1) {
             shell.children.push(el);
@@ -212,14 +215,14 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
           input.rows.add(xml);
           input.rowFingerprints.push(hash(rowFingerprint(el)));
           input.rowKinds.push(ROW_LEVEL[rowKind]);
-          rowHashes += cyrb53(xml);
+          rowXml.update(xml);
           shell.children.push(ROW_SLOT);
           noteRefsIn(el);
         },
         end(): void {
           input.tables.set(input.blocks.count, [from, input.rows.count]);
           const xml = serializeXml(shell);
-          index(shell, xml, hash(xml + rowHashes), text, hash(tableFingerprint(text)));
+          index(shell, xml, digest(rowXml.update(xml)), "", text.digest());
         },
       };
     };
@@ -335,6 +338,40 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
 export function dropNotesModel(shell: DocxDocument): void {
   shell.footnotes.clear();
   shell.endnotes.clear();
+}
+
+/**
+ * tableFingerprint of a text fed a piece at a time, hashed as it goes: the
+ * whole text's normalizeText, with a whitespace run that crosses a piece
+ * boundary collapsed as one.
+ */
+class TextHasher {
+  private readonly hash = createHash("sha1");
+  /** Whether any text is in: whitespace before the first is trimmed. */
+  private started = false;
+  /** Whether whitespace ended the text so far: one space, once more text comes. */
+  private space = false;
+
+  add(piece: string): void {
+    if (/^\s/.test(piece)) this.space = true;
+    const text = normalizeText(piece);
+    if (text) {
+      if (this.started && this.space) this.hash.update(" ");
+      this.hash.update(text);
+      this.started = true;
+      this.space = false;
+    }
+    if (/\s$/.test(piece)) this.space = true;
+  }
+
+  digest(): number {
+    return digest(this.hash);
+  }
+}
+
+/** A streamed hash as a number, like `hash`. */
+function digest(hash: Hash): number {
+  return hash.digest().readUIntBE(0, 6);
 }
 
 /** A paragraph whose mark is deleted or moved away: accepting it joins the next block. */
