@@ -151,81 +151,6 @@ export type NotePart = "footnotes" | "endnotes";
  * A fully parsed .docx: sections of blocks, styles, numbering, theme, and
  * header/footer parts, with helpers to resolve effective formatting.
  */
-export interface LoadOptions {
-  /**
-   * Keep the body's top-level blocks as XML text (`deferredBody`) instead of
-   * parsing them into the tree and the model. For compareDocx, which parses
-   * one stretch of blocks at a time.
-   */
-  deferBody?: boolean;
-}
-
-/**
- * Split document.xml into its body's top-level blocks and a skeleton: the
- * document with only the body's section properties left in the body. A small
- * scanner, not a parse: it finds where each top-level element starts and
- * ends, skipping comments, CDATA and quoted attribute values.
- */
-function splitBodyXml(xml: string): { skeleton: string; blocks: string[] } {
-  const open = /<(?:[\w.-]+:)?body[\s/>]/.exec(xml);
-  if (!open) return { skeleton: xml, blocks: [] };
-  const tagEnd = (from: number): number => {
-    let quote = "";
-    for (let i = from; i < xml.length; i++) {
-      const c = xml[i];
-      if (quote) {
-        if (c === quote) quote = "";
-      } else if (c === '"' || c === "'") quote = c;
-      else if (c === ">") return i;
-    }
-    throw new Error("XML parse error: unterminated tag in the body");
-  };
-  const bodyOpenEnd = tagEnd(open.index);
-  if (xml[bodyOpenEnd - 1] === "/") return { skeleton: xml, blocks: [] };
-  const blocks: string[] = [];
-  const sectPrs: string[] = [];
-  let depth = 0;
-  let start = -1;
-  let i = bodyOpenEnd + 1;
-  for (;;) {
-    const lt = xml.indexOf("<", i);
-    if (lt === -1) throw new Error("XML parse error: the body is not closed");
-    if (xml.startsWith("<!--", lt)) {
-      i = xml.indexOf("-->", lt + 4) + 3;
-      continue;
-    }
-    if (xml.startsWith("<![CDATA[", lt)) {
-      i = xml.indexOf("]]>", lt + 9) + 3;
-      continue;
-    }
-    if (xml.startsWith("<?", lt)) {
-      i = xml.indexOf("?>", lt + 2) + 2;
-      continue;
-    }
-    const gt = tagEnd(lt + 1);
-    if (xml[lt + 1] === "/") {
-      if (depth === 0) {
-        // The body's own closing tag.
-        const skeleton = xml.slice(0, bodyOpenEnd + 1) + sectPrs.join("") + xml.slice(lt);
-        return { skeleton, blocks };
-      }
-      if (--depth === 0) {
-        const block = xml.slice(start, gt + 1);
-        (/^<(?:[\w.-]+:)?sectPr[\s/>]/.test(block) ? sectPrs : blocks).push(block);
-      }
-    } else if (xml[gt - 1] === "/") {
-      if (depth === 0) {
-        const block = xml.slice(lt, gt + 1);
-        (/^<(?:[\w.-]+:)?sectPr[\s/>]/.test(block) ? sectPrs : blocks).push(block);
-      }
-    } else {
-      if (depth === 0) start = lt;
-      depth++;
-    }
-    i = gt + 1;
-  }
-}
-
 /**
  * Length and two independent 53-bit hashes (cyrb53 with seeds 1 and 2):
  * equal fingerprints mean equal XML. Both hashes run in one pass over the
@@ -418,7 +343,7 @@ export class DocxDocument {
    * single-threaded and sequential per section. */
   charGridEa = false;
 
-  private constructor(pkg: Package, options: LoadOptions = {}) {
+  private constructor(pkg: Package) {
     this.pkg = pkg;
 
     const docPart = this.findDocumentPart();
@@ -455,23 +380,11 @@ export class DocxDocument {
     if (this.relsRoot) this.rememberOriginalXml(this.relsPath, this.relsRoot);
     if (this.contentTypesRoot) this.rememberOriginalXml("[Content_Types].xml", this.contentTypesRoot);
 
-    let docRoot: XmlElement | undefined;
-    if (options.deferBody) {
-      const text = this.pkg.text(docPart);
-      if (text === undefined) throw new Error(`Missing ${docPart} in package`);
-      const split = splitBodyXml(text);
-      docRoot = parseXml(split.skeleton);
-      this.deferredBody = split.blocks;
-    } else {
-      docRoot = this.readXmlOptional(docPart);
-    }
+    const docRoot = this.readXmlOptional(docPart);
     if (!docRoot) throw new Error(`Missing ${docPart} in package`);
     this.docRoot = docRoot;
-    // A deferred body's fingerprint is taken once its blocks are read (see
-    // setDeferredBody).
-    if (!this.deferredBody) this.rememberOriginalXml(docPart, docRoot);
+    this.rememberOriginalXml(docPart, docRoot);
     const coreProperties = this.readXmlOptional("docProps/core.xml");
-    this.coreProperties = coreProperties;
     this.hydrateCorePropertyControls(docRoot, coreProperties);
     this.repairLegacyWordInWebObjects();
     this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
@@ -2478,12 +2391,7 @@ export class DocxDocument {
       });
       if (this.saveJournal) this.saveJournal.push(() => ctRoot.children.pop());
     }
-    if (this.deferredBody) {
-      const xml = this.deferredDocumentXml();
-      if (xmlFingerprint(xml) !== this.originalModeledXml.get(this.docPart)) files[this.docPart] = strToU8(xml);
-    } else {
-      this.writeModeledXml(files, this.docPart, this.docRoot);
-    }
+    this.writeModeledXml(files, this.docPart, this.docRoot);
     for (const part of this.hfParts) {
       this.writeModeledXml(files, part.target, part.root);
       if (part.relsRoot) this.writeModeledXml(files, relsPathFor(part.target), part.relsRoot);
@@ -3130,62 +3038,8 @@ export class DocxDocument {
     return { dataRelId, layoutRelId, styleRelId, colorsRelId, drawingRelId };
   }
 
-  static load(data: ArrayBuffer | Uint8Array, options: LoadOptions = {}): DocxDocument {
-    return new DocxDocument(Package.from(data), options);
-  }
-
-  /**
-   * The body's top-level blocks as XML text, when loaded with `deferBody`.
-   * The tree then holds the body's section properties only, and the model
-   * none of the body: compareDocx reads and writes the blocks itself.
-   */
-  deferredBody: string[] | null = null;
-  private coreProperties: XmlElement | undefined;
-
-  /**
-   * Give one deferred block, parsed, what loading gives the body: bound
-   * content-control text, and the empty-paragraph caret anchors building the
-   * model inserts. The model it builds is thrown away.
-   */
-  prepareDeferredBlock(block: XmlElement): void {
-    this.hydrateCorePropertyControls(block, this.coreProperties);
-    const ctx: DocParseContext = {
-      ...this.ctxBase,
-      rels: this.documentRels,
-      readPart: (part: string) => this.readXmlOptional(part),
-      refBookmarks: { open: new Map<string, Run[]>(), byName: new Map<string, Run[]>() },
-      independentTextboxStories: true,
-    };
-    parseBody({ name: "w:body", attrs: {}, children: [block], text: "" }, ctx);
-  }
-
-  /** Replace the deferred body (compareDocx's result). */
-  setDeferredBody(blocks: string[]): void {
-    this.deferredBody = blocks;
-  }
-
-  /**
-   * Record the body as loaded: each block parsed and serialized, before
-   * prepareDeferredBlock. save() keeps the part's original bytes while the
-   * body still matches it, as it does for a body loaded whole.
-   */
-  rememberLoadedBody(blocks: string[]): void {
-    const current = this.deferredBody;
-    this.deferredBody = blocks;
-    this.originalModeledXml.set(this.docPart, xmlFingerprint(this.deferredDocumentXml()));
-    this.deferredBody = current;
-  }
-
-  /** document.xml with the deferred blocks in the body, ahead of its section properties. */
-  private deferredDocumentXml(): string {
-    const body = child(this.docRoot, "body");
-    if (!body || !this.deferredBody) return serializeXml(this.docRoot, true);
-    const marker: XmlElement = { name: "w:dxw-deferred-blocks", attrs: {}, children: [], text: "" };
-    body.children.unshift(marker);
-    const xml = serializeXml(this.docRoot, true);
-    body.children.shift();
-    const at = xml.indexOf("<w:dxw-deferred-blocks/>");
-    return xml.slice(0, at) + this.deferredBody.join("") + xml.slice(at + "<w:dxw-deferred-blocks/>".length);
+  static load(data: ArrayBuffer | Uint8Array): DocxDocument {
+    return new DocxDocument(Package.from(data));
   }
 
   media(part: string): Uint8Array | undefined {

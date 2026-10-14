@@ -1,6 +1,6 @@
 import { diffArrays } from "diff";
 import { DocxDocument } from "../../docx.js";
-import { XmlElement, child, cloneXml, localName, parseXml, sameXml, serializeXml } from "../../xml.js";
+import { XmlElement, child, cloneXml, localName, sameXml, serializeXml } from "../../xml.js";
 import {
   RevisionMeta,
   acceptAllRevisions,
@@ -96,8 +96,8 @@ export interface CompareNote {
 export interface CompareOptions {
   /** Who the revisions are attributed to. */
   author: string;
-  /** ISO 8601 timestamp for every w:date written. */
-  date: string;
+  /** ISO 8601 timestamp for every w:date written. Default: the current time. */
+  date?: string;
   /**
    * Report formatting-only differences as tracked format revisions. Default
    * true; Word exposes the same switch.
@@ -172,7 +172,7 @@ export function compareDocuments(
   return compareInto(accepted(original, "original", false), merged === revised && !reuse ? revised.clone() : merged, options);
 }
 
-function compareInto(original: DocxDocument, merged: DocxDocument, options: CompareOptions, lean?: LeanBodies): DocxDocument {
+function compareInto(original: DocxDocument, merged: DocxDocument, options: CompareOptions): DocxDocument {
   // Every revision takes an id; with none issued the body is the clone's own,
   // untouched, and its model needs no rebuild (refresh was a sixth of the time
   // on a document compared with itself).
@@ -182,7 +182,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
     original,
     meta: {
       author: options.author,
-      date: options.date,
+      date: options.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
       nextId: () => {
         issued++;
         return merged.nextRevisionId();
@@ -201,22 +201,18 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
 
   // Before the body is touched, merged holds exactly the revised parts.
   reportUncomparedParts(original, merged, ctx);
-  const headerFooterPairs = pairHeadersFooters(original, merged, lean);
+  const headerFooterPairs = pairHeadersFooters(original, merged);
   // Notes first: struck body text carries the ORIGINAL's note references,
   // and adoptFromOriginal re-points them through the ids this settles.
-  compareNotes("footnote", original, merged, ctx, lean);
-  compareNotes("endnote", original, merged, ctx, lean);
+  compareNotes("footnote", original, merged, ctx);
+  compareNotes("endnote", original, merged, ctx);
 
-  if (lean) {
-    compareDeferredBodies(lean, ctx);
-  } else {
-    const tail = mergedBody.children.filter((c) => localName(c.name) === "sectPr");
-    const entries = alignBlocks(blockList(originalBody, "sectPr"), blockList(mergedBody, "sectPr"), ctx);
-    applyParagraphMarks(entries, ctx);
-    mergedBody.children = [...entries.map((e) => e.el), ...tail];
-    giveStruckReferencesTheirOwnNotes("footnote", merged, ctx);
-    giveStruckReferencesTheirOwnNotes("endnote", merged, ctx);
-  }
+  const tail = mergedBody.children.filter((c) => localName(c.name) === "sectPr");
+  const entries = alignBlocks(blockList(originalBody, "sectPr"), blockList(mergedBody, "sectPr"), ctx);
+  applyParagraphMarks(entries, ctx);
+  mergedBody.children = [...entries.map((e) => e.el), ...tail];
+  giveStruckReferencesTheirOwnNotes("footnote", merged, ctx);
+  giveStruckReferencesTheirOwnNotes("endnote", merged, ctx);
 
   for (const [from, into] of headerFooterPairs) {
     const oRoot = original.headerFooterRoot(from);
@@ -224,209 +220,8 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
     if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
   }
 
-  // A deferred body has no model to rebuild.
-  if (issued > 0 && !lean) merged.refresh();
+  if (issued > 0) merged.refresh();
   return merged;
-}
-
-/**
- * Compare two .docx files and return the result's bytes: what
- * `compareDocuments(load(original), load(revised)).save()` returns, byte for
- * byte, in a fraction of the memory.
- *
- * Neither body is ever held as one tree. Each loads as its top-level blocks'
- * XML text (DocxDocument's deferBody); each block is read once for its
- * fingerprint and its saved form; and only the blocks the alignment leaves
- * unmatched, or matches with a difference, are parsed again, compared,
- * marked, and written back as text. A document that needs the whole tree
- * (one with tracked changes of its own, percentage-width tables or charts,
- * which save() rewrites from the model) goes through compareDocuments.
- */
-export function compareDocx(original: Uint8Array, revised: Uint8Array, options: CompareOptions): Uint8Array {
-  const lean = readLeanBodies(original, revised);
-  if (!lean) {
-    return compareDocuments(DocxDocument.load(original), DocxDocument.load(revised), { ...options, reuseRevised: true }).save();
-  }
-  return compareInto(lean.original.doc, lean.merged.doc, options, lean).save();
-}
-
-/**
- * Both bodies loaded deferred, or null when either needs the whole tree. On
- * null the deferred loads are already unreachable, so the whole-tree compare
- * does not hold them too.
- */
-function readLeanBodies(original: Uint8Array, revised: Uint8Array): LeanBodies | null {
-  const o = DocxDocument.load(original, { deferBody: true });
-  if (needsWholeTree(o)) return null;
-  const r = DocxDocument.load(revised, { deferBody: true });
-  if (needsWholeTree(r)) return null;
-  return { original: readDeferredBody(o, false), merged: readDeferredBody(r, true) };
-}
-
-/** Tracked-change markup. */
-export const TRACKED_CHANGE =
-  /<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|sectPrChange|tblPrChange|tblGridChange|trPrChange|tcPrChange|numberingChange|cellIns|cellDel|cellMerge)[\s>/]/;
-
-/** What compareDocx cannot do block by block (see compareDocx). */
-export const WHOLE_TREE = new RegExp(`${TRACKED_CHANGE.source}|<w:tblW\\b[^>]*w:w="[^"]*%"|ProgID="Package"`);
-
-function needsWholeTree(doc: DocxDocument): boolean {
-  if (doc.docRoot.name !== "w:document") return true;
-  if (collectRevisions(doc).length > 0) return true;
-  if ([...doc.documentRels.values()].some((rel) => rel.type.endsWith("/chart"))) return true;
-  return (doc.deferredBody ?? []).some((block) => WHOLE_TREE.test(block));
-}
-
-/** A deferred body read once: each block's saved form and fingerprint, and what the rest of compare needs from the body. */
-interface LeanBody {
-  doc: DocxDocument;
-  blocks: string[];
-  fingerprints: string[];
-  /** Each section-ending paragraph's w:sectPr, in order. */
-  sections: XmlElement[];
-  /** Note reference ids in document order. */
-  noteRefs: Record<"footnote" | "endnote", string[]>;
-}
-
-interface LeanBodies {
-  original: LeanBody;
-  merged: LeanBody;
-}
-
-function readDeferredBody(doc: DocxDocument, isResult: boolean): LeanBody {
-  const body: LeanBody = { doc, blocks: [], fingerprints: [], sections: [], noteRefs: { footnote: [], endnote: [] } };
-  // The result's body as loaded, for save() to tell whether it changed: the
-  // same strings as `blocks` except where preparing a block changed it.
-  const loaded: string[] = [];
-  for (const raw of doc.deferredBody ?? []) {
-    const el = parseXml(raw);
-    const before = isResult ? serializeXml(el) : "";
-    doc.prepareDeferredBlock(el);
-    const xml = serializeXml(el);
-    body.blocks.push(xml);
-    if (isResult) loaded.push(before === xml ? xml : before);
-    body.fingerprints.push(blockFingerprint(el, doc));
-    if (localName(el.name) === "p") {
-      const sectPr = child(child(el, "pPr"), "sectPr");
-      if (sectPr) body.sections.push(sectPr);
-    }
-    const walk = (e: XmlElement): void => {
-      const ln = localName(e.name);
-      if (ln === "footnoteReference") body.noteRefs.footnote.push(e.attrs["w:id"]);
-      else if (ln === "endnoteReference") body.noteRefs.endnote.push(e.attrs["w:id"]);
-      for (const c of e.children) walk(c);
-    };
-    walk(el);
-  }
-  if (isResult) doc.rememberLoadedBody(loaded);
-  doc.setDeferredBody(body.blocks);
-  return body;
-}
-
-/**
- * The body compare of compareInto, a stretch at a time. Anchored blocks whose
- * text is identical stay text; the blocks of each gap, and anchored blocks
- * that differ, are parsed, emitted exactly as alignBlocks would, and written
- * back to text once their paragraph marks are settled. A stretch's marks
- * touch only the kept paragraph before it and read the one after, so every
- * entry before the latest anchor is final once that anchor is placed.
- */
-function compareDeferredBodies(lean: LeanBodies, ctx: Ctx): void {
-  const O = lean.original;
-  const R = lean.merged;
-  const parse = (side: LeanBody, i: number): XmlElement => {
-    const el = parseXml(side.blocks[i]);
-    side.doc.prepareDeferredBlock(el);
-    return el;
-  };
-  type Slot = { el: XmlElement | null; xml?: string; cls: BlockClass };
-  const element = (slot: Slot): Entry => {
-    if (!slot.el) {
-      slot.el = parseXml(slot.xml!);
-      R.doc.prepareDeferredBlock(slot.el);
-    }
-    return slot as Entry;
-  };
-  // compareInto settles every paragraph mark after the whole body, so mark
-  // revisions take their ids after all the body's other revisions. Here each
-  // stretch is settled as soon as it is complete, with a stand-in id that is
-  // swapped for the real one, in the same order, once the body is done.
-  let stand = 0;
-  const markCtx: Ctx = { ...ctx, meta: { ...ctx.meta, nextId: () => `dxw-mark-${stand++}` as unknown as number } };
-  const out: string[] = [];
-  // Compared blocks that hold note references stay trees until the note pass
-  // below: written and read back, an emptied wrapper (<w:ins></w:ins>, whose
-  // one child is the editor's placeholder run) would come back self-closing.
-  const NOTE_REF = /<w:(?:footnote|endnote)Reference /;
-  const trees = new Map<number, XmlElement>();
-  let pending: Slot[] = [];
-  const settle = (keepLast: boolean): void => {
-    if (pending.some((slot) => slot.cls !== "kept")) applyParagraphMarks(pending.map(element), markCtx);
-    const last = keepLast ? pending.pop() : undefined;
-    for (const slot of pending) {
-      const xml = slot.el ? serializeXml(slot.el) : slot.xml!;
-      if (slot.el && NOTE_REF.test(xml)) trees.set(out.length, slot.el);
-      out.push(xml);
-    }
-    pending = last ? [last] : [];
-  };
-
-  // Sparse: a gap's blocks are parsed into them for that gap only.
-  const oEls: XmlElement[] = new Array(O.blocks.length);
-  const rEls: XmlElement[] = new Array(R.blocks.length);
-  let oAt = 0;
-  let rAt = 0;
-  for (const anchor of [...histogramMatch(O.fingerprints, R.fingerprints), { a: O.blocks.length, b: R.blocks.length }]) {
-    const anchored = anchor.a < O.blocks.length && anchor.b < R.blocks.length;
-    if (anchor.a > oAt || anchor.b > rAt) {
-      for (let i = oAt; i < anchor.a; i++) oEls[i] = parse(O, i);
-      for (let j = rAt; j < anchor.b; j++) rEls[j] = parse(R, j);
-      // emitGap looks at the block after the gap.
-      if (anchored) rEls[anchor.b] = parse(R, anchor.b);
-      if (pending.length > 0) element(pending[pending.length - 1]);
-      emitGap(oEls, rEls, oAt, anchor.a, rAt, anchor.b, pending as Entry[], ctx);
-      for (let i = oAt; i < anchor.a; i++) delete oEls[i];
-      for (let j = rAt; j < anchor.b; j++) delete rEls[j];
-    }
-    if (anchored) {
-      if (O.blocks[anchor.a] === R.blocks[anchor.b]) {
-        pending.push({ el: null, xml: R.blocks[anchor.b], cls: "kept" });
-      } else {
-        pending.push(emitMatched(parse(O, anchor.a), rEls[anchor.b] ?? parse(R, anchor.b), ctx));
-      }
-      delete rEls[anchor.b];
-      settle(true);
-    }
-    oAt = anchor.a + 1;
-    rAt = anchor.b + 1;
-  }
-  settle(false);
-  // The marks' real ids, taken before the note pass's, as compareInto does.
-  const ids = Array.from({ length: stand }, () => String(ctx.meta.nextId()));
-
-  // One note, one reference: the blocks that hold references, in order, are
-  // all giveStruckReferencesTheirOwnNotes needs to see. A block kept as text
-  // was never compared, so reading it again gives it back unchanged.
-  const withRefs = out.flatMap((xml, i) => (NOTE_REF.test(xml) ? [i] : []));
-  if (withRefs.length > 0) {
-    const tree = (i: number): XmlElement => {
-      const kept = trees.get(i);
-      if (kept) return kept;
-      const el = parseXml(out[i]);
-      R.doc.prepareDeferredBlock(el);
-      return el;
-    };
-    const body: XmlElement = { name: "w:body", attrs: {}, children: withRefs.map(tree), text: "" };
-    giveStruckReferencesTheirOwnNotes("footnote", ctx.doc, ctx, body);
-    giveStruckReferencesTheirOwnNotes("endnote", ctx.doc, ctx, body);
-    withRefs.forEach((i, k) => (out[i] = serializeXml(body.children[k])));
-  }
-  if (stand > 0) {
-    for (let i = 0; i < out.length; i++) {
-      if (out[i].includes('"dxw-mark-')) out[i] = out[i].replace(/"dxw-mark-(\d+)"/g, (_, n: string) => `"${ids[Number(n)]}"`);
-    }
-  }
-  R.doc.setDeferredBody(out);
 }
 
 /** Align and diff one container's blocks in place (a header, a note). */
@@ -445,19 +240,13 @@ function compareContainer(oRoot: XmlElement, mRoot: XmlElement, ctx: Ctx): void 
  * Header and footer parts paired across the documents: section by section,
  * kind by kind (default, first, even), each pair once.
  */
-function pairHeadersFooters(original: DocxDocument, merged: DocxDocument, lean?: LeanBodies): [string, string][] {
+function pairHeadersFooters(original: DocxDocument, merged: DocxDocument): [string, string][] {
   const refs = (doc: DocxDocument): Map<string, string> => {
     const out = new Map<string, string>();
     const body = child(doc.docRoot, "body");
-    // A deferred body's tree holds only the body's own sectPr; its section
-    // breaks were read from the blocks.
-    const scanned = lean ? (doc === original ? lean.original : lean.merged).sections : null;
-    const sects = [
-      ...(scanned ?? []),
-      ...(body?.children ?? []).flatMap((c) =>
-        localName(c.name) === "sectPr" ? [c] : localName(c.name) === "p" ? [child(child(c, "pPr"), "sectPr")].filter((x): x is XmlElement => !!x) : [],
-      ),
-    ];
+    const sects = (body?.children ?? []).flatMap((c) =>
+      localName(c.name) === "sectPr" ? [c] : localName(c.name) === "p" ? [child(child(c, "pPr"), "sectPr")].filter((x): x is XmlElement => !!x) : [],
+    );
     sects.forEach((sp, i) => {
       for (const ref of sp.children) {
         const ln = localName(ref.name);
@@ -487,7 +276,7 @@ function pairHeadersFooters(original: DocxDocument, merged: DocxDocument, lean?:
  * under a fresh id with its content struck, and struck body text pointing
  * at it is re-pointed (adoptFromOriginal, through ctx.noteIds).
  */
-function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merged: DocxDocument, ctx: Ctx, lean?: LeanBodies): void {
+function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merged: DocxDocument, ctx: Ctx): void {
   const tree = (doc: DocxDocument, create = false): XmlElement | null =>
     kind === "footnote" ? doc.footnotesTree(create) : doc.endnotesTree(create);
   const oRoot = tree(original);
@@ -501,19 +290,17 @@ function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merg
     );
     const out: XmlElement[] = [];
     const seen = new Set<string>();
-    const take = (id: string): void => {
-      const note = byId.get(id);
-      if (note && !seen.has(id)) {
-        seen.add(id);
-        out.push(note);
-      }
-    };
     const walk = (e: XmlElement): void => {
-      if (localName(e.name) === refName) take(e.attrs["w:id"]);
+      if (localName(e.name) === refName) {
+        const id = e.attrs["w:id"];
+        const note = byId.get(id);
+        if (note && !seen.has(id)) {
+          seen.add(id);
+          out.push(note);
+        }
+      }
       for (const c of e.children) walk(c);
     };
-    // A deferred body's references were read from its blocks, in order.
-    if (lean) for (const id of (doc === original ? lean.original : lean.merged).noteRefs[kind]) take(id);
     walk(doc.docRoot);
     return out;
   };
@@ -595,7 +382,7 @@ function compareNotes(kind: "footnote" | "endnote", original: DocxDocument, merg
  * a struck copy of its note instead, as Word gives one when it tracks the
  * deletion of a reference.
  */
-function giveStruckReferencesTheirOwnNotes(kind: "footnote" | "endnote", merged: DocxDocument, ctx: Ctx, body: XmlElement = merged.docRoot): void {
+function giveStruckReferencesTheirOwnNotes(kind: "footnote" | "endnote", merged: DocxDocument, ctx: Ctx): void {
   const root = kind === "footnote" ? merged.footnotesTree() : merged.endnotesTree();
   if (!root) return;
   const refName = `${kind}Reference`;
@@ -612,7 +399,7 @@ function giveStruckReferencesTheirOwnNotes(kind: "footnote" | "endnote", merged:
   // too) may hold references with no w:del around them.
   const rowDeleted = (tr: XmlElement): boolean =>
     localName(tr.name) === "tr" && !!child(child(tr, "trPr"), "del");
-  walk(body, false);
+  walk(merged.docRoot, false);
   let next = 1 + Math.max(0, ...root.children.map((c) => Number(c.attrs["w:id"]) || 0));
   let changed = false;
   for (const [id, list] of refs) {

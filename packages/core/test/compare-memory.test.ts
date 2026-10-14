@@ -51,20 +51,4 @@ describe("estimateCompareMemory", () => {
       expect(estimateCompareMemory(clean, tracked, options).heapBytes).toBeGreaterThan(base);
     }
   });
-
-  it("is lower for compareDocx, unless an input needs the whole tree", () => {
-    const clean = docx(5000);
-    const percentTable = makeDocx({
-      "word/document.xml": wrapDocument(
-        Array.from({ length: 5000 }, (_, i) => p(`Paragraph ${i} of the test.`)).join("") +
-          '<w:tbl><w:tblPr><w:tblW w:w="5000%" w:type="pct"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>',
-      ),
-    });
-    expect(estimateCompareMemory(clean, clean, { compareDocx: true }).heapBytes).toBeLessThan(
-      estimateCompareMemory(clean, clean, { reuseRevised: true }).heapBytes,
-    );
-    expect(estimateCompareMemory(clean, percentTable, { compareDocx: true }).heapBytes).toBe(
-      estimateCompareMemory(clean, percentTable, { reuseRevised: true }).heapBytes,
-    );
-  });
 });

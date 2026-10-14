@@ -712,3 +712,11 @@ describe("compareDocuments — reuseRevised", () => {
     expect(originalDoc.save()).toEqual(before);
   });
 });
+
+describe("compareDocuments — options", () => {
+  it("dates the revisions now when no date is given", () => {
+    const merged = compareDocuments(loadBody(para("The quick brown fox.")), loadBody(para("The quick brown cat.")), { author: AUTHOR });
+    const xml = DocxDocument.load(merged.save()).pkg.text("word/document.xml") ?? "";
+    expect(xml).toMatch(/w:date="\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"/);
+  });
+});
