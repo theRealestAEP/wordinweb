@@ -83,6 +83,18 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
 
   const root: XmlElement = { name: "#root", attrs: {}, children: [], text: "" };
   const stack: XmlElement[] = [root];
+  // One string per distinct tag name, attribute name and short attribute
+  // value. Each slice of the input is a new string, and a document part
+  // repeats the same few hundred of them across half a million elements
+  // (w:rPr, w:val, "24"): reusing one copy took a fifth off the parsed tree.
+  const strings = new Map<string, string>();
+  const intern = (value: string): string => {
+    if (value.length > 32) return value;
+    const known = strings.get(value);
+    if (known !== undefined) return known;
+    strings.set(value, value);
+    return value;
+  };
 
   const fail = (msg: string): never => {
     throw new Error(`XML parse error at offset ${i}: ${msg}`);
@@ -125,13 +137,16 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
       const end = input.indexOf(">", i + 2);
       if (end === -1) fail("unterminated close tag");
       if (stack.length <= 1) fail("unbalanced close tag");
-      stack.pop();
+      // An array grown by push keeps room for more (17 slots for one
+      // child); a copy holds exactly its children.
+      const closed = stack.pop()!;
+      if (closed.children.length > 0) closed.children = closed.children.slice();
       i = end + 1;
     } else {
       // Open tag
       let j = i + 1;
       while (j < n && !isNameEnd(input.charCodeAt(j))) j++;
-      const name = input.slice(i + 1, j);
+      const name = intern(input.slice(i + 1, j));
       if (!name) fail("empty tag name");
       const el: XmlElement = { name, attrs: {}, children: [], text: "" };
       // Attributes
@@ -141,7 +156,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
         if (ch === ">" || ch === "/" || ch === undefined) break;
         let k = j;
         while (k < n && input[k] !== "=" && !isWhitespace(input.charCodeAt(k)) && input[k] !== ">" && input[k] !== "/") k++;
-        const attrName = input.slice(j, k);
+        const attrName = intern(input.slice(j, k));
         while (k < n && isWhitespace(input.charCodeAt(k))) k++;
         if (input[k] === "=") {
           k++;
@@ -150,7 +165,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
           if (quote === '"' || quote === "'") {
             const close = input.indexOf(quote, k + 1);
             if (close === -1) fail("unterminated attribute value");
-            el.attrs[attrName] = decodeEntities(input.slice(k + 1, close));
+            el.attrs[attrName] = intern(decodeEntities(input.slice(k + 1, close)));
             j = close + 1;
           } else {
             // Unquoted value (not valid XML, but be lenient)
@@ -188,10 +203,17 @@ function isNameEnd(c: number): boolean {
   return isWhitespace(c) || c === 62 /* > */ || c === 47 /* / */;
 }
 
-/** Local part of a possibly-prefixed name: `w:p` → `p`. */
+/** Local part of a possibly-prefixed name: `w:p` → `p`. Element names are
+ * few and parseXml shares one string for each, so the answer is cached. */
+const localNames = new Map<string, string>();
 export function localName(name: string): string {
-  const idx = name.indexOf(":");
-  return idx === -1 ? name : name.slice(idx + 1);
+  let local = localNames.get(name);
+  if (local === undefined) {
+    const idx = name.indexOf(":");
+    local = idx === -1 ? name : name.slice(idx + 1);
+    if (localNames.size < 10000) localNames.set(name, local);
+  }
+  return local;
 }
 
 export function isEl(el: XmlElement, local: string): boolean {
@@ -257,9 +279,17 @@ function escapeAttr(s: string): string {
  * mixed content — so text is emitted only for leaf elements.
  */
 export function serializeXml(el: XmlElement, declaration = false): string {
+  // Pieces are joined a few thousand at a time: one array of every piece held
+  // over five million entries for a 16 MB document part, about 40 MB of
+  // pointers alive at once on top of the string they make.
+  const chunks: string[] = [];
   const out: string[] = [];
   if (declaration) out.push('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>');
   const write = (e: XmlElement) => {
+    if (out.length > 4096) {
+      chunks.push(out.join(""));
+      out.length = 0;
+    }
     if (
       e.omitWhenEmpty &&
       Object.keys(e.attrs).length === 0 &&
@@ -287,7 +317,9 @@ export function serializeXml(el: XmlElement, declaration = false): string {
     out.push("</", e.name, ">");
   };
   write(el);
-  return out.join("");
+  if (chunks.length === 0) return out.join("");
+  chunks.push(out.join(""));
+  return chunks.join("");
 }
 
 /** The placeholder serializeXml leaves out: an omitWhenEmpty run holding only an empty w:t. */

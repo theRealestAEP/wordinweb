@@ -151,6 +151,28 @@ export type NotePart = "footnotes" | "endnotes";
  * A fully parsed .docx: sections of blocks, styles, numbering, theme, and
  * header/footer parts, with helpers to resolve effective formatting.
  */
+/**
+ * Length and two independent 53-bit hashes (cyrb53 with seeds 1 and 2):
+ * equal fingerprints mean equal XML. Both hashes run in one pass over the
+ * text, which is 16 million characters for a long book.
+ */
+function xmlFingerprint(xml: string): string {
+  let a1 = 0xdeadbeef ^ 1, a2 = 0x41c6ce57 ^ 1, b1 = 0xdeadbeef ^ 2, b2 = 0x41c6ce57 ^ 2;
+  for (let i = 0; i < xml.length; i++) {
+    const ch = xml.charCodeAt(i);
+    a1 = Math.imul(a1 ^ ch, 2654435761);
+    a2 = Math.imul(a2 ^ ch, 1597334677);
+    b1 = Math.imul(b1 ^ ch, 2654435761);
+    b2 = Math.imul(b2 ^ ch, 1597334677);
+  }
+  const finish = (h1: number, h2: number): string => {
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(36);
+  };
+  return `${xml.length}:${finish(a1, a2)}:${finish(b1, b2)}`;
+}
+
 export class DocxDocument {
   /** Changes whenever refresh() rebuilds the parsed model. Plain in-place text
    * edits can keep this stable so incremental layout reuses model-only caches. */
@@ -306,9 +328,11 @@ export class DocxDocument {
   private readonly relsPath: string;
   private relsRoot: XmlElement | null = null;
   private contentTypesRoot: XmlElement | null = null;
-  /** Canonical XML as first parsed from each always-modeled package part.
-   * If the retained tree still matches on save, keep the part's original
-   * bytes instead of replacing producer formatting such as CRLF line ends. */
+  /** A fingerprint of the canonical XML first parsed from each always-modeled
+   * package part. If the retained tree still matches on save, keep the part's
+   * original bytes instead of replacing producer formatting such as CRLF line
+   * ends. A fingerprint and not the XML itself: the XML was a second copy of
+   * every document part, 30 MB for a 0.85 MB .docx. */
   private readonly originalModeledXml = new Map<string, string>();
   private docPrIdCounter: number | null = null;
 
@@ -2173,12 +2197,12 @@ export class DocxDocument {
    * byte-for-byte.
    */
   private rememberOriginalXml(part: string, root: XmlElement): void {
-    this.originalModeledXml.set(part, serializeXml(root, true));
+    this.originalModeledXml.set(part, xmlFingerprint(serializeXml(root, true)));
   }
 
   private writeModeledXml(files: Record<string, Uint8Array>, part: string, root: XmlElement): void {
     const xml = serializeXml(root, true);
-    if (xml !== this.originalModeledXml.get(part)) files[part] = strToU8(xml);
+    if (xmlFingerprint(xml) !== this.originalModeledXml.get(part)) files[part] = strToU8(xml);
   }
 
   /**
