@@ -1024,7 +1024,7 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
     if (ln === "pPr") return;
     // A move is a deletion at its source (w:moveFrom) and an insertion at its
     // destination (w:moveTo), and reviews as one.
-    if (ln === "ins" || ln === "del" || ln === "moveTo" || ln === "moveFrom") {
+    if (ln === "ins" || ln === "del" || isTrackedMove(el)) {
       out.push({
         el,
         kind: ln === "ins" || ln === "moveTo" ? "insertion" : "deletion",
@@ -1302,6 +1302,17 @@ function applyToAll(
   return n;
 }
 
+/**
+ * A tracked move's w:moveFrom or w:moveTo. DrawingML has an a:moveTo too,
+ * the pen move that starts a shape's path: taken for a tracked move,
+ * accept-all unwrapped it and broke the shape (wild-gatech's custom
+ * geometry).
+ */
+function isTrackedMove(el: XmlElement): boolean {
+  const ln = localName(el.name);
+  return (ln === "moveTo" || ln === "moveFrom") && !el.name.startsWith("a:");
+}
+
 const MOVE_RANGES = ["moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd"];
 
 /**
@@ -1311,7 +1322,7 @@ const MOVE_RANGES = ["moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart
 function dropSettledMoveRanges(doc: DocxDocument): void {
   const roots = doc.revisionRoots();
   const has = (el: XmlElement): boolean =>
-    ["moveFrom", "moveTo"].includes(localName(el.name)) || el.children.some(has);
+    isTrackedMove(el) || el.children.some(has);
   if (roots.some(has)) return;
   const strip = (el: XmlElement): void => {
     el.children = el.children.filter((c) => !MOVE_RANGES.includes(localName(c.name)));

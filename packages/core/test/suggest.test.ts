@@ -431,6 +431,18 @@ describe("suggesting mode — review all", () => {
     expect(serializeXml(paraEl(doc, 0))).toMatch(/<w:pPr><w:rPr><w:ins [^>]*\/><\/w:rPr><w:sectPr>/);
   });
 
+  it("leaves a shape path's a:moveTo alone", () => {
+    // DrawingML's a:moveTo is a pen move in a custom shape, not a tracked
+    // move: accept-all unwrapped it and broke the shape's geometry.
+    const path =
+      `<w:p><w:r><w:drawing><a:path xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="10" h="10">` +
+      `<a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="10" y="10"/></a:lnTo></a:path></w:drawing></w:r></w:p>`;
+    const doc = loadDoc(path + p("After"));
+    expect(collectRevisions(doc)).toHaveLength(0);
+    expect(acceptAllRevisions(doc)).toBe(0);
+    expect(serializeXml(doc.docRoot)).toContain("<a:moveTo><a:pt");
+  });
+
   it("reject-all puts a move back at its source", () => {
     const doc = loadDoc(MOVED);
     expect(rejectAllRevisions(doc)).toBe(2);
