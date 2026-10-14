@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { strFromU8, unzipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, serializeXml } from "../../core/src/xml.js";
@@ -169,6 +170,46 @@ describe("compareFiles", () => {
     const notes = (doc: DocxDocument) => withoutIds(serializeXml(doc.footnotesTree() as XmlElement));
     expect(notes(result)).toBe(notes(expected));
     expect(result.footnotesTree()?.children.filter((c) => c.attrs["w:id"] === "2")).toHaveLength(1);
+  });
+
+  it("footnotes edited, added, removed and tracked are compared as compareDocuments compares them", async () => {
+    const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const rels =
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId1" Type="${REL}/footnotes" Target="footnotes.xml"/><Relationship Id="rId2" Type="${REL}/comments" Target="comments.xml"/></Relationships>`;
+    const note = (id: number, body: string): string => `<w:footnote w:id="${id}"><w:p><w:r><w:t xml:space="preserve">${body}</w:t></w:r></w:p></w:footnote>`;
+    const notesPart = (notes: string): string =>
+      `<w:footnotes ${W_NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>${notes}</w:footnotes>`;
+    const cited = (text: string, id: number): string =>
+      `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r><w:r><w:footnoteReference w:id="${id}"/></w:r></w:p>`;
+    const comments = `<w:comments ${W_NS}><w:comment w:id="0" w:author="x"><w:p><w:r><w:t>A comment.</w:t></w:r></w:p></w:comment></w:comments>`;
+    const tracked = `<w:footnote w:id="4"><w:p><w:r><w:t xml:space="preserve">Kept </w:t></w:r><w:ins w:id="9" w:author="x"><w:r><w:t>added</w:t></w:r></w:ins></w:p></w:footnote>`;
+    const original = makeDocx({
+      "word/_rels/document.xml.rels": rels,
+      "word/comments.xml": comments,
+      "word/footnotes.xml": notesPart(note(1, "Same note.") + note(2, "A note that is edited here.") + note(3, "A note that goes.") + tracked),
+      "word/document.xml": wrapDocument(cited("One", 1) + cited("Two", 2) + cited("Three", 3) + cited("Four", 4)),
+    });
+    const revised = makeDocx({
+      "word/_rels/document.xml.rels": rels,
+      "word/comments.xml": comments,
+      "word/footnotes.xml": notesPart(note(1, "Same note.") + note(2, "A note that was edited here.") + note(5, "A new note.") + note(4, "Kept added")),
+      "word/document.xml": wrapDocument(cited("One", 1) + cited("Two", 2) + cited("Five", 5) + cited("Four", 4)),
+    });
+    const n = pairs++;
+    const paths = [join(dir, `${n}-o.docx`), join(dir, `${n}-r.docx`), join(dir, `${n}-out.docx`)];
+    writeFileSync(paths[0], original);
+    writeFileSync(paths[1], revised);
+    await compareFiles(paths[0], paths[1], paths[2], { author: AUTHOR, date: DATE });
+    const bytes = new Uint8Array(readFileSync(paths[2]));
+    const result = DocxDocument.load(bytes);
+    const expected = compareDocuments(DocxDocument.load(original), DocxDocument.load(revised), { author: AUTHOR, date: DATE });
+    expect(withoutIds(canonicalBody(result))).toBe(withoutIds(canonicalBody(expected)));
+    const notes = (doc: DocxDocument) => withoutIds(serializeXml(doc.footnotesTree() as XmlElement));
+    expect(notes(result)).toBe(notes(expected));
+    // The comments are never read: the result carries the revised part as it was.
+    expect(strFromU8(unzipSync(bytes)["word/comments.xml"])).toBe(comments);
   });
 
   it("an input with tracked changes is compared as accepted", async () => {

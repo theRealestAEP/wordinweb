@@ -8,9 +8,11 @@ import { acceptAllRevisions, collectRevisions } from "../../core/src/edit/sugges
 import { paragraphText } from "../../core/src/edit/compare/content.js";
 import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionKey } from "../../core/src/edit/compare/index.js";
 import { normalizeText } from "../../core/src/edit/compare/text.js";
+import { resolvePartPath } from "../../core/src/zip.js";
+import { DiskNotes } from "./notes.js";
 import { scanBody, scanChildren } from "./scan.js";
 import { BlockStore } from "./store.js";
-import { ZipReader } from "./zip.js";
+import { ZipEntry, ZipReader } from "./zip.js";
 
 export type Side = "original" | "revised";
 
@@ -78,6 +80,10 @@ export interface Input {
   tables: Map<number, [number, number]>;
   /** Note reference ids in document order. */
   noteRefs: Record<"footnote" | "endnote", string[]>;
+  /** The footnotes and endnotes parts, on disk; the shell holds them empty. */
+  notes: Record<"footnote" | "endnote", DiskNotes | null>;
+  /** Parts the compare never reads (comments): the shell holds them empty, and the result takes them from the input as they are. */
+  untouched: string[];
   /** Whether the input held tracked changes, now accepted. */
   hadRevisions: boolean;
 }
@@ -118,11 +124,25 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     };
     const isSectPr = (i: number): boolean => localName(names[i]) === "sectPr";
 
+    // The notes and comments parts go to disk; the shell holds each empty.
+    const noteParts: Partial<Record<"footnote" | "endnote", string>> = {};
+    const untouched: string[] = [];
+    const outlines = new Map<string, Outline>();
+    for (const rel of documentRels(zip, docPart)) {
+      const kind = rel.type.endsWith("/footnotes") ? "footnote" : rel.type.endsWith("/endnotes") ? "endnote" : rel.type.endsWith("/comments") ? "comments" : null;
+      if (!kind || !zip.entries.has(rel.part) || outlines.has(rel.part)) continue;
+      if (kind === "comments") untouched.push(rel.part);
+      else noteParts[kind] = rel.part;
+      outlines.set(rel.part, await outline(zip, rel.part, join(dir, `${side}-${fileName(rel.part)}`)));
+    }
+
     // The shell: document.xml with only the body's own section properties.
     const files: Record<string, Uint8Array> = {};
     for (const entry of zip.entries.values()) {
       if (entry.name === docPart || entry.name.endsWith("/")) continue;
-      files[entry.name] = /\.(xml|rels|vml)$/i.test(entry.name) ? zip.read(entry) : Buffer.from(`${STUB}${side}\u0000${entry.name}`, "utf8");
+      const empty = outlines.get(entry.name);
+      if (empty) files[entry.name] = Buffer.from(empty.head + empty.tail, "utf8");
+      else files[entry.name] = /\.(xml|rels|vml)$/i.test(entry.name) ? zip.read(entry) : Buffer.from(`${STUB}${side}\u0000${entry.name}`, "utf8");
     }
     const skeleton: Buffer[] = [Buffer.from(range(0, bounds.contentStart))];
     for (let i = 0; i < names.length; i++) if (isSectPr(i)) skeleton.push(Buffer.from(range(starts[i], ends[i])));
@@ -153,6 +173,8 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       rowKinds: [],
       tables: new Map(),
       noteRefs: { footnote: [], endnote: [] },
+      notes: { footnote: null, endnote: null },
+      untouched,
       hadRevisions,
     };
 
@@ -324,22 +346,98 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       }
     }
     flush();
+
+    // The notes, a part at a time, accepted as body blocks are.
+    for (const kind of ["footnote", "endnote"] as const) {
+      const part = noteParts[kind];
+      if (!part) continue;
+      const { file, head, tail } = outlines.get(part) as Outline;
+      const notes = new DiskNotes(kind, part, join(dir, `${side}-${fileName(part)}-notes`));
+      notes.head = head;
+      notes.tail = tail;
+      input.notes[kind] = notes;
+      const notesFd = openSync(file, "r");
+      try {
+        let batch: XmlElement[] = [];
+        let batchBytes = 0;
+        const flushNotes = (): void => {
+          if (batch.length > 0) for (const el of accept(batch, null)) notes.add(el);
+          batch = [];
+          batchBytes = 0;
+        };
+        scanChildren(
+          notesFd,
+          0,
+          () => {},
+          (c) => {
+            const xml = readRange(notesFd, c.start, c.end);
+            const el = parseXml(xml);
+            if (batch.length > 0 || TRACKED_CHANGE.test(xml)) {
+              hadRevisions = true;
+              batch.push(el);
+              batchBytes += xml.length;
+              if (batchBytes >= BATCH_BYTES) flushNotes();
+            } else {
+              notes.add(el);
+            }
+          },
+        );
+        flushNotes();
+      } finally {
+        closeSync(notesFd);
+      }
+    }
     input.hadRevisions = hadRevisions;
-    dropNotesModel(shell);
     return input;
   } finally {
     closeSync(fd);
   }
 }
 
-/**
- * The notes' editing model (id -> blocks) is built by every load and again
- * by each markNotePartsChanged. A compare reads the retained trees, never
- * the model, and the model is as large again as the trees.
- */
-export function dropNotesModel(shell: DocxDocument): void {
-  shell.footnotes.clear();
-  shell.endnotes.clear();
+/** A part extracted to disk, and its bytes around its root's children: the part with none. */
+interface Outline {
+  file: string;
+  head: string;
+  tail: string;
+}
+
+/** Extract `part` to `file`, and find its root's children. */
+async function outline(zip: ZipReader, part: string, file: string): Promise<Outline> {
+  await zip.extract(zip.entries.get(part) as ZipEntry, file);
+  const fd = openSync(file, "r");
+  try {
+    let bounds;
+    try {
+      bounds = scanChildren(fd, 0, () => {}, () => {});
+    } catch (error) {
+      throw new Error(`${part}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return { file, head: readRange(fd, 0, bounds.contentStart), tail: readRange(fd, bounds.contentEnd, fstatSync(fd).size) };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** A part name as a file name. */
+function fileName(part: string): string {
+  return part.replace(/\W/g, "-");
+}
+
+function readRange(fd: number, start: number, end: number): string {
+  const buf = Buffer.allocUnsafe(end - start);
+  let done = 0;
+  while (done < buf.length) done += readSync(fd, buf, done, buf.length - done, start + done);
+  return buf.toString("utf8");
+}
+
+/** The main document part's relationships: each one's type and the part it names. */
+function documentRels(zip: ZipReader, docPart: string): { type: string; part: string }[] {
+  const at = docPart.lastIndexOf("/");
+  const entry = zip.entries.get(`${docPart.slice(0, at + 1)}_rels/${docPart.slice(at + 1)}.rels`);
+  if (!entry) return [];
+  return parseXml(zip.read(entry).toString("utf8"))
+    .children.filter((rel) => rel.attrs.TargetMode !== "External" && rel.attrs.Target)
+    .map((rel) => ({ type: rel.attrs.Type ?? "", part: resolvePartPath(docPart, rel.attrs.Target) }));
 }
 
 /**

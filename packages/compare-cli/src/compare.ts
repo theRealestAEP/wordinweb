@@ -33,9 +33,10 @@ import {
   reportUncomparedParts,
   resolveGap,
 } from "../../core/src/edit/compare/index.js";
-import { Input, ROW_SLOT, Side, dropNotesModel, readInput, stubSource } from "./input.js";
+import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
+import { DiskNotes } from "./notes.js";
 import { BlockStore } from "./store.js";
-import { ZipReader, ZipWriter } from "./zip.js";
+import { ZipEntry, ZipReader, ZipWriter } from "./zip.js";
 
 export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"> {
   /** Where the working files go. Default: the system's temporary directory. */
@@ -66,7 +67,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
   if (!statSync(dirname(resolve(outPath)), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`${outPath}: the result's folder does not exist`);
   const dir = mkdtempSync(join(options.tempDir ?? tmpdir(), "docx-compare-"));
   const zips: ZipReader[] = [];
-  const stores: BlockStore[] = [];
+  const stores: { close(): void }[] = [];
   try {
     const oZip = ZipReader.open(originalPath);
     zips.push(oZip);
@@ -75,9 +76,9 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     checkDiskSpace(dir, [oZip, rZip]);
 
     const O = await readNamed(oZip, "original", dir);
-    stores.push(O.blocks, O.texts, O.rows);
+    stores.push(O.blocks, O.texts, O.rows, ...notesOf(O));
     const R = await readNamed(rZip, "revised", dir);
-    stores.push(R.blocks, R.texts, R.rows);
+    stores.push(R.blocks, R.texts, R.rows, ...notesOf(R));
 
     const note = options.onNote ?? (() => {});
     for (const input of [O, R]) {
@@ -91,10 +92,8 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     // Notes first: struck body text carries the ORIGINAL's note references,
     // and adoptFromOriginal re-points them through the ids this settles.
     for (const kind of ["footnote", "endnote"] as const) {
-      compareNotes(kind, O.shell, R.shell, ctx, { original: O.noteRefs[kind], merged: R.noteRefs[kind] });
+      compareNotes(kind, O.shell, R.shell, ctx, { original: O.noteRefs[kind], merged: R.noteRefs[kind] }, { original: O.notes[kind], merged: R.notes[kind] });
     }
-    // Changed notes rebuild the model.
-    dropNotesModel(R.shell);
 
     const plan = planBody(O, R, ctx);
     const body = new BlockStore(join(dir, "result-blocks"));
@@ -114,6 +113,10 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     for (const zip of zips) zip.close();
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function notesOf(input: Input): DiskNotes[] {
+  return [input.notes.footnote, input.notes.endnote].filter((notes): notes is DiskNotes => notes !== null);
 }
 
 /** readInput, with the input's path on any error that does not already name it. */
@@ -558,7 +561,7 @@ function giveStruckReferencesTheirOwnNotes(body: BlockStore, withNoteRefs: numbe
       noteRefsIn({ name: "w:dxw-piece", attrs: {}, children: [parseXml(body.read(k))], text: "" }, kind, false, found);
       found.forEach((ref, place) => refs.push({ el: { attrs: { "w:id": ref.el.attrs["w:id"] } }, struck: ref.struck, block: k, place }));
     }
-    for (const [i, id] of copyNotesForStruckReferences(kind, R.shell, ctx, refs)) {
+    for (const [i, id] of copyNotesForStruckReferences(kind, R.shell, ctx, refs, R.notes[kind] ?? undefined)) {
       let block = changes.get(refs[i].block);
       if (!block) changes.set(refs[i].block, (block = { footnote: new Map(), endnote: new Map() }));
       block[kind].set(refs[i].place, id);
@@ -625,9 +628,21 @@ async function writeResult(
 
   const writer = new ZipWriter(outPath);
   const names = Object.keys(files).sort((a, b) => Number(b === "[Content_Types].xml") - Number(a === "[Content_Types].xml"));
+  const notes = new Map(notesOf(R).map((n) => [n.part, n]));
   for (const name of names) {
     if (name === R.docPart) {
       await writer.addFile(name, docFile);
+      continue;
+    }
+    const part = notes.get(name);
+    if (part) {
+      const file = join(dir, `result-${part.kind}s.xml`);
+      part.write(file);
+      await writer.addFile(name, file);
+      continue;
+    }
+    if (R.untouched.includes(name)) {
+      R.zip.copyInto(writer, R.zip.entries.get(name) as ZipEntry);
       continue;
     }
     const stub = stubSource(files[name]);
