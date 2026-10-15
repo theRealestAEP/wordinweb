@@ -324,6 +324,15 @@ function evictLru(cache: Map<string, unknown>, max: number): void {
 const WIDTH_CACHE_MAX = 20000;
 /** Ink extents are only asked for by math radicals, so this stays small. */
 const INK_CACHE_MAX = 4000;
+/** Canvas measurements per context, see CanvasMeasurer.setFont. */
+const CANVAS_MEASURES = 20000;
+
+function canvasContext(): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D {
+  if (typeof OffscreenCanvas !== "undefined") {
+    return new OffscreenCanvas(1, 1).getContext("2d") as OffscreenCanvasRenderingContext2D;
+  }
+  return document.createElement("canvas").getContext("2d") as CanvasRenderingContext2D;
+}
 
 /**
  * Canvas-based measurer for browsers. Word's single line spacing derives from
@@ -333,6 +342,7 @@ const INK_CACHE_MAX = 4000;
  */
 export class CanvasMeasurer implements TextMeasurer {
   private ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  private measures = 0;
   private widthCache = new Map<string, number>();
   private metricsCache = new Map<string, FontMetrics>();
   private paintBoxCache = new Map<string, { ascent: number; descent: number } | null>();
@@ -340,16 +350,19 @@ export class CanvasMeasurer implements TextMeasurer {
   private currentFont = "";
 
   constructor() {
-    if (typeof OffscreenCanvas !== "undefined") {
-      const c = new OffscreenCanvas(1, 1);
-      this.ctx = c.getContext("2d") as OffscreenCanvasRenderingContext2D;
-    } else {
-      const c = document.createElement("canvas");
-      this.ctx = c.getContext("2d") as CanvasRenderingContext2D;
-    }
+    this.ctx = canvasContext();
   }
 
   private setFont(font: FontSpec): void {
+    // Chromium keeps a shaped-text cache in each canvas context that grows
+    // with every distinct string measured and is freed only with the context
+    // (a 400-page document's count pass left 180 MB of it). A fresh context
+    // every CANVAS_MEASURES measurements keeps it small; widths do not change.
+    if (++this.measures > CANVAS_MEASURES) {
+      this.ctx = canvasContext();
+      this.currentFont = "";
+      this.measures = 0;
+    }
     const css = cssFont(font);
     const key = `${css}\0${font.kerning ? "normal" : "none"}`;
     if (key !== this.currentFont) {
