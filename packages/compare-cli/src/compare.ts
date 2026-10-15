@@ -783,10 +783,6 @@ async function writePackage(path: string, docFile: string, files: Record<string,
       await writer.addFile(name, file);
       continue;
     }
-    if (R.untouched.includes(name)) {
-      R.zip.copyInto(writer, R.zip.entries.get(name) as ZipEntry);
-      continue;
-    }
     const stub = stubSource(files[name]);
     if (stub) {
       const zip = stub.side === "original" ? O.zip : R.zip;

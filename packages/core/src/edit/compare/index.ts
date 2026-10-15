@@ -69,8 +69,8 @@ import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./te
  *
  * **Styles and numbering — NOT compared.** The result carries `revised`'s.
  * `onNote` reports when `original`'s differ, so a reviewer is never told "no
- * change" about something that was never looked at. The result also carries
- * `revised`'s comments part as it is.
+ * change" about something that was never looked at. Comments go with the
+ * text they mark: struck text keeps the original's comment.
  *
  * **Moves — not detected, by architecture.** `RevisionKind` has no moveFrom /
  * moveTo member and nothing in suggest.ts writes those elements, so a move is
