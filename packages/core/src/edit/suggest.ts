@@ -168,13 +168,14 @@ export function markDeletedText(el: XmlElement): void {
   // PAGEREF field, in the compare benchmark's wild-gatech).
   // A text box inside the run is a story of its own: its paragraphs keep
   // w:t (w:delText outside a w:del is invalid), and the drawing goes whole.
-  // An equation keeps its m:t too: OMML has no deleted form of math text,
-  // and the w:del around the equation is what strikes it.
+  // An equation's m:t stays: OMML has no deleted form of math text, and the
+  // w:del around the equation is what strikes it. A w:r inside the equation
+  // is WordprocessingML and is retyped like any other.
+  const w = prefixOf(el);
   const walk = (e: XmlElement): void => {
-    const ln = localName(e.name);
-    if (ln === "txbxContent" || ln === "oMath" || ln === "oMathPara") return;
-    if (localName(e.name) === "t") e.name = e.name.replace(/t$/, "delText");
-    else if (localName(e.name) === "instrText") e.name = e.name.replace(/instrText$/, "delInstrText");
+    if (localName(e.name) === "txbxContent") return;
+    if (e.name === `${w}t`) e.name = `${w}delText`;
+    else if (e.name === `${w}instrText`) e.name = `${w}delInstrText`;
     for (const c of e.children) walk(c);
   };
   walk(el);
