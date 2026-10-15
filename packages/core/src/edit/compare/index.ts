@@ -1267,13 +1267,16 @@ function samePart(target: string, ctx: Ctx): boolean {
 export function refersToChangedPart(el: XmlElement, ctx: Ctx): boolean {
   const mine = ctx.doc.relationshipsOf(ctx.scope.into);
   const theirs = ctx.original.relationshipsOf(ctx.scope.from);
+  // A section's header and footer parts are compared on their own.
   const walk = (e: XmlElement): boolean =>
-    Object.keys(e.attrs).some((key) => {
+    localName(e.name) !== "sectPr" &&
+    (Object.keys(e.attrs).some((key) => {
       if (!key.startsWith("r:") || !REL_ATTRS.includes(localName(key))) return false;
       const source = theirs.get(e.attrs[key]);
       const here = mine.get(e.attrs[key]);
       return !!source && !!here && !source.external && source.target === here.target && !samePart(source.target, ctx);
-    }) || e.children.some(walk);
+    }) ||
+      e.children.some(walk));
   return walk(el);
 }
 
