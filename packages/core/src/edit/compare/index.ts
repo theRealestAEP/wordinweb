@@ -61,10 +61,15 @@ import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./te
  * INSIDE it). Such a paragraph is never word-diffed: if it changed at all it
  * is struck whole and the new one inserted whole, and `onNote` says so.
  *
- * **Headers, footers, footnotes, endnotes, comments, styles and numbering —
- * NOT compared.** The result carries `revised`'s. `onNote` reports when
- * `original`'s differ, so a reviewer is never told "no change" about something
- * that was never looked at.
+ * **Headers, footers, footnotes and endnotes — compared as the body is.** A
+ * header or footer the last section has on one side alone is compared against
+ * nothing, so it comes out wholly inserted or struck. No revision can carry
+ * the section's reference to it, so `onNote` reports that change.
+ *
+ * **Styles and numbering — NOT compared.** The result carries `revised`'s.
+ * `onNote` reports when `original`'s differ, so a reviewer is never told "no
+ * change" about something that was never looked at. The result also carries
+ * `revised`'s comments part as it is.
  *
  * **Moves — not detected, by architecture.** `RevisionKind` has no moveFrom /
  * moveTo member and nothing in suggest.ts writes those elements, so a move is
