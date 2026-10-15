@@ -5,6 +5,7 @@ import { clearBreakCache } from "../layout/inline.js";
 import { LaidOutPage } from "../layout/types.js";
 import { StreamingDocument, openStreamingDocument } from "../stream/body.js";
 import { ByteSource } from "../stream/source.js";
+import { CommentColumn, RAIL_WIDTH } from "./comments.js";
 import { PageDrawer } from "./draw.js";
 import { FontSet } from "./fonts.js";
 import { WrittenImage, writeImage } from "./images.js";
@@ -18,6 +19,10 @@ export interface RenderPdfOptions {
   fontDirs?: string[];
   /** The PDF's Title entry. */
   title?: string;
+  /** Print the review comments: each sheet is the page with a comment
+   * column at its right (see comments.ts), every sheet the size of the
+   * largest page plus the column. */
+  comments?: boolean;
 }
 
 export interface RenderPdfResult {
@@ -79,6 +84,21 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   const unsupportedImages = new Set<string>();
   const undrawn = new Set<string>();
 
+  const column = options.comments && opened.doc.comments.length > 0 ? new CommentColumn(opened.doc, measurer, resources, opened.commentIds) : null;
+  const sheet = column ? { width: final.maxWidth + RAIL_WIDTH, height: final.maxHeight } : null;
+
+  const writePage = async (drawer: PageDrawer, width: number, height: number, xobjects: string[]): Promise<void> => {
+    const content = writer.allocate();
+    await writer.deflatedStream(content, "", Buffer.from(drawer.ops.join("\n"), "latin1"));
+    const pageNum = writer.allocate();
+    pageNums.push(pageNum);
+    await writer.object(
+      pageNum,
+      `<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${pt(width)} ${pt(height)}] /Contents ${content} 0 R ` +
+        `/Resources << ${resources.shared()}${xobjects.length ? ` /XObject << ${xobjects.join(" ")} >>` : ""} >> >>`,
+    );
+  };
+
   const onPage = async (page: LaidOutPage): Promise<void> => {
     const names = new Map<string, string>();
     for (const item of page.items) {
@@ -93,22 +113,23 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
       }
       if (image) names.set(item.part, `Im${image.objNum}`);
     }
-    const drawer = new PageDrawer(fonts, resources, page);
+    const drawer = new PageDrawer(fonts, resources, page, 0, sheet?.height ?? page.height);
     drawer.drawPage((part) => names.get(part) ?? null);
-    const content = writer.allocate();
-    await writer.deflatedStream(content, "", Buffer.from(drawer.ops.join("\n"), "latin1"));
-    const pageNum = writer.allocate();
-    pageNums.push(pageNum);
+    if (column && sheet) column.draw(page, drawer, sheet.height);
     const xobjects = [...images.entries()].filter(([part]) => names.has(part)).map(([part, image]) => `/${names.get(part)} ${(image as WrittenImage).objNum} 0 R`);
-    await writer.object(
-      pageNum,
-      `<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${pt(page.width)} ${pt(page.height)}] /Contents ${content} 0 R ` +
-        `/Resources << ${resources.shared()}${xobjects.length ? ` /XObject << ${xobjects.join(" ")} >>` : ""} >> >>`,
-    );
+    await writePage(drawer, sheet?.width ?? page.width, sheet?.height ?? page.height, xobjects);
     if (page.index % 25 === 0) clearBreakCache(measurer);
   };
   clearBreakCache(measurer);
   await layoutDocumentStream(opened.doc, { measurer, prescan: opened.prescan, knownTotalPages: final.knownTotalPages, final: final.result, onPage });
+
+  // Balloons past the last page go on sheets of their own.
+  while (column && sheet && column.hasCarried()) {
+    const blank: LaidOutPage = { width: final.maxWidth, height: final.maxHeight, index: 0, number: 0, items: [], bodyTop: 0, bodyBottom: 0, hfStart: 0, columnBands: [] };
+    const drawer = new PageDrawer(fonts, resources, blank, 0, sheet.height);
+    column.draw(blank, drawer, sheet.height);
+    await writePage(drawer, sheet.width, sheet.height, []);
+  }
 
   await resources.write();
   await writer.object(pagesNum, `<< /Type /Pages /Count ${pageNums.length} /Kids [${pageNums.map((n) => `${n} 0 R`).join(" ")}] >>`);
@@ -125,8 +146,18 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   };
 }
 
+interface Count {
+  result: StreamLayoutResult;
+  knownTotalPages: number | undefined;
+  /** The largest page's sides, for sheets that must all be one size. */
+  maxWidth: number;
+  maxHeight: number;
+}
+
 /** The counting pass, and the NUMPAGES convergence passes openPrintStream runs. */
-async function countPages(opened: StreamingDocument, measurer: NodeMeasurer): Promise<{ result: StreamLayoutResult; knownTotalPages: number | undefined }> {
+async function countPages(opened: StreamingDocument, measurer: NodeMeasurer): Promise<Count> {
+  let maxWidth = 0;
+  let maxHeight = 0;
   const count = (total: number | undefined): Promise<StreamLayoutResult> => {
     clearBreakCache(measurer);
     return layoutDocumentStream(opened.doc, {
@@ -134,6 +165,8 @@ async function countPages(opened: StreamingDocument, measurer: NodeMeasurer): Pr
       prescan: opened.prescan,
       knownTotalPages: total,
       onPage: (page) => {
+        maxWidth = Math.max(maxWidth, page.width);
+        maxHeight = Math.max(maxHeight, page.height);
         if (page.index % 25 === 0) clearBreakCache(measurer);
       },
     });
@@ -147,7 +180,7 @@ async function countPages(opened: StreamingDocument, measurer: NodeMeasurer): Pr
       if (result.totalPages === knownTotalPages) break;
     }
   }
-  return { result, knownTotalPages };
+  return { result, knownTotalPages, maxWidth, maxHeight };
 }
 
 function pt(px: number): string {

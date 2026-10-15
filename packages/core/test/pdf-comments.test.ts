@@ -1,0 +1,121 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Writable } from "node:stream";
+import { describe, expect, it } from "vitest";
+import { renderDocxToPdf } from "../src/pdf/render.js";
+import { bytesSource } from "../src/stream/source.js";
+import { W_NS, makeDocx } from "./helpers.js";
+
+const W14 = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+const W15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
+
+/**
+ * A document of `pages` pages with `perPage` commented paragraphs each; a
+ * reply under every third comment. `longText` makes every comment's text
+ * long, so a page's balloons outgrow the sheet.
+ */
+export function commentedDocx(pages: number, perPage: number, longText = false): { docx: Uint8Array; texts: string[] } {
+  const body: string[] = [];
+  const comments: string[] = [];
+  const extended: string[] = [];
+  const texts: string[] = [];
+  let id = 0;
+  for (let page = 1; page <= pages; page++) {
+    if (page > 1) body.push(`<w:p><w:r><w:br w:type="page"/></w:r></w:p>`);
+    for (let i = 0; i < perPage; i++) {
+      const cid = id++;
+      body.push(
+        `<w:p><w:r><w:t xml:space="preserve">Page ${page} paragraph ${i} starts here; </w:t></w:r>` +
+          `<w:commentRangeStart w:id="${cid}"/><w:r><w:t xml:space="preserve">this part is commented</w:t></w:r><w:commentRangeEnd w:id="${cid}"/>` +
+          `<w:r><w:commentReference w:id="${cid}"/></w:r><w:r><w:t xml:space="preserve"> and the paragraph goes on.</w:t></w:r></w:p>`,
+      );
+      const text = `Note ${cid} on page ${page}` + (longText ? ": " + "review this wording against the signed version ".repeat(8) : "");
+      texts.push(text);
+      const paraId = (0x1000 + cid).toString(16).toUpperCase().padStart(8, "0");
+      comments.push(`<w:comment w:id="${cid}" w:author="Ada Reviewer" w:initials="AR" w:date="2026-06-01T10:00:00Z"><w:p w14:paraId="${paraId}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:comment>`);
+      extended.push(`<w15:commentEx w15:paraId="${paraId}" w15:done="0"/>`);
+      if (cid % 3 === 0) {
+        const rid = id++;
+        const replyText = `Reply to note ${cid}`;
+        texts.push(replyText);
+        const replyPara = (0x1000 + rid).toString(16).toUpperCase().padStart(8, "0");
+        body[body.length - 1] = body[body.length - 1].replace(`<w:commentRangeEnd w:id="${cid}"/>`, `<w:commentRangeEnd w:id="${cid}"/><w:commentRangeEnd w:id="${rid}"/>`).replace(`<w:commentRangeStart w:id="${cid}"/>`, `<w:commentRangeStart w:id="${cid}"/><w:commentRangeStart w:id="${rid}"/>`);
+        comments.push(`<w:comment w:id="${rid}" w:author="Bob Editor" w:initials="BE" w:date="2026-06-02T10:00:00Z"><w:p w14:paraId="${replyPara}"><w:r><w:t xml:space="preserve">${replyText}</w:t></w:r></w:p></w:comment>`);
+        extended.push(`<w15:commentEx w15:paraId="${replyPara}" w15:paraIdParent="${paraId}" w15:done="0"/>`);
+      }
+    }
+  }
+  body.push(`<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr>`);
+  const docx = makeDocx({
+    "word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${W_NS}><w:body>${body.join("")}</w:body></w:document>`,
+    "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS} ${W14}>${comments.join("")}</w:comments>`,
+    "word/commentsExtended.xml": `<?xml version="1.0"?>\n<w15:commentsEx ${W15}>${extended.join("")}</w15:commentsEx>`,
+  });
+  return { docx, texts };
+}
+
+class Collect extends Writable {
+  readonly chunks: Buffer[] = [];
+  _write(chunk: Buffer, _encoding: string, callback: () => void): void {
+    this.chunks.push(chunk);
+    callback();
+  }
+}
+
+async function render(docx: Uint8Array, comments: boolean): Promise<{ bytes: Buffer; pages: number }> {
+  const out = new Collect();
+  const result = await renderDocxToPdf(bytesSource(docx), out, { comments });
+  return { bytes: Buffer.concat(out.chunks), pages: result.pages };
+}
+
+let hasPdftotext: boolean;
+try {
+  execFileSync("pdftotext", ["-v"], { stdio: "ignore" });
+  hasPdftotext = true;
+} catch {
+  hasPdftotext = false;
+}
+
+function pdfText(bytes: Buffer): string {
+  const dir = mkdtempSync(join(tmpdir(), "wordinweb-pdf-"));
+  const path = join(dir, "doc.pdf");
+  writeFileSync(path, bytes);
+  return execFileSync("pdftotext", [path, "-"], { encoding: "utf8" }).replace(/\s+/g, " ");
+}
+
+describe("renderDocxToPdf with comments", () => {
+  it("is off by default: no column, pages keep their size", async () => {
+    const { docx } = commentedDocx(2, 2);
+    const { bytes, pages } = await render(docx, false);
+    expect(pages).toBe(2);
+    expect(bytes.toString("latin1")).toContain("/MediaBox [0 0 612 792]");
+  });
+
+  it.skipIf(!hasPdftotext)("prints every comment and reply beside its page on sheets of one size", async () => {
+    const { docx, texts } = commentedDocx(3, 2);
+    const { bytes, pages } = await render(docx, true);
+    expect(pages).toBe(3);
+    const pdf = bytes.toString("latin1");
+    expect(pdf.match(/\/MediaBox \[0 0 804 792\]/g)?.length).toBe(3);
+    const text = pdfText(bytes);
+    for (const t of texts) expect(text).toContain(t);
+    // A reply follows its parent, author and all.
+    expect(text.indexOf("Note 0 on page 1")).toBeLessThan(text.indexOf("Reply to note 0"));
+    expect(text).toContain("Bob Editor");
+  });
+
+  it.skipIf(!hasPdftotext)("carries balloons that do not fit a sheet onto the next, losing nothing", async () => {
+    const { docx, texts } = commentedDocx(2, 9, true);
+    const { bytes, pages } = await render(docx, true);
+    // Two pages of text; the balloons overflow onto extra sheets.
+    expect(pages).toBeGreaterThan(2);
+    const text = pdfText(bytes);
+    // A balloon split over two sheets has the next page's text between its
+    // halves in pdftotext's reading order, so count its words instead.
+    const notes = texts.filter((t) => t.startsWith("Note "));
+    for (const t of texts) expect(text).toContain(t.split(":")[0]);
+    expect(text.match(/wording/g)?.length).toBe(notes.length * 8);
+  });
+});

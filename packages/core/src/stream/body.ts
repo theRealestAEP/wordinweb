@@ -5,7 +5,7 @@ import { Block, FieldContent, Section, SectionProps } from "../model.js";
 import { DocParseContext, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
 import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
-import { XmlElement, child, localName, parseXml } from "../xml.js";
+import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
 import { DEFAULT_ZIP_LIMITS } from "../zip.js";
 import { scanBody } from "./scan.js";
 import { ByteSource } from "./source.js";
@@ -26,6 +26,10 @@ export interface StreamingDocument {
   mediaPieces(part: string, onPiece: (piece: Uint8Array) => void): Promise<boolean>;
   /** A binary part's size in bytes, from the zip directory; undefined when missing. */
   mediaSize(part: string): number | undefined;
+  /** The ids of the comments whose ranges cover a body w:t (the element a
+   * TextItem's src.t is), as DocxDocument.commentAnchors gives them for a
+   * document loaded whole; undefined when none does. */
+  commentIds(t: XmlElement): string[] | undefined;
 }
 
 /** Parts the shell holds whole; every other part stays in the file. */
@@ -74,6 +78,9 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
   const sections: { props: SectionProps; from: number; to: number }[] = [];
   let from = 0;
   let hasPageTotal = false;
+  // Comment ranges cross blocks: this pass learns which are open when each
+  // block starts, so a later parse of the block can tag its w:t elements.
+  const comments = doc.comments.length > 0 ? new CommentRanges() : null;
   const endSection = (props: SectionProps): void => {
     sections.push({ props, from, to: body.count });
     from = body.count;
@@ -88,6 +95,7 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
     const block = parseBlock(el, ctx);
     if (!block) continue;
     body.keep(candidate, block);
+    comments?.first(el, body.count - 1);
     if (!hasPageTotal && bodyHasPageTotal(el)) hasPageTotal = true;
     prescan.visit(block);
     if (block.type === "paragraph" && block.sectionBreak) endSection(block.sectionBreak);
@@ -99,7 +107,10 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
   // Later parses must not touch the captured REF bookmark ranges, which this
   // pass completed: a block parsed again out of order would extend them.
   const later: DocParseContext = { ...ctx, refBookmarks: undefined };
-  body.parser = (el) => parseBlock(el, later) as Block;
+  body.parser = (el, index) => {
+    comments?.again(el, index);
+    return parseBlock(el, later) as Block;
+  };
   doc.sections = sections.map((section): Section => ({ props: section.props, blocks: body.blocks(section.from, section.to) }));
   inheritHeaderFooterRefs(doc.sections);
 
@@ -120,7 +131,73 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
     mediaSize(part) {
       return zip.entries.get(part.startsWith("/") ? part.slice(1) : part)?.size;
     },
+    commentIds(t) {
+      return comments?.ids.get(t);
+    },
   };
+}
+
+/**
+ * Which comments cover each w:t of a streamed body. The first pass walks
+ * the blocks in order and records the comments open at each block's start;
+ * every later parse of a block replays its markers from that state and
+ * tags the w:t elements it made. A point comment (a reference with no
+ * range) anchors to the nearest w:t before it in its block, else the first
+ * after, as commentAnchors anchors it to the one before it in the document.
+ */
+class CommentRanges {
+  readonly ids = new WeakMap<XmlElement, string[]>();
+  private readonly openAtStart = new Map<number, string[]>();
+  private readonly open = new Set<string>();
+
+  first(el: XmlElement, index: number): void {
+    if (this.open.size > 0) this.openAtStart.set(index, [...this.open]);
+    this.walk(el, this.open);
+  }
+
+  again(el: XmlElement, index: number): void {
+    this.walk(el, new Set(this.openAtStart.get(index)));
+  }
+
+  private walk(block: XmlElement, open: Set<string>): void {
+    let lastT: XmlElement | null = null;
+    let firstT: XmlElement | null = null;
+    const pointIds: string[] = [];
+    const tag = (t: XmlElement, id: string): void => {
+      const list = this.ids.get(t);
+      if (list) list.push(id);
+      else this.ids.set(t, [id]);
+    };
+    const visit = (el: XmlElement): void => {
+      const ln = localName(el.name);
+      if (ln === "commentRangeStart") {
+        const id = attr(el, "id");
+        if (id !== undefined) open.add(id);
+        return;
+      }
+      if (ln === "commentRangeEnd") {
+        const id = attr(el, "id");
+        if (id !== undefined) open.delete(id);
+        return;
+      }
+      if (ln === "commentReference") {
+        const id = attr(el, "id");
+        if (id === undefined) return;
+        if (lastT) tag(lastT, id);
+        else pointIds.push(id);
+        return;
+      }
+      if (ln === "t") {
+        lastT = el;
+        firstT ??= el;
+        for (const id of open) tag(el, id);
+        return;
+      }
+      for (const c of el.children) visit(c);
+    };
+    visit(block);
+    if (firstT) for (const id of pointIds) tag(firstT, id);
+  }
 }
 
 /** A body's block as parse/document.ts's parseBody makes it: null when the
@@ -176,7 +253,8 @@ class BodyStore {
   private inflated: { index: number; bytes: Uint8Array } | null = null;
   /** The stable key of each field occurrence the parses made (see Prescan). */
   readonly fieldKeys = new WeakMap<object, string>();
-  parser: ((el: XmlElement) => Block) | null = null;
+  /** Parses a block's element; `index` is the block's position in the body. */
+  parser: ((el: XmlElement, index: number) => Block) | null = null;
   /** Resolves a block's content controls as the shell resolves its own (DocxDocument.hydrateControls). */
   hydrate: ((el: XmlElement) => void) | null = null;
 
@@ -303,7 +381,7 @@ class BodyStore {
   private block(index: number): Block {
     let block = this.parsed.get(index);
     if (block) return block;
-    block = (this.parser as (el: XmlElement) => Block)(this.element(this.kept[index]));
+    block = (this.parser as (el: XmlElement, index: number) => Block)(this.element(this.kept[index]), index);
     this.parsed.set(index, block);
     keyFields(block, index, this.fieldKeys);
     this.trim(index);
