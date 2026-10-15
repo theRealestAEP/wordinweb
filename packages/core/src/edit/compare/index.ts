@@ -296,22 +296,41 @@ export function pairHeadersFooters(
   const theirs = refs(original);
   const mine = refs(merged);
   const pairs: HeaderFooterPair[] = [];
-  const done = new Set<string>();
+  const paired = { from: new Set<string>(), into: new Set<string>() };
   const parse = (key: string): Pick<HeaderFooterPair, "kind" | "type"> => {
     const [, ln, type] = key.split(":");
     return { kind: ln === "headerReference" ? "header" : "footer", type: type as HeaderFooterPair["type"] };
   };
+  const pair = (key: string, from: string, into: string): void => {
+    paired.from.add(from);
+    paired.into.add(into);
+    pairs.push({ ...parse(key), from, into });
+  };
+  const same = (from: string, into: string): boolean => {
+    const oRoot = original.headerFooterRoot(from);
+    const mRoot = merged.headerFooterRoot(into);
+    return !!oRoot && !!mRoot && sameXml(oRoot, mRoot);
+  };
+  // A part with the same content on both sides is the same part wherever
+  // its section now sits (a removed section shifts the ones after it): at
+  // its own section first, then anywhere, in section order. The rest pair
+  // section by section.
   for (const [key, from] of theirs) {
     const into = mine.get(key);
-    if (into && !done.has(into)) {
-      done.add(into);
-      pairs.push({ ...parse(key), from, into });
-    } else if (!into && key.startsWith("last:")) {
-      pairs.push({ ...parse(key), from, into: null });
-    }
+    if (into && !paired.into.has(into) && same(from, into)) pair(key, from, into);
+  }
+  for (const [key, from] of theirs) {
+    if (paired.from.has(from)) continue;
+    const into = [...mine.values()].find((target) => !paired.into.has(target) && same(from, target));
+    if (into) pair(key, from, into);
+  }
+  for (const [key, from] of theirs) {
+    const into = mine.get(key);
+    if (into && !paired.into.has(into)) pair(key, from, into);
+    else if (!into && key.startsWith("last:")) pairs.push({ ...parse(key), from, into: null });
   }
   for (const [key, into] of mine) {
-    if (key.startsWith("last:") && !theirs.has(key) && !done.has(into)) pairs.push({ ...parse(key), from: null, into });
+    if (key.startsWith("last:") && !theirs.has(key) && !paired.into.has(into)) pairs.push({ ...parse(key), from: null, into });
   }
   return pairs;
 }
