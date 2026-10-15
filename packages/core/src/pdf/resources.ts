@@ -27,10 +27,12 @@ export class EmbeddedFont {
       cid = this.gids.length;
       this.gids.push(gid);
       this.cidOf.set(gid, cid);
-      this.unicode.set(cid, codePoint);
       // Composite glyphs draw other glyphs, which the subset must hold too.
       for (const component of this.face.components(gid)) this.cid(component, 0);
     }
+    // A glyph first pulled in as a component learns its code point when
+    // text shows it, so the ToUnicode map covers it.
+    if (codePoint > 0 && !this.unicode.get(cid)) this.unicode.set(cid, codePoint);
     return cid;
   }
 
