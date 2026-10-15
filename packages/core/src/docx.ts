@@ -385,6 +385,7 @@ export class DocxDocument {
     this.docRoot = docRoot;
     this.rememberOriginalXml(docPart, docRoot);
     const coreProperties = this.readXmlOptional("docProps/core.xml");
+    this.coreProperties = coreProperties;
     this.hydrateCorePropertyControls(docRoot, coreProperties);
     this.repairLegacyWordInWebObjects();
     this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
@@ -536,6 +537,14 @@ export class DocxDocument {
     }
 
     this.refresh();
+  }
+
+  private readonly coreProperties: XmlElement | undefined;
+
+  /** Resolve the content controls under `root` as the document's own were
+   * resolved when it loaded, for body XML parsed outside it (stream/body.ts). */
+  hydrateControls(root: XmlElement): void {
+    this.hydrateCorePropertyControls(root, this.coreProperties);
   }
 
   /** Resolve content controls mapped to standard package core properties.
@@ -3040,6 +3049,24 @@ export class DocxDocument {
 
   static load(data: ArrayBuffer | Uint8Array): DocxDocument {
     return new DocxDocument(Package.from(data));
+  }
+
+  /** A document over parts already unzipped (stream/body.ts's shell). */
+  static fromFiles(files: Record<string, Uint8Array>): DocxDocument {
+    return new DocxDocument(Package.fromFiles(files));
+  }
+
+  /** The context the body's blocks are parsed with, for a caller that keeps
+   * the body outside the document (stream/body.ts). Its REF bookmark capture
+   * starts empty; the caller decides whether `refBookmarks` reads from it. */
+  bodyParseContext(): DocParseContext {
+    return {
+      ...this.ctxBase,
+      rels: this.documentRels,
+      readPart: (part: string) => this.readXmlOptional(part),
+      refBookmarks: { open: new Map<string, Run[]>(), byName: new Map<string, Run[]>() },
+      independentTextboxStories: true,
+    };
   }
 
   media(part: string): Uint8Array | undefined {

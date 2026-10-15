@@ -113,7 +113,7 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
  * only a footer, yet Word keeps the previous section's running header on every
  * page (and the earlier section keeps the roman-numeral footer it inherits).
  */
-function inheritHeaderFooterRefs(sections: Section[]): void {
+export function inheritHeaderFooterRefs(sections: Section[]): void {
   for (let i = 1; i < sections.length; i++) {
     const prev = sections[i - 1].props;
     const cur = sections[i].props;
