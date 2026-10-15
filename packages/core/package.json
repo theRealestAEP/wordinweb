@@ -20,6 +20,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./pdf": {
+      "types": "./dist/pdf/render.d.ts",
+      "import": "./dist/pdf/render.js"
     }
   },
   "files": [
