@@ -4,6 +4,17 @@ export interface ScannedChild {
   name: string;
   /** Whether it is the body's own child, not one of a w:sdt's. */
   top: boolean;
+  /** The innermost block-level w:sdt it sits in (see ScannedSdt), or -1. */
+  sdt: number;
+  bytes: Uint8Array;
+}
+
+/** A block-level w:sdt, reported once its w:sdtContent opens: its bytes from
+ * its start tag through the sdtContent's, which hold its properties. */
+export interface ScannedSdt {
+  id: number;
+  /** The block-level w:sdt this one sits in, or -1. */
+  parent: number;
   bytes: Uint8Array;
 }
 
@@ -28,8 +39,12 @@ const SLASH = 0x2f;
  * instructions and CDATA are skipped; a document type declaration, an
  * unterminated construct or a missing body is an error.
  */
-export function scanBody(pull: () => Uint8Array | null, onChild: (child: ScannedChild) => void): BodyOutline {
-  return new Scanner(pull).run(onChild);
+export function scanBody(
+  pull: () => Uint8Array | null,
+  onChild: (child: ScannedChild) => void,
+  onSdt: (sdt: ScannedSdt) => void,
+): BodyOutline {
+  return new Scanner(pull).run(onChild, onSdt);
 }
 
 class Scanner {
@@ -42,7 +57,7 @@ class Scanner {
 
   constructor(private readonly pull: () => Uint8Array | null) {}
 
-  run(onChild: (child: ScannedChild) => void): BodyOutline {
+  run(onChild: (child: ScannedChild) => void, onSdt: (sdt: ScannedSdt) => void): BodyOutline {
     // The body sits at depth 1, under the document root.
     const cd = 1;
     let depth = 0;
@@ -50,8 +65,10 @@ class Scanner {
     let head: Uint8Array | null = null;
     // Depths whose children are blocks: the body's, then each open sdtContent's.
     const containers: number[] = [];
-    // The level of each open w:sdt found among the blocks, awaiting its sdtContent.
-    const sdts: number[] = [];
+    // Each open block-level w:sdt: its level, where it starts, and its id
+    // once its sdtContent has opened.
+    const sdts: { level: number; at: number; id: number }[] = [];
+    let nextSdt = 0;
     let childStart = -1;
     let childName = "";
     let pos = 0;
@@ -59,7 +76,9 @@ class Scanner {
       if (pos > CHUNK) {
         // Move what is left to the front, so the buffer never grows past a
         // chunk or two; an open child's bytes stay, as its reader wants them.
-        const keep = childStart >= 0 ? Math.min(pos, childStart - this.base) : pos;
+        let keep = childStart >= 0 ? Math.min(pos, childStart - this.base) : pos;
+        const sdt = sdts[sdts.length - 1];
+        if (sdt && sdt.id === -1) keep = Math.min(keep, sdt.at - this.base);
         this.store.copyWithin(0, keep, this.length);
         this.length -= keep;
         this.base += keep;
@@ -91,9 +110,9 @@ class Scanner {
           // A block's end tag and an sdt's both come at the container's depth
           // plus one: only a block is open as a child.
           if (depth === top + 1 && childStart >= 0) {
-            onChild({ name: childName, top: containers.length === 1, bytes: this.store.subarray(childStart - this.base, end - this.base) });
+            onChild({ name: childName, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(childStart - this.base, end - this.base) });
             childStart = -1;
-          } else if (sdts.length > 0 && depth === sdts[sdts.length - 1] - 1) sdts.pop();
+          } else if (sdts.length > 0 && depth === sdts[sdts.length - 1].level - 1) sdts.pop();
           else if (depth === top && containers.length > 1) containers.pop();
         }
       } else {
@@ -113,13 +132,16 @@ class Scanner {
           if (depth === top + 1) {
             const ln = localName(name);
             if (ln === "body") throw new Error("a w:body inside the body");
-            if (ln === "sdt" && !selfClosing) sdts.push(depth + 1);
-            else if (selfClosing) onChild({ name, top: containers.length === 1, bytes: this.store.subarray(lt, end - this.base) });
+            if (ln === "sdt" && !selfClosing) sdts.push({ level: depth + 1, at, id: -1 });
+            else if (selfClosing) onChild({ name, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(lt, end - this.base) });
             else {
               childStart = at;
               childName = name;
             }
-          } else if (sdts.length > 0 && depth === sdts[sdts.length - 1] && localName(name) === "sdtContent" && !selfClosing) {
+          } else if (sdts.length > 0 && depth === sdts[sdts.length - 1].level && localName(name) === "sdtContent" && !selfClosing) {
+            const sdt = sdts[sdts.length - 1];
+            sdt.id = nextSdt++;
+            onSdt({ id: sdt.id, parent: sdts[sdts.length - 2]?.id ?? -1, bytes: this.store.subarray(sdt.at - this.base, end - this.base) });
             containers.push(depth);
           }
         }

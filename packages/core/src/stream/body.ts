@@ -5,7 +5,7 @@ import { Block, FieldContent, Section, SectionProps } from "../model.js";
 import { DocParseContext, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
 import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
-import { XmlElement, localName, parseXml } from "../xml.js";
+import { XmlElement, child, localName, parseXml } from "../xml.js";
 import { scanBody } from "./scan.js";
 import { ByteSource } from "./source.js";
 import { ZipIndex } from "./zip.js";
@@ -58,6 +58,7 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
   }
   files[docPart] = outline;
   const doc = DocxDocument.fromFiles(files);
+  body.hydrate = (el) => doc.hydrateControls(el);
 
   // Every block once, in order: which candidates are blocks at all, where
   // each section ends, and what the Prescan assigns.
@@ -73,7 +74,7 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
     prescan.endSection();
   };
   for (let candidate = 0; candidate < body.candidates; candidate++) {
-    const el = parseXml(body.candidateXml(candidate));
+    const el = body.element(candidate);
     if (body.kind(candidate) === "sectPr") {
       endSection(parseSectionProps(el));
       continue;
@@ -144,6 +145,10 @@ class BodyStore {
   private readonly ranges: number[] = [];
   /** Each candidate's local name: p, tbl, or the body's own sectPr. */
   private readonly kinds: string[] = [];
+  /** Each block-level w:sdt's properties, as its start tag through its
+   * sdtContent's, and the sdt it sits in; each candidate's innermost one. */
+  private readonly sdts: { parent: number; xml: string }[] = [];
+  private readonly sdtOf: number[] = [];
   /** The candidate bytes, deflated in pieces: piece i holds [starts[i], starts[i + 1]). */
   private readonly pieces: Uint8Array[] = [];
   private readonly starts: number[] = [];
@@ -157,6 +162,8 @@ class BodyStore {
   /** The stable key of each field occurrence the parses made (see Prescan). */
   readonly fieldKeys = new WeakMap<object, string>();
   parser: ((el: XmlElement) => Block) | null = null;
+  /** Resolves a block's content controls as the shell resolves its own (DocxDocument.hydrateControls). */
+  hydrate: ((el: XmlElement) => void) | null = null;
 
   get candidates(): number {
     return this.kinds.length;
@@ -183,18 +190,25 @@ class BodyStore {
       piece = [];
       pieceBytes = 0;
     };
-    const outline = scanBody(inflatePull(method, raw), (child) => {
-      const ln = localName(child.name);
-      // A sectPr counts at the body's own level only, as parseBody walks it.
-      if (ln !== "p" && ln !== "tbl" && (ln !== "sectPr" || !child.top)) return;
-      if (pieceBytes >= PIECE_BYTES) flush();
-      if (piece.length === 0) this.starts.push(total);
-      piece.push(child.bytes.slice());
-      pieceBytes += child.bytes.length;
-      this.ranges.push(total, total + child.bytes.length);
-      this.kinds.push(ln);
-      total += child.bytes.length;
-    });
+    const outline = scanBody(
+      inflatePull(method, raw),
+      (child) => {
+        const ln = localName(child.name);
+        // A sectPr counts at the body's own level only, as parseBody walks it.
+        if (ln !== "p" && ln !== "tbl" && (ln !== "sectPr" || !child.top)) return;
+        if (pieceBytes >= PIECE_BYTES) flush();
+        if (piece.length === 0) this.starts.push(total);
+        piece.push(child.bytes.slice());
+        pieceBytes += child.bytes.length;
+        this.ranges.push(total, total + child.bytes.length);
+        this.kinds.push(ln);
+        this.sdtOf.push(child.sdt);
+        total += child.bytes.length;
+      },
+      (sdt) => {
+        this.sdts.push({ parent: sdt.parent, xml: strFromU8(sdt.bytes) });
+      },
+    );
     flush();
     this.starts.push(total);
     const head = outline.head;
@@ -211,8 +225,20 @@ class BodyStore {
     return this.kinds[candidate];
   }
 
-  candidateXml(candidate: number): string {
-    return strFromU8(this.candidateBytes(candidate));
+  /**
+   * A candidate's element, its content controls resolved. The block-level
+   * sdts around a block are not in its bytes, so a block in one is parsed
+   * inside them again: a control bound to a document property is resolved
+   * from the sdt's properties, as the shell resolves its own.
+   */
+  element(candidate: number): XmlElement {
+    const xml = strFromU8(this.candidateBytes(candidate));
+    const wrappers: string[] = [];
+    for (let sdt = this.sdtOf[candidate]; sdt !== -1; sdt = this.sdts[sdt].parent) wrappers.unshift(this.sdts[sdt].xml);
+    let el = parseXml(wrappers.join("") + xml + "</w:sdtContent></w:sdt>".repeat(wrappers.length));
+    this.hydrate?.(el);
+    for (let i = 0; i < wrappers.length; i++) el = (child(el, "sdtContent") as XmlElement).children[0];
+    return el;
   }
 
   private candidateBytes(candidate: number): Uint8Array {
@@ -262,7 +288,7 @@ class BodyStore {
   private block(index: number): Block {
     let block = this.parsed.get(index);
     if (block) return block;
-    block = (this.parser as (el: XmlElement) => Block)(parseXml(this.candidateXml(this.kept[index])));
+    block = (this.parser as (el: XmlElement) => Block)(this.element(this.kept[index]));
     this.parsed.set(index, block);
     keyFields(block, index, this.fieldKeys);
     this.trim(index);

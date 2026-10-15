@@ -385,6 +385,7 @@ export class DocxDocument {
     this.docRoot = docRoot;
     this.rememberOriginalXml(docPart, docRoot);
     const coreProperties = this.readXmlOptional("docProps/core.xml");
+    this.coreProperties = coreProperties;
     this.hydrateCorePropertyControls(docRoot, coreProperties);
     this.repairLegacyWordInWebObjects();
     this.documentRels = parseRelationships(this.relsRoot ?? undefined, docPart);
@@ -536,6 +537,14 @@ export class DocxDocument {
     }
 
     this.refresh();
+  }
+
+  private readonly coreProperties: XmlElement | undefined;
+
+  /** Resolve the content controls under `root` as the document's own were
+   * resolved when it loaded, for body XML parsed outside it (stream/body.ts). */
+  hydrateControls(root: XmlElement): void {
+    this.hydrateCorePropertyControls(root, this.coreProperties);
   }
 
   /** Resolve content controls mapped to standard package core properties.

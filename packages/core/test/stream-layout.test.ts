@@ -74,6 +74,22 @@ describe("streamed layout", () => {
     await expectSame(makeDocx({ "word/document.xml": wrapDocument(body) }));
   });
 
+  it("resolves content controls bound to document properties, around a block and inside one", async () => {
+    const binding = `<w:dataBinding w:prefixMappings="xmlns:ns0='http://purl.org/dc/elements/1.1/' xmlns:ns1='http://schemas.openxmlformats.org/package/2006/metadata/core-properties'" w:xpath="/ns1:coreProperties[1]/ns0:creator[1]" w:storeItemID="{1}"/>`;
+    const body =
+      `<w:sdt><w:sdtPr><w:alias w:val="Author"/>${binding}<w:text/></w:sdtPr><w:sdtContent>${p("Stale name")}</w:sdtContent></w:sdt>` +
+      `<w:p><w:r><w:t xml:space="preserve">By </w:t></w:r><w:sdt><w:sdtPr>${binding}</w:sdtPr><w:sdtContent><w:r><w:t>Stale again</w:t></w:r></w:sdtContent></w:sdt></w:p>` +
+      prose(5, "Body");
+    const core = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>Fresh Author</dc:creator></cp:coreProperties>`;
+    const bytes = makeDocx({ "word/document.xml": wrapDocument(body), "docProps/core.xml": core });
+    await expectSame(bytes);
+    const streamed = await streamedPages(bytes);
+    const text = (JSON.parse(streamed.pages[0]) as LaidOutPage).items.map((item) => (item.kind === "text" ? item.text : "")).join("");
+    expect(text).toContain("Fresh Author");
+    expect(text).not.toContain("Stale");
+  });
+
   it("shows NUMPAGES and PAGEREF from the counting pass", async () => {
     const field = (instr: string, cached: string) =>
       `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
