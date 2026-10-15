@@ -29,6 +29,7 @@ import {
   noteRefsIn,
   pairHeadersFooters,
   paragraphKeyParts,
+  refersToChangedPart,
   paragraphMarkSteps,
   reportUncomparedParts,
   resolveGap,
@@ -484,7 +485,8 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): voi
     let xml: string | null = null;
     if (op === COPY) {
       const revisedXml = R.blocks.read(r);
-      const same = revisedXml === O.blocks.read(o);
+      // Same XML can still refer to a part that changed (a SmartArt diagram).
+      const same = revisedXml === O.blocks.read(o) && !(/ r:\w+="/.test(revisedXml) && refersToChangedPart(parseXml(revisedXml), ctx));
       if (same && !glyph[k] && props[k] === -1) xml = revisedXml;
       else if (same) entry = { el: parseXml(revisedXml), cls: "kept" };
       else entry = emitMatched(parseO(o), parseR(r), ctx);

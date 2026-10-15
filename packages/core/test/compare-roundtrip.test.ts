@@ -858,3 +858,64 @@ describe("the last section's page setup", () => {
     expect(collectRevisions(merged)).toHaveLength(0);
   });
 });
+
+describe("compareDocuments — comments and diagram parts", () => {
+  const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const rels = (extra: string) =>
+    `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${extra}</Relationships>`;
+  const textOf = (xml: string | null | undefined) => [...(xml ?? "").matchAll(/<w:t[^>]*>([^<]*)/g)].map((m) => m[1]).join(" ");
+  const review = (original: DocxDocument, revised: DocxDocument) => {
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+    const accepted = DocxDocument.load(merged.save());
+    acceptAllRevisions(accepted);
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    return { accepted, rejected };
+  };
+
+  it("brings a removed paragraph's comment back on reject-all", () => {
+    const commented = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Commented.</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
+    const doc = (body: string, comments: string) =>
+      DocxDocument.load(
+        makeDocx({
+          "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${body}</w:body></w:document>`,
+          "word/_rels/document.xml.rels": rels(`<Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/>`),
+          "word/comments.xml": `<w:comments ${W_NS}>${comments}</w:comments>`,
+        }),
+      );
+    const note = `<w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Check this.</w:t></w:r></w:p></w:comment>`;
+    const { accepted, rejected } = review(doc(para("Before.") + commented, note), doc(para("Before."), ""));
+    expect(textOf(rejected.pkg.text("word/comments.xml"))).toBe("Check this.");
+    const ref = /<w:commentReference w:id="(\d+)"/.exec(serializeXml(rejected.docRoot));
+    expect(rejected.pkg.text("word/comments.xml")).toContain(`w:id="${ref?.[1]}"`);
+    expect(serializeXml(accepted.docRoot)).not.toContain("commentReference");
+  });
+
+  it("strikes a diagram whose data part changed under the same name, and reject-all brings the old data back", () => {
+    const DGM = 'xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"';
+    const diagram = `<w:p><w:r><w:drawing><dgm:relIds ${DGM} r:dm="rId5" r:lo="rId6" r:qs="rId7" r:cs="rId8"/></w:drawing></w:r></w:p>`;
+    const doc = (word: string) =>
+      DocxDocument.load(
+        makeDocx({
+          "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${para("Before.")}${diagram}</w:body></w:document>`,
+          "word/_rels/document.xml.rels": rels(
+            ["diagramData:data1", "diagramLayout:layout1", "diagramQuickStyle:quickStyle1", "diagramColors:colors1"]
+              .map((t, i) => `<Relationship Id="rId${i + 5}" Type="${REL}/${t.split(":")[0]}" Target="diagrams/${t.split(":")[1]}.xml"/>`)
+              .join(""),
+          ),
+          "word/diagrams/data1.xml": `<dgm:dataModel ${DGM}><w:t ${W_NS}>${word}</w:t></dgm:dataModel>`,
+          "word/diagrams/layout1.xml": `<dgm:layoutDef ${DGM}/>`,
+          "word/diagrams/quickStyle1.xml": `<dgm:styleDef ${DGM}/>`,
+          "word/diagrams/colors1.xml": `<dgm:colorsDef ${DGM}/>`,
+        }),
+      );
+    const { accepted, rejected } = review(doc("Discover"), doc("Explore"));
+    const dataOf = (d: DocxDocument) => {
+      const id = /r:dm="(\w+)"/.exec(serializeXml(d.docRoot))?.[1] ?? "";
+      return textOf(d.pkg.text(d.documentRels.get(id)?.target ?? ""));
+    };
+    expect(dataOf(rejected)).toBe("Discover");
+    expect(dataOf(accepted)).toBe("Explore");
+  });
+});

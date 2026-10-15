@@ -144,6 +144,8 @@ export interface Ctx {
   scope: { from: string | null; into: string | null };
   /** Original note id -> the result's id for the same note (compareNotes). */
   noteIds: Record<"footnote" | "endnote", Map<string, string>>;
+  /** Original comment id -> the result's id for that comment (adoptComment). */
+  commentIds: Map<string, string>;
 }
 
 /** Where a block ended up, which is what decides the paragraph-mark revisions. */
@@ -234,6 +236,7 @@ export function compareContext(original: DocxDocument, merged: DocxDocument, opt
     note: options.onNote ?? (() => {}),
     scope: { from: null, into: null },
     noteIds: { footnote: new Map(), endnote: new Map() },
+    commentIds: new Map(),
   };
 }
 
@@ -1210,13 +1213,19 @@ export function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
       const to = ctx.noteIds[ln === "footnoteReference" ? "footnote" : "endnote"].get(el.attrs["w:id"]);
       if (to !== undefined) el.attrs["w:id"] = to;
     }
+    if (ln === "commentReference" || ln === "commentRangeStart" || ln === "commentRangeEnd") {
+      el.attrs["w:id"] = adoptComment(el.attrs["w:id"], ctx);
+    }
     for (const key of Object.keys(el.attrs)) {
       if (!key.startsWith("r:") || !REL_ATTRS.includes(localName(key))) continue;
       const id = el.attrs[key];
       const source = theirs.get(id);
       if (!source) continue;
+      // The same relationship to the same part: nothing to adopt. The same
+      // part name with other bytes is another part (a SmartArt diagram's
+      // data with a word changed), and reject-all needs the original's.
       const here = mine.get(id);
-      if (here && here.target === source.target && here.type === source.type) continue;
+      if (here && here.target === source.target && here.type === source.type && samePart(source.target, ctx)) continue;
       let replacement = remapped.get(id);
       if (replacement === undefined) {
         replacement = source.external
@@ -1236,6 +1245,65 @@ export function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
     for (const c of el.children) walk(c);
   };
   walk(root);
+}
+
+/**
+ * True when the result and the original hold the same bytes at `target`. Only
+ * an XML part (a SmartArt diagram's data, a chart) is read; a binary part
+ * under one name is taken as the same, as it always was.
+ */
+function samePart(target: string, ctx: Ctx): boolean {
+  if (!target.endsWith(".xml")) return true;
+  const mine = ctx.doc.pkg.binary(target);
+  const theirs = ctx.original.pkg.binary(target);
+  return !!mine && !!theirs && mine.length === theirs.length && mine.every((b, i) => b === theirs[i]);
+}
+
+/**
+ * Whether `el` refers to a part the two documents both hold under one name
+ * with different contents: a SmartArt diagram with a word changed leaves its
+ * paragraph's XML as it was and changes only the diagram's data part.
+ */
+export function refersToChangedPart(el: XmlElement, ctx: Ctx): boolean {
+  const mine = ctx.doc.relationshipsOf(ctx.scope.into);
+  const theirs = ctx.original.relationshipsOf(ctx.scope.from);
+  const walk = (e: XmlElement): boolean =>
+    Object.keys(e.attrs).some((key) => {
+      if (!key.startsWith("r:") || !REL_ATTRS.includes(localName(key))) return false;
+      const source = theirs.get(e.attrs[key]);
+      const here = mine.get(e.attrs[key]);
+      return !!source && !!here && !source.external && source.target === here.target && !samePart(source.target, ctx);
+    }) || e.children.some(walk);
+  return walk(el);
+}
+
+/**
+ * The result's id for the original's comment `id`, which struck content
+ * refers to: the id itself when the result holds that comment unchanged,
+ * else a copy of the comment under a fresh id. Without the copy, reject-all
+ * brought a removed comment's reference back pointing at nothing
+ * (parity-comments with a comment removed).
+ */
+function adoptComment(id: string, ctx: Ctx): string {
+  const known = ctx.commentIds.get(id);
+  if (known !== undefined) return known;
+  const find = (root: XmlElement | null): XmlElement | undefined =>
+    root?.children.find((c) => localName(c.name) === "comment" && c.attrs["w:id"] === id);
+  const theirs = find(ctx.original.commentsTree());
+  const mine = find(ctx.doc.commentsTree());
+  let to = id;
+  if (theirs && !(mine && sameXml(theirs, mine))) {
+    const root = ctx.doc.commentsTree(true) as XmlElement;
+    let next = 0;
+    for (const c of root.children) next = Math.max(next, 1 + (Number(c.attrs["w:id"]) || 0));
+    const copy = cloneXml(theirs);
+    copy.attrs["w:id"] = String(next);
+    root.children.push(copy);
+    ctx.doc.markCommentsChanged();
+    to = String(next);
+  }
+  ctx.commentIds.set(id, to);
+  return to;
 }
 
 export function emitDeleted(el: XmlElement, ctx: Ctx): Entry {
@@ -1339,14 +1407,15 @@ export function wrapContainerContent(container: XmlElement, kind: "ins" | "del",
 
 /** Diff one matched paragraph pair, mutating the revised element in place. */
 function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
-  if (sameXml(oEl, rEl)) return;
+  const partChanged = refersToChangedPart(oEl, ctx);
+  if (!partChanged && sameXml(oEl, rEl)) return;
 
   if (ctx.formatting) alignParagraphProps(rEl, child(rEl, "pPr"), child(oEl, "pPr"), ctx);
 
   const oc = readParagraph(oEl, readOptions(ctx, true));
   const rc = readParagraph(rEl, readOptions(ctx, false));
-  if (!oc.inlineDiffable || !rc.inlineDiffable) {
-    if (oc.text !== rc.text || serializeXml(stripProps(oEl)) !== serializeXml(stripProps(rEl))) {
+  if (partChanged || !oc.inlineDiffable || !rc.inlineDiffable) {
+    if (partChanged || oc.text !== rc.text || serializeXml(stripProps(oEl)) !== serializeXml(stripProps(rEl))) {
       // Too structured to rebuild safely: strike the old content whole and
       // insert the new content whole, inside this one paragraph.
       const deleted = cloneXml(oEl);
