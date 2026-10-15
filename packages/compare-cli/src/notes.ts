@@ -74,8 +74,8 @@ export class DiskNotes implements NotesPart {
     for (const at of this.appended) use(parseXml(this.changes.read(at)));
   }
 
-  /** Write the part, with its changes, to `path`. */
-  write(path: string): void {
+  /** Write the part, with its changes, to `path`; `transform` rewrites each changed or appended note on the way. */
+  write(path: string, transform?: (note: XmlElement) => XmlElement): void {
     const fd = openSync(path, "w");
     try {
       const out = (bytes: Buffer | string): void => {
@@ -83,13 +83,17 @@ export class DiskNotes implements NotesPart {
         let done = 0;
         while (done < buf.length) done += writeSync(fd, buf, done, buf.length - done);
       };
+      const change = (at: number): void => {
+        if (transform) out(serializeXml(transform(parseXml(this.changes.read(at)))));
+        else this.changes.withBytes(at, out);
+      };
       out(this.head);
       for (let i = 0; i < this.children.count; i++) {
-        const change = this.changed.get(i);
-        if (change === undefined) this.children.withBytes(i, out);
-        else this.changes.withBytes(change, out);
+        const at = this.changed.get(i);
+        if (at === undefined) this.children.withBytes(i, out);
+        else change(at);
       }
-      for (const at of this.appended) this.changes.withBytes(at, out);
+      for (const at of this.appended) change(at);
       out(this.tail);
     } finally {
       closeSync(fd);

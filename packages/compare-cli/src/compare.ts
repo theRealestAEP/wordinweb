@@ -711,21 +711,30 @@ async function writeResult(
 
   // Every other part comes from the shell's save. A save leaves out chart
   // parts the body it sees does not use, so the body's ids stand in for it.
-  if (relIds) shellBody.children.unshift({ name: "w:dxw-rels", attrs: Object.fromEntries([...relIds].map((id, i) => [`r:dxw${i}`, id])), children: [], text: "" });
-  const files = unzipSync(R.shell.save());
-  if (relIds) shellBody.children.shift();
-  const notes = new Map<string, string>();
-  for (const part of notesOf(R)) {
-    const file = join(dir, `result-${part.kind}s.xml`);
-    part.write(file);
-    notes.set(part.part, file);
-  }
-  await writePackage(outPath, docFile, files, notes, O, R);
+  const saveShell = (): Record<string, Uint8Array> => {
+    if (relIds) shellBody.children.unshift({ name: "w:dxw-rels", attrs: Object.fromEntries([...relIds].map((id, i) => [`r:dxw${i}`, id])), children: [], text: "" });
+    const files = unzipSync(R.shell.save());
+    if (relIds) shellBody.children.shift();
+    return files;
+  };
+  const writeNotes = (prefix: string, transform?: (note: XmlElement) => XmlElement): Map<string, string> => {
+    const notes = new Map<string, string>();
+    for (const part of notesOf(R)) {
+      const file = join(dir, `${prefix}-${part.kind}s.xml`);
+      part.write(file, transform);
+      notes.set(part.part, file);
+    }
+    return notes;
+  };
+  await writePackage(outPath, docFile, saveShell(), writeNotes("result"), O, R);
 
   if (printable) {
     const printableFile = join(dir, "printable-document.xml");
     writeDocument(printableFile, head, printable.store, noteIds, (printable.beforeSectPr ?? "") + tail);
-    await writePackage(printable.path, printableFile, files, notes, O, R);
+    // The headers, footers and notes carry revisions of their own: flattened
+    // in the shell, now that the result is saved, and in the notes on disk.
+    for (const root of R.shell.revisionRoots()) flatten(root);
+    await writePackage(printable.path, printableFile, saveShell(), writeNotes("printable", flatten), O, R);
   }
 }
 

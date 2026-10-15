@@ -5,7 +5,7 @@ import { strFromU8, unzipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, child, localName, parseXml, serializeXml } from "../../core/src/xml.js";
-import { compareDocuments } from "../../core/src/edit/compare/index.js";
+import { CompareNote, compareDocuments } from "../../core/src/edit/compare/index.js";
 import { acceptAllRevisions, collectRevisions, rejectAllRevisions } from "../../core/src/edit/suggest.js";
 import { makeDocx, wrapDocument } from "../../core/test/helpers.js";
 import { AUTHOR, DATE, canonicalBody, para } from "../../core/test/compare-helpers.js";
@@ -18,15 +18,30 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 let pairs = 0;
 
-/** compareFiles on two bodies: the result must review back to either input, and say what compareDocuments says. */
-async function check(originalBody: string, revisedBody: string, parts: Record<string, string> = {}): Promise<DocxDocument> {
+/** A .docx from a body, or as given. */
+function docx(input: string | Uint8Array): Uint8Array {
+  return typeof input === "string" ? makeDocx({ "word/document.xml": wrapDocument(input) }) : input;
+}
+
+/** The parts beside the body that can carry revisions (headers, footers, notes), serialized, in package order. */
+function otherParts(doc: DocxDocument): string {
+  return doc.revisionRoots().slice(1).map((root) => serializeXml(root)).join("\n");
+}
+
+/**
+ * compareFiles on two documents: the result's body must review back to
+ * either input, and every part must say what compareDocuments says. The
+ * printable copy must be the result with every part flattened. Returns the
+ * result and the printable copy.
+ */
+async function check(originalInput: string | Uint8Array, revisedInput: string | Uint8Array, onNote?: (note: CompareNote) => void): Promise<{ result: DocxDocument; printable: DocxDocument }> {
   const n = pairs++;
-  const original = makeDocx({ ...parts, "word/document.xml": wrapDocument(originalBody) });
-  const revised = makeDocx({ ...parts, "word/document.xml": wrapDocument(revisedBody) });
+  const original = docx(originalInput);
+  const revised = docx(revisedInput);
   const paths = [join(dir, `${n}-o.docx`), join(dir, `${n}-r.docx`), join(dir, `${n}-out.docx`), join(dir, `${n}-print.docx`)];
   writeFileSync(paths[0], original);
   writeFileSync(paths[1], revised);
-  const { revisions } = await compareFiles(paths[0], paths[1], paths[2], { author: AUTHOR, date: DATE, printable: { path: paths[3], beforeSectPr: SUMMARY } });
+  const { revisions } = await compareFiles(paths[0], paths[1], paths[2], { author: AUTHOR, date: DATE, onNote, printable: { path: paths[3], beforeSectPr: SUMMARY } });
   const result = new Uint8Array(readFileSync(paths[2]));
 
   // The counts are collectRevisions' on the result, kind by kind.
@@ -35,26 +50,40 @@ async function check(originalBody: string, revisedBody: string, parts: Record<st
   expect(revisions).toEqual(tally);
   // The printable copy is the result flattened whole, the summary before the final sectPr.
   const reference = DocxDocument.load(result);
+  for (const root of reference.revisionRoots()) flatten(root);
   const body = child(reference.docRoot, "body") as XmlElement;
-  flatten(body);
   const sectPr = body.children.findIndex((c) => localName(c.name) === "sectPr");
   body.children.splice(sectPr === -1 ? body.children.length : sectPr, 0, ...parseXml(`<root>${SUMMARY}</root>`).children);
-  expect(canonicalBody(DocxDocument.load(new Uint8Array(readFileSync(paths[3]))))).toBe(canonicalBody(reference));
+  const printable = DocxDocument.load(new Uint8Array(readFileSync(paths[3])));
+  expect(canonicalBody(printable)).toBe(canonicalBody(reference));
+  expect(otherParts(printable)).toBe(otherParts(reference));
 
   const accepted = DocxDocument.load(result);
   acceptAllRevisions(accepted);
-  expect(canonicalBody(accepted)).toBe(canonicalBody(DocxDocument.load(revised)));
+  expect(reviewedBody(accepted)).toBe(reviewedBody(DocxDocument.load(revised)));
   expect(collectRevisions(accepted)).toHaveLength(0);
   const rejected = DocxDocument.load(result);
   rejectAllRevisions(rejected);
-  expect(canonicalBody(rejected)).toBe(canonicalBody(DocxDocument.load(original)));
+  expect(reviewedBody(rejected)).toBe(reviewedBody(DocxDocument.load(original)));
 
   const expected = compareDocuments(DocxDocument.load(original), DocxDocument.load(revised), { author: AUTHOR, date: DATE });
   expect(withoutIds(canonicalBody(DocxDocument.load(result)))).toBe(withoutIds(canonicalBody(expected)));
-  return DocxDocument.load(result);
+  expect(withoutIds(otherParts(DocxDocument.load(result)))).toBe(withoutIds(otherParts(expected)));
+  return { result: DocxDocument.load(result), printable };
 }
 
 const SUMMARY = `<w:p><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:r><w:t>Summary</w:t></w:r></w:p>`;
+
+/**
+ * The body as a review gives it: without the last section's header and
+ * footer references and title-page flag, which no revision carries, so a
+ * review leaves them as the result has them.
+ */
+function reviewedBody(doc: DocxDocument): string {
+  const sectPr = child(child(doc.docRoot, "body"), "sectPr");
+  if (sectPr) sectPr.children = sectPr.children.filter((c) => !["headerReference", "footerReference", "titlePg"].includes(localName(c.name)));
+  return canonicalBody(doc);
+}
 
 /** Revision ids are unique either way, but taken in a different order. */
 function withoutIds(xml: string): string {
@@ -73,7 +102,7 @@ describe("compareFiles", () => {
 
   it("identical documents give no revisions", async () => {
     const body = para("One.") + para("Two.") + table([["a", "b"]]);
-    const result = await check(body, body);
+    const { result } = await check(body, body);
     expect(collectRevisions(result)).toHaveLength(0);
   });
 
@@ -226,6 +255,128 @@ describe("compareFiles", () => {
     expect(notes(result)).toBe(notes(expected));
     // The comments are never read: the result carries the revised part as it was.
     expect(strFromU8(unzipSync(bytes)["word/comments.xml"])).toBe(comments);
+  });
+
+  describe("the parts beside the body", () => {
+    const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    /** A one-paragraph document with the parts named here, each holding its text, and the body referencing each. */
+    const withParts = (texts: Partial<Record<"header" | "footer" | "first" | "footnote" | "endnote", string>>): Uint8Array => {
+      const line = (text: string): string => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+      const notesPart = (kind: "footnote" | "endnote", text: string): string =>
+        `<w:${kind}s ${W_NS}><w:${kind} w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:${kind}>` +
+        `<w:${kind} w:id="1">${line(text)}</w:${kind}></w:${kind}s>`;
+      const rels: string[] = [];
+      const parts: Record<string, string> = {};
+      const refs: string[] = [];
+      let runs = "";
+      if (texts.footnote !== undefined) {
+        rels.push(`<Relationship Id="rId1" Type="${REL}/footnotes" Target="footnotes.xml"/>`);
+        parts["word/footnotes.xml"] = notesPart("footnote", texts.footnote);
+        runs += `<w:r><w:footnoteReference w:id="1"/></w:r>`;
+      }
+      if (texts.endnote !== undefined) {
+        rels.push(`<Relationship Id="rId2" Type="${REL}/endnotes" Target="endnotes.xml"/>`);
+        parts["word/endnotes.xml"] = notesPart("endnote", texts.endnote);
+        runs += `<w:r><w:endnoteReference w:id="1"/></w:r>`;
+      }
+      for (const [name, kind, type, id] of [["header", "header", "default", 3], ["footer", "footer", "default", 4], ["first", "header", "first", 5]] as const) {
+        const text = texts[name];
+        if (text === undefined) continue;
+        rels.push(`<Relationship Id="rId${id}" Type="${REL}/${kind}" Target="${kind}${id}.xml"/>`);
+        parts[`word/${kind}${id}.xml`] = `<w:${kind === "header" ? "hdr" : "ftr"} ${W_NS}>${line(text)}${line("Line two.")}</w:${kind === "header" ? "hdr" : "ftr"}>`;
+        refs.push(`<w:${kind}Reference w:type="${type}" r:id="rId${id}"/>`);
+      }
+      return makeDocx({
+        ...parts,
+        "word/_rels/document.xml.rels": `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.join("")}</Relationships>`,
+        "word/document.xml":
+          `<w:document ${W_NS} ${R_NS}><w:body><w:p><w:r><w:t xml:space="preserve">Body text.</w:t></w:r>${runs}</w:p>` +
+          `<w:sectPr>${refs.join("")}${texts.first === undefined ? "" : "<w:titlePg/>"}</w:sectPr></w:body></w:document>`,
+      });
+    };
+    /** The text of each header and footer part the body references, by reference, and of each note. */
+    const texts = (doc: DocxDocument): Record<string, string> => {
+      const d = DocxDocument.load(doc.save());
+      const text = (xml: string): string => [...xml.matchAll(/<w:t[^>]*>([^<]*)/g)].map((m) => m[1]).join(" ");
+      const out: Record<string, string> = {};
+      for (const m of (d.pkg.text("word/document.xml") ?? "").matchAll(/<w:(header|footer)Reference [^>]*w:type="(\w+)"[^>]*r:id="(\w+)"/g)) {
+        out[`${m[1]}:${m[2]}`] = text(d.pkg.text(d.documentRels.get(m[3])?.target ?? "") ?? "");
+      }
+      for (const kind of ["footnote", "endnote"] as const) {
+        const note = (kind === "footnote" ? d.footnotesTree() : d.endnotesTree())?.children.find((c) => c.attrs["w:id"] === "1");
+        if (note) out[kind] = text(serializeXml(note));
+      }
+      return out;
+    };
+    const reviewed = (doc: DocxDocument, review: (d: DocxDocument) => unknown): DocxDocument => {
+      const copy = DocxDocument.load(doc.save());
+      review(copy);
+      return copy;
+    };
+    /** check, with the header-footer-reference notes and the deletion and insertion counts. */
+    const compare = async (original: Uint8Array, revised: Uint8Array) => {
+      const notes: string[] = [];
+      const { result } = await check(original, revised, (note) => {
+        if (note.code === "header-footer-reference") notes.push(note.detail);
+      });
+      const counts = collectRevisions(result).reduce((n, r) => (r.kind === "deletion" ? [n[0] + 1, n[1]] : r.kind === "insertion" ? [n[0], n[1] + 1] : n), [0, 0]);
+      return { notes, counts, accepted: reviewed(result, acceptAllRevisions), rejected: reviewed(result, rejectAllRevisions) };
+    };
+
+    it("edits in a header, a footer, a footnote and an endnote show in the printable copy as plain formatting", async () => {
+      const { printable } = await check(
+        withParts({ header: "BEFOREHEADER here", footer: "BEFOREFOOTER here", footnote: "BEFORENOTE here", endnote: "BEFOREEND here" }),
+        withParts({ header: "AFTERHEADER here", footer: "AFTERFOOTER here", footnote: "AFTERNOTE here", endnote: "AFTEREND here" }),
+      );
+      const printed = DocxDocument.load(printable.save());
+      for (const [part, old] of [["word/header3.xml", "BEFOREHEADER"], ["word/footer4.xml", "BEFOREFOOTER"], ["word/footnotes.xml", "BEFORENOTE"], ["word/endnotes.xml", "BEFOREEND"]]) {
+        const xml = printed.pkg.text(part) ?? "";
+        expect(xml).not.toMatch(/<w:(?:ins|del|delText)[\s>]/);
+        // The struck word is a red, struck-through run; the new word a blue, underlined one.
+        expect(xml).toMatch(new RegExp(`<w:r><w:rPr><w:color w:val="FF0000"/><w:strike/></w:rPr><w:t[^>]*>${old}`));
+        expect(xml).toMatch(/<w:r><w:rPr><w:color w:val="0000FF"\/><w:u w:val="single"\/><\/w:rPr><w:t[^>]*>AFTER/);
+      }
+    });
+
+    it("a header removed", async () => {
+      const original = withParts({ header: "BEFOREHEADER", footnote: "A note." });
+      const { notes, counts, accepted, rejected } = await compare(original, withParts({ footnote: "A note." }));
+      expect(counts).toEqual([2, 0]);
+      expect(notes).toEqual(["the last section's header was removed; its reference is not a revision, so accept-all leaves the header empty"]);
+      expect(texts(rejected)).toEqual(texts(DocxDocument.load(original)));
+      expect(texts(accepted)).toEqual({ "header:default": "", footnote: "A note." });
+    });
+
+    it("a header added", async () => {
+      const revised = withParts({ header: "AFTERHEADER" });
+      const { notes, counts, accepted, rejected } = await compare(withParts({}), revised);
+      expect(counts).toEqual([0, 2]);
+      expect(notes).toEqual(["the last section's header was added; its reference is not a revision, so reject-all leaves the header empty"]);
+      expect(texts(accepted)).toEqual(texts(DocxDocument.load(revised)));
+      expect(texts(rejected)).toEqual({ "header:default": "" });
+    });
+
+    it("a first-page header added", async () => {
+      const original = withParts({ header: "Shared header" });
+      const revised = withParts({ header: "Shared header", first: "FIRSTPAGE" });
+      const { notes, counts, accepted, rejected } = await compare(original, revised);
+      expect(counts).toEqual([0, 2]);
+      expect(notes).toEqual(["the last section's first-page header was added; its reference is not a revision, so reject-all leaves the header empty"]);
+      expect(texts(accepted)).toEqual(texts(DocxDocument.load(revised)));
+      expect(texts(rejected)).toEqual({ ...texts(DocxDocument.load(original)), "header:first": "" });
+    });
+
+    it("a footer removed", async () => {
+      const original = withParts({ header: "Shared header", footer: "BEFOREFOOTER" });
+      const revised = withParts({ header: "Shared header" });
+      const { notes, counts, accepted, rejected } = await compare(original, revised);
+      expect(counts).toEqual([2, 0]);
+      expect(notes).toEqual(["the last section's footer was removed; its reference is not a revision, so accept-all leaves the footer empty"]);
+      expect(texts(rejected)).toEqual(texts(DocxDocument.load(original)));
+      expect(texts(accepted)).toEqual({ ...texts(DocxDocument.load(revised)), "footer:default": "" });
+    });
   });
 
   it("an input with tracked changes is compared as accepted", async () => {
