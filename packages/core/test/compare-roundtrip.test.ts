@@ -806,3 +806,23 @@ describe("compareDocuments — options", () => {
     expect(xml).toMatch(/w:date="\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"/);
   });
 });
+
+describe("the last section's page setup", () => {
+  const PORTRAIT = `<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>`;
+  const LANDSCAPE = `<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="708" w:footer="708" w:gutter="0"/>`;
+
+  it("is tracked as a w:sectPrChange that reviews back to either side", () => {
+    const { merged } = roundTrip(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`, para("Body text.") + `<w:sectPr>${LANDSCAPE}</w:sectPr>`);
+    expect(collectRevisions(merged).map((r) => r.kind)).toEqual(["sectionFormat"]);
+  });
+
+  it("is not tracked when it is the same", () => {
+    const merged = compareDocuments(loadBody(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`), loadBody(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`), { author: AUTHOR, date: DATE });
+    expect(collectRevisions(merged)).toHaveLength(0);
+  });
+
+  it("is not tracked when formatting changes are off", () => {
+    const merged = compareDocuments(loadBody(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`), loadBody(para("Body text.") + `<w:sectPr>${LANDSCAPE}</w:sectPr>`), { author: AUTHOR, date: DATE, formatting: false });
+    expect(collectRevisions(merged)).toHaveLength(0);
+  });
+});

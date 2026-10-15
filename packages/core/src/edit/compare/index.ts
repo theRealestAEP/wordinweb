@@ -12,6 +12,7 @@ import {
   recordParagraphFormatChange,
   recordRowFormatChange,
   recordRunFormatChange,
+  recordSectionFormatChange,
   recordTableFormatChange,
   recordTableGridChange,
   revisionWrapper,
@@ -206,6 +207,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
   giveStruckReferencesTheirOwnNotes("endnote", merged, ctx);
 
   compareHeadersFooters(original, merged, headerFooterPairs, ctx);
+  compareLastSection(original, merged, ctx);
 
   if (issued > 0) merged.refresh();
   return merged;
@@ -338,6 +340,22 @@ export function pairHeadersFooters(
     if (key.startsWith("last:") && !theirs.has(key) && !paired.into.has(into)) pairs.push({ ...parse(key), from: null, into });
   }
   return pairs;
+}
+
+/**
+ * The last section's page setup (size, orientation, margins, columns and the
+ * rest of w:sectPr), tracked as a w:sectPrChange holding the original's when
+ * it differs. The header and footer references are compareHeadersFooters'.
+ */
+export function compareLastSection(original: DocxDocument, merged: DocxDocument, ctx: Ctx): void {
+  if (!ctx.formatting) return;
+  const before = child(child(original.docRoot, "body"), "sectPr");
+  const after = child(child(merged.docRoot, "body"), "sectPr");
+  if (!after) return;
+  const contents = (sectPr: XmlElement | undefined): string =>
+    (sectPr?.children ?? []).filter((c) => !["headerReference", "footerReference", "sectPrChange"].includes(localName(c.name))).map((c) => serializeXml(c)).join("");
+  if (contents(before) === contents(after)) return;
+  recordSectionFormatChange(after, before ?? { name: after.name, attrs: {}, children: [], text: "" }, ctx.meta);
 }
 
 /**

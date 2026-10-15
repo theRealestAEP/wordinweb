@@ -14,6 +14,7 @@ import {
   applyMarkStep,
   compareContext,
   compareHeadersFooters,
+  compareLastSection,
   compareNotes,
   compareRow,
   compareTableProps,
@@ -136,6 +137,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const noteIds = giveStruckReferencesTheirOwnNotes(body, sink.withNoteRefs, R, ctx);
 
     compareHeadersFooters(O.shell, R.shell, headerFooterPairs, ctx);
+    compareLastSection(O.shell, R.shell, ctx);
 
     // The body's revisions were counted as it was written; the rest are in
     // the shell (headers, footers) and in the notes the compare changed.
@@ -371,6 +373,7 @@ function noRevisions(): Record<RevisionKind, number> {
     tableFormat: 0,
     rowFormat: 0,
     cellFormat: 0,
+    sectionFormat: 0,
   };
 }
 
@@ -728,7 +731,9 @@ async function writeResult(
 
   if (printable) {
     const printableFile = join(dir, "printable-document.xml");
-    writeDocument(printableFile, head, printable.store, noteIds, (printable.beforeSectPr ?? "") + tail);
+    // The last section's page setup change, if any, as plain formatting.
+    const printableTail = tail.replace(/<w:sectPrChange\b[\s\S]*?<\/w:sectPrChange>/, "");
+    writeDocument(printableFile, head, printable.store, noteIds, (printable.beforeSectPr ?? "") + printableTail);
     // The headers, footers and notes carry revisions of their own: flattened
     // in the shell, now that the result is saved, and in the notes on disk.
     for (const root of R.shell.revisionRoots()) flatten(root);
