@@ -2149,9 +2149,12 @@ function paragraphRunSteps(n: number, info: (i: number) => MarkInfo, start: numb
   while (at <= end) {
     let last = at;
     while (last + 1 <= end && info(last + 1).cls === info(at).cls) last++;
-    // The join steps over range markers to the next paragraph, and so does the follower.
+    // Reviewed, the chain joins the first paragraph that survives the same
+    // review: past range markers, and past blocks of its own class, which go
+    // first (an inserted content control after an inserted paragraph: on
+    // reject the paragraph joined the heading after it, uspto-follow-on).
     let follower = last + 1;
-    while (follower < n && info(follower).marker) follower++;
+    while (follower < n && (info(follower).marker || info(follower).cls === info(at).cls)) follower++;
     if (follower < n && info(at).paragraph && info(follower).paragraph) step({ kind: "props", at, follower });
     at = last + 1;
   }

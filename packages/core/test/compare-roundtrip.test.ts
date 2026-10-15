@@ -919,3 +919,38 @@ describe("compareDocuments — comments and diagram parts", () => {
     expect(dataOf(accepted)).toBe("Explore");
   });
 });
+
+describe("compareDocuments — a joined paragraph's properties", () => {
+  const H1 = `<w:pStyle w:val="Heading1"/>`;
+  const control = (text: string) => `<w:sdt><w:sdtPr/><w:sdtContent>${para(text)}</w:sdtContent></w:sdt>`;
+
+  it("records the follower's original properties when the follower's own format changed", () => {
+    // parity-text: two paragraphs with the same words, justified and left.
+    const same = "Lorem ipsum dolor sit amet.";
+    roundTrip(
+      para("Title", { pPr: H1 }) + para(same, { pPr: `<w:jc w:val="both"/>` }) + para(same, { pPr: `<w:jc w:val="left"/>` }) + para("End."),
+      para(same + " Updated.", { pPr: `<w:jc w:val="both"/>` }) + para("Inserted.") + para(same, { pPr: `<w:jc w:val="left"/>` }) + para("End."),
+    );
+  });
+
+  it("finds the follower past range markers", () => {
+    // wild-wirfp: a paragraph inserted after a content control, then bookmark
+    // ends at body level, then a heading.
+    // The join takes the markers into the heading, where the bookmarks still
+    // end, so the check is the heading's style rather than the whole body.
+    const marks = `<w:bookmarkEnd w:id="1"/><w:bookmarkEnd w:id="2"/>`;
+    const merged = compareDocuments(loadBody(control("Cover") + marks + para("Heading", { pPr: H1 })), loadBody(control("Cover") + para("Inserted.") + marks + para("Heading", { pPr: H1 })), { author: AUTHOR, date: DATE });
+    for (const review of [acceptAllRevisions, rejectAllRevisions]) {
+      const doc = DocxDocument.load(merged.save());
+      review(doc);
+      expect(serializeXml(doc.docRoot)).toMatch(/<w:pStyle w:val="Heading1"\/><\/w:pPr>(<w:bookmarkEnd w:id="\d"\/>)*<w:r><w:t[^>]*>Heading/);
+    }
+  });
+
+  it("finds the follower past a block of the head's own class", () => {
+    // uspto-follow-on: an inserted paragraph, then an inserted content
+    // control, then a styled paragraph both documents hold.
+    const conclusion = para("Conclusion", { pPr: `<w:pStyle w:val="Conclusion"/>` });
+    roundTrip(control("Kept") + conclusion, control("Kept") + para("Inserted.") + control("Also inserted") + conclusion);
+  });
+});
