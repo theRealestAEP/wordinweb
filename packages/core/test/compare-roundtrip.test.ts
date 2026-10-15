@@ -422,6 +422,16 @@ describe("compareDocuments — equations", () => {
     // The struck equation keeps its m:t; only w:t becomes w:delText.
     expect(serializeXml(merged.docRoot)).not.toContain("m:delText");
   });
+  it("retypes a struck equation's own w:r text as deleted text", () => {
+    // An equation may hold plain w:r runs (EG_PContentMath); a w:t left in a
+    // w:del is invalid, while the m:t beside it stays.
+    const withRun = (word: string): string =>
+      `<w:p><w:r><w:t xml:space="preserve">Let ${word} be </w:t></w:r><m:oMath ${M}><m:r><m:t>x</m:t></m:r><w:r><w:t>where</w:t></w:r></m:oMath></w:p>`;
+    const { merged } = roundTrip(withRun("x"), withRun("y"));
+    const xml = serializeXml(merged.docRoot);
+    expect(xml).toContain("<w:delText>where</w:delText>");
+    expect(xml).not.toContain("m:delText");
+  });
   it("round-trips a number changed inside an equation", () => {
     roundTrip(inline("x", "x+1"), inline("x", "x+2"));
   });

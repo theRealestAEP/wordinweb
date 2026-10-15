@@ -171,14 +171,17 @@ export function markDeletedText(el: XmlElement): void {
   // An equation's m:t stays: OMML has no deleted form of math text, and the
   // w:del around the equation is what strikes it. A w:r inside the equation
   // is WordprocessingML and is retyped like any other.
-  const w = prefixOf(el);
-  const walk = (e: XmlElement): void => {
-    if (localName(e.name) === "txbxContent") return;
-    if (e.name === `${w}t`) e.name = `${w}delText`;
-    else if (e.name === `${w}instrText`) e.name = `${w}delInstrText`;
-    for (const c of e.children) walk(c);
+  const walk = (e: XmlElement, math: string | null): void => {
+    const ln = localName(e.name);
+    if (ln === "txbxContent") return;
+    if (ln === "oMath" || ln === "oMathPara") math = prefixOf(e);
+    if (math === null || prefixOf(e) !== math) {
+      if (ln === "t") e.name = e.name.replace(/t$/, "delText");
+      else if (ln === "instrText") e.name = e.name.replace(/instrText$/, "delInstrText");
+    }
+    for (const c of e.children) walk(c, math);
   };
-  walk(el);
+  walk(el, null);
 }
 
 // ---------- insertion ----------
