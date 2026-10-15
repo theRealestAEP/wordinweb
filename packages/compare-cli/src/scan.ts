@@ -1,4 +1,5 @@
 import { closeSync, openSync, readSync } from "node:fs";
+import { CompareError } from "./errors.js";
 
 /** One child of an element: its bytes are [start, end) of the file. */
 export interface Child {
@@ -89,7 +90,7 @@ class Scanner {
       }
       let lt = this.buf.indexOf(LT, pos);
       while (lt === -1) {
-        if (!this.more()) throw new Error(inside ? "an element is not closed" : "no w:body: it is not a Word document");
+        if (!this.more()) throw inside ? new CompareError("damaged", "an element is not closed") : new CompareError("not_docx", "no w:body: it is not a Word document");
         lt = this.buf.indexOf(LT, pos);
       }
       const at = this.base + lt;
@@ -100,7 +101,7 @@ class Scanner {
       } else if (next === 0x21 /* ! */) {
         if (this.startsWith("<!--", lt)) end = this.find("-->", lt + 4, "comment");
         else if (this.startsWith("<![CDATA[", lt)) end = this.find("]]>", lt + 9, "CDATA section");
-        else throw new Error("a document type declaration is not allowed");
+        else throw new CompareError("damaged", "a document type declaration is not allowed");
       } else if (next === SLASH) {
         end = this.find(">", lt + 2, "end tag");
         depth--;
@@ -116,7 +117,7 @@ class Scanner {
           inside = true;
           contentStart = end;
         } else if (inside && depth === cd + 1) {
-          if (container.name && localName(name) === container.name) throw new Error(`a w:${container.name} inside the ${container.name}`);
+          if (container.name && localName(name) === container.name) throw new CompareError("damaged", `a w:${container.name} inside the ${container.name}`);
           if (selfClosing) {
             onChild({ start: at, end: end, name });
           } else {
@@ -150,7 +151,7 @@ class Scanner {
   }
 
   private byteAt(i: number): number {
-    while (i >= this.buf.length) if (!this.more()) throw new Error("unexpected end of file");
+    while (i >= this.buf.length) if (!this.more()) throw new CompareError("damaged", "unexpected end of file");
     return this.buf[i];
   }
 
@@ -166,7 +167,7 @@ class Scanner {
       if (i !== -1) return this.base + i + text.length;
       // Keep looking from where a match could still start.
       from = Math.max(from, this.buf.length - text.length + 1);
-      if (!this.more()) throw new Error(`unterminated ${what}`);
+      if (!this.more()) throw new CompareError("damaged", `unterminated ${what}`);
     }
   }
 
@@ -174,13 +175,13 @@ class Scanner {
   private tagEnd(from: number): number {
     let quote = 0;
     for (let i = from; ; i++) {
-      if (i >= this.buf.length && !this.more()) throw new Error("unterminated start tag");
+      if (i >= this.buf.length && !this.more()) throw new CompareError("damaged", "unterminated start tag");
       const c = this.buf[i];
       if (quote) {
         if (c === quote) quote = 0;
       } else if (c === 0x22 || c === 0x27) quote = c;
       else if (c === GT) return this.base + i + 1;
-      else if (c === LT) throw new Error("'<' inside a start tag");
+      else if (c === LT) throw new CompareError("damaged", "'<' inside a start tag");
     }
   }
 

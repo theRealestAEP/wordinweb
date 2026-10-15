@@ -9,6 +9,7 @@ import { paragraphText } from "../../core/src/edit/compare/content.js";
 import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionKey } from "../../core/src/edit/compare/index.js";
 import { normalizeText } from "../../core/src/edit/compare/text.js";
 import { resolvePartPath } from "../../core/src/zip.js";
+import { CompareError } from "./errors.js";
 import { DiskNotes } from "./notes.js";
 import { scanBody, scanChildren } from "./scan.js";
 import { BlockStore } from "./store.js";
@@ -92,7 +93,7 @@ export interface Input {
 export async function readInput(zip: ZipReader, side: Side, dir: string): Promise<Input> {
   const docPart = documentPart(zip);
   const docEntry = zip.entries.get(docPart);
-  if (!docEntry) throw new Error(`${zip.path}: missing ${docPart}`);
+  if (!docEntry) throw new CompareError("not_docx", `${zip.path}: missing ${docPart}`);
   const docFile = join(dir, `${side}-document.xml`);
   await zip.extract(docEntry, docFile);
 
@@ -108,7 +109,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       names.push(c.name);
     });
   } catch (error) {
-    throw new Error(`${docPart}: ${error instanceof Error ? error.message : String(error)}`);
+    throw withPart(docPart, error);
   }
 
   const fd = openSync(docFile, "r");
@@ -259,7 +260,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     // `wrap` is the body child the batch sat in: a table around its rows,
     // or null for body blocks.
     const body = child(shell.docRoot, "body");
-    if (!body) throw new Error(`${zip.path}: document.xml has no w:body`);
+    if (!body) throw new CompareError("not_docx", `${zip.path}: document.xml has no w:body`);
     const tail = body.children;
     const accept = (els: XmlElement[], wrap: XmlElement | null): XmlElement[] => {
       body.children = [...(wrap ? [{ ...wrap, children: els }] : els), ...tail];
@@ -415,12 +416,18 @@ async function outline(zip: ZipReader, part: string, file: string): Promise<Outl
     try {
       bounds = scanChildren(fd, 0, () => {}, () => {});
     } catch (error) {
-      throw new Error(`${part}: ${error instanceof Error ? error.message : String(error)}`);
+      throw withPart(part, error);
     }
     return { file, head: readRange(fd, 0, bounds.contentStart), tail: readRange(fd, bounds.contentEnd, fstatSync(fd).size) };
   } finally {
     closeSync(fd);
   }
+}
+
+/** `error` with the part it was found in named first, its code kept. */
+function withPart(part: string, error: unknown): CompareError {
+  const message = `${part}: ${error instanceof Error ? error.message : String(error)}`;
+  return new CompareError(error instanceof CompareError ? error.code : "damaged", message, undefined, { cause: error });
 }
 
 /** A part name as a file name. */

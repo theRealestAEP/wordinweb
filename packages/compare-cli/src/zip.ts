@@ -2,6 +2,7 @@ import { closeSync, createReadStream, createWriteStream, fstatSync, openSync, re
 import { PassThrough, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { crc32, createDeflateRaw, createInflateRaw, deflateRawSync, inflateRawSync } from "node:zlib";
+import { CompareError } from "./errors.js";
 
 /** One entry of a zip's central directory. */
 export interface ZipEntry {
@@ -44,7 +45,7 @@ export class ZipReader {
   /** Where an entry's compressed bytes start. */
   dataOffset(entry: ZipEntry): number {
     const header = this.bytes(entry.headerOffset, 30);
-    if (header.readUInt32LE(0) !== 0x04034b50) throw new Error(`${this.path}: bad local header for ${entry.name}`);
+    if (header.readUInt32LE(0) !== 0x04034b50) throw new CompareError("damaged", `${this.path}: bad local header for ${entry.name}`);
     return entry.headerOffset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
   }
 
@@ -56,9 +57,9 @@ export class ZipReader {
       // Never inflate past the size the directory gives: a zip bomb stops here.
       data = entry.method === 8 ? inflateRawSync(raw, { maxOutputLength: Math.max(1, entry.size) }) : raw;
     } catch {
-      throw new Error(`${this.path}: ${entry.name} is corrupt`);
+      throw new CompareError("damaged", `${this.path}: ${entry.name} is corrupt`);
     }
-    if (data.length !== entry.size || crc32(data) !== entry.crc) throw new Error(`${this.path}: ${entry.name} is corrupt`);
+    if (data.length !== entry.size || crc32(data) !== entry.crc) throw new CompareError("damaged", `${this.path}: ${entry.name} is corrupt`);
     return data;
   }
 
@@ -73,14 +74,14 @@ export class ZipReader {
         size += chunk.length;
         crc = crc32(chunk, crc);
         // Stop as soon as the entry outgrows the size the directory gives.
-        if (size > entry.size) done(new Error(`${path}: ${entry.name} is corrupt`));
+        if (size > entry.size) done(new CompareError("damaged", `${path}: ${entry.name} is corrupt`));
         else done(null, chunk);
       },
     });
     // createReadStream's `end` is inclusive, and a zero-length range must not read byte `start`.
     const source = entry.compressedSize > 0 ? createReadStream(this.path, { start, end: start + entry.compressedSize - 1 }) : emptyStream();
     await pipeline(source, entry.method === 8 ? createInflateRaw() : new PassThrough(), check, createWriteStream(dest));
-    if (size !== entry.size || crc !== entry.crc) throw new Error(`${this.path}: ${entry.name} is corrupt`);
+    if (size !== entry.size || crc !== entry.crc) throw new CompareError("damaged", `${this.path}: ${entry.name} is corrupt`);
   }
 
   /** Copy an entry's compressed bytes, unchanged, into `out` under `name`. */
@@ -91,7 +92,7 @@ export class ZipReader {
       const chunk = Buffer.allocUnsafe(Math.min(1 << 20, entry.compressedSize));
       while (at < end) {
         const n = readSync(this.fd, chunk, 0, Math.min(chunk.length, end - at), at);
-        if (n === 0) throw new Error(`${this.path}: ${entry.name} is truncated`);
+        if (n === 0) throw new CompareError("damaged", `${this.path}: ${entry.name} is truncated`);
         write(chunk.subarray(0, n));
         at += n;
       }
@@ -103,7 +104,7 @@ export class ZipReader {
     let done = 0;
     while (done < length) {
       const n = readSync(this.fd, buf, done, length - done, position + done);
-      if (n === 0) throw new Error(`${this.path}: unexpected end of file`);
+      if (n === 0) throw new CompareError("damaged", `${this.path}: unexpected end of file`);
       done += n;
     }
     return buf;
@@ -120,7 +121,7 @@ export class ZipReader {
     if (eocd < 0) {
       // A .doc file, and a password-protected .docx, are OLE compound files.
       const ole = fileSize >= 8 && this.bytes(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
-      throw new Error(`${this.path}: not a .docx file${ole ? " (it is a .doc file or a password-protected document)" : ""}`);
+      throw new CompareError("not_docx", `${this.path}: not a .docx file${ole ? " (it is a .doc file or a password-protected document)" : ""}`);
     }
     let count = tail.readUInt16LE(eocd + 10);
     let cdSize = tail.readUInt32LE(eocd + 12);
@@ -129,9 +130,9 @@ export class ZipReader {
       // ZIP64: a locator just before the record points at the ZIP64 record.
       const locatorAt = fileSize - tailLength + eocd - 20;
       const locator = this.bytes(locatorAt, 20);
-      if (locator.readUInt32LE(0) !== 0x07064b50) throw new Error(`${this.path}: missing ZIP64 locator`);
+      if (locator.readUInt32LE(0) !== 0x07064b50) throw new CompareError("damaged", `${this.path}: missing ZIP64 locator`);
       const record = this.bytes(Number(locator.readBigUInt64LE(8)), 56);
-      if (record.readUInt32LE(0) !== 0x06064b50) throw new Error(`${this.path}: bad ZIP64 record`);
+      if (record.readUInt32LE(0) !== 0x06064b50) throw new CompareError("damaged", `${this.path}: bad ZIP64 record`);
       count = Number(record.readBigUInt64LE(32));
       cdSize = Number(record.readBigUInt64LE(40));
       cdOffset = Number(record.readBigUInt64LE(48));
@@ -139,8 +140,8 @@ export class ZipReader {
     const cd = this.bytes(cdOffset, cdSize);
     let at = 0;
     for (let i = 0; i < count; i++) {
-      if (cd.readUInt32LE(at) !== 0x02014b50) throw new Error(`${this.path}: bad central directory`);
-      if (cd.readUInt16LE(at + 8) & 1) throw new Error(`${this.path}: encrypted entries are not supported`);
+      if (cd.readUInt32LE(at) !== 0x02014b50) throw new CompareError("damaged", `${this.path}: bad central directory`);
+      if (cd.readUInt16LE(at + 8) & 1) throw new CompareError("not_docx", `${this.path}: encrypted entries are not supported`);
       const nameLength = cd.readUInt16LE(at + 28);
       const extraLength = cd.readUInt16LE(at + 30);
       const commentLength = cd.readUInt16LE(at + 32);
@@ -152,7 +153,7 @@ export class ZipReader {
         size: cd.readUInt32LE(at + 24),
         headerOffset: cd.readUInt32LE(at + 42),
       };
-      if (entry.method !== 0 && entry.method !== 8) throw new Error(`${this.path}: ${entry.name} uses compression method ${entry.method}`);
+      if (entry.method !== 0 && entry.method !== 8) throw new CompareError("not_docx", `${this.path}: ${entry.name} uses compression method ${entry.method}`);
       // A ZIP64 extra field holds, in order, each of these that is 0xFFFFFFFF.
       let extra = at + 46 + nameLength;
       const extraEnd = extra + extraLength;
