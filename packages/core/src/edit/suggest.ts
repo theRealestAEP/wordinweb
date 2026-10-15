@@ -1016,6 +1016,12 @@ function carrySectionBreak(pEl: XmlElement, next: XmlElement): void {
  */
 export function collectRevisions(doc: DocxDocument): RevisionRef[] {
   const out: RevisionRef[] = [];
+  for (const root of doc.revisionRoots()) collectRevisionsIn(root, out);
+  return out;
+}
+
+/** collectRevisions for one tree: its revisions, in document order, onto `out`. */
+export function collectRevisionsIn(root: XmlElement, out: RevisionRef[]): void {
   const walk = (el: XmlElement): void => {
     const ln = localName(el.name);
     // Paragraph-mark revisions live in pPr/rPr; collect them at the w:p so
@@ -1087,8 +1093,7 @@ export function collectRevisions(doc: DocxDocument): RevisionRef[] {
       }
     }
   };
-  for (const root of doc.revisionRoots()) walk(root);
-  return out;
+  walk(root);
 }
 
 function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
