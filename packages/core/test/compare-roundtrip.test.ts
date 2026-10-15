@@ -408,6 +408,38 @@ describe("compareDocuments — content controls and simple fields in removed par
   });
 });
 
+describe("compareDocuments — equations", () => {
+  // parity-math2: a paragraph holding an equation is struck and reinserted
+  // whole, and the equation itself was left outside the w:del, so accept-all
+  // showed it twice.
+  const M = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"';
+  const math = (text: string): string => `<m:oMath ${M}><m:r><m:t>${text}</m:t></m:r></m:oMath>`;
+  const inline = (word: string, eq: string): string =>
+    `<w:p><w:r><w:t xml:space="preserve">Let ${word} be </w:t></w:r>${math(eq)}<w:r><w:t>.</w:t></w:r></w:p>`;
+  const display = (eq: string): string => `<w:p><m:oMathPara ${M}>${math(eq)}</m:oMathPara></w:p>`;
+  it("round-trips a word changed beside an inline equation", () => {
+    const { merged } = roundTrip(inline("x", "x+1"), inline("y", "x+1"));
+    // The struck equation keeps its m:t; only w:t becomes w:delText.
+    expect(serializeXml(merged.docRoot)).not.toContain("m:delText");
+  });
+  it("retypes a struck equation's own w:r text as deleted text", () => {
+    // An equation may hold plain w:r runs (EG_PContentMath); a w:t left in a
+    // w:del is invalid, while the m:t beside it stays.
+    const withRun = (word: string): string =>
+      `<w:p><w:r><w:t xml:space="preserve">Let ${word} be </w:t></w:r><m:oMath ${M}><m:r><m:t>x</m:t></m:r><w:r><w:t>where</w:t></w:r></m:oMath></w:p>`;
+    const { merged } = roundTrip(withRun("x"), withRun("y"));
+    const xml = serializeXml(merged.docRoot);
+    expect(xml).toContain("<w:delText>where</w:delText>");
+    expect(xml).not.toContain("m:delText");
+  });
+  it("round-trips a number changed inside an equation", () => {
+    roundTrip(inline("x", "x+1"), inline("x", "x+2"));
+  });
+  it("round-trips a display equation removed and one added", () => {
+    roundTrip(para("Before.") + display("a=b") + para("After."), para("Before.") + para("After.") + display("c=d"));
+  });
+});
+
 describe("compareDocuments — a word split across runs", () => {
   it("round-trips an edit beside a split word", () => {
     roundTrip(
@@ -804,5 +836,121 @@ describe("compareDocuments — options", () => {
     const merged = compareDocuments(loadBody(para("The quick brown fox.")), loadBody(para("The quick brown cat.")), { author: AUTHOR });
     const xml = DocxDocument.load(merged.save()).pkg.text("word/document.xml") ?? "";
     expect(xml).toMatch(/w:date="\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ"/);
+  });
+});
+
+describe("the last section's page setup", () => {
+  const PORTRAIT = `<w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="708" w:footer="708" w:gutter="0"/>`;
+  const LANDSCAPE = `<w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/><w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="708" w:footer="708" w:gutter="0"/>`;
+
+  it("is tracked as a w:sectPrChange that reviews back to either side", () => {
+    const { merged } = roundTrip(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`, para("Body text.") + `<w:sectPr>${LANDSCAPE}</w:sectPr>`);
+    expect(collectRevisions(merged).map((r) => r.kind)).toEqual(["sectionFormat"]);
+  });
+
+  it("is not tracked when it is the same", () => {
+    const merged = compareDocuments(loadBody(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`), loadBody(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`), { author: AUTHOR, date: DATE });
+    expect(collectRevisions(merged)).toHaveLength(0);
+  });
+
+  it("is not tracked when formatting changes are off", () => {
+    const merged = compareDocuments(loadBody(para("Body text.") + `<w:sectPr>${PORTRAIT}</w:sectPr>`), loadBody(para("Body text.") + `<w:sectPr>${LANDSCAPE}</w:sectPr>`), { author: AUTHOR, date: DATE, formatting: false });
+    expect(collectRevisions(merged)).toHaveLength(0);
+  });
+});
+
+describe("compareDocuments — comments and diagram parts", () => {
+  const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const rels = (extra: string) =>
+    `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${extra}</Relationships>`;
+  const textOf = (xml: string | null | undefined) => [...(xml ?? "").matchAll(/<w:t[^>]*>([^<]*)/g)].map((m) => m[1]).join(" ");
+  const review = (original: DocxDocument, revised: DocxDocument) => {
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+    const accepted = DocxDocument.load(merged.save());
+    acceptAllRevisions(accepted);
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    return { accepted, rejected };
+  };
+
+  it("brings a removed paragraph's comment back on reject-all", () => {
+    const commented = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Commented.</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
+    const doc = (body: string, comments: string) =>
+      DocxDocument.load(
+        makeDocx({
+          "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${body}</w:body></w:document>`,
+          "word/_rels/document.xml.rels": rels(`<Relationship Id="rId9" Type="${REL}/comments" Target="comments.xml"/>`),
+          "word/comments.xml": `<w:comments ${W_NS}>${comments}</w:comments>`,
+        }),
+      );
+    const note = `<w:comment w:id="0" w:author="A"><w:p><w:r><w:t>Check this.</w:t></w:r></w:p></w:comment>`;
+    const { accepted, rejected } = review(doc(para("Before.") + commented, note), doc(para("Before."), ""));
+    expect(textOf(rejected.pkg.text("word/comments.xml"))).toBe("Check this.");
+    const ref = /<w:commentReference w:id="(\d+)"/.exec(serializeXml(rejected.docRoot));
+    expect(rejected.pkg.text("word/comments.xml")).toContain(`w:id="${ref?.[1]}"`);
+    expect(serializeXml(accepted.docRoot)).not.toContain("commentReference");
+  });
+
+  it("strikes a diagram whose data part changed under the same name, and reject-all brings the old data back", () => {
+    const DGM = 'xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram"';
+    const diagram = `<w:p><w:r><w:drawing><dgm:relIds ${DGM} r:dm="rId5" r:lo="rId6" r:qs="rId7" r:cs="rId8"/></w:drawing></w:r></w:p>`;
+    const doc = (word: string) =>
+      DocxDocument.load(
+        makeDocx({
+          "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${para("Before.")}${diagram}</w:body></w:document>`,
+          "word/_rels/document.xml.rels": rels(
+            ["diagramData:data1", "diagramLayout:layout1", "diagramQuickStyle:quickStyle1", "diagramColors:colors1"]
+              .map((t, i) => `<Relationship Id="rId${i + 5}" Type="${REL}/${t.split(":")[0]}" Target="diagrams/${t.split(":")[1]}.xml"/>`)
+              .join(""),
+          ),
+          "word/diagrams/data1.xml": `<dgm:dataModel ${DGM}><w:t ${W_NS}>${word}</w:t></dgm:dataModel>`,
+          "word/diagrams/layout1.xml": `<dgm:layoutDef ${DGM}/>`,
+          "word/diagrams/quickStyle1.xml": `<dgm:styleDef ${DGM}/>`,
+          "word/diagrams/colors1.xml": `<dgm:colorsDef ${DGM}/>`,
+        }),
+      );
+    const { accepted, rejected } = review(doc("Discover"), doc("Explore"));
+    const dataOf = (d: DocxDocument) => {
+      const id = /r:dm="(\w+)"/.exec(serializeXml(d.docRoot))?.[1] ?? "";
+      return textOf(d.pkg.text(d.documentRels.get(id)?.target ?? ""));
+    };
+    expect(dataOf(rejected)).toBe("Discover");
+    expect(dataOf(accepted)).toBe("Explore");
+  });
+});
+
+describe("compareDocuments — a joined paragraph's properties", () => {
+  const H1 = `<w:pStyle w:val="Heading1"/>`;
+  const control = (text: string) => `<w:sdt><w:sdtPr/><w:sdtContent>${para(text)}</w:sdtContent></w:sdt>`;
+
+  it("records the follower's original properties when the follower's own format changed", () => {
+    // parity-text: two paragraphs with the same words, justified and left.
+    const same = "Lorem ipsum dolor sit amet.";
+    roundTrip(
+      para("Title", { pPr: H1 }) + para(same, { pPr: `<w:jc w:val="both"/>` }) + para(same, { pPr: `<w:jc w:val="left"/>` }) + para("End."),
+      para(same + " Updated.", { pPr: `<w:jc w:val="both"/>` }) + para("Inserted.") + para(same, { pPr: `<w:jc w:val="left"/>` }) + para("End."),
+    );
+  });
+
+  it("finds the follower past range markers", () => {
+    // wild-wirfp: a paragraph inserted after a content control, then bookmark
+    // ends at body level, then a heading.
+    // The join takes the markers into the heading, where the bookmarks still
+    // end, so the check is the heading's style rather than the whole body.
+    const marks = `<w:bookmarkEnd w:id="1"/><w:bookmarkEnd w:id="2"/>`;
+    const merged = compareDocuments(loadBody(control("Cover") + marks + para("Heading", { pPr: H1 })), loadBody(control("Cover") + para("Inserted.") + marks + para("Heading", { pPr: H1 })), { author: AUTHOR, date: DATE });
+    for (const review of [acceptAllRevisions, rejectAllRevisions]) {
+      const doc = DocxDocument.load(merged.save());
+      review(doc);
+      expect(serializeXml(doc.docRoot)).toMatch(/<w:pStyle w:val="Heading1"\/><\/w:pPr>(<w:bookmarkEnd w:id="\d"\/>)*<w:r><w:t[^>]*>Heading/);
+    }
+  });
+
+  it("finds the follower past a block of the head's own class", () => {
+    // uspto-follow-on: an inserted paragraph, then an inserted content
+    // control, then a styled paragraph both documents hold.
+    const conclusion = para("Conclusion", { pPr: `<w:pStyle w:val="Conclusion"/>` });
+    roundTrip(control("Kept") + conclusion, control("Kept") + para("Inserted.") + control("Also inserted") + conclusion);
   });
 });

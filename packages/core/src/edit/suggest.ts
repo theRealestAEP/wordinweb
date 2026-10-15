@@ -52,7 +52,7 @@ export interface CaretTarget {
 }
 
 /**
- * A tracked FORMATTING change: the five properties elements that can carry a
+ * A tracked FORMATTING change: the six properties elements that can carry a
  * `*PrChange` record of the properties they replaced.
  */
 export type FormatRevisionKind =
@@ -60,7 +60,8 @@ export type FormatRevisionKind =
   | "paragraphFormat"
   | "tableFormat"
   | "rowFormat"
-  | "cellFormat";
+  | "cellFormat"
+  | "sectionFormat";
 
 /** A tracked-change element the review UI can accept or reject. */
 export type RevisionKind =
@@ -167,13 +168,20 @@ export function markDeletedText(el: XmlElement): void {
   // PAGEREF field, in the compare benchmark's wild-gatech).
   // A text box inside the run is a story of its own: its paragraphs keep
   // w:t (w:delText outside a w:del is invalid), and the drawing goes whole.
-  const walk = (e: XmlElement): void => {
-    if (localName(e.name) === "txbxContent") return;
-    if (localName(e.name) === "t") e.name = e.name.replace(/t$/, "delText");
-    else if (localName(e.name) === "instrText") e.name = e.name.replace(/instrText$/, "delInstrText");
-    for (const c of e.children) walk(c);
+  // An equation's m:t stays: OMML has no deleted form of math text, and the
+  // w:del around the equation is what strikes it. A w:r inside the equation
+  // is WordprocessingML and is retyped like any other.
+  const walk = (e: XmlElement, math: string | null): void => {
+    const ln = localName(e.name);
+    if (ln === "txbxContent") return;
+    if (ln === "oMath" || ln === "oMathPara") math = prefixOf(e);
+    if (math === null || prefixOf(e) !== math) {
+      if (ln === "t") e.name = e.name.replace(/t$/, "delText");
+      else if (ln === "instrText") e.name = e.name.replace(/instrText$/, "delInstrText");
+    }
+    for (const c of e.children) walk(c, math);
   };
-  walk(el);
+  walk(el, null);
 }
 
 // ---------- insertion ----------
@@ -707,6 +715,7 @@ const FORMAT_CHANGE: Record<
   tableFormat: { props: "tblPr", change: "tblPrChange", excluded: ["tblPrChange"] },
   rowFormat: { props: "trPr", change: "trPrChange", excluded: ["ins", "del", "trPrChange"] },
   cellFormat: { props: "tcPr", change: "tcPrChange", excluded: ["tcPrChange"] },
+  sectionFormat: { props: "sectPr", change: "sectPrChange", excluded: ["headerReference", "footerReference", "sectPrChange"] },
 };
 
 /**
@@ -758,6 +767,18 @@ export function recordRowFormatChange(trEl: XmlElement, meta: RevisionMeta): voi
 /** Record a cell's w:tcPr as the previous formatting (w:tcPrChange). */
 export function recordCellFormatChange(tcEl: XmlElement, meta: RevisionMeta): void {
   recordFormatChange(tcEl, "cellFormat", meta);
+}
+
+/**
+ * Record `previous` as a section's properties before a change
+ * (w:sectPrChange). Its header and footer references are left out:
+ * CT_SectPrBase has no place for them.
+ */
+export function recordSectionFormatChange(sectPr: XmlElement, previous: XmlElement, meta: RevisionMeta): void {
+  const w = prefixOf(sectPr);
+  const { excluded } = FORMAT_CHANGE.sectionFormat;
+  const recorded = el(`${w}sectPr`, {}, previous.children.filter((c) => !excluded.includes(localName(c.name))).map(cloneXml));
+  sectPr.children.push(el(`${w}sectPrChange`, revAttrs(w, meta), [recorded]));
 }
 
 /**
@@ -978,7 +999,7 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
 }
 
 /** Range markers that may sit between two body paragraphs. */
-const MARKERS = ["bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "permStart", "permEnd", "proofErr"];
+export const MARKERS = ["bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "permStart", "permEnd", "proofErr"];
 
 /**
  * A section break lives in a paragraph's mark. Joined, the two paragraphs end
@@ -1070,6 +1091,10 @@ export function collectRevisionsIn(root: XmlElement, out: RevisionRef[]): void {
     // the trPr, so never descend into a trPr — its trPrChange and its
     // structural revisions are already collected.
     if (ln === "trPr") return;
+    if (ln === "sectPr") {
+      collectSectionChange(el, out);
+      return;
+    }
     for (const c of el.children) walk(c);
     // The paragraph-mark revision is the pilcrow at the paragraph's END, so
     // it follows the paragraph's own runs in document order.
@@ -1079,6 +1104,8 @@ export function collectRevisionsIn(root: XmlElement, out: RevisionRef[]): void {
         out.push({ el: change, kind: "paragraphFormat", paragraph: el, author: attrByLocal(change, "author") });
       }
       const pPr = el.children.find((c) => localName(c.name) === "pPr");
+      const sectPr = pPr?.children.find((c) => localName(c.name) === "sectPr");
+      if (sectPr) collectSectionChange(sectPr, out);
       const rPr = pPr?.children.find((c) => localName(c.name) === "rPr");
       for (const c of rPr?.children ?? []) {
         const cn = localName(c.name);
@@ -1094,6 +1121,12 @@ export function collectRevisionsIn(root: XmlElement, out: RevisionRef[]): void {
     }
   };
   walk(root);
+}
+
+/** A section's w:sectPrChange, if it has one. */
+function collectSectionChange(sectPr: XmlElement, out: RevisionRef[]): void {
+  const change = sectPr.children.find((c) => localName(c.name) === "sectPrChange");
+  if (change) out.push({ el: change, kind: "sectionFormat", author: attrByLocal(change, "author") });
 }
 
 function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
@@ -1118,6 +1151,7 @@ function applyAccept(doc: DocxDocument, ref: RevisionRef): boolean {
     case "tableFormat":
     case "rowFormat":
     case "cellFormat":
+    case "sectionFormat":
       // The new formatting is already the live one; accepting just retires the
       // record of what it replaced.
       return removeFormatChange(doc, ref);
@@ -1151,12 +1185,12 @@ function removeFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
 
 /**
  * A properties element left holding nothing is not a property, so it goes —
- * EXCEPT w:tblPr, which CT_Tbl requires. Dropping that one would leave a table
- * Word refuses to open.
+ * EXCEPT w:tblPr, which CT_Tbl requires (dropping it would leave a table Word
+ * refuses to open), and w:sectPr, whose presence is the section break.
  */
 function dropEmptyProps(doc: DocxDocument, props: XmlElement): void {
   if (props.children.length > 0) return;
-  if (localName(props.name) === "tblPr") return;
+  if (localName(props.name) === "tblPr" || localName(props.name) === "sectPr") return;
   removeEl(doc, props);
 }
 
@@ -1185,7 +1219,8 @@ function restoreFormatChange(doc: DocxDocument, ref: RevisionRef): boolean {
     return true;
   });
   if (ref.kind === "tableFormat") restoreGridChange(doc, props);
-  props.children = [...restored, ...kept];
+  // A section's header and footer references LEAD its w:sectPr.
+  props.children = ref.kind === "sectionFormat" ? [...kept, ...restored] : [...restored, ...kept];
   dropEmptyProps(doc, props);
   return true;
 }
@@ -1221,6 +1256,7 @@ function applyReject(doc: DocxDocument, ref: RevisionRef): boolean {
     case "tableFormat":
     case "rowFormat":
     case "cellFormat":
+    case "sectionFormat":
       return restoreFormatChange(doc, ref);
   }
 }

@@ -224,6 +224,7 @@ const REVISION_LABEL: Record<RevisionKind, { text: string; ink: string }> = {
   tableFormat: { text: "Suggested table formatting", ink: "#1a73e8" },
   rowFormat: { text: "Suggested row formatting", ink: "#1a73e8" },
   cellFormat: { text: "Suggested cell formatting", ink: "#1a73e8" },
+  sectionFormat: { text: "Suggested page setup", ink: "#1a73e8" },
 };
 
 function drawingCursor(kind: "pen" | "highlighter" | "eraser" | "lasso"): string {

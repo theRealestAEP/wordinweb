@@ -82,8 +82,6 @@ export interface Input {
   noteRefs: Record<"footnote" | "endnote", string[]>;
   /** The footnotes and endnotes parts, on disk; the shell holds them empty. */
   notes: Record<"footnote" | "endnote", DiskNotes | null>;
-  /** Parts the compare never reads (comments): the shell holds them empty, and the result takes them from the input as they are. */
-  untouched: string[];
   /** Whether the input held tracked changes, now accepted. */
   hadRevisions: boolean;
 }
@@ -124,20 +122,19 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     };
     const isSectPr = (i: number): boolean => localName(names[i]) === "sectPr";
 
-    // The notes and comments parts go to disk; the shell holds each empty.
+    // The notes parts go to disk; the shell holds each empty. The comments
+    // part is held: struck content may need the original's comments.
     const noteParts: Partial<Record<"footnote" | "endnote", string>> = {};
-    const untouched: string[] = [];
     const outlines = new Map<string, Outline>();
     for (const rel of documentRels(zip, docPart)) {
-      const kind = rel.type.endsWith("/footnotes") ? "footnote" : rel.type.endsWith("/endnotes") ? "endnote" : rel.type.endsWith("/comments") ? "comments" : null;
+      const kind = rel.type.endsWith("/footnotes") ? "footnote" : rel.type.endsWith("/endnotes") ? "endnote" : null;
       if (!kind || !zip.entries.has(rel.part) || outlines.has(rel.part)) continue;
-      if (kind === "comments") untouched.push(rel.part);
-      else noteParts[kind] = rel.part;
+      noteParts[kind] = rel.part;
       outlines.set(rel.part, await outline(zip, rel.part, join(dir, `${side}-${fileName(rel.part)}`)));
     }
 
     // The shell: document.xml with only the body's own section properties.
-    // Its parts (everything but the body, the notes and comments on disk,
+    // Its parts (everything but the body, the notes on disk,
     // and the binary stubs) are held whole, so their sizes are checked
     // first, from the directory, and each is inflated once, straight into
     // the document.
@@ -185,7 +182,6 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       tables: new Map(),
       noteRefs: { footnote: [], endnote: [] },
       notes: { footnote: null, endnote: null },
-      untouched,
       hadRevisions,
     };
 

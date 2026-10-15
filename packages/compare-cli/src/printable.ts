@@ -7,7 +7,7 @@ import { XmlElement, child, localName, parseXml } from "../../core/src/xml.js";
  * block as it is written.
  */
 
-const FORMAT_CHANGES = new Set(["rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange"]);
+const FORMAT_CHANGES = new Set(["rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange"]);
 const PROPERTIES = new Set(["rPr", "pPr", "trPr", "tcPr"]);
 const INSERTED = '<w:color w:val="0000FF"/><w:u w:val="single"/>';
 const DELETED = '<w:color w:val="FF0000"/><w:strike/>';

@@ -14,6 +14,7 @@ import {
   applyMarkStep,
   compareContext,
   compareHeadersFooters,
+  compareLastSection,
   compareNotes,
   compareRow,
   compareTableProps,
@@ -26,13 +27,15 @@ import {
   gapOps,
   insertedRow,
   noteRefsIn,
+  originalProps,
   pairHeadersFooters,
   paragraphKeyParts,
+  refersToChangedPart,
   paragraphMarkSteps,
   reportUncomparedParts,
   resolveGap,
 } from "../../core/src/edit/compare/index.js";
-import { RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
+import { MARKERS, RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
 import { CompareError, isDiskFull } from "./errors.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
 import { flatten } from "./printable.js";
@@ -136,6 +139,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const noteIds = giveStruckReferencesTheirOwnNotes(body, sink.withNoteRefs, R, ctx);
 
     compareHeadersFooters(O.shell, R.shell, headerFooterPairs, ctx);
+    compareLastSection(O.shell, R.shell, ctx);
 
     // The body's revisions were counted as it was written; the rest are in
     // the shell (headers, footers) and in the notes the compare changed.
@@ -371,6 +375,7 @@ function noRevisions(): Record<RevisionKind, number> {
     tableFormat: 0,
     rowFormat: 0,
     cellFormat: 0,
+    sectionFormat: 0,
   };
 }
 
@@ -430,7 +435,7 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): voi
     const fromOriginal = plan.fromOriginal(k);
     const kind = fromOriginal ? O.kinds[plan.o[k]] : R.kinds[plan.r[k]];
     const ends = fromOriginal ? O.endsSection[plan.o[k]] : R.endsSection[plan.r[k]];
-    return { cls: plan.cls(k), paragraph: kind === "p", endsSection: ends };
+    return { cls: plan.cls(k), paragraph: kind === "p", endsSection: ends, marker: MARKERS.includes(kind) };
   };
   paragraphMarkSteps(n, info, (step) => {
     if (step.kind === "untracked") untracked++;
@@ -457,10 +462,13 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): voi
    * that reads a later entry. Emitting keeps the live side's base properties
    * (alignParagraphProps), so the source paragraph answers.
    */
-  const pPrOf = (f: number): XmlElement | undefined => {
-    if (second && f === emittedUpTo + 1) return child(second.el, "pPr");
+  const pPrOf = (f: number, side: "original" | "revised"): XmlElement | undefined => {
+    if (second && f === emittedUpTo + 1) return side === "revised" ? child(second.el, "pPr") : originalProps(child(second.el, "pPr"));
     const op = plan.op[f];
     if (op === DELETED || op === MERGE_SECOND) return child(parseO(plan.o[f]), "pPr");
+    // A matched, split or merged paragraph wears the original's properties
+    // in a w:pPrChange once compared, when formatting is tracked.
+    if (side === "original" && ctx.formatting && (op === MATCH || op === COPY || op === SPLIT || op === MERGE)) return child(parseO(plan.o[f]), "pPr");
     return child(parseR(plan.r[f]), "pPr");
   };
   let emittedUpTo = -1;
@@ -481,7 +489,8 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): voi
     let xml: string | null = null;
     if (op === COPY) {
       const revisedXml = R.blocks.read(r);
-      const same = revisedXml === O.blocks.read(o);
+      // Same XML can still refer to a part that changed (a SmartArt diagram).
+      const same = revisedXml === O.blocks.read(o) && !(/ r:\w+="/.test(revisedXml) && refersToChangedPart(parseXml(revisedXml), ctx));
       if (same && !glyph[k] && props[k] === -1) xml = revisedXml;
       else if (same) entry = { el: parseXml(revisedXml), cls: "kept" };
       else entry = emitMatched(parseO(o), parseR(r), ctx);
@@ -728,7 +737,9 @@ async function writeResult(
 
   if (printable) {
     const printableFile = join(dir, "printable-document.xml");
-    writeDocument(printableFile, head, printable.store, noteIds, (printable.beforeSectPr ?? "") + tail);
+    // The last section's page setup change, if any, as plain formatting.
+    const printableTail = tail.replace(/<w:sectPrChange\b[\s\S]*?<\/w:sectPrChange>/, "");
+    writeDocument(printableFile, head, printable.store, noteIds, (printable.beforeSectPr ?? "") + printableTail);
     // The headers, footers and notes carry revisions of their own: flattened
     // in the shell, now that the result is saved, and in the notes on disk.
     for (const root of R.shell.revisionRoots()) flatten(root);
@@ -774,10 +785,6 @@ async function writePackage(path: string, docFile: string, files: Record<string,
     const file = name === R.docPart ? docFile : notes.get(name);
     if (file) {
       await writer.addFile(name, file);
-      continue;
-    }
-    if (R.untouched.includes(name)) {
-      R.zip.copyInto(writer, R.zip.entries.get(name) as ZipEntry);
       continue;
     }
     const stub = stubSource(files[name]);

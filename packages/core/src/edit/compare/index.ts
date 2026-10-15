@@ -12,9 +12,11 @@ import {
   recordParagraphFormatChange,
   recordRowFormatChange,
   recordRunFormatChange,
+  recordSectionFormatChange,
   recordTableFormatChange,
   recordTableGridChange,
   revisionWrapper,
+  MARKERS,
 } from "../suggest.js";
 import { CONTAINERS, ContentToken, Placed, ReadOptions, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
 import { Key, histogramMatch } from "./histogram.js";
@@ -68,8 +70,8 @@ import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./te
  *
  * **Styles and numbering — NOT compared.** The result carries `revised`'s.
  * `onNote` reports when `original`'s differ, so a reviewer is never told "no
- * change" about something that was never looked at. The result also carries
- * `revised`'s comments part as it is.
+ * change" about something that was never looked at. Comments go with the
+ * text they mark: struck text keeps the original's comment.
  *
  * **Moves — not detected, by architecture.** `RevisionKind` has no moveFrom /
  * moveTo member and nothing in suggest.ts writes those elements, so a move is
@@ -143,6 +145,8 @@ export interface Ctx {
   scope: { from: string | null; into: string | null };
   /** Original note id -> the result's id for the same note (compareNotes). */
   noteIds: Record<"footnote" | "endnote", Map<string, string>>;
+  /** Original comment id -> the result's id for that comment (adoptComment). */
+  commentIds: Map<string, string>;
 }
 
 /** Where a block ended up, which is what decides the paragraph-mark revisions. */
@@ -206,6 +210,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
   giveStruckReferencesTheirOwnNotes("endnote", merged, ctx);
 
   compareHeadersFooters(original, merged, headerFooterPairs, ctx);
+  compareLastSection(original, merged, ctx);
 
   if (issued > 0) merged.refresh();
   return merged;
@@ -232,6 +237,7 @@ export function compareContext(original: DocxDocument, merged: DocxDocument, opt
     note: options.onNote ?? (() => {}),
     scope: { from: null, into: null },
     noteIds: { footnote: new Map(), endnote: new Map() },
+    commentIds: new Map(),
   };
 }
 
@@ -338,6 +344,22 @@ export function pairHeadersFooters(
     if (key.startsWith("last:") && !theirs.has(key) && !paired.into.has(into)) pairs.push({ ...parse(key), from: null, into });
   }
   return pairs;
+}
+
+/**
+ * The last section's page setup (size, orientation, margins, columns and the
+ * rest of w:sectPr), tracked as a w:sectPrChange holding the original's when
+ * it differs. The header and footer references are compareHeadersFooters'.
+ */
+export function compareLastSection(original: DocxDocument, merged: DocxDocument, ctx: Ctx): void {
+  if (!ctx.formatting) return;
+  const before = child(child(original.docRoot, "body"), "sectPr");
+  const after = child(child(merged.docRoot, "body"), "sectPr");
+  if (!after) return;
+  const contents = (sectPr: XmlElement | undefined): string =>
+    (sectPr?.children ?? []).filter((c) => !["headerReference", "footerReference", "sectPrChange"].includes(localName(c.name))).map((c) => serializeXml(c)).join("");
+  if (contents(before) === contents(after)) return;
+  recordSectionFormatChange(after, before ?? { name: after.name, attrs: {}, children: [], text: "" }, ctx.meta);
 }
 
 /**
@@ -1192,13 +1214,19 @@ export function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
       const to = ctx.noteIds[ln === "footnoteReference" ? "footnote" : "endnote"].get(el.attrs["w:id"]);
       if (to !== undefined) el.attrs["w:id"] = to;
     }
+    if (ln === "commentReference" || ln === "commentRangeStart" || ln === "commentRangeEnd") {
+      el.attrs["w:id"] = adoptComment(el.attrs["w:id"], ctx);
+    }
     for (const key of Object.keys(el.attrs)) {
       if (!key.startsWith("r:") || !REL_ATTRS.includes(localName(key))) continue;
       const id = el.attrs[key];
       const source = theirs.get(id);
       if (!source) continue;
+      // The same relationship to the same part: nothing to adopt. The same
+      // part name with other bytes is another part (a SmartArt diagram's
+      // data with a word changed), and reject-all needs the original's.
       const here = mine.get(id);
-      if (here && here.target === source.target && here.type === source.type) continue;
+      if (here && here.target === source.target && here.type === source.type && samePart(source.target, ctx)) continue;
       let replacement = remapped.get(id);
       if (replacement === undefined) {
         replacement = source.external
@@ -1218,6 +1246,68 @@ export function adoptFromOriginal(root: XmlElement, ctx: Ctx): void {
     for (const c of el.children) walk(c);
   };
   walk(root);
+}
+
+/**
+ * True when the result and the original hold the same bytes at `target`. Only
+ * an XML part (a SmartArt diagram's data, a chart) is read; a binary part
+ * under one name is taken as the same, as it always was.
+ */
+function samePart(target: string, ctx: Ctx): boolean {
+  if (!target.endsWith(".xml")) return true;
+  const mine = ctx.doc.pkg.binary(target);
+  const theirs = ctx.original.pkg.binary(target);
+  return !!mine && !!theirs && mine.length === theirs.length && mine.every((b, i) => b === theirs[i]);
+}
+
+/**
+ * Whether `el` refers to a part the two documents both hold under one name
+ * with different contents: a SmartArt diagram with a word changed leaves its
+ * paragraph's XML as it was and changes only the diagram's data part.
+ */
+export function refersToChangedPart(el: XmlElement, ctx: Ctx): boolean {
+  const mine = ctx.doc.relationshipsOf(ctx.scope.into);
+  const theirs = ctx.original.relationshipsOf(ctx.scope.from);
+  // A section's header and footer parts are compared on their own.
+  const walk = (e: XmlElement): boolean =>
+    localName(e.name) !== "sectPr" &&
+    (Object.keys(e.attrs).some((key) => {
+      if (!key.startsWith("r:") || !REL_ATTRS.includes(localName(key))) return false;
+      const source = theirs.get(e.attrs[key]);
+      const here = mine.get(e.attrs[key]);
+      return !!source && !!here && !source.external && source.target === here.target && !samePart(source.target, ctx);
+    }) ||
+      e.children.some(walk));
+  return walk(el);
+}
+
+/**
+ * The result's id for the original's comment `id`, which struck content
+ * refers to: the id itself when the result holds that comment unchanged,
+ * else a copy of the comment under a fresh id. Without the copy, reject-all
+ * brought a removed comment's reference back pointing at nothing
+ * (parity-comments with a comment removed).
+ */
+function adoptComment(id: string, ctx: Ctx): string {
+  const known = ctx.commentIds.get(id);
+  if (known !== undefined) return known;
+  const find = (root: XmlElement | null): XmlElement | undefined =>
+    root?.children.find((c) => localName(c.name) === "comment" && c.attrs["w:id"] === id);
+  const theirs = find(ctx.original.commentsTree());
+  const mine = find(ctx.doc.commentsTree());
+  let to = id;
+  if (theirs && !(mine && sameXml(theirs, mine))) {
+    const root = ctx.doc.commentsTree(true) as XmlElement;
+    let next = 0;
+    for (const c of root.children) next = Math.max(next, 1 + (Number(c.attrs["w:id"]) || 0));
+    const copy = cloneXml(theirs);
+    copy.attrs["w:id"] = String(next);
+    root.children.push(copy);
+    ctx.doc.markCommentsChanged();
+    to = String(next);
+  }
+  ctx.commentIds.set(id, to);
+  return to;
 }
 
 export function emitDeleted(el: XmlElement, ctx: Ctx): Entry {
@@ -1282,7 +1372,11 @@ export function wrapContainerContent(container: XmlElement, kind: "ins" | "del",
   // paragraph's checkbox controls ("☒ ☐") survived accept-all and joined the
   // paragraph before (probe2-form-checkboxes).
   const NESTED = ["hyperlink", "smartTag", "dir", "bdo", "fldSimple"];
-  const WRAPPABLE = ["r", "sdt", "customXml"];
+  // An equation goes whole: a w:ins or w:del may hold m:oMath and
+  // m:oMathPara (EG_MathContent, through EG_RunLevelElements). Left plain,
+  // a struck paragraph's equation survived accept-all beside the inserted
+  // one, so the result showed it twice (parity-math2).
+  const WRAPPABLE = ["r", "sdt", "customXml", "oMath", "oMathPara"];
   const out: XmlElement[] = [];
   let group: XmlElement[] = [];
   const flush = (): void => {
@@ -1317,14 +1411,15 @@ export function wrapContainerContent(container: XmlElement, kind: "ins" | "del",
 
 /** Diff one matched paragraph pair, mutating the revised element in place. */
 function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
-  if (sameXml(oEl, rEl)) return;
+  const partChanged = refersToChangedPart(oEl, ctx);
+  if (!partChanged && sameXml(oEl, rEl)) return;
 
   if (ctx.formatting) alignParagraphProps(rEl, child(rEl, "pPr"), child(oEl, "pPr"), ctx);
 
   const oc = readParagraph(oEl, readOptions(ctx, true));
   const rc = readParagraph(rEl, readOptions(ctx, false));
-  if (!oc.inlineDiffable || !rc.inlineDiffable) {
-    if (oc.text !== rc.text || serializeXml(stripProps(oEl)) !== serializeXml(stripProps(rEl))) {
+  if (partChanged || !oc.inlineDiffable || !rc.inlineDiffable) {
+    if (partChanged || oc.text !== rc.text || serializeXml(stripProps(oEl)) !== serializeXml(stripProps(rEl))) {
       // Too structured to rebuild safely: strike the old content whole and
       // insert the new content whole, inside this one paragraph.
       const deleted = cloneXml(oEl);
@@ -1958,11 +2053,17 @@ function prefixOf(name: string): string {
  * same-class chain takes a w:pPrChange to carry the other document's answer.
  */
 function applyParagraphMarks(entries: Entry[], ctx: Ctx): void {
-  const infos = entries.map((e) => ({ cls: e.cls, paragraph: isParagraph(e.el), endsSection: endsSection(e.el) }));
+  const infos = entries.map((e) => ({ cls: e.cls, paragraph: isParagraph(e.el), endsSection: endsSection(e.el), marker: MARKERS.includes(localName(e.el.name)) }));
   paragraphMarkSteps(
     infos.length,
     (i) => infos[i],
-    (step) => applyMarkStep(step, (i) => entries[i], (i) => child(entries[i].el, "pPr"), ctx),
+    (step) =>
+      applyMarkStep(
+        step,
+        (i) => entries[i],
+        (i, side) => (side === "revised" ? child(entries[i].el, "pPr") : originalProps(child(entries[i].el, "pPr"))),
+        ctx,
+      ),
   );
 }
 
@@ -1972,6 +2073,8 @@ export interface MarkInfo {
   paragraph: boolean;
   /** A paragraph that ends a section: its mark is the break. */
   endsSection: boolean;
+  /** A range marker between blocks (a bookmark's end): a joined paragraph steps over it. */
+  marker: boolean;
 }
 
 /**
@@ -2046,16 +2149,28 @@ function paragraphRunSteps(n: number, info: (i: number) => MarkInfo, start: numb
   while (at <= end) {
     let last = at;
     while (last + 1 <= end && info(last + 1).cls === info(at).cls) last++;
-    if (last + 1 < n && info(at).paragraph && info(last + 1).paragraph) step({ kind: "props", at, follower: last + 1 });
+    // Reviewed, the chain joins the first paragraph that survives the same
+    // review: past range markers, and past blocks of its own class, which go
+    // first (an inserted content control after an inserted paragraph: on
+    // reject the paragraph joined the heading after it, uspto-follow-on).
+    let follower = last + 1;
+    while (follower < n && (info(follower).marker || info(follower).cls === info(at).cls)) follower++;
+    if (follower < n && info(at).paragraph && info(follower).paragraph) step({ kind: "props", at, follower });
     at = last + 1;
   }
 }
 
 /**
  * Apply one mark step. `entry` gives an entry by index; `pPrOf` gives an
- * entry's paragraph properties as they stand once it is emitted.
+ * entry's paragraph properties as the original or the revised document has
+ * them.
  */
-export function applyMarkStep(step: MarkStep, entry: (i: number) => Entry, pPrOf: (i: number) => XmlElement | undefined, ctx: Ctx): void {
+export function applyMarkStep(
+  step: MarkStep,
+  entry: (i: number) => Entry,
+  pPrOf: (i: number, side: "original" | "revised") => XmlElement | undefined,
+  ctx: Ctx,
+): void {
   if (step.kind === "untracked") {
     ctx.note({
       code: "no-common-paragraph",
@@ -2066,10 +2181,18 @@ export function applyMarkStep(step: MarkStep, entry: (i: number) => Entry, pPrOf
   } else {
     const head = entry(step.at);
     const own = child(head.el, "pPr");
-    const other = pPrOf(step.follower);
-    if (head.cls === "deleted") alignParagraphProps(head.el, other, own, ctx);
-    else alignParagraphProps(head.el, own, other, ctx);
+    // Reviewed, the head joins its follower and keeps its own properties: on
+    // accept they must be the follower's as revised, on reject the follower's
+    // as original (parity-text: the follower's revised alignment came back on
+    // reject).
+    if (head.cls === "deleted") alignParagraphProps(head.el, pPrOf(step.follower, "revised"), own, ctx);
+    else alignParagraphProps(head.el, own, pPrOf(step.follower, "original"), ctx);
   }
+}
+
+/** Paragraph properties as the original had them: a w:pPrChange's record, else the properties themselves. */
+export function originalProps(pPr: XmlElement | undefined): XmlElement | undefined {
+  return child(child(pPr, "pPrChange"), "pPr") ?? pPr;
 }
 
 function endsSection(el: XmlElement): boolean {
