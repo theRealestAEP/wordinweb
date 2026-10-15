@@ -54,9 +54,10 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
    * Also write a printable copy to `path`: the same document with its tracked
    * changes as plain formatting (printable.ts), from the same pass.
    * `beforeSectPr` is XML put at the end of its body, ahead of the body's
-   * final section properties: a page break and a summary, say.
+   * final section properties: a page break and a summary, say. As a
+   * function it is given the result's revision counts, known by then.
    */
-  printable?: { path: string; beforeSectPr?: string };
+  printable?: { path: string; beforeSectPr?: string | ((revisions: Record<RevisionKind, number>) => string) };
   /**
    * Also write the printable copy as a PDF to `path`, rendered without a
    * browser (core's pdf/render.ts) from the printable .docx (a working file
@@ -69,6 +70,8 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
 export interface CompareFilesResult {
   /** The result's revisions by kind, as collectRevisions counts them. */
   revisions: Record<RevisionKind, number>;
+  /** The PDF's page count, when `pdf` was asked for. */
+  pdfPages?: number;
 }
 
 /**
@@ -159,9 +162,12 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     for (const root of R.shell.revisionRoots()) countRevisions(root, revisions);
     for (const notes of notesOf(R)) notes.forEachChange((note) => countRevisions(note, revisions));
 
-    await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { ...printableSpec, store: printable } : null);
+    const summary = printableSpec?.beforeSectPr;
+    const beforeSectPr = typeof summary === "function" ? summary(revisions) : summary;
+    await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
     if (options.pdf && printableSpec) {
-      await renderDocxToPdf(printableSpec.path, createWriteStream(options.pdf.path), { comments: options.pdf.comments });
+      const rendered = await renderDocxToPdf(printableSpec.path, createWriteStream(options.pdf.path), { comments: options.pdf.comments });
+      return { revisions, pdfPages: rendered.pages };
     }
     return { revisions };
   } catch (error) {
