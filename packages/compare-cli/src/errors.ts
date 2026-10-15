@@ -6,7 +6,7 @@ export type CompareErrorCode =
   | "not_docx"
   /** An input is a .docx that cannot be read: a corrupt zip entry, or XML that is not well formed. */
   | "damaged"
-  /** An input holds more outside its body than the compare keeps in memory (MAX_PART_BYTES, MAX_HELD_BYTES). */
+  /** An input holds more outside its body than the compare keeps in memory (MAX_HELD_BYTES). */
   | "too_large"
   /** The temp folder or the result's folder ran out of space. */
   | "disk_full"

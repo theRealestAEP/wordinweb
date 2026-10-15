@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32 } from "node:zlib";
-import { strFromU8, unzipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, child, localName, parseXml, serializeXml } from "../../core/src/xml.js";
@@ -13,7 +13,7 @@ import { AUTHOR, DATE, canonicalBody, para } from "../../core/test/compare-helpe
 import { compareFiles } from "../src/compare.js";
 import { CompareError } from "../src/errors.js";
 import { flatten } from "../src/printable.js";
-import { ZipWriter } from "../src/zip.js";
+import { MAX_HELD_BYTES, ZipWriter } from "../src/zip.js";
 
 const dir = mkdtempSync(join(tmpdir(), "compare-files-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -455,14 +455,16 @@ describe("compareFiles errors", () => {
     await fails(good, good, join(dir, "no-such-folder", "x.docx")).toThrow(/folder does not exist/);
   });
 
-  it("refuses parts larger than it holds in memory, from the directory's sizes, before inflating anything", async () => {
+  it("refuses parts over what it holds in memory, from the directory's sizes, before inflating anything", async () => {
     // A .docx whose directory declares each named part at `declared` bytes
     // (the entries themselves are tiny): what a zip bomb declares, checked
     // before any inflating, so the compare never pays for it.
     const declaring = (name: string, declared: [string, number][]): string => {
       const path = join(dir, name);
       const writer = new ZipWriter(path);
-      for (const [part, bytes] of Object.entries(unzipSync(makeDocx({ "word/document.xml": wrapDocument(para("Text.")) })))) writer.addBuffer(part, bytes);
+      for (const [part, bytes] of Object.entries(unzipSync(makeDocx({ "word/document.xml": wrapDocument(para("Text.")) })))) {
+        if (!declared.some(([d]) => d === part)) writer.addBuffer(part, bytes);
+      }
       for (const [part, size] of declared) {
         const data = Buffer.from("<a/>");
         writer.addEntry(part, 0, crc32(data), data.length, size, (write) => write(data));
@@ -470,11 +472,12 @@ describe("compareFiles errors", () => {
       writer.close();
       return path;
     };
-    const onePart = declaring("one-big-part.docx", [["word/styles.xml", 65 << 20]]);
-    const manyParts = declaring("many-big-parts.docx", [["word/styles.xml", 50 << 20], ["word/numbering.xml", 50 << 20], ["word/header1.xml", 50 << 20]]);
+    // The document's relationships are read before the total is known: a part on its own.
+    const onePart = declaring("one-big-part.docx", [["word/_rels/document.xml.rels", (3 << 20) + 1]]);
+    const manyParts = declaring("many-big-parts.docx", [["word/styles.xml", 1 << 20], ["word/numbering.xml", 1 << 20], ["word/header1.xml", 1 << 20]]);
     const bigBody = declaring("big-body.docx", [["word/media/image1.png", 65 << 20]]);
-    await fails(good, onePart, join(dir, "x.docx")).toThrow(/one-big-part\.docx: word\/styles\.xml is 65 MB; a part held in memory is at most 64 MB/);
-    await fails(manyParts, good, join(dir, "x.docx")).toThrow(/many-big-parts\.docx: the parts held in memory .* come to 151 MB; at most 128 MB together, 64 MB each/);
+    await fails(good, onePart, join(dir, "x.docx")).toThrow(/one-big-part\.docx: word\/_rels\/document\.xml\.rels is 4 MB; the parts held in memory are at most 3 MB together, so that a compare fits in a 256 MB heap/);
+    await fails(manyParts, good, join(dir, "x.docx")).toThrow(/many-big-parts\.docx: the parts held in memory .* come to 4 MB; at most 3 MB is supported, so that a compare fits in a 256 MB heap/);
     for (const [path, file] of [[onePart, "revised"], [manyParts, "original"]] as const) {
       const error = await errorOf(file === "original" ? path : good, file === "revised" ? path : good, join(dir, "x.docx"));
       expect([error.code, error.file]).toEqual(["too_large", file]);
@@ -482,4 +485,30 @@ describe("compareFiles errors", () => {
     // A binary part is never inflated, so no limit applies: it is copied as it is.
     await compareFiles(good, bigBody, join(dir, "x.docx"), options);
   });
+
+  it("compares a document at the limit, in its costliest shape", async () => {
+    // The parts outside the body at exactly MAX_HELD_BYTES, the bulk a
+    // header of empty paragraphs: the shape that costs the most heap per
+    // byte (bench/memory/big-parts.mjs measures the heap this takes).
+    const atLimit = (name: string, over: number): string => {
+      const base = makeDocx({
+        "word/document.xml": wrapDocument(para("Text.") + `<w:sectPr><w:headerReference w:type="default" r:id="rIdH"/></w:sectPr>`),
+        "word/_rels/document.xml.rels": `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`,
+      });
+      const files = unzipSync(base);
+      const held = Object.entries(files).filter(([part]) => /\.(xml|rels)$/.test(part) && part !== "word/document.xml").reduce((n, [, bytes]) => n + bytes.length, 0);
+      const frame = `<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"></w:hdr>`;
+      const paragraphs = Math.floor((MAX_HELD_BYTES - held - frame.length + over) / "<w:p/>".length);
+      files["word/header1.xml"] = strToU8(frame.replace("></w:hdr>", `>${"<w:p/>".repeat(paragraphs)}</w:hdr>`));
+      const path = join(dir, name);
+      writeFileSync(path, zipSync(files, { level: 1 }));
+      return path;
+    };
+    const original = atLimit("at-limit-o.docx", 0);
+    const over = atLimit("at-limit-over.docx", "<w:p/>".length);
+    const { revisions } = await compareFiles(original, original, join(dir, "at-limit-out.docx"), options);
+    expect(revisions.insertion).toBe(0);
+    const error = await errorOf(original, over, join(dir, "x.docx"));
+    expect([error.code, error.file]).toEqual(["too_large", "revised"]);
+  }, 120000);
 });

@@ -12,16 +12,9 @@ import { CompareError } from "./errors.js";
 import { DiskNotes } from "./notes.js";
 import { scanBody, scanChildren } from "./scan.js";
 import { BlockStore } from "./store.js";
-import { MAX_PART_BYTES, ZipEntry, ZipReader, mb } from "./zip.js";
+import { HEAP_MB, MAX_HELD_BYTES, ZipEntry, ZipReader, mb } from "./zip.js";
 
 export type Side = "original" | "revised";
-
-/**
- * The most the shell holds in memory, all its parts together: everything
- * but the body, the notes and comments (on disk) and the binary parts
- * (stubs). Each part is at most MAX_PART_BYTES (zip.ts).
- */
-export const MAX_HELD_BYTES = 128 << 20;
 
 /**
  * A binary part's stand-in inside a shell: the shell needs to know the part
@@ -144,13 +137,15 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     }
 
     // The shell: document.xml with only the body's own section properties.
-    // Its parts are held whole, so their sizes are checked first, from the
-    // directory, and each is inflated once, straight into the document.
+    // Its parts (everything but the body, the notes and comments on disk,
+    // and the binary stubs) are held whole, so their sizes are checked
+    // first, from the directory, and each is inflated once, straight into
+    // the document.
     const held = (entry: ZipEntry): boolean => entry.name !== docPart && !entry.name.endsWith("/") && !outlines.has(entry.name) && /\.(xml|rels|vml)$/i.test(entry.name);
     let heldBytes = 0;
     for (const entry of zip.entries.values()) if (held(entry)) heldBytes += entry.size;
     if (heldBytes > MAX_HELD_BYTES) {
-      throw new CompareError("too_large", `${zip.path}: the parts held in memory (all but the body, the notes and the binary parts) come to ${mb(heldBytes)}; at most ${mb(MAX_HELD_BYTES)} together, ${mb(MAX_PART_BYTES)} each`);
+      throw new CompareError("too_large", `${zip.path}: the parts held in memory (all but the body, the notes and the binary parts) come to ${mb(heldBytes)}; at most ${mb(MAX_HELD_BYTES)} is supported, so that a compare fits in a ${HEAP_MB} MB heap`);
     }
     const files: Record<string, Uint8Array> = {};
     for (const entry of zip.entries.values()) {
@@ -163,7 +158,8 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     for (let i = 0; i < names.length; i++) if (isSectPr(i)) skeleton.push(Buffer.from(range(starts[i], ends[i])));
     skeleton.push(Buffer.from(range(bounds.contentEnd, fstatSync(fd).size)));
     files[docPart] = Buffer.concat(skeleton);
-    const shell = DocxDocument.fromFiles(files);
+    // The compare reads the headers' and footers' XML; their block models would cost about 1 KB a paragraph.
+    const shell = DocxDocument.fromFiles(files, { headerFooterBlocks: false });
     let hadRevisions = false;
     if (collectRevisions(shell).length > 0) {
       acceptAllRevisions(shell);
