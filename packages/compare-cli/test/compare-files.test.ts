@@ -512,3 +512,29 @@ describe("compareFiles errors", () => {
     expect([error.code, error.file]).toEqual(["too_large", "revised"]);
   }, 120000);
 });
+
+describe("the pdf option", () => {
+  it("writes the redline as a PDF beside the result, with the printable copy a working file", async () => {
+    const original = join(dir, "pdf-o.docx");
+    const revised = join(dir, "pdf-r.docx");
+    writeFileSync(original, docx(para("The quick brown fox.")));
+    writeFileSync(revised, docx(para("The quick red fox.")));
+    const pdf = join(dir, "pdf-redline.pdf");
+    const { revisions } = await compareFiles(original, revised, join(dir, "pdf-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: pdf } });
+    expect(revisions.insertion).toBe(1);
+    const bytes = readFileSync(pdf);
+    expect(bytes.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    expect(bytes.toString("latin1").trimEnd().endsWith("%%EOF")).toBe(true);
+  });
+
+  it("reports a script the PDF renderer cannot shape as unsupported_script", async () => {
+    const original = join(dir, "pdf-arabic-o.docx");
+    const revised = join(dir, "pdf-arabic-r.docx");
+    writeFileSync(original, docx(para("مرحبا")));
+    writeFileSync(revised, docx(para("مرحبا بالعالم")));
+    const error = await compareFiles(original, revised, join(dir, "pdf-arabic-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: join(dir, "pdf-arabic.pdf") } }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CompareError);
+    expect((error as CompareError).code).toBe("unsupported_script");
+    expect((error as CompareError).message).toContain("Arabic");
+  });
+});

@@ -26,6 +26,9 @@
       "import": "./dist/pdf/render.js"
     }
   },
+  "bin": {
+    "docx-pdf": "./dist/pdf/cli.js"
+  },
   "files": [
     "dist"
   ],

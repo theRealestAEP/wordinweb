@@ -14,6 +14,8 @@ export type CompareErrorCode =
   | "result_folder_missing"
   /** The result would overwrite an input. */
   | "result_is_input"
+  /** The PDF (`pdf` option) holds text in a script the PDF renderer cannot shape; the message names it. */
+  | "unsupported_script"
   /** Anything else. The message and `cause` say what. */
   | "failed";
 

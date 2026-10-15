@@ -14,7 +14,7 @@ function wholePages(bytes: Uint8Array): string[] {
 }
 
 /** The pages of the streamed layout: a counting pass, then a rendering pass
- * with its page total and bookmark pages, as openPrintStream runs them. */
+ * with its page total and bookmark pages, as renderDocxToPdf runs them. */
 async function streamedPages(bytes: Uint8Array): Promise<{ pages: string[]; counted: number }> {
   const opened = await openStreamingDocument(bytesSource(bytes));
   const measurer = new ApproxMeasurer();

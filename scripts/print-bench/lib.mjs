@@ -1,6 +1,5 @@
-// Shared driver for the print benches: the old renderForPrint path (as
-// DiscoveryTool's chrome.ts drives it) and the new streaming path, both in
-// headless Chromium through Playwright, plus memory sampling.
+// Driver for the browser print bench: renderForPrint (the web app's print
+// path) in headless Chromium through Playwright, plus memory sampling.
 import { execFileSync } from "node:child_process";
 import { fstatSync, openSync, readSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -13,7 +12,7 @@ import { chromium } from "playwright";
  */
 export const BUNDLE = buildSync({
   stdin: {
-    contents: 'export { renderForPrint, openPrintStream } from "./render/print.js";',
+    contents: 'export { renderForPrint } from "./render/print.js";',
     resolveDir: fileURLToPath(new URL("../../packages/core/src/", import.meta.url)),
     loader: "ts",
   },
@@ -129,88 +128,4 @@ export async function runOld(page, bytes, { batch = 25, print = false, onPages }
     printMs = Math.round(performance.now() - t1);
   }
   return { pageCount, hashes, layoutMs, printMs, pageHtml: (i) => page.evaluate(PAGE_HTML(i)) };
-}
-
-/**
- * Serve the document at http://docx.local/doc.docx with Range support, and an
- * empty page at /. `source` is its bytes, or its path: then each range is read
- * from the file, so this process holds only what one request asks for, as
- * DiscoveryTool's Fetch.fulfillRequest loop does.
- */
-export async function serve(page, source) {
-  const file = typeof source === "string" ? openSync(source, "r") : -1;
-  const size = file === -1 ? source.length : fstatSync(file).size;
-  const read = (start, end) => {
-    if (file === -1) return Buffer.from(source.subarray(start, end));
-    const buf = Buffer.allocUnsafe(end - start);
-    let done = 0;
-    while (done < buf.length) done += readSync(file, buf, done, buf.length - done, start + done);
-    return buf;
-  };
-  await page.route("http://docx.local/**", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.pathname === "/") return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><head></head><body></body></html>" });
-    if (url.pathname !== "/doc.docx") return route.fulfill({ status: 404, body: "" });
-    const range = /bytes=(\d+)-(\d+)/.exec(route.request().headers()["range"] ?? "");
-    if (!range) return route.fulfill({ status: 200, contentType: "application/octet-stream", body: read(0, size) });
-    const start = Number(range[1]);
-    const end = Math.min(Number(range[2]), size - 1);
-    return route.fulfill({
-      status: 206,
-      headers: { "Content-Range": `bytes ${start}-${end}/${size}`, "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream" },
-      body: read(start, end + 1),
-    });
-  });
-}
-
-/** The new path: openPrintStream over the served file (its bytes or its path),
- * a batch at a time. `onBatch(first, hashes, batchApi)` sees each mounted
- * batch before release. */
-export async function runNew(page, bytes, { batch = 25, print = false, onBatch } = {}) {
-  await serve(page, bytes);
-  await page.goto("http://docx.local/");
-  await page.clock.setFixedTime(FIXED_TIME);
-  await page.addScriptTag({ content: BUNDLE });
-  const t0 = performance.now();
-  const started = await page.evaluate(`(async () => {
-    window.__print = wordinwebPrint.openPrintStream("http://docx.local/doc.docx", document.body, { batchPages: ${batch} });
-    return await window.__print.start();
-  })()`);
-  const countMs = Math.round(performance.now() - t0);
-  const hashes = [];
-  let printMs = 0;
-  let renderMs = 0;
-  let batches = 0;
-  let images = 0;
-  let imagesDrawn = 0;
-  for (;;) {
-    const t1 = performance.now();
-    const b = await page.evaluate(`window.__print.nextBatch()`);
-    renderMs += performance.now() - t1;
-    if (!b) break;
-    batches++;
-    const batchHashes = await page.evaluate(PAGE_HASHES);
-    if (batchHashes.length !== b.count) throw new Error(`batch at ${b.first}: ${batchHashes.length} pages mounted, ${b.count} announced`);
-    hashes.push(...batchHashes);
-    const drawn = await page.evaluate(`[document.images.length, [...document.images].filter((img) => img.naturalWidth > 0).length]`);
-    images += drawn[0];
-    imagesDrawn += drawn[1];
-    if (onBatch) await onBatch(b.first, batchHashes, { pageHtml: (i) => page.evaluate(PAGE_HTML(i - b.first)) });
-    if (print) {
-      const t2 = performance.now();
-      await page.pdf({ preferCSSPageSize: true, printBackground: true });
-      printMs += performance.now() - t2;
-    }
-    await page.evaluate(`window.__print.release()`);
-  }
-  return { ...started, hashes, batches, images, imagesDrawn, countMs, renderMs: Math.round(renderMs), printMs: Math.round(printMs) };
-}
-
-/** Where two normalized HTML strings first differ, with context. */
-export function firstDiff(a, b) {
-  if (a === b) return null;
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i]) i++;
-  const from = Math.max(0, i - 120);
-  return { at: i, old: a.slice(from, i + 160), new: b.slice(from, i + 160) };
 }

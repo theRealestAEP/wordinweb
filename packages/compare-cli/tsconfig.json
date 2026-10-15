@@ -4,5 +4,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  "files": ["../core/src/bidi-js.d.ts", "../core/src/wmf.d.ts"]
 }

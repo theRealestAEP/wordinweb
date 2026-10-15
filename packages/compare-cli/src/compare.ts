@@ -1,4 +1,4 @@
-import { closeSync, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
+import { closeSync, createWriteStream, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
@@ -37,6 +37,8 @@ import {
 } from "../../core/src/edit/compare/index.js";
 import { MARKERS, RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
 import { CompareError, isDiskFull } from "./errors.js";
+import { PdfRenderError } from "../../core/src/pdf/errors.js";
+import { renderDocxToPdf } from "../../core/src/pdf/render.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
 import { flatten } from "./printable.js";
 import { DiskNotes } from "./notes.js";
@@ -55,6 +57,13 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
    * final section properties: a page break and a summary, say.
    */
   printable?: { path: string; beforeSectPr?: string };
+  /**
+   * Also write the printable copy as a PDF to `path`, rendered without a
+   * browser (core's pdf/render.ts) from the printable .docx (a working file
+   * when `printable` is not asked for), with its review comments beside the
+   * pages when `comments` is set.
+   */
+  pdf?: { path: string; comments?: boolean };
 }
 
 export interface CompareFilesResult {
@@ -86,7 +95,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     if (!stat) throw new CompareError("missing", `${path}: the ${which} file does not exist`, which);
     if (!stat.isFile()) throw new CompareError("missing", `${path}: the ${which} file is not a file`, which);
   }
-  for (const out of [outPath, options.printable?.path]) {
+  for (const out of [outPath, options.printable?.path, options.pdf?.path]) {
     if (out === undefined) continue;
     // The result is written while the inputs are still read.
     if ([originalPath, revisedPath].some((path) => resolve(path) === resolve(out))) {
@@ -130,7 +139,10 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const plan = planBody(O, R, ctx);
     const body = new BlockStore(join(dir, "result-blocks"));
     stores.push(body);
-    const printable = options.printable ? new BlockStore(join(dir, "printable-blocks")) : null;
+    // The PDF is rendered from the printable copy: a working file when the
+    // caller did not ask for the copy itself.
+    const printableSpec = options.printable ?? (options.pdf ? { path: join(dir, "printable.docx") } : undefined);
+    const printable = printableSpec ? new BlockStore(join(dir, "printable-blocks")) : null;
     if (printable) stores.push(printable);
     // A save drops a chart part whose relationship the body it sees does not use.
     const charts = [O, R].some((input) => [...input.shell.documentRels.values()].some((rel) => rel.type.endsWith("/chart")));
@@ -147,11 +159,15 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     for (const root of R.shell.revisionRoots()) countRevisions(root, revisions);
     for (const notes of notesOf(R)) notes.forEachChange((note) => countRevisions(note, revisions));
 
-    await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && options.printable ? { ...options.printable, store: printable } : null);
+    await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { ...printableSpec, store: printable } : null);
+    if (options.pdf && printableSpec) {
+      await renderDocxToPdf(printableSpec.path, createWriteStream(options.pdf.path), { comments: options.pdf.comments });
+    }
     return { revisions };
   } catch (error) {
     if (error instanceof CompareError) throw error;
     const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof PdfRenderError && error.code === "unsupported_script") throw new CompareError("unsupported_script", message, undefined, { cause: error });
     throw new CompareError(isDiskFull(error) ? "disk_full" : "failed", message, undefined, { cause: error });
   } finally {
     for (const store of stores) store.close();

@@ -3,6 +3,7 @@ import { mkdtempSync, renameSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { compareFiles } from "./compare.js";
+import { CompareError } from "./errors.js";
 
 const USAGE = `Usage: docx-compare ORIGINAL.docx REVISED.docx -o RESULT.docx --author NAME [options]
 
@@ -22,14 +23,20 @@ Options:
   --no-formatting     do not report formatting-only differences
   --no-whitespace     do not report whitespace-only differences
   --temp-dir DIR      where the working files go (default: the system's)
+  --pdf FILE          also write the redline as a PDF: the result with its tracked
+                      changes as plain formatting, rendered without a browser
+  --pdf-comments      print the review comments beside the PDF's pages
   --quiet             do not print notes about differences that could not be expressed exactly
-  -h, --help          show this help`;
+  -h, --help          show this help
+
+Exit codes: 0 done; 1 failed (the message starts with the reason's code, such as
+not_docx or unsupported_script); 2 usage.`;
 
 /** A mistake in the command line: reported with exit code 2. */
 class UsageError extends Error {}
 
-const VALUED = new Set(["out", "author", "date", "temp-dir"]);
-const SWITCHES = new Set(["no-formatting", "no-whitespace", "quiet", "help"]);
+const VALUED = new Set(["out", "author", "date", "temp-dir", "pdf"]);
+const SWITCHES = new Set(["no-formatting", "no-whitespace", "pdf-comments", "quiet", "help"]);
 
 function parseArgs(argv: string[]): { files: string[]; flags: Record<string, string | boolean> } {
   const files: string[] = [];
@@ -83,9 +90,14 @@ async function main(): Promise<void> {
   const tempDir = typeof flags["temp-dir"] === "string" ? flags["temp-dir"] : tmpdir();
   if (!isFolder(tempDir)) throw new Error(`${tempDir}: the --temp-dir folder does not exist`);
   const partial = `${out}.${process.pid}.partial`;
+  const pdf = typeof flags.pdf === "string" ? flags.pdf : undefined;
+  if (pdf && !isFolder(dirname(resolve(pdf)))) throw new Error(`${pdf}: the folder for the PDF does not exist`);
+  if (flags["pdf-comments"] && !pdf) throw new UsageError("--pdf-comments needs --pdf FILE");
+  const pdfPartial = pdf ? `${pdf}.${process.pid}.partial` : undefined;
   const work = mkdtempSync(join(tempDir, "docx-compare-"));
   const cleanUp = (): void => {
     rmSync(partial, { force: true });
+    if (pdfPartial) rmSync(pdfPartial, { force: true });
     rmSync(work, { recursive: true, force: true });
   };
   const stop = (code: number) => () => {
@@ -101,9 +113,11 @@ async function main(): Promise<void> {
       formatting: !flags["no-formatting"],
       whitespace: !flags["no-whitespace"],
       tempDir: work,
+      pdf: pdfPartial ? { path: pdfPartial, comments: !!flags["pdf-comments"] } : undefined,
       onNote: flags.quiet ? undefined : (note) => console.error(`note: ${note.code}: ${note.detail}`),
     });
     renameSync(partial, out);
+    if (pdf && pdfPartial) renameSync(pdfPartial, pdf);
   } finally {
     cleanUp();
   }
@@ -115,6 +129,7 @@ main().catch((error: unknown) => {
     process.exitCode = 2;
     return;
   }
-  console.error(`docx-compare: ${error instanceof Error ? error.message : String(error)}`);
+  const code = error instanceof CompareError ? `${error.code}: ` : "";
+  console.error(`docx-compare: ${code}${error instanceof Error ? error.message : String(error)}`);
   process.exitCode = 1;
 });
