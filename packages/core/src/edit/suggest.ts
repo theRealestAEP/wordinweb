@@ -999,7 +999,7 @@ function joinWithNext(doc: DocxDocument, pEl: XmlElement, gone: "ins" | "del"): 
 }
 
 /** Range markers that may sit between two body paragraphs. */
-const MARKERS = ["bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "permStart", "permEnd", "proofErr"];
+export const MARKERS = ["bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "permStart", "permEnd", "proofErr"];
 
 /**
  * A section break lives in a paragraph's mark. Joined, the two paragraphs end

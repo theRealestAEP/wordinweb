@@ -16,6 +16,7 @@ import {
   recordTableFormatChange,
   recordTableGridChange,
   revisionWrapper,
+  MARKERS,
 } from "../suggest.js";
 import { CONTAINERS, ContentToken, Placed, ReadOptions, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
 import { Key, histogramMatch } from "./histogram.js";
@@ -2052,7 +2053,7 @@ function prefixOf(name: string): string {
  * same-class chain takes a w:pPrChange to carry the other document's answer.
  */
 function applyParagraphMarks(entries: Entry[], ctx: Ctx): void {
-  const infos = entries.map((e) => ({ cls: e.cls, paragraph: isParagraph(e.el), endsSection: endsSection(e.el) }));
+  const infos = entries.map((e) => ({ cls: e.cls, paragraph: isParagraph(e.el), endsSection: endsSection(e.el), marker: MARKERS.includes(localName(e.el.name)) }));
   paragraphMarkSteps(
     infos.length,
     (i) => infos[i],
@@ -2072,6 +2073,8 @@ export interface MarkInfo {
   paragraph: boolean;
   /** A paragraph that ends a section: its mark is the break. */
   endsSection: boolean;
+  /** A range marker between blocks (a bookmark's end): a joined paragraph steps over it. */
+  marker: boolean;
 }
 
 /**
@@ -2146,7 +2149,10 @@ function paragraphRunSteps(n: number, info: (i: number) => MarkInfo, start: numb
   while (at <= end) {
     let last = at;
     while (last + 1 <= end && info(last + 1).cls === info(at).cls) last++;
-    if (last + 1 < n && info(at).paragraph && info(last + 1).paragraph) step({ kind: "props", at, follower: last + 1 });
+    // The join steps over range markers to the next paragraph, and so does the follower.
+    let follower = last + 1;
+    while (follower < n && info(follower).marker) follower++;
+    if (follower < n && info(at).paragraph && info(follower).paragraph) step({ kind: "props", at, follower });
     at = last + 1;
   }
 }

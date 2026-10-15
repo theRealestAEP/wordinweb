@@ -35,7 +35,7 @@ import {
   reportUncomparedParts,
   resolveGap,
 } from "../../core/src/edit/compare/index.js";
-import { RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
+import { MARKERS, RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
 import { CompareError, isDiskFull } from "./errors.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
 import { flatten } from "./printable.js";
@@ -435,7 +435,7 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): voi
     const fromOriginal = plan.fromOriginal(k);
     const kind = fromOriginal ? O.kinds[plan.o[k]] : R.kinds[plan.r[k]];
     const ends = fromOriginal ? O.endsSection[plan.o[k]] : R.endsSection[plan.r[k]];
-    return { cls: plan.cls(k), paragraph: kind === "p", endsSection: ends };
+    return { cls: plan.cls(k), paragraph: kind === "p", endsSection: ends, marker: MARKERS.includes(kind) };
   };
   paragraphMarkSteps(n, info, (step) => {
     if (step.kind === "untracked") untracked++;
