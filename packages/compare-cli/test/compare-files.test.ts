@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { crc32 } from "node:zlib";
 import { strFromU8, unzipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
@@ -12,6 +13,7 @@ import { AUTHOR, DATE, canonicalBody, para } from "../../core/test/compare-helpe
 import { compareFiles } from "../src/compare.js";
 import { CompareError } from "../src/errors.js";
 import { flatten } from "../src/printable.js";
+import { ZipWriter } from "../src/zip.js";
 
 const dir = mkdtempSync(join(tmpdir(), "compare-files-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -300,5 +302,33 @@ describe("compareFiles errors", () => {
   it("refuses to overwrite an input, and to write into a missing folder", async () => {
     await fails(good, good, good).toThrow(/must not overwrite an input/);
     await fails(good, good, join(dir, "no-such-folder", "x.docx")).toThrow(/folder does not exist/);
+  });
+
+  it("refuses parts larger than it holds in memory, from the directory's sizes, before inflating anything", async () => {
+    // A .docx whose directory declares each named part at `declared` bytes
+    // (the entries themselves are tiny): what a zip bomb declares, checked
+    // before any inflating, so the compare never pays for it.
+    const declaring = (name: string, declared: [string, number][]): string => {
+      const path = join(dir, name);
+      const writer = new ZipWriter(path);
+      for (const [part, bytes] of Object.entries(unzipSync(makeDocx({ "word/document.xml": wrapDocument(para("Text.")) })))) writer.addBuffer(part, bytes);
+      for (const [part, size] of declared) {
+        const data = Buffer.from("<a/>");
+        writer.addEntry(part, 0, crc32(data), data.length, size, (write) => write(data));
+      }
+      writer.close();
+      return path;
+    };
+    const onePart = declaring("one-big-part.docx", [["word/styles.xml", 65 << 20]]);
+    const manyParts = declaring("many-big-parts.docx", [["word/styles.xml", 50 << 20], ["word/numbering.xml", 50 << 20], ["word/header1.xml", 50 << 20]]);
+    const bigBody = declaring("big-body.docx", [["word/media/image1.png", 65 << 20]]);
+    await fails(good, onePart, join(dir, "x.docx")).toThrow(/one-big-part\.docx: word\/styles\.xml is 65 MB; a part held in memory is at most 64 MB/);
+    await fails(manyParts, good, join(dir, "x.docx")).toThrow(/many-big-parts\.docx: the parts held in memory .* come to 151 MB; at most 128 MB together, 64 MB each/);
+    for (const [path, file] of [[onePart, "revised"], [manyParts, "original"]] as const) {
+      const error = await errorOf(file === "original" ? path : good, file === "revised" ? path : good, join(dir, "x.docx"));
+      expect([error.code, error.file]).toEqual(["too_large", file]);
+    }
+    // A binary part is never inflated, so no limit applies: it is copied as it is.
+    await compareFiles(good, bigBody, join(dir, "x.docx"), options);
   });
 });
