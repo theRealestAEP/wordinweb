@@ -1696,11 +1696,23 @@ export class DocxDocument {
     return changed;
   }
 
+  /**
+   * A new empty header or footer part, referenced as `type` from `sectPr`
+   * alone. Returns the part's target, as headerFooterRoot and
+   * relationshipsOf take it. compareDocuments gives a header the revised
+   * document lost one of these, to hold the original's content struck.
+   */
+  addHfPart(kind: "header" | "footer", type: "default" | "first" | "even", sectPr: XmlElement): string {
+    const { relId, target } = this.createHfPart(kind);
+    sectPr.children.unshift(this.hfReference(kind === "header" ? "w:headerReference" : "w:footerReference", type, relId));
+    return target;
+  }
+
   /** Create and register a new empty header/footer part — package part,
    * document relationship, content-type override, hfParts entry — with no
    * section references of its own; the caller decides which sectPrs point at
    * it and with which w:type. */
-  private createHfPart(kind: "header" | "footer"): { relId: string; root: XmlElement } {
+  private createHfPart(kind: "header" | "footer"): { relId: string; target: string; root: XmlElement } {
     const isHeader = kind === "header";
     const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
     let n = 1;
@@ -1764,7 +1776,7 @@ export class DocxDocument {
       }
     }
     this.hfParts.push({ relId, target, root, isHeader, rels: new Map(), relsRoot: null });
-    return { relId, root };
+    return { relId, target, root };
   }
 
   markFootnotesChanged(): void {

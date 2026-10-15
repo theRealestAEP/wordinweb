@@ -88,6 +88,8 @@ export interface CompareNote {
     | "no-common-paragraph"
     /** Original-only content referencing a relationship the result does not have. */
     | "unresolved-relationship"
+    /** The last section gained or lost a header or footer; the reference is not a revision, so one review leaves it empty. */
+    | "header-footer-reference"
     /** An input held tracked changes; it was compared as if they were accepted. */
     | "existing-revisions-accepted";
   detail: string;
@@ -198,11 +200,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
   giveStruckReferencesTheirOwnNotes("footnote", merged, ctx);
   giveStruckReferencesTheirOwnNotes("endnote", merged, ctx);
 
-  for (const [from, into] of headerFooterPairs) {
-    const oRoot = original.headerFooterRoot(from);
-    const mRoot = merged.headerFooterRoot(into);
-    if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
-  }
+  compareHeadersFooters(original, merged, headerFooterPairs, ctx);
 
   if (issued > 0) merged.refresh();
   return merged;
@@ -245,16 +243,33 @@ export function compareContainer(oRoot: XmlElement, mRoot: XmlElement, ctx: Ctx)
 }
 
 /**
+ * A header or footer part on each side of the compare, or the last
+ * section's on one side alone when the other side's last section shows
+ * none of that kind and type.
+ */
+export interface HeaderFooterPair {
+  kind: "header" | "footer";
+  type: "default" | "first" | "even";
+  from: string | null;
+  into: string | null;
+}
+
+/**
  * Header and footer parts paired across the documents: section by section,
- * kind by kind (default, first, even), each pair once. `sections` gives each
- * side's section breaks that are not in its tree, in order, ahead of those
- * that are.
+ * kind by kind (default, first, even), each pair once. A section without a
+ * reference of a kind shows the previous section's part, as Word does, so
+ * it pairs that part. `sections` gives each side's section breaks that are
+ * not in its tree, in order, ahead of those that are.
+ *
+ * The last section's references with no counterpart come out one-sided. An
+ * earlier section's do not: a section-break paragraph whose references
+ * differ is struck and reinserted whole (pairable), which carries them.
  */
 export function pairHeadersFooters(
   original: DocxDocument,
   merged: DocxDocument,
   sections?: { original: XmlElement[]; merged: XmlElement[] },
-): [string, string][] {
+): HeaderFooterPair[] {
   const refs = (doc: DocxDocument): Map<string, string> => {
     const out = new Map<string, string>();
     const body = child(doc.docRoot, "body");
@@ -264,26 +279,74 @@ export function pairHeadersFooters(
         localName(c.name) === "sectPr" ? [c] : localName(c.name) === "p" ? [child(child(c, "pPr"), "sectPr")].filter((x): x is XmlElement => !!x) : [],
       ),
     ];
+    const shown = new Map<string, string>();
     sects.forEach((sp, i) => {
       for (const ref of sp.children) {
         const ln = localName(ref.name);
         if (ln !== "headerReference" && ln !== "footerReference") continue;
         const target = doc.documentRels.get(ref.attrs["r:id"])?.target;
-        if (target) out.set(`${i}:${ln}:${ref.attrs["w:type"] ?? "default"}`, target);
+        if (target) shown.set(`${ln}:${ref.attrs["w:type"] ?? "default"}`, target);
       }
+      // The body's own section properties are the last section's.
+      const section = body?.children.includes(sp) ? "last" : String(i);
+      for (const [kindType, target] of shown) out.set(`${section}:${kindType}`, target);
     });
     return out;
   };
+  const theirs = refs(original);
   const mine = refs(merged);
-  const pairs: [string, string][] = [];
+  const pairs: HeaderFooterPair[] = [];
   const done = new Set<string>();
-  for (const [key, from] of refs(original)) {
+  const parse = (key: string): Pick<HeaderFooterPair, "kind" | "type"> => {
+    const [, ln, type] = key.split(":");
+    return { kind: ln === "headerReference" ? "header" : "footer", type: type as HeaderFooterPair["type"] };
+  };
+  for (const [key, from] of theirs) {
     const into = mine.get(key);
-    if (!into || done.has(into)) continue;
-    done.add(into);
-    pairs.push([from, into]);
+    if (into && !done.has(into)) {
+      done.add(into);
+      pairs.push({ ...parse(key), from, into });
+    } else if (!into && key.startsWith("last:")) {
+      pairs.push({ ...parse(key), from, into: null });
+    }
+  }
+  for (const [key, into] of mine) {
+    if (key.startsWith("last:") && !theirs.has(key) && !done.has(into)) pairs.push({ ...parse(key), from: null, into });
   }
   return pairs;
+}
+
+/**
+ * Compare each paired header or footer part in place. A part the last
+ * section has on one side alone is compared against nothing: one the
+ * revised document lost gets a new part in the result, referenced from the
+ * last section, with the original's content struck; one it gained has its
+ * content marked inserted. A sectPrChange cannot carry the reference
+ * itself, so the review that removes the content leaves an empty part, and
+ * `onNote` says so.
+ */
+export function compareHeadersFooters(original: DocxDocument, merged: DocxDocument, pairs: HeaderFooterPair[], ctx: Ctx): void {
+  for (const { kind, type, from, into } of pairs) {
+    const oRoot = from === null ? null : original.headerFooterRoot(from);
+    let mRoot = into === null ? null : merged.headerFooterRoot(into);
+    if (from !== null && into !== null) {
+      if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
+      continue;
+    }
+    const name = `the last section's ${type === "default" ? "" : `${type}-page `}${kind}`;
+    if (from !== null) {
+      const sectPr = child(child(merged.docRoot, "body"), "sectPr");
+      if (!oRoot || !sectPr) continue;
+      const target = merged.addHfPart(kind, type, sectPr);
+      mRoot = merged.headerFooterRoot(target) as XmlElement;
+      mRoot.children = [];
+      compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into: target } });
+      ctx.note({ code: "header-footer-reference", detail: `${name} was removed; its reference is not a revision, so accept-all leaves the ${kind} empty` });
+    } else if (mRoot) {
+      compareContainer({ ...mRoot, children: [] }, mRoot, { ...ctx, scope: { from: null, into } });
+      ctx.note({ code: "header-footer-reference", detail: `${name} was added; its reference is not a revision, so reject-all leaves the ${kind} empty` });
+    }
+  }
 }
 
 /**

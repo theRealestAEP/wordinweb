@@ -550,6 +550,92 @@ describe("compareDocuments — headers, footers and notes", () => {
     rejectAllRevisions(rejected);
     expect(collectRevisions(DocxDocument.load(rejected.save()))).toHaveLength(0);
   });
+
+  // FAILURE MODE: a header or footer only one side referenced was skipped,
+  // and a removed header's content vanished from the result with no change
+  // reported.
+  describe("a header or footer the last section has on one side alone", () => {
+    /** A document whose last section references one part per entry: "header:first" -> its text. */
+    const withParts = (parts: Record<string, string>, sectPr = "") => {
+      const names = Object.keys(parts);
+      return DocxDocument.load(
+        makeDocx({
+          "word/document.xml":
+            `<w:document ${W_NS} ${R}><w:body><w:p><w:r><w:t xml:space="preserve">Body text.</w:t></w:r></w:p><w:sectPr>` +
+            names.map((name, i) => `<w:${name.split(":")[0]}Reference w:type="${name.split(":")[1]}" r:id="rId${i + 1}"/>`).join("") +
+            `${sectPr}</w:sectPr></w:body></w:document>`,
+          "word/_rels/document.xml.rels":
+            `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+            names.map((name, i) => `<Relationship Id="rId${i + 1}" Type="${REL}/${name.split(":")[0]}" Target="${name.split(":")[0]}${i + 1}.xml"/>`).join("") +
+            `</Relationships>`,
+          ...Object.fromEntries(
+            names.map((name, i) => [
+              `word/${name.split(":")[0]}${i + 1}.xml`,
+              `<w:${name.startsWith("header") ? "hdr" : "ftr"} ${W_NS}><w:p><w:r><w:t xml:space="preserve">${parts[name]}</w:t></w:r></w:p><w:p><w:r><w:t>Line two.</w:t></w:r></w:p></w:${name.startsWith("header") ? "hdr" : "ftr"}>`,
+            ]),
+          ),
+        }),
+      );
+    };
+    /** The text of each header and footer part the last section references, by reference. */
+    const texts = (doc: DocxDocument): Record<string, string> => {
+      const d = DocxDocument.load(doc.save());
+      const out: Record<string, string> = {};
+      for (const m of (d.pkg.text("word/document.xml") ?? "").matchAll(/<w:(header|footer)Reference [^>]*w:type="(\w+)"[^>]*r:id="(\w+)"/g)) {
+        const target = d.documentRels.get(m[3])?.target ?? "";
+        out[`${m[1]}:${m[2]}`] = [...(d.pkg.text(target) ?? "").matchAll(/<w:t[^>]*>([^<]*)/g)].map((x) => x[1]).join(" ");
+      }
+      return out;
+    };
+    const compare = (original: DocxDocument, revised: DocxDocument) => {
+      const notes: CompareNote[] = [];
+      const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE, onNote: (n) => notes.push(n) });
+      const counts = (kind: string) => collectRevisions(merged).filter((r) => r.kind === kind).length;
+      const accepted = DocxDocument.load(merged.save());
+      acceptAllRevisions(accepted);
+      const rejected = DocxDocument.load(merged.save());
+      rejectAllRevisions(rejected);
+      return { notes: notes.filter((n) => n.code === "header-footer-reference").map((n) => n.detail), counts, accepted, rejected };
+    };
+
+    it("strikes a removed header's content, and accept-all leaves the header empty", () => {
+      const original = withParts({ "header:default": "BEFOREHEADER" });
+      const { notes, counts, accepted, rejected } = compare(original, withParts({}));
+      expect([counts("deletion"), counts("insertion")]).toEqual([2, 0]);
+      expect(notes).toEqual(["the last section's header was removed; its reference is not a revision, so accept-all leaves the header empty"]);
+      expect(texts(rejected)).toEqual(texts(original));
+      expect(texts(accepted)).toEqual({ "header:default": "" });
+    });
+
+    it("inserts an added header's content, and reject-all leaves the header empty", () => {
+      const revised = withParts({ "header:default": "AFTERHEADER" });
+      const { notes, counts, accepted, rejected } = compare(withParts({}), revised);
+      expect([counts("deletion"), counts("insertion")]).toEqual([0, 2]);
+      expect(notes).toEqual(["the last section's header was added; its reference is not a revision, so reject-all leaves the header empty"]);
+      expect(texts(accepted)).toEqual(texts(revised));
+      expect(texts(rejected)).toEqual({ "header:default": "" });
+    });
+
+    it("inserts an added first-page header beside the header both sides share", () => {
+      const original = withParts({ "header:default": "Shared header" });
+      const revised = withParts({ "header:default": "Shared header", "header:first": "FIRSTPAGE" }, "<w:titlePg/>");
+      const { notes, counts, accepted, rejected } = compare(original, revised);
+      expect([counts("deletion"), counts("insertion")]).toEqual([0, 2]);
+      expect(notes).toEqual(["the last section's first-page header was added; its reference is not a revision, so reject-all leaves the header empty"]);
+      expect(texts(accepted)).toEqual(texts(revised));
+      expect(texts(rejected)).toEqual({ ...texts(original), "header:first": "" });
+    });
+
+    it("strikes a removed footer's content", () => {
+      const original = withParts({ "header:default": "Shared header", "footer:default": "BEFOREFOOTER" });
+      const revised = withParts({ "header:default": "Shared header" });
+      const { notes, counts, accepted, rejected } = compare(original, revised);
+      expect([counts("deletion"), counts("insertion")]).toEqual([2, 0]);
+      expect(notes).toEqual(["the last section's footer was removed; its reference is not a revision, so accept-all leaves the footer empty"]);
+      expect(texts(rejected)).toEqual(texts(original));
+      expect(texts(accepted)).toEqual({ ...texts(revised), "footer:default": "" });
+    });
+  });
 });
 
 describe("compareDocuments — content controls and table rows", () => {

@@ -13,8 +13,8 @@ import {
   GapSide,
   NoteRef,
   applyMarkStep,
-  compareContainer,
   compareContext,
+  compareHeadersFooters,
   compareNotes,
   compareRow,
   compareTableProps,
@@ -134,11 +134,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     emitBody(plan, O, R, ctx, sink);
     const noteIds = giveStruckReferencesTheirOwnNotes(body, sink.withNoteRefs, R, ctx);
 
-    for (const [from, into] of headerFooterPairs) {
-      const oRoot = O.shell.headerFooterRoot(from);
-      const mRoot = R.shell.headerFooterRoot(into);
-      if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
-    }
+    compareHeadersFooters(O.shell, R.shell, headerFooterPairs, ctx);
 
     // The body's revisions were counted as it was written; the rest are in
     // the shell (headers, footers) and in the notes the compare changed.
