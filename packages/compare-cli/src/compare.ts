@@ -466,9 +466,9 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): voi
     if (second && f === emittedUpTo + 1) return side === "revised" ? child(second.el, "pPr") : originalProps(child(second.el, "pPr"));
     const op = plan.op[f];
     if (op === DELETED || op === MERGE_SECOND) return child(parseO(plan.o[f]), "pPr");
-    // A matched paragraph wears the original's properties in a w:pPrChange
-    // once compared, when formatting is tracked.
-    if (side === "original" && ctx.formatting && (op === MATCH || op === COPY)) return child(parseO(plan.o[f]), "pPr");
+    // A matched, split or merged paragraph wears the original's properties
+    // in a w:pPrChange once compared, when formatting is tracked.
+    if (side === "original" && ctx.formatting && (op === MATCH || op === COPY || op === SPLIT || op === MERGE)) return child(parseO(plan.o[f]), "pPr");
     return child(parseR(plan.r[f]), "pPr");
   };
   let emittedUpTo = -1;
