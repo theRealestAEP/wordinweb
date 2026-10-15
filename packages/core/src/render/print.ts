@@ -143,6 +143,9 @@ export function openPrintStream(source: string | ByteSource, container: HTMLElem
               pageWidth = page.width;
               pageHeight = page.height;
             }
+            // The break cache keeps a line-metrics entry per paragraph laid;
+            // dropped a batch at a time here as the rendering pass drops it.
+            if (page.index % batchPages === 0) clearBreakCache(measurer);
           },
         });
       };
