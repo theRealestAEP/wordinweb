@@ -205,8 +205,12 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       noteRefsIn(el);
     };
 
-    const add = (el: XmlElement): void => {
-      const xml = serializeXml(el);
+    /**
+     * Index one block. `xml` is the block as read when nothing changed it: a
+     * block with no tracked changes is stored as its own bytes, not parsed
+     * and written again (that was a fifth of a large compare's time).
+     */
+    const add = (el: XmlElement, xml = serializeXml(el)): void => {
       index(el, xml, hash(xml), paragraphText(el), hash(blockFingerprint(el, shell)));
     };
 
@@ -225,8 +229,8 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
         open,
         /** How many w:tr rows it holds. */
         trs: 0,
-        take(el: XmlElement): void {
-          const xml = serializeXml(el);
+        /** Take the table's next child; `raw` is its XML as read, when nothing changed it. */
+        take(el: XmlElement, raw?: string): void {
           text.add(paragraphText(el));
           const rowKind = ROW_LEVEL.indexOf(localName(el.name));
           if (rowKind === -1) {
@@ -234,6 +238,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
             return;
           }
           if (ROW_LEVEL[rowKind] === "tr") this.trs++;
+          const xml = raw ?? serializeXml(el);
           input.rows.add(xml);
           input.rowFingerprints.push(hash(rowFingerprint(el)));
           input.rowKinds.push(ROW_LEVEL[rowKind]);
@@ -305,7 +310,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
             rows.push(el);
             rowBytes += xml.length;
             if (rowBytes >= BATCH_BYTES) flushRows();
-          } else table.take(el);
+          } else table.take(el, xml);
         },
       );
       flushRows();
@@ -342,7 +347,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
         batchBytes += xml.length;
         if (batchBytes >= BATCH_BYTES && !joinsNext(el)) flush();
       } else {
-        add(el);
+        add(el, xml);
       }
     }
     flush();
@@ -378,7 +383,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
               batchBytes += xml.length;
               if (batchBytes >= BATCH_BYTES) flushNotes();
             } else {
-              notes.add(el);
+              notes.add(el, xml);
             }
           },
         );

@@ -95,9 +95,9 @@ export class DiskNotes implements NotesPart {
     this.changes.close();
   }
 
-  /** Add the part's next child, as read. */
-  add(el: XmlElement): void {
-    const i = this.children.add(serializeXml(el));
+  /** Add the part's next child; `xml` is its XML as read, when nothing changed it. */
+  add(el: XmlElement, xml = serializeXml(el)): void {
+    const i = this.children.add(xml);
     const id = el.attrs["w:id"];
     const note = localName(el.name) === this.kind;
     this.keys.push(note ? parseInt(cyrb53(normalizeText(paragraphText(el))), 36) : 0);
