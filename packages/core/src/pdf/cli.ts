@@ -36,7 +36,7 @@ try {
   const result = await renderDocxToPdf(input, createWriteStream(output), { comments });
   const ms = Math.round(performance.now() - t0);
   const rss = Math.round(process.resourceUsage().maxRSS / 1024);
-  console.log(JSON.stringify({ input, output, pages: result.pages, ms, maxRssMB: rss, fonts: result.fonts, missingFonts: result.missingFonts, unsupportedImages: result.unsupportedImages }));
+  console.log(JSON.stringify({ input, output, pages: result.pages, ms, maxRssMB: rss, fonts: result.fonts, missingFonts: result.missingFonts, missingCharacters: result.missingCharacters, unsupportedImages: result.unsupportedImages }));
 } catch (error) {
   const code: PdfRenderErrorCode = error instanceof PdfRenderError ? error.code : "failed";
   console.error(`docx-pdf: ${code}: ${error instanceof Error ? error.message : String(error)}`);

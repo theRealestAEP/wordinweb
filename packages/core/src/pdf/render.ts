@@ -34,8 +34,11 @@ export interface RenderPdfResult {
   pages: number;
   /** Faces embedded, "family subfamily". */
   fonts: string[];
-  /** Families the document asked for that no font directory holds. */
+  /** Families the document asked for that no font directory holds; a
+   * substitute or fallback face drew them. */
   missingFonts: string[];
+  /** Characters no installed font has, as "U+4E2D 中": each drew as an empty box. */
+  missingCharacters: string[];
   /** Picture parts drawn as empty frames: no decoder for their format. */
   unsupportedImages: string[];
 }
@@ -194,6 +197,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     pages: pageNums.length,
     fonts: resources.embedded(),
     missingFonts: [...fonts.missing],
+    missingCharacters: [...fonts.missingCodePoints].sort((a, b) => a - b).map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")} ${String.fromCodePoint(cp)}`),
     unsupportedImages: [...unsupportedImages],
   };
 }

@@ -535,13 +535,14 @@ describe("the pdf option", () => {
     const printable = join(dir, "pdf-sum-printable.docx");
     const summary = (revisions: Record<string, number>): string =>
       `<w:p><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:r><w:t>Insertions: ${revisions.insertion}</w:t></w:r></w:p>`;
-    const { pdfPages } = await compareFiles(original, revised, join(dir, "pdf-sum-out.docx"), {
+    const { pdfPages, missingCharacters } = await compareFiles(original, revised, join(dir, "pdf-sum-out.docx"), {
       author: AUTHOR,
       date: DATE,
       printable: { path: printable, beforeSectPr: summary },
       pdf: { path: join(dir, "pdf-sum.pdf") },
     });
     expect(pdfPages).toBe(2);
+    expect(missingCharacters).toEqual([]);
     expect(strFromU8(unzipSync(readFileSync(printable))["word/document.xml"])).toContain("Insertions: 1");
   });
 

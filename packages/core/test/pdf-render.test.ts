@@ -159,4 +159,11 @@ describe("renderDocxToPdf", () => {
     // "Opening" starts with U+004F.
     expect(cmaps.join("\n")).toMatch(/<[0-9a-f]{4}> <004f>/);
   });
+  it("reports fonts no directory holds and characters no font has", async () => {
+    const body = `<w:p><w:r><w:rPr><w:rFonts w:ascii="No Such Font Family" w:hAnsi="No Such Font Family"/></w:rPr><w:t>Plain words \u{10FFFD}</w:t></w:r></w:p>`;
+    const docx = makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}</w:body></w:document>` });
+    const result = await renderDocxToPdf(bytesSource(docx), new HeldWritable(Infinity));
+    expect(result.missingFonts).toContain("No Such Font Family");
+    expect(result.missingCharacters).toEqual(["U+10FFFD \u{10FFFD}"]);
+  });
 });

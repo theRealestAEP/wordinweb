@@ -200,6 +200,8 @@ export class FontSet {
   private readonly stacks = new Map<string, FontStack>();
   /** Families the documents asked for that no directory holds. */
   readonly missing = new Set<string>();
+  /** Code points no face in their stack has: each drew as an empty box. */
+  readonly missingCodePoints = new Set<number>();
 
   constructor(dirs: string[] = defaultFontDirs()) {
     this.registry = FontRegistry.for(dirs);
@@ -276,6 +278,7 @@ export class FontSet {
           break;
         }
       }
+      if (gid === 0 && shown !== 32) this.missingCodePoints.add(cp);
       if (!run || run.face !== chosen) {
         run = { face: chosen, gids: [], advances: [], codePoints: [] };
         runs.push(run);

@@ -72,6 +72,10 @@ export interface CompareFilesResult {
   revisions: Record<RevisionKind, number>;
   /** The PDF's page count, when `pdf` was asked for. */
   pdfPages?: number;
+  /** With `pdf`: font families no installed font holds (a substitute drew
+   * them), and characters no installed font has (each an empty box). */
+  missingFonts?: string[];
+  missingCharacters?: string[];
 }
 
 /**
@@ -167,7 +171,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
     if (options.pdf && printableSpec) {
       const rendered = await renderDocxToPdf(printableSpec.path, createWriteStream(options.pdf.path), { comments: options.pdf.comments });
-      return { revisions, pdfPages: rendered.pages };
+      return { revisions, pdfPages: rendered.pages, missingFonts: rendered.missingFonts, missingCharacters: rendered.missingCharacters };
     }
     return { revisions };
   } catch (error) {
