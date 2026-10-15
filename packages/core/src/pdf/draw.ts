@@ -1,4 +1,5 @@
-import { Border } from "../model.js";
+import { Border, Theme } from "../model.js";
+import { drawChart } from "./chart.js";
 import { fontWidthScale } from "../layout/measure.js";
 import { FontSpec, LaidOutPage, LineEdgeItem, PageItem, PathItem, RectItem, TextItem } from "../layout/types.js";
 import { FontSet, GlyphRun } from "./fonts.js";
@@ -73,6 +74,7 @@ export class PageDrawer {
   constructor(
     private readonly fonts: FontSet,
     private readonly resources: Resources,
+    private readonly theme: Theme,
     private readonly page: LaidOutPage,
     private readonly offsetX = 0,
     sheetHeight = page.height,
@@ -82,6 +84,13 @@ export class PageDrawer {
 
   x(px: number): number {
     return (px + this.offsetX) * PT;
+  }
+
+  /** The laid width of `text` in `font`, px, as the layout would measure it. */
+  textWidth(text: string, font: FontSpec): number {
+    let width = 0;
+    for (const run of this.fonts.shape(text, font)) for (const advance of run.advances) width += advance;
+    return width;
   }
 
   y(px: number): number {
@@ -150,8 +159,10 @@ export class PageDrawer {
       case "wordart":
         this.drawWordArt(item);
         break;
-      case "warptext":
       case "chart":
+        drawChart(this, item, this.theme);
+        break;
+      case "warptext":
       case "grip":
       case "drawingHit":
         break;

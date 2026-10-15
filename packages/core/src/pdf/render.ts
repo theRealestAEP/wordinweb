@@ -102,7 +102,7 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   const onPage = async (page: LaidOutPage): Promise<void> => {
     const names = new Map<string, string>();
     for (const item of page.items) {
-      if (item.kind === "chart" || item.kind === "warptext") undrawn.add(item.kind);
+      if (item.kind === "warptext") undrawn.add(item.kind);
       if (item.kind !== "image" || names.has(item.part)) continue;
       let image = images.get(item.part);
       if (image === undefined) {
@@ -113,7 +113,7 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
       }
       if (image) names.set(item.part, `Im${image.objNum}`);
     }
-    const drawer = new PageDrawer(fonts, resources, page, 0, sheet?.height ?? page.height);
+    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, sheet?.height ?? page.height);
     drawer.drawPage((part) => names.get(part) ?? null);
     if (column && sheet) column.draw(page, drawer, sheet.height);
     const xobjects = [...images.entries()].filter(([part]) => names.has(part)).map(([part, image]) => `/${names.get(part)} ${(image as WrittenImage).objNum} 0 R`);
@@ -126,7 +126,7 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   // Balloons past the last page go on sheets of their own.
   while (column && sheet && column.hasCarried()) {
     const blank: LaidOutPage = { width: final.maxWidth, height: final.maxHeight, index: 0, number: 0, items: [], bodyTop: 0, bodyBottom: 0, hfStart: 0, columnBands: [] };
-    const drawer = new PageDrawer(fonts, resources, blank, 0, sheet.height);
+    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, blank, 0, sheet.height);
     column.draw(blank, drawer, sheet.height);
     await writePage(drawer, sheet.width, sheet.height, []);
   }
