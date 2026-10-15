@@ -323,6 +323,93 @@ function docMediaUrl(doc: DocxDocument, key: string, make: () => string): string
   return u;
 }
 
+/**
+ * The object URL renderItem would make for an image part, built from its
+ * bytes a piece at a time: a print stream feeds a large image through here
+ * so the page never holds it whole (render/print.ts). The colour profile is
+ * stripped from the head, as renderItem strips it, once the pixel data
+ * starts; the rest goes straight into the Blob. Null for a format renderItem
+ * converts from its bytes (TIFF, WMF, EMF), which it needs whole.
+ */
+export function mediaUrlSink(doc: DocxDocument, part: string): { push(piece: Uint8Array): void; end(): string } | null {
+  const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
+  if (CONVERTED.has(ext)) return null;
+  const type = MIME_BY_EXT[ext] ?? "application/octet-stream";
+  // The browser stores the bytes a Blob of about BLOB_PIECE at a time; the
+  // URL's Blob is made of those, so no part of the image is in a buffer here.
+  const blobs: Blob[] = [];
+  let pending: Uint8Array<ArrayBuffer>[] = [];
+  let pendingBytes = 0;
+  const store = (): void => {
+    blobs.push(new Blob(pending, { type }));
+    pending = [];
+    pendingBytes = 0;
+  };
+  const append = (bytes: Uint8Array): void => {
+    // A view is copied into the Blob as far as it reaches, whatever buffer is under it.
+    pending.push(bytes as Uint8Array<ArrayBuffer>);
+    pendingBytes += bytes.length;
+    if (pendingBytes >= BLOB_PIECE) store();
+  };
+  // The head, held until the pixel data is found in it; null once it is through.
+  let head: Uint8Array | null = ext === "png" || ext === "jpg" || ext === "jpeg" ? new Uint8Array(0) : null;
+  const flushHead = (at: number): void => {
+    const bytes = head as Uint8Array;
+    head = null;
+    append(stripColorProfile(bytes.subarray(0, at), ext));
+    if (at < bytes.length) append(bytes.subarray(at));
+  };
+  return {
+    push(piece) {
+      if (!head) return append(piece);
+      const joined = new Uint8Array(head.length + piece.length);
+      joined.set(head);
+      joined.set(piece, head.length);
+      head = joined;
+      const at = pixelDataStart(head, ext);
+      if (at !== -1) flushHead(at);
+    },
+    end() {
+      if (head) flushHead(head.length);
+      store();
+      return docMediaUrl(doc, part, () => URL.createObjectURL(new Blob(blobs, { type })));
+    },
+  };
+}
+
+/** Formats renderItem converts from their bytes, which it needs whole. */
+const CONVERTED = new Set(["tiff", "tif", "wmf", "emf"]);
+
+/** mediaUrlSink stores a Blob about this often: one per piece would give the browser thousands of parts to keep track of. */
+const BLOB_PIECE = 1 << 20;
+
+/**
+ * Where an image's header ends and its pixel data starts: a PNG's first IDAT
+ * chunk, or a JPEG's start of scan (or a byte that is no marker, where
+ * stripJpegIcc keeps the rest as it is). -1 while the header is not all
+ * there, or the bytes are not what their name says: then the whole image
+ * is the head, and stripColorProfile treats it as renderItem would.
+ */
+function pixelDataStart(bytes: Uint8Array, ext: string): number {
+  if (ext === "png") {
+    let i = 8;
+    while (i + 8 <= bytes.length) {
+      const len = (bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3];
+      if (len < 0) return -1;
+      if (bytes[i + 4] === 0x49 && bytes[i + 5] === 0x44 && bytes[i + 6] === 0x41 && bytes[i + 7] === 0x54) return i;
+      i += 12 + len;
+    }
+    return -1;
+  }
+  if (bytes.length < 2 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return -1;
+  let i = 2;
+  while (i + 4 <= bytes.length) {
+    if (bytes[i] !== 0xff || bytes[i + 1] === 0xda) return i;
+    i += 2 + ((bytes[i + 2] << 8) | bytes[i + 3]);
+  }
+  return -1;
+}
+
 function docDerivedSrc(doc: DocxDocument, key: string): string | undefined {
   return derivedSrcCache.get(doc)?.get(key);
 }

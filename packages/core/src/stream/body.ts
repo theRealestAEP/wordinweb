@@ -6,6 +6,7 @@ import { DocParseContext, inheritHeaderFooterRefs, parseParagraph, parseTable } 
 import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, child, localName, parseXml } from "../xml.js";
+import { DEFAULT_ZIP_LIMITS } from "../zip.js";
 import { scanBody } from "./scan.js";
 import { ByteSource } from "./source.js";
 import { ZipIndex } from "./zip.js";
@@ -21,6 +22,8 @@ export interface StreamingDocument {
   bodyHasPageTotal: boolean;
   /** A binary part's bytes, read from the file when asked. */
   media(part: string): Promise<Uint8Array | undefined>;
+  /** A binary part's bytes a piece at a time, never held whole; false when the part is missing. */
+  mediaPieces(part: string, onPiece: (piece: Uint8Array) => void): Promise<boolean>;
 }
 
 /** Parts the shell holds whole; every other part stays in the file. */
@@ -50,12 +53,13 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
   const outline = body.scan(docEntry.method, await zip.raw(docEntry));
 
   // The shell: every text part, and document.xml with only the body's own
-  // section properties.
+  // section properties. Their sizes, from the directory, are held to what
+  // Package allows a document loaded whole, before any of them is inflated.
+  const held = [...zip.entries.values()].filter((entry) => entry.name !== docPart && !entry.name.endsWith("/") && TEXT_PART.test(entry.name));
+  const heldBytes = held.reduce((total, entry) => total + entry.size, 0);
+  if (heldBytes > DEFAULT_ZIP_LIMITS.maxTotalUncompressed) throw new Error(`the parts held in memory come to ${heldBytes} bytes, over ${DEFAULT_ZIP_LIMITS.maxTotalUncompressed}`);
   const files: Record<string, Uint8Array> = {};
-  for (const entry of zip.entries.values()) {
-    if (entry.name === docPart || entry.name.endsWith("/") || !TEXT_PART.test(entry.name)) continue;
-    files[entry.name] = await zip.read(entry);
-  }
+  for (const entry of held) files[entry.name] = await zip.read(entry);
   files[docPart] = outline;
   const doc = DocxDocument.fromFiles(files);
   body.hydrate = (el) => doc.hydrateControls(el);
@@ -104,6 +108,12 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
     async media(part) {
       const entry = zip.entries.get(part.startsWith("/") ? part.slice(1) : part);
       return entry ? zip.read(entry) : undefined;
+    },
+    async mediaPieces(part, onPiece) {
+      const entry = zip.entries.get(part.startsWith("/") ? part.slice(1) : part);
+      if (!entry) return false;
+      await zip.pieces(entry, onPiece);
+      return true;
     },
   };
 }

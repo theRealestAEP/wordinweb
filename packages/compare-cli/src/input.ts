@@ -1,7 +1,6 @@
 import { Hash, createHash } from "node:crypto";
 import { closeSync, openSync, readSync, fstatSync } from "node:fs";
 import { join } from "node:path";
-import { zipSync } from "fflate";
 import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, child, cyrb53, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { acceptAllRevisions, collectRevisions } from "../../core/src/edit/suggest.js";
@@ -13,9 +12,16 @@ import { CompareError } from "./errors.js";
 import { DiskNotes } from "./notes.js";
 import { scanBody, scanChildren } from "./scan.js";
 import { BlockStore } from "./store.js";
-import { ZipEntry, ZipReader } from "./zip.js";
+import { MAX_PART_BYTES, ZipEntry, ZipReader, mb } from "./zip.js";
 
 export type Side = "original" | "revised";
+
+/**
+ * The most the shell holds in memory, all its parts together: everything
+ * but the body, the notes and comments (on disk) and the binary parts
+ * (stubs). Each part is at most MAX_PART_BYTES (zip.ts).
+ */
+export const MAX_HELD_BYTES = 128 << 20;
 
 /**
  * A binary part's stand-in inside a shell: the shell needs to know the part
@@ -138,18 +144,26 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     }
 
     // The shell: document.xml with only the body's own section properties.
+    // Its parts are held whole, so their sizes are checked first, from the
+    // directory, and each is inflated once, straight into the document.
+    const held = (entry: ZipEntry): boolean => entry.name !== docPart && !entry.name.endsWith("/") && !outlines.has(entry.name) && /\.(xml|rels|vml)$/i.test(entry.name);
+    let heldBytes = 0;
+    for (const entry of zip.entries.values()) if (held(entry)) heldBytes += entry.size;
+    if (heldBytes > MAX_HELD_BYTES) {
+      throw new CompareError("too_large", `${zip.path}: the parts held in memory (all but the body, the notes and the binary parts) come to ${mb(heldBytes)}; at most ${mb(MAX_HELD_BYTES)} together, ${mb(MAX_PART_BYTES)} each`);
+    }
     const files: Record<string, Uint8Array> = {};
     for (const entry of zip.entries.values()) {
       if (entry.name === docPart || entry.name.endsWith("/")) continue;
       const empty = outlines.get(entry.name);
       if (empty) files[entry.name] = Buffer.from(empty.head + empty.tail, "utf8");
-      else files[entry.name] = /\.(xml|rels|vml)$/i.test(entry.name) ? zip.read(entry) : Buffer.from(`${STUB}${side}\u0000${entry.name}`, "utf8");
+      else files[entry.name] = held(entry) ? zip.read(entry) : Buffer.from(`${STUB}${side}\u0000${entry.name}`, "utf8");
     }
     const skeleton: Buffer[] = [Buffer.from(range(0, bounds.contentStart))];
     for (let i = 0; i < names.length; i++) if (isSectPr(i)) skeleton.push(Buffer.from(range(starts[i], ends[i])));
     skeleton.push(Buffer.from(range(bounds.contentEnd, fstatSync(fd).size)));
     files[docPart] = Buffer.concat(skeleton);
-    const shell = DocxDocument.load(zipSync(files, { level: 0 }));
+    const shell = DocxDocument.fromFiles(files);
     let hadRevisions = false;
     if (collectRevisions(shell).length > 0) {
       acceptAllRevisions(shell);

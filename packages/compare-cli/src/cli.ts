@@ -10,6 +10,11 @@ Write RESULT.docx: REVISED.docx with every difference from ORIGINAL.docx as a
 tracked change by NAME. Accept all of them to get the revised document;
 reject all of them to get the original.
 
+The body, the notes and the binary parts (images, embedded files) can be any
+size. The other parts (styles, numbering, headers, footers, charts, custom
+XML) are held in memory: at most 64 MB each and 128 MB together, or the
+compare fails.
+
 Options:
   -o, --out FILE      the result (required)
   --author NAME       who the tracked changes are attributed to (required)

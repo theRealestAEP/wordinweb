@@ -17,6 +17,19 @@ export interface ZipEntry {
 
 const MAX32 = 0xffffffff;
 
+/**
+ * The most read() inflates: the largest part the compare holds in memory.
+ * Word's own parts outside the body (styles, numbering, headers, charts,
+ * custom XML) run to a few MB; the body and the binary parts never come
+ * through here.
+ */
+export const MAX_PART_BYTES = 64 << 20;
+
+/** A size for a message, in whole MB. */
+export function mb(bytes: number): string {
+  return `${Math.ceil(bytes / (1024 * 1024))} MB`;
+}
+
 /** A zip file on disk, read through its central directory. */
 export class ZipReader {
   readonly entries = new Map<string, ZipEntry>();
@@ -49,8 +62,11 @@ export class ZipReader {
     return entry.headerOffset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
   }
 
-  /** An entry's content, inflated in memory. For small parts only. */
+  /** An entry's content, inflated in memory: at most MAX_PART_BYTES, checked against the directory's size before anything is read. */
   read(entry: ZipEntry): Buffer {
+    if (entry.size > MAX_PART_BYTES) {
+      throw new CompareError("too_large", `${this.path}: ${entry.name} is ${mb(entry.size)}; a part held in memory is at most ${mb(MAX_PART_BYTES)}`);
+    }
     const raw = this.bytes(this.dataOffset(entry), entry.compressedSize);
     let data: Buffer;
     try {

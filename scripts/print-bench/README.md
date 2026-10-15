@@ -12,7 +12,10 @@ A mismatched page's two DOMs go to `$TMPDIR/print-bench-diffs`.
     node scripts/print-bench/equiv.mjs [--jobs 4] [--batch 25] [--out results.json] <docx or folder>...
 
 Memory: peak renderer RSS and JS heap while laying out and printing every
-batch to PDF, each fixture and mode in its own Chromium.
+batch to PDF, each fixture and mode in its own Chromium, with the peak RSS of
+the browser process (where the page's Blobs live) and of the Node process.
+The new mode serves the file from disk a range at a time, as DiscoveryTool
+does, so the Node figure is what serving the file costs.
 
     node scripts/print-bench/memory-table.mjs [--modes old,new] [--out table.json] <docx>...
     node scripts/print-bench/memory.mjs --mode old|new [--batch 25] <docx>

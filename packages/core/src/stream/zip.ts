@@ -1,4 +1,4 @@
-import { inflateSync, strFromU8 } from "fflate";
+import { Inflate, strFromU8 } from "fflate";
 import { ByteSource } from "./source.js";
 
 /** One entry of a zip's central directory. */
@@ -12,6 +12,15 @@ export interface ZipEntry {
 }
 
 const MAX32 = 0xffffffff;
+
+/**
+ * An entry's compressed bytes are fetched this much at a time: the most one
+ * request asks for, and the most the server of a file on disk holds for it.
+ */
+export const FETCH_BYTES = 1 << 20;
+
+/** The inflater takes this much input at a time, so each piece it gives is bounded too: deflate inflates at most 1032:1, so 64 MB at the very most, and about as much as the input for an image. */
+const INFLATE_INPUT = 64 << 10;
 
 /**
  * A zip read through its central directory, an entry at a time, so a
@@ -31,20 +40,65 @@ export class ZipIndex {
 
   /** An entry's compressed bytes, as the file holds them. */
   async raw(entry: ZipEntry): Promise<Uint8Array> {
-    const header = view(await this.source.read(entry.headerOffset, entry.headerOffset + 30));
-    if (header.getUint32(0, true) !== 0x04034b50) throw new Error(`bad local header for ${entry.name}`);
-    const start = entry.headerOffset + 30 + header.getUint16(26, true) + header.getUint16(28, true);
-    return this.source.read(start, start + entry.compressedSize);
+    const out = new Uint8Array(entry.compressedSize);
+    let at = 0;
+    await this.compressed(entry, (piece) => {
+      out.set(piece, at);
+      at += piece.length;
+    });
+    return out;
   }
 
   /** An entry's content, inflated in memory. */
   async read(entry: ZipEntry): Promise<Uint8Array> {
-    return inflateEntry(entry, await this.raw(entry));
+    const out = new Uint8Array(entry.size);
+    let at = 0;
+    await this.pieces(entry, (piece) => {
+      out.set(piece, at);
+      at += piece.length;
+    });
+    return out;
+  }
+
+  /**
+   * An entry's content a piece at a time, inflated as its compressed bytes
+   * are fetched: nothing holds the entry whole. Stops as soon as the content
+   * outgrows the size the directory gives, so a zip bomb stops here.
+   */
+  async pieces(entry: ZipEntry, onPiece: (piece: Uint8Array) => void): Promise<void> {
+    let size = 0;
+    const take = (piece: Uint8Array): void => {
+      size += piece.length;
+      if (size > entry.size) throw new Error(`${entry.name} is corrupt`);
+      onPiece(piece);
+    };
+    if (entry.method !== 8) await this.compressed(entry, take);
+    else {
+      const inflater = new Inflate(take);
+      let done = 0;
+      await this.compressed(entry, (piece) => {
+        for (let at = 0; at < piece.length; at += INFLATE_INPUT) {
+          const next = Math.min(at + INFLATE_INPUT, piece.length);
+          done += next - at;
+          inflater.push(piece.subarray(at, next), done === entry.compressedSize);
+        }
+      });
+    }
+    if (size !== entry.size) throw new Error(`${entry.name} is corrupt`);
   }
 
   async text(name: string): Promise<string | undefined> {
     const entry = this.entries.get(name);
     return entry ? strFromU8(await this.read(entry)) : undefined;
+  }
+
+  /** An entry's compressed bytes, FETCH_BYTES at a time. */
+  private async compressed(entry: ZipEntry, onPiece: (piece: Uint8Array) => void): Promise<void> {
+    const header = view(await this.source.read(entry.headerOffset, entry.headerOffset + 30));
+    if (header.getUint32(0, true) !== 0x04034b50) throw new Error(`bad local header for ${entry.name}`);
+    const start = entry.headerOffset + 30 + header.getUint16(26, true) + header.getUint16(28, true);
+    const end = start + entry.compressedSize;
+    for (let at = start; at < end; at += FETCH_BYTES) onPiece(await this.source.read(at, Math.min(at + FETCH_BYTES, end)));
   }
 
   private async readDirectory(): Promise<void> {
@@ -112,14 +166,6 @@ export class ZipIndex {
       at = extraEnd + commentLength;
     }
   }
-}
-
-/** An entry's content from its compressed bytes. */
-export function inflateEntry(entry: ZipEntry, raw: Uint8Array): Uint8Array {
-  // Never inflate past the size the directory gives: a zip bomb stops here.
-  const data = entry.method === 8 ? inflateSync(raw, { out: new Uint8Array(entry.size) }) : raw;
-  if (data.length !== entry.size) throw new Error(`${entry.name} is corrupt`);
-  return data;
 }
 
 function view(bytes: Uint8Array): DataView {

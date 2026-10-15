@@ -2,6 +2,7 @@
 // DiscoveryTool's chrome.ts drives it) and the new streaming path, both in
 // headless Chromium through Playwright, plus memory sampling.
 import { execFileSync } from "node:child_process";
+import { fstatSync, openSync, readSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
 import { chromium } from "playwright";
@@ -45,13 +46,15 @@ export async function launch() {
   return chromium.launch({ headless: true, args: ["--disable-gpu", "--no-first-run"] });
 }
 
-/** Peak renderer RSS (MB) and JS heap (MB) sampled while `work` runs. */
+/** Peak renderer RSS (MB), JS heap (MB) and browser-process RSS (MB, where
+ * blobs the page makes are stored) sampled while `work` runs. */
 export async function sampled(browser, page, work, trace = null) {
   const session = await page.context().newCDPSession(page);
   await session.send("Performance.enable");
   const browserSession = await browser.newBrowserCDPSession();
   let peakRss = 0;
   let peakHeap = 0;
+  let peakBrowserRss = 0;
   let stopped = false;
   const t0 = performance.now();
   const sample = async () => {
@@ -67,14 +70,19 @@ export async function sampled(browser, page, work, trace = null) {
     try {
       // Chromium names its own processes; the page's renderer is the only one.
       const { processInfo } = await browserSession.send("SystemInfo.getProcessInfo");
-      const renderers = processInfo.filter((p) => p.type === "renderer").map((p) => String(p.id));
-      if (renderers.length === 0) return;
-      const out = execFileSync("ps", ["-o", "rss=", "-p", renderers.join(",")], { encoding: "utf8" });
-      for (const line of out.split("\n")) {
-        const kb = Number(line.trim());
-        if (kb > 0) rss = Math.max(rss, kb / 1024);
-      }
+      const rssOf = (type) => {
+        const pids = processInfo.filter((p) => p.type === type).map((p) => String(p.id));
+        if (pids.length === 0) return 0;
+        let most = 0;
+        for (const line of execFileSync("ps", ["-o", "rss=", "-p", pids.join(",")], { encoding: "utf8" }).split("\n")) {
+          const kb = Number(line.trim());
+          if (kb > 0) most = Math.max(most, kb / 1024);
+        }
+        return most;
+      };
+      rss = rssOf("renderer");
       peakRss = Math.max(peakRss, rss);
+      peakBrowserRss = Math.max(peakBrowserRss, rssOf("browser"));
     } catch {}
     trace?.push({ t: Math.round(performance.now() - t0), rssMB: Math.round(rss), heapMB: Math.round(heap), heapTotalMB: Math.round(heapTotal) });
   };
@@ -82,7 +90,7 @@ export async function sampled(browser, page, work, trace = null) {
   try {
     const result = await work();
     await sample();
-    return { result, peakRssMB: Math.round(peakRss), peakHeapMB: Math.round(peakHeap) };
+    return { result, peakRssMB: Math.round(peakRss), peakHeapMB: Math.round(peakHeap), browserRssMB: Math.round(peakBrowserRss) };
   } finally {
     stopped = true;
     clearInterval(timer);
@@ -123,26 +131,41 @@ export async function runOld(page, bytes, { batch = 25, print = false, onPages }
   return { pageCount, hashes, layoutMs, printMs, pageHtml: (i) => page.evaluate(PAGE_HTML(i)) };
 }
 
-/** Serve `bytes` at http://docx.local/doc.docx with Range support, and an empty page at /. */
-export async function serve(page, bytes) {
+/**
+ * Serve the document at http://docx.local/doc.docx with Range support, and an
+ * empty page at /. `source` is its bytes, or its path: then each range is read
+ * from the file, so this process holds only what one request asks for, as
+ * DiscoveryTool's Fetch.fulfillRequest loop does.
+ */
+export async function serve(page, source) {
+  const file = typeof source === "string" ? openSync(source, "r") : -1;
+  const size = file === -1 ? source.length : fstatSync(file).size;
+  const read = (start, end) => {
+    if (file === -1) return Buffer.from(source.subarray(start, end));
+    const buf = Buffer.allocUnsafe(end - start);
+    let done = 0;
+    while (done < buf.length) done += readSync(file, buf, done, buf.length - done, start + done);
+    return buf;
+  };
   await page.route("http://docx.local/**", async (route) => {
     const url = new URL(route.request().url());
     if (url.pathname === "/") return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><head></head><body></body></html>" });
     if (url.pathname !== "/doc.docx") return route.fulfill({ status: 404, body: "" });
     const range = /bytes=(\d+)-(\d+)/.exec(route.request().headers()["range"] ?? "");
-    if (!range) return route.fulfill({ status: 200, contentType: "application/octet-stream", body: Buffer.from(bytes) });
+    if (!range) return route.fulfill({ status: 200, contentType: "application/octet-stream", body: read(0, size) });
     const start = Number(range[1]);
-    const end = Math.min(Number(range[2]), bytes.length - 1);
+    const end = Math.min(Number(range[2]), size - 1);
     return route.fulfill({
       status: 206,
-      headers: { "Content-Range": `bytes ${start}-${end}/${bytes.length}`, "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream" },
-      body: Buffer.from(bytes.subarray(start, end + 1)),
+      headers: { "Content-Range": `bytes ${start}-${end}/${size}`, "Accept-Ranges": "bytes", "Content-Type": "application/octet-stream" },
+      body: read(start, end + 1),
     });
   });
 }
 
-/** The new path: openPrintStream over the served file, a batch at a time.
- * `onBatch(first, hashes, batchApi)` sees each mounted batch before release. */
+/** The new path: openPrintStream over the served file (its bytes or its path),
+ * a batch at a time. `onBatch(first, hashes, batchApi)` sees each mounted
+ * batch before release. */
 export async function runNew(page, bytes, { batch = 25, print = false, onBatch } = {}) {
   await serve(page, bytes);
   await page.goto("http://docx.local/");
@@ -158,6 +181,8 @@ export async function runNew(page, bytes, { batch = 25, print = false, onBatch }
   let printMs = 0;
   let renderMs = 0;
   let batches = 0;
+  let images = 0;
+  let imagesDrawn = 0;
   for (;;) {
     const t1 = performance.now();
     const b = await page.evaluate(`window.__print.nextBatch()`);
@@ -167,6 +192,9 @@ export async function runNew(page, bytes, { batch = 25, print = false, onBatch }
     const batchHashes = await page.evaluate(PAGE_HASHES);
     if (batchHashes.length !== b.count) throw new Error(`batch at ${b.first}: ${batchHashes.length} pages mounted, ${b.count} announced`);
     hashes.push(...batchHashes);
+    const drawn = await page.evaluate(`[document.images.length, [...document.images].filter((img) => img.naturalWidth > 0).length]`);
+    images += drawn[0];
+    imagesDrawn += drawn[1];
     if (onBatch) await onBatch(b.first, batchHashes, { pageHtml: (i) => page.evaluate(PAGE_HTML(i - b.first)) });
     if (print) {
       const t2 = performance.now();
@@ -175,7 +203,7 @@ export async function runNew(page, bytes, { batch = 25, print = false, onBatch }
     }
     await page.evaluate(`window.__print.release()`);
   }
-  return { ...started, hashes, batches, countMs, renderMs: Math.round(renderMs), printMs: Math.round(printMs) };
+  return { ...started, hashes, batches, images, imagesDrawn, countMs, renderMs: Math.round(renderMs), printMs: Math.round(printMs) };
 }
 
 /** Where two normalized HTML strings first differ, with context. */

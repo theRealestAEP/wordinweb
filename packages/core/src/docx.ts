@@ -2370,16 +2370,24 @@ export class DocxDocument {
     }
   }
 
-  saveAsync(): Promise<Uint8Array> {
+  /**
+   * The package's parts as save() writes them, before they are zipped: a
+   * writer that streams the zip to disk (compare-cli) takes them one at a
+   * time, without a zip of them all in memory and its unzip.
+   */
+  saveFiles(): Record<string, Uint8Array> {
     const journal: (() => void)[] = [];
     this.saveJournal = journal;
-    let files: Record<string, Uint8Array>;
     try {
-      files = this.buildPackageFiles();
+      return this.buildPackageFiles();
     } finally {
       for (let i = journal.length - 1; i >= 0; i--) journal[i]();
       this.saveJournal = null;
     }
+  }
+
+  saveAsync(): Promise<Uint8Array> {
+    const files = this.saveFiles();
     return new Promise((resolve, reject) => {
       zip(files, { mtime: FIXED_ZIP_MTIME }, (error, bytes) => {
         if (error) reject(error);

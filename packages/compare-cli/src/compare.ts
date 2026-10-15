@@ -1,7 +1,6 @@
 import { closeSync, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { unzipSync } from "fflate";
 import { XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
 import { histogramMatch } from "../../core/src/edit/compare/histogram.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
@@ -39,7 +38,7 @@ import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
 import { flatten } from "./printable.js";
 import { DiskNotes } from "./notes.js";
 import { BlockStore } from "./store.js";
-import { ZipEntry, ZipReader, ZipWriter } from "./zip.js";
+import { ZipEntry, ZipReader, ZipWriter, mb } from "./zip.js";
 
 export { CompareError, type CompareErrorCode } from "./errors.js";
 
@@ -69,10 +68,12 @@ export interface CompareFilesResult {
  * written to disk block by block with a small index (hashes, kinds, section
  * breaks), a table's rows as blocks of their own; the alignment runs on the
  * index, and the blocks are read back one pair at a time to be compared and
- * written out. Everything outside the body (styles, numbering, headers,
- * footers, notes) is held in memory, and each binary part is copied from
- * the input zip unread. Buffers are fixed in size, or as large as the
- * largest single block, row or note, or the parts outside the body.
+ * written out. The notes go to disk the same way. Everything else outside
+ * the body (styles, numbering, headers, footers) is held in memory, at most
+ * MAX_PART_BYTES a part and MAX_HELD_BYTES together, checked against the
+ * zip's directory before any of it is inflated (too_large); each binary
+ * part is copied from the input zip unread. Buffers are fixed in size, or
+ * as large as the largest single block, row or note, or those limits.
  *
  * Every error is a CompareError, with a code and the input at fault.
  */
@@ -201,10 +202,6 @@ function checkDiskSpace(dir: string, zips: ZipReader[]): void {
   const free = fs.bavail * fs.bsize;
   const need = DISK_PER_BODY_BYTE * xml;
   if (need > free) throw new CompareError("disk_full", `not enough disk space in ${dir}: about ${mb(need)} needed, ${mb(free)} free`);
-}
-
-function mb(bytes: number): string {
-  return `${Math.ceil(bytes / (1024 * 1024))} MB`;
 }
 
 // ---------------------------------------------------------------------------
@@ -709,11 +706,12 @@ async function writeResult(
   const docFile = join(dir, "result-document.xml");
   writeDocument(docFile, head, body, noteIds, tail);
 
-  // Every other part comes from the shell's save. A save leaves out chart
-  // parts the body it sees does not use, so the body's ids stand in for it.
+  // Every other part comes from the shell's save, a part at a time. A save
+  // leaves out chart parts the body it sees does not use, so the body's ids
+  // stand in for it.
   const saveShell = (): Record<string, Uint8Array> => {
     if (relIds) shellBody.children.unshift({ name: "w:dxw-rels", attrs: Object.fromEntries([...relIds].map((id, i) => [`r:dxw${i}`, id])), children: [], text: "" });
-    const files = unzipSync(R.shell.save());
+    const files = R.shell.saveFiles();
     if (relIds) shellBody.children.shift();
     return files;
   };

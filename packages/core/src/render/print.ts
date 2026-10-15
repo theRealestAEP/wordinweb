@@ -5,7 +5,10 @@ import { createMeasurer } from "../layout/measure.js";
 import { LaidOutPage } from "../layout/types.js";
 import { StreamingDocument, openStreamingDocument } from "../stream/body.js";
 import { ByteSource, fetchSource } from "../stream/source.js";
-import { RenderHandle, paintsSettled, printStylesheet, pruneBlankSpans, releaseMediaUrls, renderToDom } from "./dom.js";
+import { RenderHandle, mediaUrlSink, paintsSettled, printStylesheet, pruneBlankSpans, releaseMediaUrls, renderToDom } from "./dom.js";
+
+/** Stands in the package for an image part whose bytes went into a Blob (mediaUrlSink), so the document counts the part as present. */
+const STREAMED = new Uint8Array(0);
 
 /**
  * Lay out and render a whole .docx into `container` for a headless browser
@@ -116,9 +119,18 @@ export function openPrintStream(source: string | ByteSource, container: HTMLElem
         if (item.embeddedObject) parts.add(item.embeddedObject.part);
       }
     }
+    // An image the browser draws as it is goes into a Blob a piece at a time,
+    // and the part is marked present so renderItem draws it from that URL;
+    // one it converts (TIFF, WMF, EMF) it needs whole.
     for (const part of parts) {
-      const bytes = await opened.media(part);
-      if (bytes) doc.pkg.raw()[part] = bytes;
+      const sink = mediaUrlSink(doc, part);
+      if (!sink) {
+        const bytes = await opened.media(part);
+        if (bytes) doc.pkg.raw()[part] = bytes;
+      } else if (await opened.mediaPieces(part, sink.push)) {
+        sink.end();
+        doc.pkg.raw()[part] = STREAMED;
+      }
     }
     const handle = renderToDom(doc, { pages, totalPages: final.totalPages }, container, { zoom: 1, pageGap: 0, pageShadow: false, comments: false });
     mounted = { handle, parts };
