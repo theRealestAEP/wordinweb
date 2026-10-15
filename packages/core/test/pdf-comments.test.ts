@@ -132,6 +132,6 @@ describe("renderDocxToPdf with comments", () => {
     const text = bytes.toString("latin1");
     const streams = [...text.matchAll(/\/Length (\d+) >>\nstream\n/g)];
     const content = streams.map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1")).join("\n");
-    expect(content.match(/\[1\.5 1\.5\] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(3);
+    expect(content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(3);
   });
 });
