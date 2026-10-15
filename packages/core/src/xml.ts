@@ -278,11 +278,15 @@ export function onOff(el: XmlElement | undefined): boolean | undefined {
 
 // ---------- serialization (for docx write-back) ----------
 
+// One pass, and none at all for the many strings with nothing to escape:
+// three chained replaces were a seventh of a large compare's time.
+const TEXT_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;" };
+const ATTR_ESCAPES: Record<string, string> = { ...TEXT_ESCAPES, '"': "&quot;", "\n": "&#10;", "\r\n": "&#10;" };
 function escapeText(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return /[&<>]/.test(s) ? s.replace(/[&<>]/g, (c) => TEXT_ESCAPES[c]) : s;
 }
 function escapeAttr(s: string): string {
-  return escapeText(s).replace(/"/g, "&quot;").replace(/\r?\n/g, "&#10;");
+  return /[&<>"\n]/.test(s) ? s.replace(/[&<>"]|\r?\n/g, (c) => ATTR_ESCAPES[c]) : s;
 }
 
 /**
