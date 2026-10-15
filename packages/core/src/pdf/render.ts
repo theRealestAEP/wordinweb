@@ -3,11 +3,14 @@ import { Writable } from "node:stream";
 import { StreamLayoutResult, layoutDocumentStream } from "../layout/engine.js";
 import { clearBreakCache } from "../layout/inline.js";
 import { LaidOutPage } from "../layout/types.js";
+import { Block } from "../model.js";
 import { StreamingDocument, openStreamingDocument } from "../stream/body.js";
+import { XmlElement, localName } from "../xml.js";
 import { ByteSource } from "../stream/source.js";
 import { CommentColumn, RAIL_WIDTH } from "./comments.js";
 import { IMAGE_PLACEHOLDER } from "./canvas.js";
 import { PageDrawer, Picture } from "./draw.js";
+import { PdfRenderError, asPdfRenderError, unsupportedScript } from "./errors.js";
 import { FontSet } from "./fonts.js";
 import { writeImage, writeSamples } from "./images.js";
 import { convertMetafile } from "./metafile.js";
@@ -68,9 +71,36 @@ export function fileSource(path: string): ByteSource {
  * used. `out` is ended when the PDF is complete.
  */
 export async function renderDocxToPdf(source: string | ByteSource, out: Writable, options: RenderPdfOptions = {}): Promise<RenderPdfResult> {
+  try {
+    return await render(source, out, options);
+  } catch (error) {
+    throw asPdfRenderError(error);
+  }
+}
+
+async function render(source: string | ByteSource, out: Writable, options: RenderPdfOptions): Promise<RenderPdfResult> {
   const fonts = new FontSet(options.fontDirs);
   const measurer = new NodeMeasurer(fonts);
-  const opened = await openStreamingDocument(typeof source === "string" ? fileSource(source) : source);
+  // Text this renderer cannot shape is refused before any layout, as the
+  // body's blocks are first parsed; the held parts (headers, footers,
+  // notes) and the comments to be printed are checked once it is open.
+  const opened = await openStreamingDocument(typeof source === "string" ? fileSource(source) : source, {
+    onBlock: (block, index) => {
+      const found = unsupportedInBlock(block);
+      if (found) throw unsupported(found.script, `in paragraph ${index + 1}, "${found.sample}"`);
+    },
+  });
+  for (const root of opened.doc.revisionRoots()) {
+    if (root === opened.doc.docRoot) continue;
+    const found = unsupportedInXml(root);
+    if (found) throw unsupported(found.script, `in a header, footer or note, "${found.sample}"`);
+  }
+  if (options.comments) {
+    for (const comment of opened.doc.comments) {
+      const script = unsupportedScript(comment.text);
+      if (script) throw unsupported(script, `in a comment by ${comment.author || "an unnamed author"}`);
+    }
+  }
   const final = await countPages(opened, measurer);
 
   const writer = new PdfWriter(out);
@@ -168,6 +198,49 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   };
 }
 
+function unsupported(script: string, where: string): PdfRenderError {
+  return new PdfRenderError("unsupported_script", `${script} text ${where} needs a shaper this renderer does not have`);
+}
+
+function sample(text: string): string {
+  const trimmed = text.trim();
+  return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed;
+}
+
+/** The first unsupported script in a block's text, with a sample of the text. */
+function unsupportedInBlock(block: Block): { script: string; sample: string } | undefined {
+  if (block.type !== "paragraph") {
+    for (const row of block.rows) for (const cell of row.cells) for (const nested of cell.blocks) {
+      const found = unsupportedInBlock(nested);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  for (const child of block.children) {
+    for (const run of child.type === "run" ? [child] : child.runs) {
+      for (const content of run.content) {
+        if (content.kind !== "text") continue;
+        const script = unsupportedScript(content.text);
+        if (script) return { script, sample: sample(content.text) };
+      }
+    }
+  }
+  return undefined;
+}
+
+/** The first unsupported script in a part's w:t elements. */
+function unsupportedInXml(el: XmlElement): { script: string; sample: string } | undefined {
+  if (localName(el.name) === "t") {
+    const script = unsupportedScript(el.text);
+    return script ? { script, sample: sample(el.text) } : undefined;
+  }
+  for (const child of el.children) {
+    const found = unsupportedInXml(child);
+    if (found) return found;
+  }
+  return undefined;
+}
+
 interface Count {
   result: StreamLayoutResult;
   knownTotalPages: number | undefined;
@@ -176,7 +249,7 @@ interface Count {
   maxHeight: number;
 }
 
-/** The counting pass, and the NUMPAGES convergence passes openPrintStream runs. */
+/** The counting pass, and the NUMPAGES convergence passes layoutDocument runs. */
 async function countPages(opened: StreamingDocument, measurer: NodeMeasurer): Promise<Count> {
   let maxWidth = 0;
   let maxHeight = 0;

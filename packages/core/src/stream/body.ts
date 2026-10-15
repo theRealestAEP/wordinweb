@@ -50,7 +50,14 @@ const KEEP_MAX = 512;
  * block arrays parse from on demand, and parsed once more for the section
  * properties and the Prescan.
  */
-export async function openStreamingDocument(source: ByteSource): Promise<StreamingDocument> {
+export interface OpenStreamingOptions {
+  /** Sees each body block once, parsed, in the first pass: `index` is the
+   * block's position in the body. A caller refuses a document here before
+   * any layout. */
+  onBlock?: (block: Block, index: number) => void;
+}
+
+export async function openStreamingDocument(source: ByteSource, options: OpenStreamingOptions = {}): Promise<StreamingDocument> {
   const zip = await ZipIndex.open(source);
   const docPart = documentPart(await zip.text("_rels/.rels"));
   const docEntry = zip.entries.get(docPart);
@@ -95,6 +102,7 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
     const block = parseBlock(el, ctx);
     if (!block) continue;
     body.keep(candidate, block);
+    options.onBlock?.(block, body.count - 1);
     comments?.first(el, body.count - 1);
     if (!hasPageTotal && bodyHasPageTotal(el)) hasPageTotal = true;
     prescan.visit(block);
