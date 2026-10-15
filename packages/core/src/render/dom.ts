@@ -292,6 +292,17 @@ const derivedSrcCache = new WeakMap<DocxDocument, Map<string, string>>();
 let lastCachedDoc: DocxDocument | null = null;
 let lastCachedUrls: Map<string, string> | null = null;
 
+/** Revoke the object URLs cached for `doc`'s media, once nothing shows them:
+ * a print that renders a batch of pages at a time releases each batch's
+ * images here, or every image of the document would stay decoded. */
+export function releaseMediaUrls(doc: DocxDocument): void {
+  const urls = mediaUrlCache.get(doc);
+  if (!urls) return;
+  for (const url of urls.values()) URL.revokeObjectURL(url);
+  urls.clear();
+  derivedSrcCache.get(doc)?.clear();
+}
+
 function docMediaUrl(doc: DocxDocument, key: string, make: () => string): string {
   let m = mediaUrlCache.get(doc);
   if (!m) {

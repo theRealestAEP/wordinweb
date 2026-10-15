@@ -3042,6 +3042,24 @@ export class DocxDocument {
     return new DocxDocument(Package.from(data));
   }
 
+  /** A document over parts already unzipped (stream/body.ts's shell). */
+  static fromFiles(files: Record<string, Uint8Array>): DocxDocument {
+    return new DocxDocument(Package.fromFiles(files));
+  }
+
+  /** The context the body's blocks are parsed with, for a caller that keeps
+   * the body outside the document (stream/body.ts). Its REF bookmark capture
+   * starts empty; the caller decides whether `refBookmarks` reads from it. */
+  bodyParseContext(): DocParseContext {
+    return {
+      ...this.ctxBase,
+      rels: this.documentRels,
+      readPart: (part: string) => this.readXmlOptional(part),
+      refBookmarks: { open: new Map<string, Run[]>(), byName: new Map<string, Run[]>() },
+      independentTextboxStories: true,
+    };
+  }
+
   media(part: string): Uint8Array | undefined {
     return this.pkg.binary(part);
   }

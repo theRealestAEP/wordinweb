@@ -1,0 +1,319 @@
+import { Inflate, deflateSync, inflateSync, strFromU8 } from "fflate";
+import { DocxDocument } from "../docx.js";
+import { Prescan, bodyHasPageTotal } from "../layout/engine.js";
+import { Block, FieldContent, Section, SectionProps } from "../model.js";
+import { DocParseContext, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
+import { parseRelationships } from "../parse/rels.js";
+import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
+import { XmlElement, localName, parseXml } from "../xml.js";
+import { scanBody } from "./scan.js";
+import { ByteSource } from "./source.js";
+import { ZipIndex } from "./zip.js";
+
+/** A document whose body stays out of memory: the engine reads its blocks
+ * through `doc.sections`, which parse them from the deflated body as it goes
+ * and keep only the ones around its cursor. */
+export interface StreamingDocument {
+  doc: DocxDocument;
+  /** The document-order assignments every layout pass shares. */
+  prescan: Prescan;
+  /** Whether the body holds a NUMPAGES field, which layoutDocument converges on. */
+  bodyHasPageTotal: boolean;
+  /** A binary part's bytes, read from the file when asked. */
+  media(part: string): Promise<Uint8Array | undefined>;
+}
+
+/** Parts the shell holds whole; every other part stays in the file. */
+const TEXT_PART = /\.(xml|rels|vml)$/i;
+
+/** The body's XML is deflated in pieces of about this much, cut at block boundaries. */
+const PIECE_BYTES = 1 << 20;
+
+/** Parsed blocks kept behind the furthest one read, for the engine's lookback. */
+const KEEP_BEHIND = 64;
+/** The parsed-block cache is trimmed once it holds this many. */
+const KEEP_MAX = 512;
+
+/**
+ * Open a .docx for layout without its body in memory. The file's small parts
+ * make a shell DocxDocument, as compare-cli's readInput does; the body is
+ * scanned once, block by block, into deflated pieces that the sections' lazy
+ * block arrays parse from on demand, and parsed once more for the section
+ * properties and the Prescan.
+ */
+export async function openStreamingDocument(source: ByteSource): Promise<StreamingDocument> {
+  const zip = await ZipIndex.open(source);
+  const docPart = documentPart(await zip.text("_rels/.rels"));
+  const docEntry = zip.entries.get(docPart);
+  if (!docEntry) throw new Error(`missing ${docPart}`);
+  const body = new BodyStore();
+  const outline = body.scan(docEntry.method, await zip.raw(docEntry));
+
+  // The shell: every text part, and document.xml with only the body's own
+  // section properties.
+  const files: Record<string, Uint8Array> = {};
+  for (const entry of zip.entries.values()) {
+    if (entry.name === docPart || entry.name.endsWith("/") || !TEXT_PART.test(entry.name)) continue;
+    files[entry.name] = await zip.read(entry);
+  }
+  files[docPart] = outline;
+  const doc = DocxDocument.fromFiles(files);
+
+  // Every block once, in order: which candidates are blocks at all, where
+  // each section ends, and what the Prescan assigns.
+  const ctx = doc.bodyParseContext();
+  doc.refBookmarks = ctx.refBookmarks!.byName;
+  const prescan = new Prescan(doc, (field) => body.fieldKeys.get(field));
+  const sections: { props: SectionProps; from: number; to: number }[] = [];
+  let from = 0;
+  let hasPageTotal = false;
+  const endSection = (props: SectionProps): void => {
+    sections.push({ props, from, to: body.count });
+    from = body.count;
+    prescan.endSection();
+  };
+  for (let candidate = 0; candidate < body.candidates; candidate++) {
+    const el = parseXml(body.candidateXml(candidate));
+    if (body.kind(candidate) === "sectPr") {
+      endSection(parseSectionProps(el));
+      continue;
+    }
+    const block = parseBlock(el, ctx);
+    if (!block) continue;
+    body.keep(candidate, block);
+    if (!hasPageTotal && bodyHasPageTotal(el)) hasPageTotal = true;
+    prescan.visit(block);
+    if (block.type === "paragraph" && block.sectionBreak) endSection(block.sectionBreak);
+  }
+  if (body.count > from) endSection(defaultSectionProps());
+  prescan.finish(sections.map((section) => section.props));
+  body.forget();
+
+  // Later parses must not touch the captured REF bookmark ranges, which this
+  // pass completed: a block parsed again out of order would extend them.
+  const later: DocParseContext = { ...ctx, refBookmarks: undefined };
+  body.parser = (el) => parseBlock(el, later) as Block;
+  doc.sections = sections.map((section): Section => ({ props: section.props, blocks: body.blocks(section.from, section.to) }));
+  inheritHeaderFooterRefs(doc.sections);
+
+  return {
+    doc,
+    prescan,
+    bodyHasPageTotal: hasPageTotal,
+    async media(part) {
+      const entry = zip.entries.get(part.startsWith("/") ? part.slice(1) : part);
+      return entry ? zip.read(entry) : undefined;
+    },
+  };
+}
+
+/** A body's block as parse/document.ts's parseBody makes it: null when the
+ * element is no block (a paragraph deleted in the final view, a table whose
+ * rows all are). */
+function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
+  const ln = localName(el.name);
+  if (ln === "p") {
+    const para = parseParagraph(el, ctx);
+    return para.revisionHidden ? null : para;
+  }
+  if (ln === "tbl") {
+    const table = parseTable(el, ctx);
+    return table.rows.length > 0 ? table : null;
+  }
+  return null;
+}
+
+/** The main document part, as the package relationships name it. */
+function documentPart(rels: string | undefined): string {
+  if (rels) {
+    for (const rel of parseRelationships(parseXml(rels), "").values()) {
+      if (rel.type.endsWith("/officeDocument")) return rel.target;
+    }
+  }
+  return "word/document.xml";
+}
+
+/**
+ * The body's blocks, held deflated and parsed on demand. A scan first finds
+ * every candidate block element (w:p, w:tbl, the body's w:sectPr) and writes
+ * their bytes, in order, into pieces deflated apart, so any block is one
+ * piece's inflate away; a parse then decides which candidates are blocks.
+ */
+class BodyStore {
+  /** Each candidate's [start, end) in the concatenated candidate bytes, as pairs. */
+  private readonly ranges: number[] = [];
+  /** Each candidate's local name: p, tbl, or the body's own sectPr. */
+  private readonly kinds: string[] = [];
+  /** The candidate bytes, deflated in pieces: piece i holds [starts[i], starts[i + 1]). */
+  private readonly pieces: Uint8Array[] = [];
+  private readonly starts: number[] = [];
+  /** Each block's candidate index. */
+  private readonly kept: number[] = [];
+  /** Parsed blocks, by block index, around the engine's cursor. */
+  private parsed = new Map<number, Block>();
+  private furthest = -1;
+  /** The piece inflated last. */
+  private inflated: { index: number; bytes: Uint8Array } | null = null;
+  /** The stable key of each field occurrence the parses made (see Prescan). */
+  readonly fieldKeys = new WeakMap<object, string>();
+  parser: ((el: XmlElement) => Block) | null = null;
+
+  get candidates(): number {
+    return this.kinds.length;
+  }
+
+  get count(): number {
+    return this.kept.length;
+  }
+
+  /** Scan the document part's compressed bytes; returns the part without the body's children. */
+  scan(method: number, raw: Uint8Array): Uint8Array {
+    let piece: Uint8Array[] = [];
+    let pieceBytes = 0;
+    let total = 0;
+    const flush = (): void => {
+      if (piece.length === 0) return;
+      const bytes = new Uint8Array(pieceBytes);
+      let at = 0;
+      for (const part of piece) {
+        bytes.set(part, at);
+        at += part.length;
+      }
+      this.pieces.push(deflateSync(bytes, { level: 1 }));
+      piece = [];
+      pieceBytes = 0;
+    };
+    const outline = scanBody(inflatePull(method, raw), (child) => {
+      const ln = localName(child.name);
+      // A sectPr counts at the body's own level only, as parseBody walks it.
+      if (ln !== "p" && ln !== "tbl" && (ln !== "sectPr" || !child.top)) return;
+      if (pieceBytes >= PIECE_BYTES) flush();
+      if (piece.length === 0) this.starts.push(total);
+      piece.push(child.bytes.slice());
+      pieceBytes += child.bytes.length;
+      this.ranges.push(total, total + child.bytes.length);
+      this.kinds.push(ln);
+      total += child.bytes.length;
+    });
+    flush();
+    this.starts.push(total);
+    const head = outline.head;
+    const sectPr = this.kinds.lastIndexOf("sectPr");
+    const own = sectPr === -1 ? null : this.candidateBytes(sectPr);
+    const shell = new Uint8Array(head.length + (own?.length ?? 0) + outline.tail.length);
+    shell.set(head);
+    if (own) shell.set(own, head.length);
+    shell.set(outline.tail, head.length + (own?.length ?? 0));
+    return shell;
+  }
+
+  kind(candidate: number): string {
+    return this.kinds[candidate];
+  }
+
+  candidateXml(candidate: number): string {
+    return strFromU8(this.candidateBytes(candidate));
+  }
+
+  private candidateBytes(candidate: number): Uint8Array {
+    const start = this.ranges[2 * candidate];
+    const end = this.ranges[2 * candidate + 1];
+    let index = this.inflated?.index ?? -1;
+    if (index === -1 || this.starts[index] > start || this.starts[index + 1] <= start) {
+      index = this.starts.findIndex((at, i) => at <= start && this.starts[i + 1] > start);
+      const bytes = inflateSync(this.pieces[index], { out: new Uint8Array(this.starts[index + 1] - this.starts[index]) });
+      this.inflated = { index, bytes };
+    }
+    const bytes = (this.inflated as { bytes: Uint8Array }).bytes;
+    return bytes.subarray(start - this.starts[index], end - this.starts[index]);
+  }
+
+  /** Candidate `candidate` is a block: the next one, parsed as `block`. */
+  keep(candidate: number, block: Block): void {
+    this.parsed.set(this.kept.length, block);
+    this.kept.push(candidate);
+    keyFields(block, this.kept.length - 1, this.fieldKeys);
+    this.trim(this.kept.length - 1);
+  }
+
+  /** Drop the parsed blocks, after the first pass over them. */
+  forget(): void {
+    this.parsed = new Map();
+    this.furthest = -1;
+  }
+
+  /** Blocks [from, to) as an array that parses each block when it is read. */
+  blocks(from: number, to: number): Block[] {
+    const target: Block[] = new Array(to - from);
+    const inRange = (prop: string | symbol): number => {
+      if (typeof prop !== "string") return -1;
+      const i = Number(prop);
+      return Number.isInteger(i) && i >= 0 && i < target.length ? i : -1;
+    };
+    return new Proxy(target, {
+      get: (t, prop, receiver) => {
+        const i = inRange(prop);
+        return i === -1 ? Reflect.get(t, prop, receiver) : this.block(from + i);
+      },
+      has: (t, prop) => inRange(prop) !== -1 || Reflect.has(t, prop),
+    });
+  }
+
+  private block(index: number): Block {
+    let block = this.parsed.get(index);
+    if (block) return block;
+    block = (this.parser as (el: XmlElement) => Block)(parseXml(this.candidateXml(this.kept[index])));
+    this.parsed.set(index, block);
+    keyFields(block, index, this.fieldKeys);
+    this.trim(index);
+    return block;
+  }
+
+  /** Keep the parsed blocks near the furthest one read: the engine looks a
+   * bounded number of blocks ahead and behind its cursor. */
+  private trim(index: number): void {
+    if (index > this.furthest) this.furthest = index;
+    if (this.parsed.size < KEEP_MAX) return;
+    for (const key of this.parsed.keys()) if (key < this.furthest - KEEP_BEHIND) this.parsed.delete(key);
+  }
+}
+
+/** Give each field occurrence in `block` the key the Prescan's memos use for it. */
+function keyFields(block: Block, index: number, keys: WeakMap<object, string>): void {
+  let n = 0;
+  const visit = (b: Block): void => {
+    if (b.type !== "paragraph") {
+      for (const row of b.rows) for (const cell of row.cells) for (const nested of cell.blocks) visit(nested);
+      return;
+    }
+    for (const c of b.children) {
+      const runs = c.type === "run" ? [c] : c.runs;
+      for (const r of runs) for (const rc of r.content) if (rc.kind === "field") keys.set(rc as FieldContent, `${index}:${n++}`);
+    }
+  };
+  visit(block);
+}
+
+/** The inflated part, a chunk per call; null once it is all out. */
+function inflatePull(method: number, raw: Uint8Array): () => Uint8Array | null {
+  if (method !== 8) {
+    let done = false;
+    return () => {
+      if (done) return null;
+      done = true;
+      return raw;
+    };
+  }
+  const out: Uint8Array[] = [];
+  const inflater = new Inflate((chunk) => out.push(chunk));
+  let at = 0;
+  return () => {
+    while (out.length === 0) {
+      if (at >= raw.length) return null;
+      const next = Math.min(at + (64 << 10), raw.length);
+      inflater.push(raw.subarray(at, next), next === raw.length);
+      at = next;
+    }
+    return out.shift() as Uint8Array;
+  };
+}

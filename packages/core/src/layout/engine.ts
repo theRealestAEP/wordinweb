@@ -798,6 +798,8 @@ class Engine {
   /** Bookmark name -> formatted display page number (PAGEREF rewrite). */
   private bookmarkPages = new Map<string, string>();
   private bookmarkPageIndices = new Map<string, number>();
+  /** Bookmarks this run has met: a text item marks each one's first place. */
+  private bookmarksSeen = new Set<string>();
   /** STYLEREF page-awareness: styleIds whose paragraphs a header/footer STYLEREF
    * references (null until precomputed; empty set = no STYLEREF, tracking off). */
   private styleRefTrack: Set<string> | null = null;
@@ -5248,6 +5250,9 @@ class Engine {
             if (!this.bookmarkPages.has(bm)) {
               this.bookmarkPages.set(bm, formatNumber(pg.displayNumber, PAGE_FMT[pg.sp.pageNumberFormat ?? "decimal"] ?? "decimal"));
               this.bookmarkPageIndices.set(bm, pg.physIndex - 1);
+            }
+            if (!this.bookmarksSeen.has(bm)) {
+              this.bookmarksSeen.add(bm);
               targets.push(bm);
             }
           }
