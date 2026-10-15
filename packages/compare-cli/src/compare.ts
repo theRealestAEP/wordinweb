@@ -33,14 +33,31 @@ import {
   reportUncomparedParts,
   resolveGap,
 } from "../../core/src/edit/compare/index.js";
+import { RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
+import { CompareError, isDiskFull } from "./errors.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
+import { flatten } from "./printable.js";
 import { DiskNotes } from "./notes.js";
 import { BlockStore } from "./store.js";
 import { ZipEntry, ZipReader, ZipWriter } from "./zip.js";
 
+export { CompareError, type CompareErrorCode } from "./errors.js";
+
 export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"> {
   /** Where the working files go. Default: the system's temporary directory. */
   tempDir?: string;
+  /**
+   * Also write a printable copy to `path`: the same document with its tracked
+   * changes as plain formatting (printable.ts), from the same pass.
+   * `beforeSectPr` is XML put at the end of its body, ahead of the body's
+   * final section properties: a page break and a summary, say.
+   */
+  printable?: { path: string; beforeSectPr?: string };
+}
+
+export interface CompareFilesResult {
+  /** The result's revisions by kind, as collectRevisions counts them. */
+  revisions: Record<RevisionKind, number>;
 }
 
 /**
@@ -53,25 +70,36 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
  * breaks), a table's rows as blocks of their own; the alignment runs on the
  * index, and the blocks are read back one pair at a time to be compared and
  * written out. Everything outside the body (styles, numbering, headers,
- * footers, notes, comments) is held in memory, and each binary part is
- * copied from the input zip unread.
+ * footers, notes) is held in memory, and each binary part is copied from
+ * the input zip unread. Buffers are fixed in size, or as large as the
+ * largest single block, row or note, or the parts outside the body.
+ *
+ * Every error is a CompareError, with a code and the input at fault.
  */
-export async function compareFiles(originalPath: string, revisedPath: string, outPath: string, options: CompareFilesOptions): Promise<void> {
-  for (const [which, path] of [["original", originalPath], ["revised", revisedPath]]) {
+export async function compareFiles(originalPath: string, revisedPath: string, outPath: string, options: CompareFilesOptions): Promise<CompareFilesResult> {
+  for (const [which, path] of [["original", originalPath], ["revised", revisedPath]] as const) {
     const stat = statSync(path, { throwIfNoEntry: false });
-    if (!stat) throw new Error(`${path}: the ${which} file does not exist`);
-    if (!stat.isFile()) throw new Error(`${path}: the ${which} file is not a file`);
+    if (!stat) throw new CompareError("missing", `${path}: the ${which} file does not exist`, which);
+    if (!stat.isFile()) throw new CompareError("missing", `${path}: the ${which} file is not a file`, which);
   }
-  // The result is written while the inputs are still read.
-  if ([originalPath, revisedPath].some((path) => resolve(path) === resolve(outPath))) throw new Error(`${outPath}: the result must not overwrite an input`);
-  if (!statSync(dirname(resolve(outPath)), { throwIfNoEntry: false })?.isDirectory()) throw new Error(`${outPath}: the result's folder does not exist`);
-  const dir = mkdtempSync(join(options.tempDir ?? tmpdir(), "docx-compare-"));
+  for (const out of [outPath, options.printable?.path]) {
+    if (out === undefined) continue;
+    // The result is written while the inputs are still read.
+    if ([originalPath, revisedPath].some((path) => resolve(path) === resolve(out))) {
+      throw new CompareError("result_is_input", `${out}: the result must not overwrite an input`);
+    }
+    if (!statSync(dirname(resolve(out)), { throwIfNoEntry: false })?.isDirectory()) {
+      throw new CompareError("result_folder_missing", `${out}: the result's folder does not exist`);
+    }
+  }
   const zips: ZipReader[] = [];
   const stores: { close(): void }[] = [];
+  let dir: string | null = null;
   try {
-    const oZip = ZipReader.open(originalPath);
+    dir = mkdtempSync(join(options.tempDir ?? tmpdir(), "docx-compare-"));
+    const oZip = openInput(originalPath, "original");
     zips.push(oZip);
-    const rZip = ZipReader.open(revisedPath);
+    const rZip = openInput(revisedPath, "revised");
     zips.push(rZip);
     checkDiskSpace(dir, [oZip, rZip]);
 
@@ -98,8 +126,13 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const plan = planBody(O, R, ctx);
     const body = new BlockStore(join(dir, "result-blocks"));
     stores.push(body);
-    const emitted = emitBody(plan, O, R, ctx, body);
-    const noteIds = giveStruckReferencesTheirOwnNotes(body, emitted.withNoteRefs, R, ctx);
+    const printable = options.printable ? new BlockStore(join(dir, "printable-blocks")) : null;
+    if (printable) stores.push(printable);
+    // A save drops a chart part whose relationship the body it sees does not use.
+    const charts = [O, R].some((input) => [...input.shell.documentRels.values()].some((rel) => rel.type.endsWith("/chart")));
+    const sink = new BodySink(body, printable, charts ? new Set() : null);
+    emitBody(plan, O, R, ctx, sink);
+    const noteIds = giveStruckReferencesTheirOwnNotes(body, sink.withNoteRefs, R, ctx);
 
     for (const [from, into] of headerFooterPairs) {
       const oRoot = O.shell.headerFooterRoot(from);
@@ -107,11 +140,22 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
       if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
     }
 
-    await writeResult(outPath, dir, O, R, body, noteIds, emitted.relIds);
+    // The body's revisions were counted as it was written; the rest are in
+    // the shell (headers, footers) and in the notes the compare changed.
+    const revisions = sink.revisions;
+    for (const root of R.shell.revisionRoots()) countRevisions(root, revisions);
+    for (const notes of notesOf(R)) notes.forEachChange((note) => countRevisions(note, revisions));
+
+    await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && options.printable ? { ...options.printable, store: printable } : null);
+    return { revisions };
+  } catch (error) {
+    if (error instanceof CompareError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new CompareError(isDiskFull(error) ? "disk_full" : "failed", message, undefined, { cause: error });
   } finally {
     for (const store of stores) store.close();
     for (const zip of zips) zip.close();
-    rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -119,14 +163,32 @@ function notesOf(input: Input): DiskNotes[] {
   return [input.notes.footnote, input.notes.endnote].filter((notes): notes is DiskNotes => notes !== null);
 }
 
-/** readInput, with the input's path on any error that does not already name it. */
+function openInput(path: string, side: Side): ZipReader {
+  try {
+    return ZipReader.open(path);
+  } catch (error) {
+    throw inputError(error, side, path);
+  }
+}
+
 async function readNamed(zip: ZipReader, side: Side, dir: string): Promise<Input> {
   try {
     return await readInput(zip, side, dir);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message.startsWith(zip.path) ? message : `${zip.path}: ${message}`);
+    throw inputError(error, side, zip.path);
   }
+}
+
+/**
+ * An error reading an input, as a CompareError naming the input: its own
+ * code when it has one, disk_full when the disk filled up, else damaged (a
+ * part that does not parse).
+ */
+function inputError(error: unknown, side: Side, path: string): CompareError {
+  const message = error instanceof Error ? error.message : String(error);
+  const named = message.startsWith(path) ? message : `${path}: ${message}`;
+  if (isDiskFull(error)) return new CompareError("disk_full", named, undefined, { cause: error });
+  return new CompareError(error instanceof CompareError ? error.code : "damaged", named, side, { cause: error });
 }
 
 /**
@@ -142,7 +204,7 @@ function checkDiskSpace(dir: string, zips: ZipReader[]): void {
   const fs = statfsSync(dir);
   const free = fs.bavail * fs.bsize;
   const need = DISK_PER_BODY_BYTE * xml;
-  if (need > free) throw new Error(`not enough disk space in ${dir}: about ${mb(need)} needed, ${mb(free)} free`);
+  if (need > free) throw new CompareError("disk_full", `not enough disk space in ${dir}: about ${mb(need)} needed, ${mb(free)} free`);
 }
 
 function mb(bytes: number): string {
@@ -299,17 +361,72 @@ class Lru<V> {
 const NOTE_REF = /<w:(?:footnote|endnote)Reference /;
 const GLYPH = { ins: 1, del: 2 } as const;
 
-interface Emitted {
-  /** The result pieces that hold note references. */
-  withNoteRefs: number[];
-  /** Relationship ids the result body uses, when the save would otherwise drop parts it cannot see used. */
-  relIds: Set<string> | null;
+/** Revision markup: XML without it has no revision to count or flatten. */
+const REVISION = /<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange)[\s>/]/;
+
+/** Revision counts by kind, all zero. */
+function noRevisions(): Record<RevisionKind, number> {
+  return {
+    insertion: 0,
+    deletion: 0,
+    markInsertion: 0,
+    markDeletion: 0,
+    rowInsertion: 0,
+    rowDeletion: 0,
+    runFormat: 0,
+    paragraphFormat: 0,
+    tableFormat: 0,
+    rowFormat: 0,
+    cellFormat: 0,
+  };
 }
 
-/** Takes one piece of the result's body: a block, or part of a table. */
-type Emit = (xml: string) => void;
+/** Add `el`'s revisions, as collectRevisions finds them, to `into`. */
+function countRevisions(el: XmlElement, into: Record<RevisionKind, number>): void {
+  const refs: RevisionRef[] = [];
+  collectRevisionsIn(el, refs);
+  for (const ref of refs) into[ref.kind]++;
+}
 
-function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Emitted {
+/**
+ * Where the result's body goes, a piece at a time: the result store and,
+ * for a printable copy, its store, entry for entry. Revisions are counted
+ * on the way, from each piece's tree.
+ */
+class BodySink {
+  /** The result entries that hold note references. */
+  readonly withNoteRefs: number[] = [];
+  readonly revisions = noRevisions();
+
+  constructor(
+    readonly out: BlockStore,
+    readonly printable: BlockStore | null,
+    /** Relationship ids the body uses, when the save would otherwise drop parts it cannot see used. */
+    readonly relIds: Set<string> | null,
+  ) {}
+
+  /** XML that no revision touched (a copied block, a table's tags), or one whose revisions are counted apart. */
+  raw(xml: string, printableXml = xml): void {
+    this.put(xml, printableXml);
+  }
+
+  /** An element as the compare left it. */
+  element(el: XmlElement): void {
+    const xml = serializeXml(el);
+    if (!REVISION.test(xml)) return this.put(xml, xml);
+    countRevisions(el, this.revisions);
+    this.put(xml, this.printable ? serializeXml(flatten(el)) : xml);
+  }
+
+  private put(xml: string, printableXml: string): void {
+    const k = this.out.add(xml);
+    this.printable?.add(printableXml);
+    if (NOTE_REF.test(xml)) this.withNoteRefs.push(k);
+    if (this.relIds) for (const m of xml.matchAll(/="(rId\d+)"/g)) this.relIds.add(m[1]);
+  }
+}
+
+function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): void {
   const n = plan.n;
   // The mark pass is planned over the whole body first. Each entry takes at
   // most one pilcrow mark and one property swap, so the steps fit two columns.
@@ -339,14 +456,6 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Em
 
   const parseO = (i: number): XmlElement => parseXml(O.blocks.read(i));
   const parseR = (j: number): XmlElement => parseXml(R.blocks.read(j));
-  // A save drops a chart part whose relationship the body it sees does not use.
-  const relIds = [O, R].some((input) => [...input.shell.documentRels.values()].some((rel) => rel.type.endsWith("/chart"))) ? new Set<string>() : null;
-  const withNoteRefs: number[] = [];
-  const emit: Emit = (text) => {
-    const k = out.add(text);
-    if (NOTE_REF.test(text)) withNoteRefs.push(k);
-    if (relIds) for (const m of text.matchAll(/="(rId\d+)"/g)) relIds.add(m[1]);
-  };
   // The second entry of a split or merge, emitted with the first.
   let second: Entry | null = null;
 
@@ -370,9 +479,9 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Em
     emittedUpTo = k;
     // A table is on disk as its shell and rows, and takes no mark.
     if ((plan.fromOriginal(k) ? O.kinds[o] : R.kinds[r]) === "tbl") {
-      if (op === DELETED) emitTableThrough(O, o, (tbl) => emitDeleted(tbl, ctx).el, emit);
-      else if (op === INSERTED) emitTableThrough(R, r, (tbl) => emitInserted(tbl, ctx).el, emit);
-      else emitMatchedTables(O, o, R, r, ctx, emit);
+      if (op === DELETED) emitTableThrough(O, o, (tbl) => emitDeleted(tbl, ctx).el, sink);
+      else if (op === INSERTED) emitTableThrough(R, r, (tbl) => emitInserted(tbl, ctx).el, sink);
+      else emitMatchedTables(O, o, R, r, ctx, sink);
       continue;
     }
     let entry: Entry | null = null;
@@ -401,11 +510,11 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, out: BlockStore): Em
       const at = (): Entry => self;
       if (glyph[k]) applyMarkStep({ kind: "glyph", at: k, glyph: glyph[k] === GLYPH.ins ? "ins" : "del" }, at, pPrOf, ctx);
       if (props[k] !== -1) applyMarkStep({ kind: "props", at: k, follower: props[k] }, at, pPrOf, ctx);
-      xml = serializeXml(entry.el);
+      sink.element(entry.el);
+    } else {
+      sink.raw(xml as string);
     }
-    emit(xml as string);
   }
-  return { withNoteRefs, relIds };
 }
 
 // ---------------------------------------------------------------------------
@@ -430,10 +539,10 @@ function tagsOf(el: XmlElement): [string, string] {
  * does; a table over TABLE_CHUNK_BYTES whose rows share a relationship the
  * result lacks (a struck image) gets it adopted once per chunk, not once.
  */
-function emitTableThrough(input: Input, i: number, emitWhole: (tbl: XmlElement) => XmlElement, emit: Emit): void {
+function emitTableThrough(input: Input, i: number, emitWhole: (tbl: XmlElement) => XmlElement, sink: BodySink): void {
   const shell = parseXml(input.blocks.read(i));
   if (shell.children.length === 0) {
-    emit(serializeXml(emitWhole(shell)));
+    sink.element(emitWhole(shell));
     return;
   }
   let [next] = input.tables.get(i) as [number, number];
@@ -444,10 +553,10 @@ function emitTableThrough(input: Input, i: number, emitWhole: (tbl: XmlElement) 
     const done = emitWhole({ ...shell, children: chunk });
     if (!tail) {
       const tags = tagsOf(done);
-      emit(tags[0]);
+      sink.raw(tags[0]);
       tail = tags[1];
     }
-    for (const c of done.children) emit(serializeXml(c));
+    for (const c of done.children) sink.element(c);
     chunk = [];
     bytes = 0;
   };
@@ -460,7 +569,7 @@ function emitTableThrough(input: Input, i: number, emitWhole: (tbl: XmlElement) 
     if (bytes >= TABLE_CHUNK_BYTES) flush();
   }
   flush();
-  emit(tail);
+  sink.raw(tail);
 }
 
 /** Whether two tables write the same XML, as compareTable asks of a matched pair. */
@@ -475,28 +584,34 @@ function sameTables(O: Input, o: number, R: Input, r: number): boolean {
 }
 
 /** A matched table pair, as emitMatched compares it: the same table unchanged, else compareTable. */
-function emitMatchedTables(O: Input, o: number, R: Input, r: number, ctx: Ctx, emit: Emit): void {
+function emitMatchedTables(O: Input, o: number, R: Input, r: number, ctx: Ctx, sink: BodySink): void {
   const shell = parseXml(R.blocks.read(r));
   const [rFrom, rTo] = R.tables.get(r) as [number, number];
   if (sameTables(O, o, R, r)) {
-    // Unchanged: the revised table as it was, its rows back in their slots.
+    // Unchanged: the revised table as it was, its rows back in their slots,
+    // each row an entry of its own.
     const parts = serializeXml(shell).split(ROW_SLOT_XML);
-    for (let i = 0; i < rTo - rFrom; i++) emit(parts[i] + R.rows.read(rFrom + i));
-    emit(parts[rTo - rFrom]);
+    for (let i = 0; i < rTo - rFrom; i++) {
+      if (parts[i]) sink.raw(parts[i]);
+      sink.raw(R.rows.read(rFrom + i));
+    }
+    sink.raw(parts[rTo - rFrom]);
     return;
   }
   compareTableProps(parseXml(O.blocks.read(o)), shell, ctx);
   // compareRows puts the rows after the table's other children.
   shell.children = [...shell.children.filter((c) => c.name !== ROW_SLOT.name), ROW_SLOT];
   const [head, tail] = serializeXml(shell).split(ROW_SLOT_XML);
-  emit(head);
+  // The table's own format change, here; its rows' as they are written.
+  countRevisions(shell, sink.revisions);
+  sink.raw(head, sink.printable ? serializeXml(flatten(shell)).split(ROW_SLOT_XML)[0] : head);
   const [oFrom, oTo] = O.tables.get(o) as [number, number];
-  emitComparedRows(O, oFrom, oTo, R, rFrom, rTo, ctx, emit);
-  emit(tail);
+  emitComparedRows(O, oFrom, oTo, R, rFrom, rTo, ctx, sink);
+  sink.raw(tail);
 }
 
 /** compareRows over two tables' rows on disk: the result's rows, in order. */
-function emitComparedRows(O: Input, oFrom: number, oTo: number, R: Input, rFrom: number, rTo: number, ctx: Ctx, emit: Emit): void {
+function emitComparedRows(O: Input, oFrom: number, oTo: number, R: Input, rFrom: number, rTo: number, ctx: Ctx, sink: BodySink): void {
   const oN = oTo - oFrom;
   const rN = rTo - rFrom;
   const anchors = histogramMatch(O.rowFingerprints.slice(oFrom, oTo), R.rowFingerprints.slice(rFrom, rTo));
@@ -505,7 +620,7 @@ function emitComparedRows(O: Input, oFrom: number, oTo: number, R: Input, rFrom:
   const parseO = (i: number): XmlElement => parseXml(O.rows.read(oFrom + i));
   const parseR = (j: number): XmlElement => parseXml(R.rows.read(rFrom + j));
   const emitRows = (rows: XmlElement[]): void => {
-    for (const row of rows) emit(serializeXml(row));
+    for (const row of rows) sink.element(row);
   };
   let oAt = 0;
   let rAt = 0;
@@ -582,6 +697,7 @@ async function writeResult(
   body: BlockStore,
   noteIds: NoteIdChanges,
   relIds: Set<string> | null,
+  printable: { path: string; beforeSectPr?: string; store: BlockStore } | null,
 ): Promise<void> {
   // document.xml: the revised shell's document, with the result's blocks
   // ahead of the body's own section properties.
@@ -592,22 +708,48 @@ async function writeResult(
   const skeleton = serializeXml(R.shell.docRoot, true);
   shellBody.children.shift();
   const at = skeleton.indexOf("<w:dxw-body/>");
+  const head = skeleton.slice(0, at);
+  const tail = skeleton.slice(at + "<w:dxw-body/>".length);
   const docFile = join(dir, "result-document.xml");
-  const fd = openSync(docFile, "w");
+  writeDocument(docFile, head, body, noteIds, tail);
+
+  // Every other part comes from the shell's save. A save leaves out chart
+  // parts the body it sees does not use, so the body's ids stand in for it.
+  if (relIds) shellBody.children.unshift({ name: "w:dxw-rels", attrs: Object.fromEntries([...relIds].map((id, i) => [`r:dxw${i}`, id])), children: [], text: "" });
+  const files = unzipSync(R.shell.save());
+  if (relIds) shellBody.children.shift();
+  const notes = new Map<string, string>();
+  for (const part of notesOf(R)) {
+    const file = join(dir, `result-${part.kind}s.xml`);
+    part.write(file);
+    notes.set(part.part, file);
+  }
+  await writePackage(outPath, docFile, files, notes, O, R);
+
+  if (printable) {
+    const printableFile = join(dir, "printable-document.xml");
+    writeDocument(printableFile, head, printable.store, noteIds, (printable.beforeSectPr ?? "") + tail);
+    await writePackage(printable.path, printableFile, files, notes, O, R);
+  }
+}
+
+/** A document.xml: `head`, the body's entries from `store` with their note ids settled, then `tail`. */
+function writeDocument(path: string, head: string, store: BlockStore, noteIds: NoteIdChanges, tail: string): void {
+  const fd = openSync(path, "w");
   try {
     const write = (text: string | Buffer): void => {
       const buf = typeof text === "string" ? Buffer.from(text, "utf8") : text;
       let done = 0;
       while (done < buf.length) done += writeSync(fd, buf, done, buf.length - done);
     };
-    write(skeleton.slice(0, at));
-    for (let k = 0; k < body.count; k++) {
+    write(head);
+    for (let k = 0; k < store.count; k++) {
       const change = noteIds.get(k);
       if (!change) {
-        body.withBytes(k, write);
+        store.withBytes(k, write);
         continue;
       }
-      const el = parseXml(body.read(k));
+      const el = parseXml(store.read(k));
       for (const kind of ["footnote", "endnote"] as const) {
         const found: NoteRef[] = [];
         noteRefsIn(el, kind, false, found);
@@ -615,29 +757,19 @@ async function writeResult(
       }
       write(serializeXml(el));
     }
-    write(skeleton.slice(at + "<w:dxw-body/>".length));
+    write(tail);
   } finally {
     closeSync(fd);
   }
+}
 
-  // Every other part comes from the shell's save. A save leaves out chart
-  // parts the body it sees does not use, so the body's ids stand in for it.
-  if (relIds) shellBody.children.unshift({ name: "w:dxw-rels", attrs: Object.fromEntries([...relIds].map((id, i) => [`r:dxw${i}`, id])), children: [], text: "" });
-  const files = unzipSync(R.shell.save());
-  if (relIds) shellBody.children.shift();
-
-  const writer = new ZipWriter(outPath);
+/** The result's zip at `path`: `docFile` as document.xml, the notes parts from disk, the rest from the shell's save and the inputs. */
+async function writePackage(path: string, docFile: string, files: Record<string, Uint8Array>, notes: Map<string, string>, O: Input, R: Input): Promise<void> {
+  const writer = new ZipWriter(path);
   const names = Object.keys(files).sort((a, b) => Number(b === "[Content_Types].xml") - Number(a === "[Content_Types].xml"));
-  const notes = new Map(notesOf(R).map((n) => [n.part, n]));
   for (const name of names) {
-    if (name === R.docPart) {
-      await writer.addFile(name, docFile);
-      continue;
-    }
-    const part = notes.get(name);
-    if (part) {
-      const file = join(dir, `result-${part.kind}s.xml`);
-      part.write(file);
+    const file = name === R.docPart ? docFile : notes.get(name);
+    if (file) {
       await writer.addFile(name, file);
       continue;
     }

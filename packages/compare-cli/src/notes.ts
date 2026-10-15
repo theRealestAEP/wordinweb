@@ -68,6 +68,12 @@ export class DiskNotes implements NotesPart {
     return this.next;
   }
 
+  /** Each note a compare changed or added, as it now stands. */
+  forEachChange(use: (note: XmlElement) => void): void {
+    for (const at of this.changed.values()) use(parseXml(this.changes.read(at)));
+    for (const at of this.appended) use(parseXml(this.changes.read(at)));
+  }
+
   /** Write the part, with its changes, to `path`. */
   write(path: string): void {
     const fd = openSync(path, "w");

@@ -4,12 +4,14 @@ import { join } from "node:path";
 import { strFromU8, unzipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
-import { XmlElement, serializeXml } from "../../core/src/xml.js";
+import { XmlElement, child, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { compareDocuments } from "../../core/src/edit/compare/index.js";
 import { acceptAllRevisions, collectRevisions, rejectAllRevisions } from "../../core/src/edit/suggest.js";
 import { makeDocx, wrapDocument } from "../../core/test/helpers.js";
 import { AUTHOR, DATE, canonicalBody, para } from "../../core/test/compare-helpers.js";
 import { compareFiles } from "../src/compare.js";
+import { CompareError } from "../src/errors.js";
+import { flatten } from "../src/printable.js";
 
 const dir = mkdtempSync(join(tmpdir(), "compare-files-test-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -21,11 +23,23 @@ async function check(originalBody: string, revisedBody: string, parts: Record<st
   const n = pairs++;
   const original = makeDocx({ ...parts, "word/document.xml": wrapDocument(originalBody) });
   const revised = makeDocx({ ...parts, "word/document.xml": wrapDocument(revisedBody) });
-  const paths = [join(dir, `${n}-o.docx`), join(dir, `${n}-r.docx`), join(dir, `${n}-out.docx`)];
+  const paths = [join(dir, `${n}-o.docx`), join(dir, `${n}-r.docx`), join(dir, `${n}-out.docx`), join(dir, `${n}-print.docx`)];
   writeFileSync(paths[0], original);
   writeFileSync(paths[1], revised);
-  await compareFiles(paths[0], paths[1], paths[2], { author: AUTHOR, date: DATE });
+  const { revisions } = await compareFiles(paths[0], paths[1], paths[2], { author: AUTHOR, date: DATE, printable: { path: paths[3], beforeSectPr: SUMMARY } });
   const result = new Uint8Array(readFileSync(paths[2]));
+
+  // The counts are collectRevisions' on the result, kind by kind.
+  const tally: Record<string, number> = Object.fromEntries(Object.keys(revisions).map((k) => [k, 0]));
+  for (const ref of collectRevisions(DocxDocument.load(result))) tally[ref.kind]++;
+  expect(revisions).toEqual(tally);
+  // The printable copy is the result flattened whole, the summary before the final sectPr.
+  const reference = DocxDocument.load(result);
+  const body = child(reference.docRoot, "body") as XmlElement;
+  flatten(body);
+  const sectPr = body.children.findIndex((c) => localName(c.name) === "sectPr");
+  body.children.splice(sectPr === -1 ? body.children.length : sectPr, 0, ...parseXml(`<root>${SUMMARY}</root>`).children);
+  expect(canonicalBody(DocxDocument.load(new Uint8Array(readFileSync(paths[3]))))).toBe(canonicalBody(reference));
 
   const accepted = DocxDocument.load(result);
   acceptAllRevisions(accepted);
@@ -39,6 +53,8 @@ async function check(originalBody: string, revisedBody: string, parts: Record<st
   expect(withoutIds(canonicalBody(DocxDocument.load(result)))).toBe(withoutIds(canonicalBody(expected)));
   return DocxDocument.load(result);
 }
+
+const SUMMARY = `<w:p><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:r><w:t>Summary</w:t></w:r></w:p>`;
 
 /** Revision ids are unique either way, but taken in a different order. */
 function withoutIds(xml: string): string {
@@ -229,6 +245,17 @@ describe("compareFiles", () => {
 });
 
 describe("compareFiles errors", () => {
+  /** compareFiles' error, which must be a CompareError. */
+  const errorOf = async (original: string, revised: string, out: string): Promise<CompareError> => {
+    try {
+      await compareFiles(original, revised, out, { author: AUTHOR, date: DATE });
+    } catch (error) {
+      expect(error).toBeInstanceOf(CompareError);
+      return error as CompareError;
+    }
+    throw new Error("compareFiles succeeded");
+  };
+
   const good = join(dir, "good.docx");
   writeFileSync(good, makeDocx({ "word/document.xml": wrapDocument(para("Text.")) }));
   const options = { author: AUTHOR, date: DATE };
@@ -247,6 +274,27 @@ describe("compareFiles errors", () => {
     const broken = join(dir, "broken.docx");
     writeFileSync(broken, makeDocx({ "word/document.xml": wrapDocument(para("Text.")).replace("</w:body>", "<!-- never closed") }));
     await fails(good, broken, join(dir, "x.docx")).toThrow(/broken\.docx: word\/document\.xml: unterminated comment/);
+  });
+
+  it("gives each failure a code and the input at fault", async () => {
+    const xlsx = join(dir, "book.docx");
+    writeFileSync(xlsx, makeDocx({ "word/document.xml": `<w:workbook ${'xmlns:w="w"'}/>` }));
+    const broken = join(dir, "broken2.docx");
+    writeFileSync(broken, makeDocx({ "word/document.xml": wrapDocument(para("Text.")).replace("</w:body>", "<!-- never closed") }));
+    writeFileSync(join(dir, "text2.docx"), "not a zip");
+    const cases: [string, string, string, string, string | undefined][] = [
+      [join(dir, "missing.docx"), good, join(dir, "x.docx"), "missing", "original"],
+      [good, dir, join(dir, "x.docx"), "missing", "revised"],
+      [join(dir, "text2.docx"), good, join(dir, "x.docx"), "not_docx", "original"],
+      [good, xlsx, join(dir, "x.docx"), "not_docx", "revised"],
+      [good, broken, join(dir, "x.docx"), "damaged", "revised"],
+      [good, good, good, "result_is_input", undefined],
+      [good, good, join(dir, "no-such-folder", "x.docx"), "result_folder_missing", undefined],
+    ];
+    for (const [original, revised, out, code, file] of cases) {
+      const error = await errorOf(original, revised, out);
+      expect([error.code, error.file]).toEqual([code, file]);
+    }
   });
 
   it("refuses to overwrite an input, and to write into a missing folder", async () => {
