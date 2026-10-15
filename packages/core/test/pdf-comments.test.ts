@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
+import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
@@ -13,10 +14,10 @@ const W15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
 
 /**
  * A document of `pages` pages with `perPage` commented paragraphs each; a
- * reply under every third comment. `longText` makes every comment's text
- * long, so a page's balloons outgrow the sheet.
+ * reply under every third comment. `repeats` is how many sentences each
+ * comment's text carries, so a page's balloons can outgrow the sheet.
  */
-export function commentedDocx(pages: number, perPage: number, longText = false): { docx: Uint8Array; texts: string[] } {
+export function commentedDocx(pages: number, perPage: number, repeats = 0): { docx: Uint8Array; texts: string[] } {
   const body: string[] = [];
   const comments: string[] = [];
   const extended: string[] = [];
@@ -31,7 +32,7 @@ export function commentedDocx(pages: number, perPage: number, longText = false):
           `<w:commentRangeStart w:id="${cid}"/><w:r><w:t xml:space="preserve">this part is commented</w:t></w:r><w:commentRangeEnd w:id="${cid}"/>` +
           `<w:r><w:commentReference w:id="${cid}"/></w:r><w:r><w:t xml:space="preserve"> and the paragraph goes on.</w:t></w:r></w:p>`,
       );
-      const text = `Note ${cid} on page ${page}` + (longText ? ": " + "review this wording against the signed version ".repeat(8) : "");
+      const text = `Note ${cid} on page ${page}` + (repeats ? ": " + "review this wording against the signed version ".repeat(repeats).trim() : "");
       texts.push(text);
       const paraId = (0x1000 + cid).toString(16).toUpperCase().padStart(8, "0");
       comments.push(`<w:comment w:id="${cid}" w:author="Ada Reviewer" w:initials="AR" w:date="2026-06-01T10:00:00Z"><w:p w14:paraId="${paraId}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:comment>`);
@@ -106,16 +107,31 @@ describe("renderDocxToPdf with comments", () => {
     expect(text).toContain("Bob Editor");
   });
 
-  it.skipIf(!hasPdftotext)("carries balloons that do not fit a sheet onto the next, losing nothing", async () => {
-    const { docx, texts } = commentedDocx(2, 9, true);
+  it.skipIf(!hasPdftotext)("moves a card that does not fit whole onto the next sheet, losing nothing", async () => {
+    const { docx, texts } = commentedDocx(2, 9, 8);
     const { bytes, pages } = await render(docx, true);
-    // Two pages of text; the balloons overflow onto extra sheets.
+    // Two pages of text; the cards overflow onto extra sheets.
     expect(pages).toBeGreaterThan(2);
     const text = pdfText(bytes);
-    // A balloon split over two sheets has the next page's text between its
-    // halves in pdftotext's reading order, so count its words instead.
-    const notes = texts.filter((t) => t.startsWith("Note "));
+    // Every card is whole, so its text reads as one piece.
+    for (const t of texts) expect(text).toContain(t);
+  });
+
+  it.skipIf(!hasPdftotext)("splits only a card taller than the rail, at a line", async () => {
+    const { docx, texts } = commentedDocx(1, 1, 120);
+    const { bytes, pages } = await render(docx, true);
+    expect(pages).toBeGreaterThan(1);
+    const text = pdfText(bytes);
     for (const t of texts) expect(text).toContain(t.split(":")[0]);
-    expect(text.match(/wording/g)?.length).toBe(notes.length * 8);
+    expect(text.match(/wording/g)?.length).toBe(120);
+  });
+
+  it("draws a dashed leader from each card's text to the card", async () => {
+    const { docx } = commentedDocx(1, 3);
+    const { bytes } = await render(docx, true);
+    const text = bytes.toString("latin1");
+    const streams = [...text.matchAll(/\/Length (\d+) >>\nstream\n/g)];
+    const content = streams.map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1")).join("\n");
+    expect(content.match(/\[1\.5 1\.5\] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(3);
   });
 });

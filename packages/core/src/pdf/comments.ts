@@ -14,11 +14,16 @@ import { num } from "./writer.js";
  * line, replies nested under their parent, balloons stacked down so none
  * overlaps the one above.
  *
- * Balloons that do not fit: a balloon is a stack of lines, placed in order
- * down the rail. The lines that would cross the sheet's bottom continue at
- * the top of the next sheet's rail, ahead of that page's own balloons, and
- * after the last page further sheets with an empty page area carry what is
- * left. No comment is ever cut.
+ * A dashed leader in the author's color runs from the end of the comment's
+ * first highlighted line across to the rail and on to the card's left edge.
+ *
+ * Balloons that do not fit: cards are placed in order down the rail. A
+ * card that would cross the sheet's bottom moves whole to the top of the
+ * next sheet's rail, ahead of that page's own cards (its leader stays on
+ * the sheet with its text, reaching the rail); after the last page further
+ * sheets with an empty page area carry what is left. Only a card taller
+ * than a whole rail splits, at a line, and continues the same way. No
+ * comment is ever cut.
  *
  * A page needs only its own comments: the column keeps the ids already
  * given a balloon and the lines carried to the next sheet, nothing else.
@@ -42,13 +47,15 @@ interface Line {
 
 interface Balloon {
   id: string;
+  /** The author's color: the avatar's, and the leader line's. */
+  color: string;
   lines: Line[];
 }
 
 export class CommentColumn {
   private readonly placed = new Set<string>();
   /** Lines of balloons that did not fit the sheet before. */
-  private carried: Line[] = [];
+  private carried: Balloon[] = [];
   private readonly replies = new Map<string, DocComment[]>();
   private readonly byId = new Map<string, DocComment>();
 
@@ -83,6 +90,8 @@ export class CommentColumn {
         else items.set(id, [item]);
       }
     }
+    // The end of each comment's first highlighted line, where its leader starts.
+    const firstLine = new Map<string, { x: number; y: number }>();
     for (const [id, list] of items) {
       const resolved = this.byId.get(id)?.resolved;
       // One continuous rect per line, as word-granular spans would gap at spaces.
@@ -92,6 +101,7 @@ export class CommentColumn {
           drawer.ops.push(
             `q /${this.resources.alpha(resolved ? 0.22 : 0.38)} gs ${resolved ? "0.627 0.627 0.627" : "1 0.784 0.353"} rg ${drawer.rect(run.x0, run.top, run.x1 - run.x0, run.height)} f Q`,
           );
+          if (!firstLine.has(id)) firstLine.set(id, { x: run.x1, y: run.top + run.height / 2 });
         }
         run = null;
       };
@@ -116,40 +126,56 @@ export class CommentColumn {
     }
     balloons.sort((a, b) => a.top - b.top);
 
-    const x = page.width + CARD_GAP;
+    const cardX = page.width + CARD_GAP;
     const bottom = sheetHeight - RAIL_PAD;
+    const rail = bottom - RAIL_PAD;
     let y = RAIL_PAD;
-    let rest: Line[] = [];
-    const place = (lines: Line[], at: number): number => {
-      if (rest.length > 0) {
-        rest.push(...lines);
-        return at;
-      }
-      let fit = 0;
-      let height = 0;
-      while (fit < lines.length && at + height + lines[fit].height <= bottom) height += lines[fit++].height;
-      if (fit > 0) {
-        drawer.ops.push(`q 1 g 0.878 0.878 0.878 RG 0.75 w ${drawer.rect(x, at, CARD_WIDTH, height)} B Q`);
-        let lineY = at;
-        for (const line of lines.slice(0, fit)) {
-          line.paint(drawer, x, lineY);
-          lineY += line.height;
-        }
-      }
-      rest = lines.slice(fit);
-      return at + height;
-    };
     let stacked = false;
-    if (this.carried.length > 0) {
-      y = place(this.carried, y);
-      this.carried = [];
+    const carried: Balloon[] = [];
+    /** Draw the leader from a highlight to the rail, and on to a card at `cardTop` when it is on this sheet. */
+    const leader = (balloon: Balloon, cardTop: number | null): void => {
+      const from = firstLine.get(balloon.id);
+      if (!from) return;
+      const ops = [`q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.y))} m ${num(drawer.x(page.width))} ${num(drawer.y(from.y))} l`];
+      if (cardTop !== null) ops.push(`${num(drawer.x(cardX))} ${num(drawer.y(cardTop + PAD_Y + AVATAR / 2))} l`);
+      ops.push("S Q");
+      drawer.ops.push(ops.join(" "));
+    };
+    /** Draw a card at `at` and give its top, or carry it to the next sheet
+     * (null). Only a card taller than the rail splits, at a line. */
+    const place = (balloon: Balloon, at: number): number | null => {
+      const height = balloon.lines.reduce((sum, line) => sum + line.height, 0);
+      let lines = balloon.lines;
+      if (carried.length > 0 || (at + height > bottom && height <= rail)) {
+        carried.push(balloon);
+        return null;
+      }
+      if (at + height > bottom) {
+        let fit = 0;
+        let fitHeight = 0;
+        while (fit < lines.length && at + fitHeight + lines[fit].height <= bottom) fitHeight += lines[fit++].height;
+        if (fit === 0) {
+          carried.push(balloon);
+          return null;
+        }
+        carried.push({ ...balloon, lines: lines.slice(fit) });
+        lines = lines.slice(0, fit);
+      }
+      const drawn = lines.reduce((sum, line) => sum + line.height, 0);
+      drawer.ops.push(`q 1 g 0.878 0.878 0.878 RG 0.75 w ${drawer.rect(cardX, at, CARD_WIDTH, drawn)} B Q`);
+      let lineY = at;
+      for (const line of lines) {
+        line.paint(drawer, cardX, lineY);
+        lineY += line.height;
+      }
+      y = at + drawn;
       stacked = true;
-    }
-    for (const { top, balloon } of balloons) {
-      y = place(balloon.lines, Math.max(top, stacked ? y + RAIL_PAD : y));
-      stacked = true;
-    }
-    this.carried = rest;
+      return at;
+    };
+    for (const balloon of this.carried) place(balloon, stacked ? y + RAIL_PAD : y);
+    this.carried = [];
+    for (const { top, balloon } of balloons) leader(balloon, place(balloon, Math.max(top, stacked ? y + RAIL_PAD : y)));
+    this.carried = carried;
   }
 
   /** Whether lines wait for another sheet after the last page. */
@@ -209,7 +235,7 @@ export class CommentColumn {
       }
     }
     lines.push({ height: PAD_Y, paint: () => undefined });
-    return { id: comment.id, lines };
+    return { id: comment.id, color: avatarColor(comment.author), lines };
   }
 
   private text(drawer: PageDrawer, text: string, font: FontSpec, color: string, x: number, baseline: number): void {
