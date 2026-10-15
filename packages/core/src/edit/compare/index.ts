@@ -1300,7 +1300,11 @@ export function wrapContainerContent(container: XmlElement, kind: "ins" | "del",
   // paragraph's checkbox controls ("☒ ☐") survived accept-all and joined the
   // paragraph before (probe2-form-checkboxes).
   const NESTED = ["hyperlink", "smartTag", "dir", "bdo", "fldSimple"];
-  const WRAPPABLE = ["r", "sdt", "customXml"];
+  // An equation goes whole: a w:ins or w:del may hold m:oMath and
+  // m:oMathPara (EG_MathContent, through EG_RunLevelElements). Left plain,
+  // a struck paragraph's equation survived accept-all beside the inserted
+  // one, so the result showed it twice (parity-math2).
+  const WRAPPABLE = ["r", "sdt", "customXml", "oMath", "oMathPara"];
   const out: XmlElement[] = [];
   let group: XmlElement[] = [];
   const flush = (): void => {

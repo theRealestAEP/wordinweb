@@ -408,6 +408,28 @@ describe("compareDocuments — content controls and simple fields in removed par
   });
 });
 
+describe("compareDocuments — equations", () => {
+  // parity-math2: a paragraph holding an equation is struck and reinserted
+  // whole, and the equation itself was left outside the w:del, so accept-all
+  // showed it twice.
+  const M = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"';
+  const math = (text: string): string => `<m:oMath ${M}><m:r><m:t>${text}</m:t></m:r></m:oMath>`;
+  const inline = (word: string, eq: string): string =>
+    `<w:p><w:r><w:t xml:space="preserve">Let ${word} be </w:t></w:r>${math(eq)}<w:r><w:t>.</w:t></w:r></w:p>`;
+  const display = (eq: string): string => `<w:p><m:oMathPara ${M}>${math(eq)}</m:oMathPara></w:p>`;
+  it("round-trips a word changed beside an inline equation", () => {
+    const { merged } = roundTrip(inline("x", "x+1"), inline("y", "x+1"));
+    // The struck equation keeps its m:t; only w:t becomes w:delText.
+    expect(serializeXml(merged.docRoot)).not.toContain("m:delText");
+  });
+  it("round-trips a number changed inside an equation", () => {
+    roundTrip(inline("x", "x+1"), inline("x", "x+2"));
+  });
+  it("round-trips a display equation removed and one added", () => {
+    roundTrip(para("Before.") + display("a=b") + para("After."), para("Before.") + para("After.") + display("c=d"));
+  });
+});
+
 describe("compareDocuments — a word split across runs", () => {
   it("round-trips an edit beside a split word", () => {
     roundTrip(
