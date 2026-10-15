@@ -1,4 +1,5 @@
 import { inflateSync } from "node:zlib";
+import { decodeTiff } from "../render/tiff.js";
 import { PdfWriter } from "./writer.js";
 
 /** A picture part of the document as an image XObject. */
@@ -12,8 +13,9 @@ export interface WrittenImage {
  * Write a picture part as an image XObject, from its bytes a piece at a
  * time: a JPEG passes through as DCTDecode once its frame header gives the
  * size, a PNG is decoded and re-encoded as Flate samples with an SMask for
- * its alpha. Null for a format not read here (EMF, WMF, TIFF, GIF, BMP,
- * SVG), which the page draws as an empty frame.
+ * its alpha, a TIFF likewise through render/tiff.ts. Null for a format not
+ * read here (GIF, BMP, SVG), which the page draws as an empty frame; EMF
+ * and WMF go through metafile.ts instead.
  */
 export async function writeImage(
   writer: PdfWriter,
@@ -23,16 +25,63 @@ export async function writeImage(
 ): Promise<WrittenImage | null> {
   const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
   if (ext === "jpg" || ext === "jpeg" || ext === "jpe") return writeJpeg(writer, size, pieces);
+  if (ext !== "png" && ext !== "tif" && ext !== "tiff") return null;
+  const bytes = new Uint8Array(size);
+  let at = 0;
+  if (!(await pieces((piece) => {
+    bytes.set(piece, at);
+    at += piece.length;
+  }))) return null;
   if (ext === "png") {
-    const bytes = new Uint8Array(size);
-    let at = 0;
-    if (!(await pieces((piece) => {
-      bytes.set(piece, at);
-      at += piece.length;
-    }))) return null;
-    return writePng(writer, bytes);
+    const png = decodePng(bytes);
+    return png ? writeSamples(writer, png) : null;
   }
-  return null;
+  const tiff = decodeTiff(bytes);
+  return tiff ? writeSamples(writer, splitRgba(tiff.rgba, tiff.width, tiff.height)) : null;
+}
+
+/** 8-bit samples with the alpha apart, as the XObjects want them. */
+export interface SampleImage {
+  width: number;
+  height: number;
+  gray: boolean;
+  /** 1 or 3 samples per pixel. */
+  samples: Uint8Array;
+  /** 8-bit alpha per pixel, or null when opaque. */
+  alpha: Uint8Array | null;
+}
+
+/** RGBA pixels as a SampleImage, the alpha dropped when every pixel is opaque. */
+export function splitRgba(rgba: ArrayLike<number>, width: number, height: number): SampleImage {
+  const count = width * height;
+  const samples = new Uint8Array(count * 3);
+  const alpha = new Uint8Array(count);
+  let opaque = true;
+  for (let i = 0; i < count; i++) {
+    samples[i * 3] = rgba[i * 4];
+    samples[i * 3 + 1] = rgba[i * 4 + 1];
+    samples[i * 3 + 2] = rgba[i * 4 + 2];
+    alpha[i] = rgba[i * 4 + 3];
+    if (alpha[i] !== 255) opaque = false;
+  }
+  return { width, height, gray: false, samples, alpha: opaque ? null : alpha };
+}
+
+/** Write a SampleImage as a Flate image XObject, with an SMask for its alpha. */
+export async function writeSamples(writer: PdfWriter, image: SampleImage): Promise<WrittenImage> {
+  const objNum = writer.allocate();
+  let smask = "";
+  if (image.alpha) {
+    const maskNum = writer.allocate();
+    await writer.deflatedStream(maskNum, `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, image.alpha);
+    smask = ` /SMask ${maskNum} 0 R`;
+  }
+  await writer.deflatedStream(
+    objNum,
+    `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /${image.gray ? "DeviceGray" : "DeviceRGB"} /BitsPerComponent 8${smask}`,
+    image.samples,
+  );
+  return { objNum, width: image.width, height: image.height };
 }
 
 async function writeJpeg(writer: PdfWriter, size: number, pieces: (onPiece: (piece: Uint8Array) => void) => Promise<boolean>): Promise<WrittenImage | null> {
@@ -114,37 +163,9 @@ function jpegFrame(bytes: Uint8Array): { width: number; height: number; componen
   return null;
 }
 
-async function writePng(writer: PdfWriter, bytes: Uint8Array): Promise<WrittenImage | null> {
-  const png = decodePng(bytes);
-  if (!png) return null;
-  const objNum = writer.allocate();
-  let smask = "";
-  if (png.alpha) {
-    const maskNum = writer.allocate();
-    await writer.deflatedStream(maskNum, `/Type /XObject /Subtype /Image /Width ${png.width} /Height ${png.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, png.alpha);
-    smask = ` /SMask ${maskNum} 0 R`;
-  }
-  await writer.deflatedStream(
-    objNum,
-    `/Type /XObject /Subtype /Image /Width ${png.width} /Height ${png.height} /ColorSpace /${png.gray ? "DeviceGray" : "DeviceRGB"} /BitsPerComponent 8${smask}`,
-    png.samples,
-  );
-  return { objNum, width: png.width, height: png.height };
-}
-
-interface DecodedPng {
-  width: number;
-  height: number;
-  gray: boolean;
-  /** 8-bit samples, 1 or 3 per pixel. */
-  samples: Uint8Array;
-  /** 8-bit alpha per pixel, when the image has any. */
-  alpha: Uint8Array | null;
-}
-
 /** A PNG as 8-bit gray or RGB samples plus alpha: every color type and bit
  * depth, interlaced or not. Null when the bytes are not a PNG. */
-export function decodePng(bytes: Uint8Array): DecodedPng | null {
+export function decodePng(bytes: Uint8Array): SampleImage | null {
   if (bytes.length < 33 || bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) return null;
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let width = 0;

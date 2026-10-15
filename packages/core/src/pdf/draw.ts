@@ -50,6 +50,10 @@ function rgbOp(c: Rgb, stroke: boolean): string {
   return `${num(c.r / 255)} ${num(c.g / 255)} ${num(c.b / 255)} ${stroke ? "RG" : "rg"}`;
 }
 
+/** What a page draws for a picture part: a raster XObject by name, or the
+ * operators a metafile converter recorded in its canvas's pixel space. */
+export type Picture = { name: string } | { vector: { ops: string; width: number; height: number } };
+
 /** The paint layer of an item, as the DOM renderer's z-index puts it. */
 function layer(item: PageItem): number {
   const z = item as { behind?: boolean; front?: boolean; z?: number };
@@ -97,15 +101,15 @@ export class PageDrawer {
     return (this.sheetHeight - px) * PT;
   }
 
-  drawPage(imageName: (part: string) => string | null): void {
+  drawPage(picture: (part: string) => Picture | null): void {
     const items = this.page.items
       .map((item, index) => ({ item, index, layer: layer(item) }))
       .filter(({ item }) => item.kind !== "grip" && item.kind !== "drawingHit")
       .sort((a, b) => a.layer - b.layer || a.index - b.index);
-    for (const { item } of items) this.drawItem(item, imageName);
+    for (const { item } of items) this.drawItem(item, picture);
   }
 
-  drawItem(item: PageItem, imageName: (part: string) => string | null): void {
+  drawItem(item: PageItem, picture: (part: string) => Picture | null): void {
     switch (item.kind) {
       case "rect":
         this.drawRect(item);
@@ -120,10 +124,10 @@ export class PageDrawer {
         this.drawPath(item);
         break;
       case "image": {
-        const name = imageName(item.part);
+        const found = picture(item.part);
         const rotate = item.rotate ?? (item.rotation ? { deg: item.rotation, ox: item.width / 2, oy: item.height / 2 } : undefined);
         this.withRotation(rotate, item.x, item.y, () => {
-          if (!name) {
+          if (!found) {
             // A format no decoder here reads: an empty frame where it sits.
             this.ops.push(`q 0.5 w 0.6 G ${this.rect(item.x, item.y, item.width, item.height)} S Q`);
             return;
@@ -144,7 +148,13 @@ export class PageDrawer {
             x = item.x - w * c.l;
             y = item.y - h * c.t;
           }
-          this.ops.push(`${num(w * PT)} 0 0 ${num(h * PT)} ${num(this.x(x))} ${num(this.y(y + h))} cm /${name} Do Q`);
+          if ("name" in found) this.ops.push(`${num(w * PT)} 0 0 ${num(h * PT)} ${num(this.x(x))} ${num(this.y(y + h))} cm /${found.name} Do Q`);
+          else {
+            // Recorded canvas operators: the canvas's pixel space (y down)
+            // onto the box, then the operators as they were recorded.
+            const vector = found.vector;
+            this.ops.push(`${num((w / vector.width) * PT)} 0 0 ${num(-(h / vector.height) * PT)} ${num(this.x(x))} ${num(this.y(y))} cm`, vector.ops, "Q");
+          }
           if (item.washout) {
             // VML gain/blacklevel washout, as a white veil over the picture.
             const lift = item.washout.blacklevel * (1 + item.washout.gain) + (1 - item.washout.gain) / 2;

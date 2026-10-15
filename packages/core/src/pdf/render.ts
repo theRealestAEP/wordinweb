@@ -6,9 +6,11 @@ import { LaidOutPage } from "../layout/types.js";
 import { StreamingDocument, openStreamingDocument } from "../stream/body.js";
 import { ByteSource } from "../stream/source.js";
 import { CommentColumn, RAIL_WIDTH } from "./comments.js";
-import { PageDrawer } from "./draw.js";
+import { IMAGE_PLACEHOLDER } from "./canvas.js";
+import { PageDrawer, Picture } from "./draw.js";
 import { FontSet } from "./fonts.js";
-import { WrittenImage, writeImage } from "./images.js";
+import { writeImage, writeSamples } from "./images.js";
+import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
 import { Resources } from "./resources.js";
 import { PdfWriter, pdfString } from "./writer.js";
@@ -80,9 +82,33 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   const info = writer.allocate();
   const resources = new Resources(writer);
   const pageNums: number[] = [];
-  const images = new Map<string, WrittenImage | null>();
+  /** Each picture part once: its picture and the XObjects it needs on a page. */
+  const pictures = new Map<string, { picture: Picture; xobjects: string[] } | null>();
   const unsupportedImages = new Set<string>();
   const undrawn = new Set<string>();
+
+  const loadPicture = async (part: string): Promise<{ picture: Picture; xobjects: string[] } | null> => {
+    const size = opened.mediaSize(part);
+    if (size === undefined) return null;
+    const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
+    if (ext === "emf" || ext === "wmf") {
+      const bytes = await opened.media(part);
+      const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources));
+      if (!canvas) return null;
+      // The bitmaps the metafile drew become XObjects, named in its operators.
+      const names: string[] = [];
+      const xobjects: string[] = [];
+      for (const image of canvas.images) {
+        const written = await writeSamples(writer, image);
+        names.push(`Im${written.objNum}`);
+        xobjects.push(`/Im${written.objNum} ${written.objNum} 0 R`);
+      }
+      const ops = canvas.ops.join("\n").replace(IMAGE_PLACEHOLDER, (_, index) => `/${names[Number(index)]}`);
+      return { picture: { vector: { ops, width: canvas.width, height: canvas.height } }, xobjects };
+    }
+    const image = await writeImage(writer, part, size, (onPiece) => opened.mediaPieces(part, onPiece));
+    return image ? { picture: { name: `Im${image.objNum}` }, xobjects: [`/Im${image.objNum} ${image.objNum} 0 R`] } : null;
+  };
 
   const column = options.comments && opened.doc.comments.length > 0 ? new CommentColumn(opened.doc, measurer, resources, opened.commentIds) : null;
   const sheet = column ? { width: final.maxWidth + RAIL_WIDTH, height: final.maxHeight } : null;
@@ -100,23 +126,24 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   };
 
   const onPage = async (page: LaidOutPage): Promise<void> => {
-    const names = new Map<string, string>();
+    const shown = new Map<string, Picture>();
+    const xobjects: string[] = [];
     for (const item of page.items) {
       if (item.kind === "warptext") undrawn.add(item.kind);
-      if (item.kind !== "image" || names.has(item.part)) continue;
-      let image = images.get(item.part);
-      if (image === undefined) {
-        const size = opened.mediaSize(item.part);
-        image = size === undefined ? null : await writeImage(writer, item.part, size, (onPiece) => opened.mediaPieces(item.part, onPiece));
-        images.set(item.part, image);
-        if (!image) unsupportedImages.add(item.part);
+      if (item.kind !== "image" || shown.has(item.part)) continue;
+      let loaded = pictures.get(item.part);
+      if (loaded === undefined) {
+        loaded = await loadPicture(item.part);
+        pictures.set(item.part, loaded);
+        if (!loaded) unsupportedImages.add(item.part);
       }
-      if (image) names.set(item.part, `Im${image.objNum}`);
+      if (!loaded) continue;
+      shown.set(item.part, loaded.picture);
+      xobjects.push(...loaded.xobjects);
     }
     const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, sheet?.height ?? page.height);
-    drawer.drawPage((part) => names.get(part) ?? null);
+    drawer.drawPage((part) => shown.get(part) ?? null);
     if (column && sheet) column.draw(page, drawer, sheet.height);
-    const xobjects = [...images.entries()].filter(([part]) => names.has(part)).map(([part, image]) => `/${names.get(part)} ${(image as WrittenImage).objNum} 0 R`);
     await writePage(drawer, sheet?.width ?? page.width, sheet?.height ?? page.height, xobjects);
     if (page.index % 25 === 0) clearBreakCache(measurer);
   };
