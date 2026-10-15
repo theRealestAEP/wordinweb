@@ -91,7 +91,7 @@ export class CommentColumn {
       }
     }
     // The end of each comment's first highlighted line, where its leader starts.
-    const firstLine = new Map<string, { x: number; y: number; bottom: number }>();
+    const firstLine = new Map<string, { x: number; y: number; top: number; bottom: number }>();
     for (const [id, list] of items) {
       const resolved = this.byId.get(id)?.resolved;
       // One continuous rect per line, as word-granular spans would gap at spaces.
@@ -101,7 +101,7 @@ export class CommentColumn {
           drawer.ops.push(
             `q /${this.resources.alpha(resolved ? 0.22 : 0.38)} gs ${resolved ? "0.627 0.627 0.627" : "1 0.784 0.353"} rg ${drawer.rect(run.x0, run.top, run.x1 - run.x0, run.height)} f Q`,
           );
-          if (!firstLine.has(id)) firstLine.set(id, { x: run.x1, y: run.top + run.height / 2, bottom: run.top + run.height - 0.5 });
+          if (!firstLine.has(id)) firstLine.set(id, { x: run.x1, y: run.top + run.height / 2, top: run.top, bottom: run.top + run.height });
         }
         run = null;
       };
@@ -132,16 +132,22 @@ export class CommentColumn {
     let y = RAIL_PAD;
     let stacked = false;
     const carried: Balloon[] = [];
-    /** Draw the leader from a highlight to the rail, and on to a card at
-     * `cardTop` when it is on this sheet: a short drop from the highlight's
-     * end to the gap under its line, then across under the line's text, so
-     * nothing reads as struck through. */
+    // The leader stays in the white margin: the right edge of the page's
+    // text area is past every text item and column on the page.
+    let textRight = 0;
+    for (const band of page.columnBands) band.colXs.forEach((x, i) => (textRight = Math.max(textRight, x + band.colWidths[i])));
+    for (const item of page.items) if (item.kind === "text" && !item.hidden) textRight = Math.max(textRight, item.x + item.width);
+    textRight = Math.min(textRight + 6, page.width - 2);
+    /** Mark the highlight's end with a short tick in the author's color,
+     * and draw the dashed leader from the text area's right edge across the
+     * margin to the rail, and on to a card at `cardTop` when it is on this
+     * sheet. No segment crosses or underlines text. */
     const leader = (balloon: Balloon, cardTop: number | null): void => {
       const from = firstLine.get(balloon.id);
       if (!from) return;
+      drawer.ops.push(`q 1.5 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x - 1))} ${num(drawer.y(from.top + 2))} m ${num(drawer.x(from.x - 1))} ${num(drawer.y(from.bottom - 2))} l S Q`);
       const ops = [
-        `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.y))} m ` +
-          `${num(drawer.x(from.x))} ${num(drawer.y(from.bottom))} l ${num(drawer.x(page.width))} ${num(drawer.y(from.bottom))} l`,
+        `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(textRight))} ${num(drawer.y(from.y))} m ${num(drawer.x(page.width))} ${num(drawer.y(from.y))} l`,
       ];
       if (cardTop !== null) ops.push(`${num(drawer.x(cardX))} ${num(drawer.y(cardTop + PAD_Y + AVATAR / 2))} l`);
       ops.push("S Q");
