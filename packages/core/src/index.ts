@@ -357,6 +357,8 @@ export { openStreamingDocument } from "./stream/body.js";
 export type { StreamingDocument } from "./stream/body.js";
 export { fetchSource, bytesSource } from "./stream/source.js";
 export type { ByteSource } from "./stream/source.js";
+export { renderDocxToPdf, fileSource } from "./pdf/render.js";
+export type { RenderPdfOptions, RenderPdfResult } from "./pdf/render.js";
 export type { FindMatch, FindOptions, FindStory, ReplaceAllResult, ReplaceAllCompilation, ReplaceIntentBody, WireRange } from "./edit/find.js";
 export { cellShadingAt } from "./edit/tables.js";
 export type { TableOp } from "./edit/tables.js";

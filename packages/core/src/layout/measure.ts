@@ -88,6 +88,12 @@ const METRIC_SUBSTITUTES: Record<string, string> = {
  * stand-ins: right line pitch, different widths. */
 const METRIC_COMPATIBLE = new Set(["Carlito", "Caladea", "Times New Roman"]);
 
+/** The substitute the CSS stack tries after `family`, metric-compatible or
+ * a visual stand-in. */
+export function substituteFamily(family: string): string | undefined {
+  return METRIC_SUBSTITUTES[family.toLowerCase()];
+}
+
 /** The metric-compatible substitute for `family`, if it has one. A loaded
  * one makes the face effectively present for Word parity. */
 export function metricCompatibleSubstitute(family: string): string | undefined {
@@ -186,6 +192,28 @@ const QUARTER_PT_PX = 1 / 3;
 
 export function quantizeQuarterPt(px: number): number {
   return Math.round(px / QUARTER_PT_PX) * QUARTER_PT_PX;
+}
+
+/** The metrics of a family the tables above know, whatever host measures;
+ * undefined for any other family. */
+export function tabledMetrics(font: FontSpec): FontMetrics | undefined {
+  const fam = normalizeFamily(font.family, !!font.bold, !!font.italic).family.toLowerCase();
+  const exact = WORD_FONT_METRICS[fam] ?? BAKED_FONT_METRICS[fam];
+  if (!exact) return undefined;
+  // lineHeight stays RAW here: Word applies the paragraph line-spacing
+  // multiple to the raw font height and quantizes the RESULT to
+  // quarter-points (msa: Arial 11pt x 1.15 = 14.546 -> 14.5pt, not
+  // 12.75 x 1.15). finishLine does that final quantization. The
+  // baseline's below-share, though, is quantized at single spacing
+  // (cross-font probe gaps sit on quarter-points).
+  const totalQ = quantizeQuarterPt((exact.asc + exact.desc + exact.gap) * font.size);
+  const aboveQ = quantizeQuarterPt((exact.asc + exact.gap) * font.size);
+  return {
+    ascent: exact.asc * font.size,
+    descent: exact.desc * font.size,
+    lineHeight: (exact.asc + exact.desc + exact.gap) * font.size,
+    lineDescent: Math.max(0, totalQ - aboveQ),
+  };
 }
 
 /** Some documents name the styled FACE as the font family — e.g. Word resolves
@@ -465,24 +493,8 @@ export class CanvasMeasurer implements TextMeasurer {
     const key = fontKey(font);
     let m = this.metricsCache.get(key);
     if (m === undefined) {
-      const fam = normalizeFamily(font.family, !!font.bold, !!font.italic).family.toLowerCase();
-      const exact = WORD_FONT_METRICS[fam] ?? BAKED_FONT_METRICS[fam];
-      if (exact) {
-        // lineHeight stays RAW here: Word applies the paragraph line-spacing
-        // multiple to the raw font height and quantizes the RESULT to
-        // quarter-points (msa: Arial 11pt x 1.15 = 14.546 -> 14.5pt, not
-        // 12.75 x 1.15). finishLine does that final quantization. The
-        // baseline's below-share, though, is quantized at single spacing
-        // (cross-font probe gaps sit on quarter-points).
-        const totalQ = quantizeQuarterPt((exact.asc + exact.desc + exact.gap) * font.size);
-        const aboveQ = quantizeQuarterPt((exact.asc + exact.gap) * font.size);
-        m = {
-          ascent: exact.asc * font.size,
-          descent: exact.desc * font.size,
-          lineHeight: (exact.asc + exact.desc + exact.gap) * font.size,
-          lineDescent: Math.max(0, totalQ - aboveQ),
-        };
-      } else {
+      m = tabledMetrics(font);
+      if (!m) {
         this.setFont(font);
         const tm = this.ctx.measureText("Mg");
         const ascent = tm.fontBoundingBoxAscent ?? font.size * 0.8;

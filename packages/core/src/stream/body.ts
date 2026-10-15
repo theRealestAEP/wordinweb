@@ -24,6 +24,8 @@ export interface StreamingDocument {
   media(part: string): Promise<Uint8Array | undefined>;
   /** A binary part's bytes a piece at a time, never held whole; false when the part is missing. */
   mediaPieces(part: string, onPiece: (piece: Uint8Array) => void): Promise<boolean>;
+  /** A binary part's size in bytes, from the zip directory; undefined when missing. */
+  mediaSize(part: string): number | undefined;
 }
 
 /** Parts the shell holds whole; every other part stays in the file. */
@@ -114,6 +116,9 @@ export async function openStreamingDocument(source: ByteSource): Promise<Streami
       if (!entry) return false;
       await zip.pieces(entry, onPiece);
       return true;
+    },
+    mediaSize(part) {
+      return zip.entries.get(part.startsWith("/") ? part.slice(1) : part)?.size;
     },
   };
 }

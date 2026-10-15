@@ -31,6 +31,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "bidi-js": "1.0.3",
     "cfb": "^1.2.2",
     "diff": "^9.0.0",
     "emf-converter": "^1.5.0",
