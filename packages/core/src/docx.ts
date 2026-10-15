@@ -173,6 +173,11 @@ function xmlFingerprint(xml: string): string {
   return `${xml.length}:${finish(a1, a2)}:${finish(b1, b2)}`;
 }
 
+export interface FromFilesOptions {
+  /** Build the header and footer block models (`headers`, `footers`). Default true. */
+  headerFooterBlocks?: boolean;
+}
+
 export class DocxDocument {
   /** Changes whenever refresh() rebuilds the parsed model. Plain in-place text
    * edits can keep this stable so incremental layout reuses model-only caches. */
@@ -192,9 +197,11 @@ export class DocxDocument {
   styles: Styles;
   numbering: Numbering;
   sections: Section[] = [];
-  /** Header/footer parts keyed by relationship id from document.xml.rels. */
+  /** Header/footer parts keyed by relationship id from document.xml.rels.
+   * Empty when the document was opened without them (fromFiles). */
   readonly headers: Map<string, HeaderFooter> = new Map();
   readonly footers: Map<string, HeaderFooter> = new Map();
+  private readonly headerFooterBlocks: boolean;
   /** Note content by note id. */
   readonly footnotes: Map<number, Block[]> = new Map();
   readonly endnotes: Map<number, Block[]> = new Map();
@@ -343,8 +350,9 @@ export class DocxDocument {
    * single-threaded and sequential per section. */
   charGridEa = false;
 
-  private constructor(pkg: Package) {
+  private constructor(pkg: Package, options: FromFilesOptions = {}) {
     this.pkg = pkg;
+    this.headerFooterBlocks = options.headerFooterBlocks ?? true;
 
     const docPart = this.findDocumentPart();
     this.docPart = docPart;
@@ -785,7 +793,7 @@ export class DocxDocument {
     this.refBookmarks = refBookmarks.byName;
     this.headers.clear();
     this.footers.clear();
-    for (const part of this.hfParts) {
+    for (const part of this.headerFooterBlocks ? this.hfParts : []) {
       const partCtx: DocParseContext = {
         ...this.ctxBase,
         rels: part.rels,
@@ -3060,8 +3068,15 @@ export class DocxDocument {
   }
 
   /** A document over parts already unzipped (stream/body.ts's shell). */
-  static fromFiles(files: Record<string, Uint8Array>): DocxDocument {
-    return new DocxDocument(Package.fromFiles(files));
+  /**
+   * A document over an already-unzipped entry map. With `headerFooterBlocks`
+   * false, `headers` and `footers` stay empty: their XML is still read,
+   * compared and saved, but no block models are built from it (about 1 KB a
+   * paragraph), for a caller that compares the document and never lays it out
+   * (compare-cli).
+   */
+  static fromFiles(files: Record<string, Uint8Array>, options: FromFilesOptions = {}): DocxDocument {
+    return new DocxDocument(Package.fromFiles(files), options);
   }
 
   /** The context the body's blocks are parsed with, for a caller that keeps

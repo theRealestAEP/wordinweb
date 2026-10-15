@@ -18,12 +18,19 @@ export interface ZipEntry {
 const MAX32 = 0xffffffff;
 
 /**
- * The most read() inflates: the largest part the compare holds in memory.
- * Word's own parts outside the body (styles, numbering, headers, charts,
- * custom XML) run to a few MB; the body and the binary parts never come
- * through here.
+ * The most the compare holds in memory, all the parts the shell keeps whole
+ * (styles, numbering, headers, footers, charts, custom XML, rels) together
+ * per document; read() holds any one of them to the same. The limit is set
+ * by the heap, not the disk: a part of tiny elements (a header of empty
+ * paragraphs, custom XML of empty elements) costs about 25 MB of heap per
+ * MB of XML, so two documents at the limit take about 160 MB and a compare
+ * fits in a 256 MB heap with margin. The documents seen so far hold under
+ * 1 MB; the body, the notes and the binary parts never come through here.
  */
-export const MAX_PART_BYTES = 64 << 20;
+export const MAX_HELD_BYTES = 3 << 20;
+
+/** The heap MAX_HELD_BYTES was chosen for, as the messages state it. */
+export const HEAP_MB = 256;
 
 /** A size for a message, in whole MB. */
 export function mb(bytes: number): string {
@@ -62,10 +69,10 @@ export class ZipReader {
     return entry.headerOffset + 30 + header.readUInt16LE(26) + header.readUInt16LE(28);
   }
 
-  /** An entry's content, inflated in memory: at most MAX_PART_BYTES, checked against the directory's size before anything is read. */
+  /** An entry's content, inflated in memory: at most MAX_HELD_BYTES, checked against the directory's size before anything is read. */
   read(entry: ZipEntry): Buffer {
-    if (entry.size > MAX_PART_BYTES) {
-      throw new CompareError("too_large", `${this.path}: ${entry.name} is ${mb(entry.size)}; a part held in memory is at most ${mb(MAX_PART_BYTES)}`);
+    if (entry.size > MAX_HELD_BYTES) {
+      throw new CompareError("too_large", `${this.path}: ${entry.name} is ${mb(entry.size)}; the parts held in memory are at most ${mb(MAX_HELD_BYTES)} together, so that a compare fits in a ${HEAP_MB} MB heap`);
     }
     const raw = this.bytes(this.dataOffset(entry), entry.compressedSize);
     let data: Buffer;

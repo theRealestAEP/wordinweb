@@ -70,8 +70,8 @@ export interface CompareFilesResult {
  * index, and the blocks are read back one pair at a time to be compared and
  * written out. The notes go to disk the same way. Everything else outside
  * the body (styles, numbering, headers, footers) is held in memory, at most
- * MAX_PART_BYTES a part and MAX_HELD_BYTES together, checked against the
- * zip's directory before any of it is inflated (too_large); each binary
+ * MAX_HELD_BYTES together, checked against the zip's directory before any
+ * of it is inflated (too_large), so a compare fits in a 256 MB heap; each binary
  * part is copied from the input zip unread. Buffers are fixed in size, or
  * as large as the largest single block, row or note, or those limits.
  *
