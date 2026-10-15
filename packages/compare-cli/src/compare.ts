@@ -27,6 +27,7 @@ import {
   gapOps,
   insertedRow,
   noteRefsIn,
+  originalProps,
   pairHeadersFooters,
   paragraphKeyParts,
   refersToChangedPart,
@@ -461,10 +462,13 @@ function emitBody(plan: Plan, O: Input, R: Input, ctx: Ctx, sink: BodySink): voi
    * that reads a later entry. Emitting keeps the live side's base properties
    * (alignParagraphProps), so the source paragraph answers.
    */
-  const pPrOf = (f: number): XmlElement | undefined => {
-    if (second && f === emittedUpTo + 1) return child(second.el, "pPr");
+  const pPrOf = (f: number, side: "original" | "revised"): XmlElement | undefined => {
+    if (second && f === emittedUpTo + 1) return side === "revised" ? child(second.el, "pPr") : originalProps(child(second.el, "pPr"));
     const op = plan.op[f];
     if (op === DELETED || op === MERGE_SECOND) return child(parseO(plan.o[f]), "pPr");
+    // A matched paragraph wears the original's properties in a w:pPrChange
+    // once compared, when formatting is tracked.
+    if (side === "original" && ctx.formatting && (op === MATCH || op === COPY)) return child(parseO(plan.o[f]), "pPr");
     return child(parseR(plan.r[f]), "pPr");
   };
   let emittedUpTo = -1;

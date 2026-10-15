@@ -2056,7 +2056,13 @@ function applyParagraphMarks(entries: Entry[], ctx: Ctx): void {
   paragraphMarkSteps(
     infos.length,
     (i) => infos[i],
-    (step) => applyMarkStep(step, (i) => entries[i], (i) => child(entries[i].el, "pPr"), ctx),
+    (step) =>
+      applyMarkStep(
+        step,
+        (i) => entries[i],
+        (i, side) => (side === "revised" ? child(entries[i].el, "pPr") : originalProps(child(entries[i].el, "pPr"))),
+        ctx,
+      ),
   );
 }
 
@@ -2147,9 +2153,15 @@ function paragraphRunSteps(n: number, info: (i: number) => MarkInfo, start: numb
 
 /**
  * Apply one mark step. `entry` gives an entry by index; `pPrOf` gives an
- * entry's paragraph properties as they stand once it is emitted.
+ * entry's paragraph properties as the original or the revised document has
+ * them.
  */
-export function applyMarkStep(step: MarkStep, entry: (i: number) => Entry, pPrOf: (i: number) => XmlElement | undefined, ctx: Ctx): void {
+export function applyMarkStep(
+  step: MarkStep,
+  entry: (i: number) => Entry,
+  pPrOf: (i: number, side: "original" | "revised") => XmlElement | undefined,
+  ctx: Ctx,
+): void {
   if (step.kind === "untracked") {
     ctx.note({
       code: "no-common-paragraph",
@@ -2160,10 +2172,18 @@ export function applyMarkStep(step: MarkStep, entry: (i: number) => Entry, pPrOf
   } else {
     const head = entry(step.at);
     const own = child(head.el, "pPr");
-    const other = pPrOf(step.follower);
-    if (head.cls === "deleted") alignParagraphProps(head.el, other, own, ctx);
-    else alignParagraphProps(head.el, own, other, ctx);
+    // Reviewed, the head joins its follower and keeps its own properties: on
+    // accept they must be the follower's as revised, on reject the follower's
+    // as original (parity-text: the follower's revised alignment came back on
+    // reject).
+    if (head.cls === "deleted") alignParagraphProps(head.el, pPrOf(step.follower, "revised"), own, ctx);
+    else alignParagraphProps(head.el, own, pPrOf(step.follower, "original"), ctx);
   }
+}
+
+/** Paragraph properties as the original had them: a w:pPrChange's record, else the properties themselves. */
+export function originalProps(pPr: XmlElement | undefined): XmlElement | undefined {
+  return child(child(pPr, "pPrChange"), "pPr") ?? pPr;
 }
 
 function endsSection(el: XmlElement): boolean {
