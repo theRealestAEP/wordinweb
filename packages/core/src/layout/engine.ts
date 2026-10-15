@@ -129,7 +129,7 @@ export function layoutDocument(doc: DocxDocument, options: LayoutOptions = {}): 
   return layoutWithBodyPageTotal(doc, measurer, options.windowModel === true, options.mergeRecord);
 }
 
-function bodyHasPageTotal(el: XmlElement): boolean {
+export function bodyHasPageTotal(el: XmlElement): boolean {
   const name = el.name.includes(":") ? el.name.slice(el.name.indexOf(":") + 1) : el.name;
   if (name === "instrText" && /\bNUMPAGES\b/i.test(el.text)) return true;
   if (name === "fldSimple" && /\bNUMPAGES\b/i.test(el.attrs["w:instr"] ?? "")) return true;
@@ -197,6 +197,40 @@ export async function layoutDocumentAsync(
     if (result.totalPages === total) break;
   }
   return result;
+}
+
+export interface StreamLayoutOptions {
+  measurer: TextMeasurer;
+  /** The document-order assignments every pass over a streamed body shares
+   * (see Prescan). Made from the blocks when absent. */
+  prescan?: Prescan;
+  /** A page total the body's NUMPAGES fields show while laying out, as the
+   * passes of layoutDocument's convergence pass each other. */
+  knownTotalPages?: number;
+  /** The counting pass's page total and bookmark pages: what this pass's
+   * headers, footers and PAGEREF fields show. Absent on a counting pass, whose
+   * pages are paginated only, never painted or finished. */
+  final?: { totalPages: number; bookmarks: Map<string, string> };
+  /** Each finished page, in order. Its items are the caller's once this
+   * returns: the engine keeps nothing of a page it has handed out. */
+  onPage: (page: LaidOutPage) => void | Promise<void>;
+}
+
+export interface StreamLayoutResult {
+  totalPages: number;
+  /** Bookmark name -> display page number. */
+  bookmarks: Map<string, string>;
+}
+
+/** Lay the document out front to back, handing each page to `options.onPage`
+ * as soon as no later block can touch it and keeping nothing of it after. A
+ * counting pass (no `final`) learns the page total and the bookmark pages; a
+ * rendering pass paints each page with them, as a whole layoutDocument run
+ * paints it. */
+export async function layoutDocumentStream(doc: DocxDocument, options: StreamLayoutOptions): Promise<StreamLayoutResult> {
+  const engine = new Engine(doc, options.measurer, options.knownTotalPages);
+  engine.prescan = options.prescan ?? null;
+  return engine.runStream(options);
 }
 
 function yieldToMain(signal?: AbortSignal): Promise<void> {
@@ -399,9 +433,9 @@ export interface IncrData {
    * formatting refreshes while preserving them for in-place text edits. */
   modelVersion: number;
   seqCounters: Map<string, number>;
-  seqAssigned: WeakMap<object, string>;
-  refFieldPosition: WeakMap<object, "above" | "below">;
-  refFieldParaNumber: WeakMap<object, string>;
+  seqAssigned: FieldMemo<string>;
+  refFieldPosition: FieldMemo<"above" | "below">;
+  refFieldParaNumber: FieldMemo<string>;
   /** Mail-merge record this layout painted (mergeRecordKey; "" for none).
    *
    * Stepping to the next record changes NO blocks — the document XML is
@@ -554,6 +588,183 @@ function formatNoteMark(n: number, fmt: string): string {
   return formatNumber(n, PAGE_FMT[fmt] ?? "decimal");
 }
 
+/** A value assigned to one field occurrence, read back by the field's object
+ * identity — or by the stable key `keyOf` gives it, for a streamed body whose
+ * blocks are parsed afresh on every pass (see Prescan). */
+class FieldMemo<V> {
+  private readonly byObject = new WeakMap<object, V>();
+  private readonly byKey = new Map<string, V>();
+
+  constructor(private readonly keyOf?: (field: object) => string | undefined) {}
+
+  get(field: object): V | undefined {
+    const key = this.keyOf?.(field);
+    return key === undefined ? this.byObject.get(field) : this.byKey.get(key);
+  }
+
+  set(field: object, value: V): void {
+    const key = this.keyOf?.(field);
+    if (key === undefined) this.byObject.set(field, value);
+    else this.byKey.set(key, value);
+  }
+}
+
+/** SEQ counters keyed by identifier; each field occurrence keeps its
+ * first-assigned value so paragraph re-breaks don't double-count. */
+function assignSeq(
+  assigned: FieldMemo<string>,
+  counters: Map<string, number>,
+  ident: string,
+  key: object,
+  instr: string,
+): string {
+  const prior = assigned.get(key);
+  if (prior !== undefined) return prior;
+  const rMatch = /\\r\s+(\d+)/.exec(instr);
+  const repeat = /\\c(\s|$)/.test(instr);
+  let n: number;
+  if (rMatch) n = parseInt(rMatch[1], 10);
+  else if (repeat) n = counters.get(ident) ?? 1;
+  else n = (counters.get(ident) ?? 0) + 1;
+  counters.set(ident, n);
+  const fmt = /\\\*\s+(\w+)/.exec(instr)?.[1]?.toLowerCase();
+  const text =
+    fmt === "roman" ? formatNumber(n, "lowerRoman")
+    : fmt === "alphabetic" ? formatNumber(n, "lowerLetter")
+    : String(n);
+  assigned.set(key, text);
+  return text;
+}
+
+/**
+ * What one walk of the body in document order assigns before layout:
+ *
+ * - SEQ values. A REF to a caption's `_Ref` bookmark can be laid out pages
+ *   BEFORE the caption itself (gatech's table of figures on p10 references
+ *   the body caption): resolving the bookmark's SEQ lazily at REF time would
+ *   consume the counter out of order, so every occurrence is pinned up front.
+ * - REF `\p` position ("above"/"below") and `\r` paragraph number, keyed by
+ *   the field occurrence. Word recomputes these on open; the docx cache is
+ *   stale (probe3-index-xrefs' `REF … \p` caches "Table 1 below" but Word
+ *   paints "above"; `REF … \r` caches "1" for an unnumbered caption Word
+ *   numbers "0"). Only \p/\r-switched REF fields are recorded.
+ * - Note numbers. Marks are numbered by document order of their references,
+ *   not layout order. w:numRestart's "eachSect" value resets the running
+ *   counter to that section's own numStart when the section begins.
+ *   "eachPage" is NOT honored: numbers are assigned before pagination runs,
+ *   so which page a note lands on isn't known yet; the value round-trips
+ *   (parse/section.ts, setFootnoteOptions/setEndnoteOptions) but the layout
+ *   keeps counting continuously.
+ *
+ * The engine feeds every body block in, section by section, then finishes
+ * with the section properties; a streamed body does the same as its blocks
+ * are first parsed, and the result serves every later pass over it.
+ */
+export class Prescan {
+  readonly seq: FieldMemo<string>;
+  readonly refPosition: FieldMemo<"above" | "below">;
+  readonly refParaNumber: FieldMemo<string>;
+  readonly seqCounters = new Map<string, number>();
+  readonly footnoteNumbers = new Map<number, number>();
+  readonly endnoteNumbers = new Map<number, number>();
+  /** Each bookmark's first-seen paragraph ordinal, and whether that paragraph carries list numbering. */
+  private readonly bmOrdinal = new Map<string, number>();
+  private readonly bmNumbered = new Map<string, boolean>();
+  private readonly refs: { field: FieldContent; ordinal: number; target: string; position: boolean; number: boolean }[] = [];
+  private readonly notes: { type: "footnote" | "endnote"; id: number; section: number }[] = [];
+  private ordinal = 0;
+  private section = 0;
+
+  constructor(
+    private readonly doc: DocxDocument,
+    keyOf?: (field: object) => string | undefined,
+  ) {
+    this.seq = new FieldMemo(keyOf);
+    this.refPosition = new FieldMemo(keyOf);
+    this.refParaNumber = new FieldMemo(keyOf);
+  }
+
+  visit(block: Block): void {
+    if (block.type !== "paragraph") {
+      for (const row of block.rows) for (const cell of row.cells) for (const nested of cell.blocks) this.visit(nested);
+      return;
+    }
+    this.ordinal++;
+    for (const nm of block.bookmarks ?? []) {
+      if (!this.bmOrdinal.has(nm)) {
+        this.bmOrdinal.set(nm, this.ordinal);
+        this.bmNumbered.set(nm, !!block.props.numbering);
+      }
+    }
+    for (const c of block.children) {
+      const runs = c.type === "run" ? [c] : c.runs;
+      for (const r of runs) {
+        for (const rc of r.content) {
+          if (rc.kind === "noteRef") {
+            if (rc.self || rc.customMarkFollows) continue;
+            const known = rc.noteType === "footnote" ? this.doc.footnotes : this.doc.endnotes;
+            if (known.has(rc.id)) this.notes.push({ type: rc.noteType, id: rc.id, section: this.section });
+            continue;
+          }
+          if (rc.kind !== "field") continue;
+          const parts = rc.instruction.trim().split(/\s+/);
+          if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
+            assignSeq(this.seq, this.seqCounters, parts[1], rc, rc.instruction.trim());
+          }
+          // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
+          // "above"/"below" instead of the bookmark's page number.
+          const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
+          if (!m) continue;
+          const position = /\\p(\s|$)/i.test(m[2]);
+          const number = /\\r(\s|$)/i.test(m[2]);
+          if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
+        }
+      }
+    }
+  }
+
+  /** The blocks visited from here on belong to the next section. */
+  endSection(): void {
+    this.section++;
+  }
+
+  /** Resolve what needed the whole walk: `sections` are every section's properties, in order. */
+  finish(sections: SectionProps[]): void {
+    for (const ref of this.refs) {
+      const tord = this.bmOrdinal.get(ref.target);
+      if (tord === undefined) continue;
+      if (ref.position) this.refPosition.set(ref.field, tord <= ref.ordinal ? "above" : "below");
+      // An unnumbered target paragraph has no list number: Word's \r shows
+      // "0" (the index-xrefs caption is unnumbered).
+      if (ref.number && !this.bmNumbered.get(ref.target)) this.refParaNumber.set(ref.field, "0");
+    }
+    let section = -1;
+    let fnCounter = 0;
+    let enCounter = 0;
+    for (const note of this.notes) {
+      while (section < note.section) {
+        section++;
+        const sp = sections[section];
+        if (section === 0 || sp?.footnoteNumRestart === "eachSect") fnCounter = (sp?.footnoteNumStart ?? 1) - 1;
+        if (section === 0 || sp?.endnoteNumRestart === "eachSect") enCounter = (sp?.endnoteNumStart ?? 1) - 1;
+      }
+      const numbers = note.type === "footnote" ? this.footnoteNumbers : this.endnoteNumbers;
+      if (numbers.has(note.id)) continue;
+      numbers.set(note.id, note.type === "footnote" ? ++fnCounter : ++enCounter);
+    }
+  }
+}
+
+function prescanDocument(doc: DocxDocument): Prescan {
+  const prescan = new Prescan(doc);
+  for (const section of doc.sections) {
+    for (const block of section.blocks) prescan.visit(block);
+    prescan.endSection();
+  }
+  prescan.finish(doc.sections.map((section) => section.props));
+  return prescan;
+}
+
 class Engine {
   private pages: InternalPage[] = [];
   private cur!: InternalPage;
@@ -672,6 +883,9 @@ class Engine {
   /** Set when something outside the eligible envelope was hit mid-layout (a
    * float, banner, column band, …); disables incremental reuse for this result. */
   private incrAbort = false;
+  /** The streaming run in progress (see runStream): its options, and how many
+   * pages it has handed out. */
+  private stream: { options: StreamLayoutOptions; flushed: number } | null = null;
   /** Added to page indices so a resumed tail numbers pages continuing from the
    * reused prefix instead of from 1. */
   private physBase = 0;
@@ -885,6 +1099,59 @@ class Engine {
     return this.finishRun();
   }
 
+  async runStream(options: StreamLayoutOptions): Promise<StreamLayoutResult> {
+    this.stream = { options, flushed: 0 };
+    // Nothing resumes a streamed run, so it captures no points.
+    this.incrAbort = true;
+    this.startRun();
+    if (options.final) this.bookmarkPages = new Map(options.final.bookmarks);
+    const sections = this.doc.sections;
+    let prevSp: SectionProps | null = null;
+    for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
+      const section = sections[sectionIndex];
+      const next = sections[sectionIndex + 1];
+      this.enterSection(sections, sectionIndex, prevSp);
+      if (section.props.textDirection === "tbRl") this.layoutVerticalSection(section);
+      else if (this.balanceEligible(next)) this.layoutSection(section, next);
+      else {
+        this.balanceBottom = undefined;
+        this.balanceFinalPagePhys = undefined;
+        await this.layoutBlocksStream(section.blocks);
+      }
+      prevSp = this.leaveSection(section);
+      await this.flushPages();
+    }
+    if (this.pages.length === 0) this.sp = sections[0]?.props ?? ({} as SectionProps);
+    this.placeEndnotes();
+    await this.flushPages(true);
+    this.stream = null;
+    return { totalPages: this.pages.length, bookmarks: this.bookmarkPages };
+  }
+
+  /** Hand every page no later block can touch to the stream's sink: all of
+   * them at the end, else all but the one being laid. The run's balanced
+   * sections and endnotes come through here only once they are complete, so
+   * nothing a sink has seen is relaid or popped. */
+  private async flushPages(all = false): Promise<void> {
+    const stream = this.stream as { options: StreamLayoutOptions; flushed: number };
+    const end = all ? this.pages.length : this.pages.length - 1;
+    while (stream.flushed < end) {
+      const page = this.pages[stream.flushed];
+      if (stream.flushed === 0) this.applyOpeningFlowOverlap();
+      if (stream.options.final) {
+        const sp = this.sp;
+        this.finishPage(page, stream.options.final.totalPages);
+        this.sp = sp;
+      }
+      stream.flushed++;
+      await stream.options.onPage(laidOutPage(page));
+      page.items = [];
+      page.footnotes = [];
+      page.hiddenText = undefined;
+      this.floats.delete(page);
+    }
+  }
+
   private startRun(): void {
     // The relay and the window both run off capture points, but they do not
     // need the same document. The relay diffs block signatures against one
@@ -899,18 +1166,32 @@ class Engine {
       this.incrLastNumberingUse = this.lastNumberingUse(blocks);
     }
     this.windowFullRun = windowOk;
-    setBreakCacheWindowed(this.measurer, windowOk);
-    this.assignNoteNumbers();
-    this.assignSeqNumbers();
-    this.assignRefContext();
+    setBreakCacheWindowed(this.measurer, windowOk || this.stream !== null);
+    this.adoptPrescan(this.prescan ?? prescanDocument(this.doc));
     this.prepareStyleRef();
   }
 
-  private layoutSectionWithBoundary(
+  /** The document-order assignments this run resolves fields and note marks
+   * from. A streamed body hands in the prescan its first parse made; any
+   * other run walks the blocks itself in startRun. */
+  prescan: Prescan | null = null;
+
+  private adoptPrescan(prescan: Prescan): void {
+    this.footnoteNumbers = prescan.footnoteNumbers;
+    this.endnoteNumbers = prescan.endnoteNumbers;
+    this.seqAssigned = prescan.seq;
+    this.seqCounters = new Map(prescan.seqCounters);
+    this.refFieldPosition = prescan.refPosition;
+    this.refFieldParaNumber = prescan.refParaNumber;
+  }
+
+  /** Open a section's first page or band, carrying the previous section's
+   * props across the boundary. */
+  private enterSection(
     sections: Section[],
     sectionIndex: number,
     prevSp: SectionProps | null,
-  ): SectionProps {
+  ): void {
       const section = sections[sectionIndex];
       const sp = section.props;
       this.curSectionIndex = sectionIndex;
@@ -1016,8 +1297,22 @@ class Engine {
         if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
         this.lastParaSpacingAfter = carryAfter;
       }
-      if (sp.textDirection === "tbRl") this.layoutVerticalSection(section);
+  }
+
+  private layoutSectionWithBoundary(
+    sections: Section[],
+    sectionIndex: number,
+    prevSp: SectionProps | null,
+  ): SectionProps {
+      const section = sections[sectionIndex];
+      this.enterSection(sections, sectionIndex, prevSp);
+      if (section.props.textDirection === "tbRl") this.layoutVerticalSection(section);
       else this.layoutSection(section, sections[sectionIndex + 1]);
+      return this.leaveSection(section);
+  }
+
+  /** Resume the flow below a section's columns. */
+  private leaveSection(section: Section): SectionProps {
       this.prevBandBalanced = this.balanceBottom !== undefined;
       if (this.balanceBottom !== undefined) {
         // Resume below the balanced band, reset to the first column so the next
@@ -1052,7 +1347,7 @@ class Engine {
         this.col = 0;
         this.balanceBottom = undefined;
       }
-      return sp;
+      return section.props;
   }
 
   private finishRun(): LayoutResult {
@@ -1062,11 +1357,7 @@ class Engine {
     }
     this.applyOpeningFlowOverlap();
     this.placeEndnotes();
-    this.emitFootnoteAreas();
-    this.emitColumnSeparators();
-    this.finalizeHeadersFooters();
-    this.rewritePageRefs(this.pages);
-    this.applySectionVAlign();
+    for (const page of this.pages) this.finishPage(page, this.pages.length);
     this.releaseDiscardedPages();
     const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
     const result: LayoutResult = {
@@ -1583,11 +1874,12 @@ class Engine {
    * the window's worth of pages from where it resumes, which is where the edit
    * (and so the caret, and so the viewport) is. */
   private canPaginateOnly(): boolean {
+    if (this.balMeasuring || this.cur.physIndex === -1) return false;
+    // A streamed counting pass paints nothing at all.
+    if (this.stream) return this.stream.options.final === undefined;
     return (
       (this.windowActive || this.windowRelay) &&
       this.materializeEndPage < 0 &&
-      !this.balMeasuring &&
-      this.cur.physIndex !== -1 &&
       this.pages.length - 1 >= INITIAL_MODEL_WINDOW_PAGES
     );
   }
@@ -2074,6 +2366,10 @@ class Engine {
    * footnote pages are never shifted.
    */
   private applySectionVAlign(): void {
+    for (const page of this.pages) this.applyVAlign(page);
+  }
+
+  private applyVAlign(page: InternalPage): void {
     const vExtent = (it: PageItem): { top: number; bottom: number } | null => {
       switch (it.kind) {
         case "text":
@@ -2089,27 +2385,25 @@ class Engine {
           return null; // interactive hit/grip zones don't define content
       }
     };
-    for (const page of this.pages) {
-      const va = page.sp.vAlign;
-      if (va !== "center" && va !== "bottom") continue;
-      if (page.footnotes.length > 0) continue;
-      const end = page.hfStart ?? page.items.length;
-      let top = Infinity;
-      let bottom = -Infinity;
-      for (let i = 0; i < end; i++) {
-        const ext = vExtent(page.items[i]);
-        if (!ext) continue;
-        if (ext.top < top) top = ext.top;
-        if (ext.bottom > bottom) bottom = ext.bottom;
-      }
-      if (!Number.isFinite(top) || !Number.isFinite(bottom)) continue;
-      const free =
-        va === "center"
-          ? (page.bodyTop + page.bodyBottom - top - bottom) / 2
-          : page.bodyBottom - bottom;
-      if (free <= 0.5) continue;
-      for (let i = 0; i < end; i++) offsetItem(page.items[i], 0, free);
+    const va = page.sp.vAlign;
+    if (va !== "center" && va !== "bottom") return;
+    if (page.footnotes.length > 0) return;
+    const end = page.hfStart ?? page.items.length;
+    let top = Infinity;
+    let bottom = -Infinity;
+    for (let i = 0; i < end; i++) {
+      const ext = vExtent(page.items[i]);
+      if (!ext) continue;
+      if (ext.top < top) top = ext.top;
+      if (ext.bottom > bottom) bottom = ext.bottom;
     }
+    if (!Number.isFinite(top) || !Number.isFinite(bottom)) return;
+    const free =
+      va === "center"
+        ? (page.bodyTop + page.bodyBottom - top - bottom) / 2
+        : page.bodyBottom - bottom;
+    if (free <= 0.5) return;
+    for (let i = 0; i < end; i++) offsetItem(page.items[i], 0, free);
   }
 
   /**
@@ -2748,105 +3042,8 @@ class Engine {
     }
   }
 
-  /** Pre-assign SEQ values in document order. A REF to a caption's `_Ref`
-   * bookmark can be laid out pages BEFORE the caption itself (gatech's
-   * table of figures on p10 references the body caption): resolving the
-   * bookmark's SEQ lazily at REF time would consume the counter out of
-   * order, so walk the document up front and pin every occurrence. */
-  private assignSeqNumbers(): void {
-    const visit = (blocks: Block[]) => {
-      for (const b of blocks) {
-        if (b.type === "paragraph") {
-          for (const c of b.children) {
-            const runs = c.type === "run" ? [c] : c.runs;
-            for (const r of runs) {
-              for (const rc of r.content) {
-                if (rc.kind !== "field") continue;
-                const parts = rc.instruction.trim().split(/\s+/);
-                if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
-                  this.resolveSeq(parts[1], rc, rc.instruction.trim());
-                }
-              }
-            }
-          }
-        } else {
-          for (const row of b.rows) for (const cell of row.cells) visit(cell.blocks);
-        }
-      }
-    };
-    for (const s of this.doc.sections) visit(s.blocks);
-  }
-
-  /** REF `\p` position ("above"/"below") and `\r` paragraph number, keyed by
-   * the field occurrence. Word recomputes these on open; the docx cache is
-   * stale (probe3-index-xrefs' `REF … \p` caches "Table 1 below" but Word paints
-   * "above"; `REF … \r` caches "1" for an unnumbered caption Word numbers "0").
-   * Only \p/\r-switched REF fields are recorded — plain refs are untouched. */
-  private refFieldPosition = new WeakMap<object, "above" | "below">();
-  private refFieldParaNumber = new WeakMap<object, string>();
-  private assignRefContext(): void {
-    // Pass 1: record each bookmark's first-seen paragraph ordinal (linear
-    // document order) and whether that paragraph carries list numbering.
-    const bmOrdinal = new Map<string, number>();
-    const bmNumbered = new Map<string, boolean>();
-    let ord = 0;
-    const scan = (blocks: Block[]) => {
-      for (const b of blocks) {
-        if (b.type === "paragraph") {
-          ord++;
-          if (b.bookmarks) {
-            for (const nm of b.bookmarks) {
-              if (!bmOrdinal.has(nm)) {
-                bmOrdinal.set(nm, ord);
-                bmNumbered.set(nm, !!b.props.numbering);
-              }
-            }
-          }
-        } else {
-          for (const row of b.rows) for (const cell of row.cells) scan(cell.blocks);
-        }
-      }
-    };
-    for (const s of this.doc.sections) scan(s.blocks);
-
-    // Pass 2: resolve each REF field's \p position (target above/below this
-    // field) and \r number against the recorded target paragraph.
-    let ord2 = 0;
-    const resolve = (blocks: Block[]) => {
-      for (const b of blocks) {
-        if (b.type === "paragraph") {
-          ord2++;
-          for (const c of b.children) {
-            const runs = c.type === "run" ? [c] : c.runs;
-            for (const r of runs) {
-              for (const rc of r.content) {
-                if (rc.kind !== "field") continue;
-                // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
-                // "above"/"below" instead of the bookmark's page number.
-                const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
-                if (!m) continue;
-                const target = m[1];
-                const rest = m[2];
-                const tord = bmOrdinal.get(target);
-                if (tord === undefined) continue;
-                if (/\\p(\s|$)/i.test(rest)) {
-                  this.refFieldPosition.set(rc, tord <= ord2 ? "above" : "below");
-                }
-                if (/\\r(\s|$)/i.test(rest) && !bmNumbered.get(target)) {
-                  // An unnumbered target paragraph has no list number: Word's
-                  // \r shows "0" (the index-xrefs caption is unnumbered).
-                  this.refFieldParaNumber.set(rc, "0");
-                }
-              }
-            }
-          }
-        } else {
-          for (const row of b.rows) for (const cell of row.cells) resolve(cell.blocks);
-        }
-      }
-    };
-    for (const s of this.doc.sections) resolve(s.blocks);
-  }
+  private refFieldPosition = new FieldMemo<"above" | "below">();
+  private refFieldParaNumber = new FieldMemo<string>();
 
   /** Precompute STYLEREF page-awareness. Word recomputes a header/footer STYLEREF
    * field on open: it shows the text of the first paragraph of the referenced
@@ -2998,75 +3195,13 @@ class Engine {
     return carry;
   }
 
-  /** SEQ counters keyed by identifier; each field occurrence keeps its
-   * first-assigned value so paragraph re-breaks don't double-count. */
   private seqCounters = new Map<string, number>();
-  private seqAssigned = new WeakMap<object, string>();
+  private seqAssigned = new FieldMemo<string>();
   private resolveSeq(ident: string, key: object, instr: string): string {
-    const prior = this.seqAssigned.get(key);
-    if (prior !== undefined) return prior;
-    const rMatch = /\\r\s+(\d+)/.exec(instr);
-    const repeat = /\\c(\s|$)/.test(instr);
-    let n: number;
-    if (rMatch) n = parseInt(rMatch[1], 10);
-    else if (repeat) n = this.seqCounters.get(ident) ?? 1;
-    else n = (this.seqCounters.get(ident) ?? 0) + 1;
-    this.seqCounters.set(ident, n);
-    const fmt = /\\\*\s+(\w+)/.exec(instr)?.[1]?.toLowerCase();
-    const text =
-      fmt === "roman" ? formatNumber(n, "lowerRoman")
-      : fmt === "alphabetic" ? formatNumber(n, "lowerLetter")
-      : String(n);
-    this.seqAssigned.set(key, text);
-    return text;
+    return assignSeq(this.seqAssigned, this.seqCounters, ident, key, instr);
   }
 
   // ---------- footnotes / endnotes ----------
-
-  /**
-   * Marks are numbered by document order of their references, not layout
-   * order. w:numRestart's "eachSect" value resets the running counter to
-   * that section's own numStart when the section begins — cheap to honor
-   * here since sections are already visited in order. "eachPage" is NOT
-   * honored: numbers are assigned in this one document-order pass before
-   * pagination runs, so which page a note lands on isn't known yet; the
-   * value round-trips (parse/section.ts, setFootnoteOptions/
-   * setEndnoteOptions) but the layout keeps counting continuously.
-   */
-  private assignNoteNumbers(): void {
-    const sp0 = this.doc.sections[0]?.props;
-    let fnCounter = (sp0?.footnoteNumStart ?? 1) - 1;
-    let enCounter = (sp0?.endnoteNumStart ?? 1) - 1;
-    const visit = (blocks: Block[]) => {
-      for (const b of blocks) {
-        if (b.type === "paragraph") {
-          for (const c of b.children) {
-            const runs = c.type === "run" ? [c] : c.runs;
-            for (const r of runs) {
-              for (const rc of r.content) {
-                if (rc.kind !== "noteRef" || rc.self || rc.customMarkFollows) continue;
-                if (rc.noteType === "footnote" && this.doc.footnotes.has(rc.id) && !this.footnoteNumbers.has(rc.id)) {
-                  this.footnoteNumbers.set(rc.id, ++fnCounter);
-                } else if (rc.noteType === "endnote" && this.doc.endnotes.has(rc.id) && !this.endnoteNumbers.has(rc.id)) {
-                  this.endnoteNumbers.set(rc.id, ++enCounter);
-                }
-              }
-            }
-          }
-        } else {
-          for (const row of b.rows) for (const cell of row.cells) visit(cell.blocks);
-        }
-      }
-    };
-    const sections = this.doc.sections;
-    for (const s of sections) {
-      if (s !== sections[0]) {
-        if (s.props.footnoteNumRestart === "eachSect") fnCounter = (s.props.footnoteNumStart ?? 1) - 1;
-        if (s.props.endnoteNumRestart === "eachSect") enCounter = (s.props.endnoteNumStart ?? 1) - 1;
-      }
-      visit(s.blocks);
-    }
-  }
 
   private footnoteMark(id: number): string {
     const n = this.footnoteNumbers.get(id);
@@ -3162,35 +3297,48 @@ class Engine {
     target.footnoteH[column] = (target.footnoteH[column] ?? 0) + laid.height;
   }
 
+  /** The post-passes that complete a page once no later block can touch it:
+   * `total` is the document's page count, for its NUMPAGES fields. */
+  private finishPage(page: InternalPage, total: number): void {
+    this.sp = page.sp;
+    this.emitFootnoteArea(page);
+    this.emitColumnSeparatorsOn(page);
+    this.finalizePageHeadersFooters(page, total, true);
+    this.rewritePageRefs([page]);
+    this.applyVAlign(page);
+  }
+
   /** Stack each column's footnotes upward from bodyBottom, under a short rule. */
   private emitFootnoteAreas(): void {
-    for (const page of this.pages) {
-      if (page.footnotes.length === 0) continue;
-      for (let column = 0; column < page.colXs.length; column++) {
-        const notes = page.footnotes.filter((note) => note.column === column);
-        if (notes.length === 0) continue;
-        const x0 = page.colXs[column];
-        const separatorHeight =
-          this.doc.footnoteSeparator.length > 0
-            ? this.layoutFrame(this.doc.footnoteSeparator, page.colWidths[column], this.fieldCtx()).height
-            : NOTE_SEP_H;
-        let y = page.bodyBottom - (page.footnoteH[column] ?? 0) - separatorHeight;
-        page.items.push({
-          kind: "edge",
-          x1: x0,
-          y1: y + NOTE_SEP_H * 0.6,
-          x2: x0 + Math.min(NOTE_SEP_LEN, page.colWidths[column]),
-          y2: y + NOTE_SEP_H * 0.6,
-          border: { style: "single", width: 0.75, color: "#000000", space: 0 },
-        });
-        y += separatorHeight;
-        for (const note of notes) {
-          for (const it of note.items) {
-            offsetItem(it, x0, y);
-            page.items.push(it);
-          }
-          y += note.height;
+    for (const page of this.pages) this.emitFootnoteArea(page);
+  }
+
+  private emitFootnoteArea(page: InternalPage): void {
+    if (page.footnotes.length === 0) return;
+    for (let column = 0; column < page.colXs.length; column++) {
+      const notes = page.footnotes.filter((note) => note.column === column);
+      if (notes.length === 0) continue;
+      const x0 = page.colXs[column];
+      const separatorHeight =
+        this.doc.footnoteSeparator.length > 0
+          ? this.layoutFrame(this.doc.footnoteSeparator, page.colWidths[column], this.fieldCtx()).height
+          : NOTE_SEP_H;
+      let y = page.bodyBottom - (page.footnoteH[column] ?? 0) - separatorHeight;
+      page.items.push({
+        kind: "edge",
+        x1: x0,
+        y1: y + NOTE_SEP_H * 0.6,
+        x2: x0 + Math.min(NOTE_SEP_LEN, page.colWidths[column]),
+        y2: y + NOTE_SEP_H * 0.6,
+        border: { style: "single", width: 0.75, color: "#000000", space: 0 },
+      });
+      y += separatorHeight;
+      for (const note of notes) {
+        for (const it of note.items) {
+          offsetItem(it, x0, y);
+          page.items.push(it);
         }
+        y += note.height;
       }
     }
   }
@@ -3203,25 +3351,27 @@ class Engine {
    * ruled only when the column to its right received content (Word paints no
    * rule beside a trailing empty column). */
   private emitColumnSeparators(): void {
-    for (const page of this.pages) {
-      for (let bi = 0; bi < page.bands.length; bi++) {
-        const band = page.bands[bi];
-        if (!band.sep || band.colXs.length < 2) continue;
-        const contentBottom = Math.max(...band.bottoms);
-        const bottom = bi + 1 < page.bands.length ? page.bands[bi + 1].top : contentBottom;
-        if (bottom <= band.top + 0.01) continue;
-        for (let i = 0; i + 1 < band.colXs.length; i++) {
-          if (band.bottoms[i + 1] <= 0) continue;
-          const x = (band.colXs[i] + band.colWidths[i] + band.colXs[i + 1]) / 2;
-          page.items.push({
-            kind: "edge",
-            x1: x,
-            y1: band.top,
-            x2: x,
-            y2: bottom,
-            border: { style: "single", width: 1, color: "#000000", space: 0 },
-          });
-        }
+    for (const page of this.pages) this.emitColumnSeparatorsOn(page);
+  }
+
+  private emitColumnSeparatorsOn(page: InternalPage): void {
+    for (let bi = 0; bi < page.bands.length; bi++) {
+      const band = page.bands[bi];
+      if (!band.sep || band.colXs.length < 2) continue;
+      const contentBottom = Math.max(...band.bottoms);
+      const bottom = bi + 1 < page.bands.length ? page.bands[bi + 1].top : contentBottom;
+      if (bottom <= band.top + 0.01) continue;
+      for (let i = 0; i + 1 < band.colXs.length; i++) {
+        if (band.bottoms[i + 1] <= 0) continue;
+        const x = (band.colXs[i] + band.colWidths[i] + band.colXs[i + 1]) / 2;
+        page.items.push({
+          kind: "edge",
+          x1: x,
+          y1: band.top,
+          x2: x,
+          y2: bottom,
+          border: { style: "single", width: 1, color: "#000000", space: 0 },
+        });
       }
     }
   }
@@ -3283,6 +3433,14 @@ class Engine {
         await yieldToMain(signal);
         sliceStart = performance.now();
       }
+    }
+  }
+
+  private async layoutBlocksStream(blocks: Block[]): Promise<void> {
+    this.prepareBlockFlow(0);
+    for (let i = 0; i < blocks.length; i++) {
+      this.layoutBlock(blocks, i);
+      if (this.pages.length - 1 > (this.stream as { flushed: number }).flushed) await this.flushPages();
     }
   }
 
@@ -6896,83 +7054,86 @@ class Engine {
 
   private finalizeHeadersFooters(emitBorders = true): void {
     const total = this.pages.length;
-    for (const page of this.pages) {
-      if (page.discarded) {
-        page.hfStart = 0;
-        continue;
-      }
-      const sp = page.sp;
-      this.sp = sp; // frames built here must resolve anchors against this page's section
-      if (emitBorders) this.emitPageBorders(page);
-      page.hfStart = page.items.length;
-      const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
-      // Headers/footers share the body's text column, so their left origin
-      // includes the binding gutter (probe3-mirror-book: on a recto page the
-      // gutter sits on the left, so the header starts marginLeft+gutter in, level
-      // with the body). On even mirror pages the gutter is already folded into the
-      // right margin (gutter = 0 here); non-gutter docs are unaffected.
-      const hfOriginX = sp.marginLeft + sp.gutter;
-      const fields: FieldContext = {
-        pageNumber: () => page.displayNumber,
-        totalPages: () => total,
-        formatPageNumber: (n) => formatNumber(n, PAGE_FMT[sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
-        styleRef: (name, lastOnPage) => this.resolveStyleRef(name, lastOnPage, page.physIndex),
-        // A REF names a body bookmark, so it reads the same on every page the
-        // header paints on. Word recomputes it on open here just as it does in
-        // the body, and the update pass caches the value it resolves to.
-        refText: (bookmark) => this.refBookmarkText(bookmark),
-        // Body statistics read the same on every page too.
-        textStats: () => this.resolveTextStats(),
-      };
-      const header = this.doc.headers.get(page.headerRel ?? "");
-      if (header && header.blocks.length > 0) {
-        const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        const seenSnapshot = new Set(this.seenNumIds);
-        this.hfMarginVTop = page.bodyTop;
-        const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
-          x: hfOriginX,
-          y: sp.headerDistance,
-        }, false, this.pageFieldFrameOverlay(header));
-        this.hfMarginVTop = null;
-        this.counters = snapshot;
-        this.seenNumIds = seenSnapshot;
-        for (const it of items) offsetItem(it, hfOriginX, sp.headerDistance);
-        page.items.push(...items);
-      }
-      const footer = this.doc.footers.get(page.footerRel ?? "");
-      if (footer && footer.blocks.length > 0) {
-        const overlayPageFrame = this.pageFieldFrameOverlay(footer);
-        // Two passes: the frame's page position depends on its own height,
-        // which anchored-shape resolution needs up front.
-        let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        let seenSnapshot = new Set(this.seenNumIds);
-        const measured = this.layoutFrame(footer.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
-        this.counters = snapshot;
-        this.seenNumIds = seenSnapshot;
-        const legacyPageFrame =
-          this.doc.compatibilityMode < 15 &&
-          footer.blocks.some(
-            (block) =>
-              block.type === "paragraph" &&
-              this.doc.effectiveParaProps(block).frame?.vAnchor === "page",
-          );
-        const top =
-          sp.pageHeight -
-          sp.footerDistance -
-          (legacyPageFrame ? 0 : measured.height);
-        snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        seenSnapshot = new Set(this.seenNumIds);
-        this.hfMarginVTop = page.bodyTop;
-        const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
-          x: hfOriginX,
-          y: top,
-        }, false, overlayPageFrame);
-        this.hfMarginVTop = null;
-        this.counters = snapshot;
-        this.seenNumIds = seenSnapshot;
-        for (const it of items) offsetItem(it, hfOriginX, top);
-        page.items.push(...items);
-      }
+    for (const page of this.pages) this.finalizePageHeadersFooters(page, total, emitBorders);
+  }
+
+  /** Paint one page's borders, header and footer after its body; `total` is the page count its NUMPAGES fields show. */
+  private finalizePageHeadersFooters(page: InternalPage, total: number, emitBorders: boolean): void {
+    if (page.discarded) {
+      page.hfStart = 0;
+      return;
+    }
+    const sp = page.sp;
+    this.sp = sp; // frames built here must resolve anchors against this page's section
+    if (emitBorders) this.emitPageBorders(page);
+    page.hfStart = page.items.length;
+    const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+    // Headers/footers share the body's text column, so their left origin
+    // includes the binding gutter (probe3-mirror-book: on a recto page the
+    // gutter sits on the left, so the header starts marginLeft+gutter in, level
+    // with the body). On even mirror pages the gutter is already folded into the
+    // right margin (gutter = 0 here); non-gutter docs are unaffected.
+    const hfOriginX = sp.marginLeft + sp.gutter;
+    const fields: FieldContext = {
+      pageNumber: () => page.displayNumber,
+      totalPages: () => total,
+      formatPageNumber: (n) => formatNumber(n, PAGE_FMT[sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
+      styleRef: (name, lastOnPage) => this.resolveStyleRef(name, lastOnPage, page.physIndex),
+      // A REF names a body bookmark, so it reads the same on every page the
+      // header paints on. Word recomputes it on open here just as it does in
+      // the body, and the update pass caches the value it resolves to.
+      refText: (bookmark) => this.refBookmarkText(bookmark),
+      // Body statistics read the same on every page too.
+      textStats: () => this.resolveTextStats(),
+    };
+    const header = this.doc.headers.get(page.headerRel ?? "");
+    if (header && header.blocks.length > 0) {
+      const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      const seenSnapshot = new Set(this.seenNumIds);
+      this.hfMarginVTop = page.bodyTop;
+      const { items } = this.layoutFrame(header.blocks, contentWidth, fields, {
+        x: hfOriginX,
+        y: sp.headerDistance,
+      }, false, this.pageFieldFrameOverlay(header));
+      this.hfMarginVTop = null;
+      this.counters = snapshot;
+      this.seenNumIds = seenSnapshot;
+      for (const it of items) offsetItem(it, hfOriginX, sp.headerDistance);
+      page.items.push(...items);
+    }
+    const footer = this.doc.footers.get(page.footerRel ?? "");
+    if (footer && footer.blocks.length > 0) {
+      const overlayPageFrame = this.pageFieldFrameOverlay(footer);
+      // Two passes: the frame's page position depends on its own height,
+      // which anchored-shape resolution needs up front.
+      let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      let seenSnapshot = new Set(this.seenNumIds);
+      const measured = this.layoutFrame(footer.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
+      this.counters = snapshot;
+      this.seenNumIds = seenSnapshot;
+      const legacyPageFrame =
+        this.doc.compatibilityMode < 15 &&
+        footer.blocks.some(
+          (block) =>
+            block.type === "paragraph" &&
+            this.doc.effectiveParaProps(block).frame?.vAnchor === "page",
+        );
+      const top =
+        sp.pageHeight -
+        sp.footerDistance -
+        (legacyPageFrame ? 0 : measured.height);
+      snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      seenSnapshot = new Set(this.seenNumIds);
+      this.hfMarginVTop = page.bodyTop;
+      const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
+        x: hfOriginX,
+        y: top,
+      }, false, overlayPageFrame);
+      this.hfMarginVTop = null;
+      this.counters = snapshot;
+      this.seenNumIds = seenSnapshot;
+      for (const it of items) offsetItem(it, hfOriginX, top);
+      page.items.push(...items);
     }
   }
 
