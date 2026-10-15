@@ -35,8 +35,6 @@ export interface RenderPdfResult {
   missingFonts: string[];
   /** Picture parts drawn as empty frames: no decoder for their format. */
   unsupportedImages: string[];
-  /** Items of kinds not drawn yet. */
-  undrawn: string[];
 }
 
 /** A .docx on disk, read a range at a time; the file is opened per read,
@@ -85,7 +83,6 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
   /** Each picture part once: its picture and the XObjects it needs on a page. */
   const pictures = new Map<string, { picture: Picture; xobjects: string[] } | null>();
   const unsupportedImages = new Set<string>();
-  const undrawn = new Set<string>();
 
   const loadPicture = async (part: string): Promise<{ picture: Picture; xobjects: string[] } | null> => {
     const size = opened.mediaSize(part);
@@ -129,7 +126,6 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
     const shown = new Map<string, Picture>();
     const xobjects: string[] = [];
     for (const item of page.items) {
-      if (item.kind === "warptext") undrawn.add(item.kind);
       if (item.kind !== "image" || shown.has(item.part)) continue;
       let loaded = pictures.get(item.part);
       if (loaded === undefined) {
@@ -169,7 +165,6 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
     fonts: resources.embedded(),
     missingFonts: [...fonts.missing],
     unsupportedImages: [...unsupportedImages],
-    undrawn: [...undrawn],
   };
 }
 

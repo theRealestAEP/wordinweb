@@ -14,4 +14,4 @@ const t0 = performance.now();
 const result = await renderDocxToPdf(input, createWriteStream(output), { comments });
 const ms = Math.round(performance.now() - t0);
 const rss = Math.round(process.resourceUsage().maxRSS / 1024);
-console.log(JSON.stringify({ input, output, pages: result.pages, ms, maxRssMB: rss, fonts: result.fonts, missingFonts: result.missingFonts, unsupportedImages: result.unsupportedImages, undrawn: result.undrawn }));
+console.log(JSON.stringify({ input, output, pages: result.pages, ms, maxRssMB: rss, fonts: result.fonts, missingFonts: result.missingFonts, unsupportedImages: result.unsupportedImages }));

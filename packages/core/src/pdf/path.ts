@@ -1,13 +1,17 @@
 import { num } from "./writer.js";
 
-/**
- * SVG path data as PDF path operators, each point mapped through `point`
- * (the item's scale and the page's flip). Arcs become cubic Béziers.
- */
-export function pathToPdf(d: string, point: (x: number, y: number) => [number, number]): string {
+/** A parsed SVG path: moves, lines, cubic curves and closes, absolute. */
+export type PathSegment =
+  | { op: "m"; x: number; y: number }
+  | { op: "l"; x: number; y: number }
+  | { op: "c"; x1: number; y1: number; x2: number; y2: number; x: number; y: number }
+  | { op: "h" };
+
+/** SVG path data as segments; quadratics and arcs become cubics. */
+export function parsePath(d: string): PathSegment[] {
   const tokens = d.match(/[MmLlHhVvCcSsQqTtAaZz]|-?(?:\d+\.?\d*|\.\d+)(?:e-?\d+)?/g);
-  if (!tokens) return "";
-  const ops: string[] = [];
+  if (!tokens) return [];
+  const out: PathSegment[] = [];
   let i = 0;
   let cmd = "";
   let x = 0;
@@ -19,16 +23,17 @@ export function pathToPdf(d: string, point: (x: number, y: number) => [number, n
   let cy = 0;
   let lastCmd = "";
   const next = (): number => Number(tokens[i++]);
-  const P = (px: number, py: number): string => {
-    const [ox, oy] = point(px, py);
-    return `${num(ox)} ${num(oy)}`;
-  };
   const cubic = (x1: number, y1: number, x2: number, y2: number, ex: number, ey: number): void => {
-    ops.push(`${P(x1, y1)} ${P(x2, y2)} ${P(ex, ey)} c`);
+    out.push({ op: "c", x1, y1, x2, y2, x: ex, y: ey });
     cx = x2;
     cy = y2;
     x = ex;
     y = ey;
+  };
+  const quadratic = (qx: number, qy: number, ex: number, ey: number): void => {
+    cubic(x + (2 / 3) * (qx - x), y + (2 / 3) * (qy - y), ex + (2 / 3) * (qx - ex), ey + (2 / 3) * (qy - ey), ex, ey);
+    cx = qx;
+    cy = qy;
   };
   while (i < tokens.length) {
     if (/[A-Za-z]/.test(tokens[i])) cmd = tokens[i++];
@@ -44,20 +49,20 @@ export function pathToPdf(d: string, point: (x: number, y: number) => [number, n
         y = dy + next();
         startX = x;
         startY = y;
-        ops.push(`${P(x, y)} m`);
+        out.push({ op: "m", x, y });
         break;
       case "L":
         x = dx + next();
         y = dy + next();
-        ops.push(`${P(x, y)} l`);
+        out.push({ op: "l", x, y });
         break;
       case "H":
         x = dx + next();
-        ops.push(`${P(x, y)} l`);
+        out.push({ op: "l", x, y });
         break;
       case "V":
         y = dy + next();
-        ops.push(`${P(x, y)} l`);
+        out.push({ op: "l", x, y });
         break;
       case "C": {
         const x1 = dx + next();
@@ -79,22 +84,12 @@ export function pathToPdf(d: string, point: (x: number, y: number) => [number, n
       case "Q": {
         const qx = dx + next();
         const qy = dy + next();
-        const ex = dx + next();
-        const ey = dy + next();
-        cubic(x + (2 / 3) * (qx - x), y + (2 / 3) * (qy - y), ex + (2 / 3) * (qx - ex), ey + (2 / 3) * (qy - ey), ex, ey);
-        cx = qx;
-        cy = qy;
+        quadratic(qx, qy, dx + next(), dy + next());
         break;
       }
       case "T": {
         const reflect = /[QqTt]/.test(lastCmd);
-        const qx = reflect ? 2 * x - cx : x;
-        const qy = reflect ? 2 * y - cy : y;
-        const ex = dx + next();
-        const ey = dy + next();
-        cubic(x + (2 / 3) * (qx - x), y + (2 / 3) * (qy - y), ex + (2 / 3) * (qx - ex), ey + (2 / 3) * (qy - ey), ex, ey);
-        cx = qx;
-        cy = qy;
+        quadratic(reflect ? 2 * x - cx : x, reflect ? 2 * y - cy : y, dx + next(), dy + next());
         break;
       }
       case "A": {
@@ -111,14 +106,50 @@ export function pathToPdf(d: string, point: (x: number, y: number) => [number, n
         break;
       }
       case "Z":
-        ops.push("h");
+        out.push({ op: "h" });
         x = startX;
         y = startY;
         break;
     }
     lastCmd = cmd;
   }
-  return ops.join(" ");
+  return out;
+}
+
+/**
+ * SVG path data as PDF path operators, each point mapped through `point`
+ * (the item's scale and the page's flip).
+ */
+export function pathToPdf(d: string, point: (x: number, y: number) => [number, number]): string {
+  const P = (px: number, py: number): string => {
+    const [ox, oy] = point(px, py);
+    return `${num(ox)} ${num(oy)}`;
+  };
+  return parsePath(d)
+    .map((s) => (s.op === "h" ? "h" : s.op === "c" ? `${P(s.x1, s.y1)} ${P(s.x2, s.y2)} ${P(s.x, s.y)} c` : `${P(s.x, s.y)} ${s.op}`))
+    .join(" ");
+}
+
+/** The path as a polyline (its first subpath), curves in 16 steps each. */
+export function flattenPath(d: string): [number, number][] {
+  const points: [number, number][] = [];
+  for (const s of parsePath(d)) {
+    if (s.op === "h") break;
+    if (s.op === "m" && points.length > 0) break;
+    if (s.op === "m" || s.op === "l") points.push([s.x, s.y]);
+    else {
+      const [x0, y0] = points[points.length - 1] ?? [s.x1, s.y1];
+      for (let k = 1; k <= 16; k++) {
+        const t = k / 16;
+        const u = 1 - t;
+        points.push([
+          u * u * u * x0 + 3 * u * u * t * s.x1 + 3 * u * t * t * s.x2 + t * t * t * s.x,
+          u * u * u * y0 + 3 * u * u * t * s.y1 + 3 * u * t * t * s.y2 + t * t * t * s.y,
+        ]);
+      }
+    }
+  }
+  return points;
 }
 
 /** An SVG arc as cubic Bézier segments of at most a quarter turn each. */

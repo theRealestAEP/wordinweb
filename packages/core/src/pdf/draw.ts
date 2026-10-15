@@ -1,5 +1,6 @@
 import { Border, Theme } from "../model.js";
 import { drawChart } from "./chart.js";
+import { drawWarpText } from "./warp.js";
 import { fontWidthScale } from "../layout/measure.js";
 import { FontSpec, LaidOutPage, LineEdgeItem, PageItem, PathItem, RectItem, TextItem } from "../layout/types.js";
 import { FontSet, GlyphRun } from "./fonts.js";
@@ -76,8 +77,8 @@ export class PageDrawer {
   private readonly sheetHeight: number;
 
   constructor(
-    private readonly fonts: FontSet,
-    private readonly resources: Resources,
+    readonly fonts: FontSet,
+    readonly resources: Resources,
     private readonly theme: Theme,
     private readonly page: LaidOutPage,
     private readonly offsetX = 0,
@@ -173,6 +174,8 @@ export class PageDrawer {
         drawChart(this, item, this.theme);
         break;
       case "warptext":
+        drawWarpText(this, item);
+        break;
       case "grip":
       case "drawingHit":
         break;
@@ -185,7 +188,7 @@ export class PageDrawer {
   }
 
   /** Run `draw` rotated by `rotate.deg` clockwise about (x + ox, y + oy). */
-  private withRotation(rotate: { deg: number; ox: number; oy: number } | undefined, x: number, y: number, draw: () => void): void {
+  withRotation(rotate: { deg: number; ox: number; oy: number } | undefined, x: number, y: number, draw: () => void): void {
     if (!rotate || !rotate.deg) {
       draw();
       return;
