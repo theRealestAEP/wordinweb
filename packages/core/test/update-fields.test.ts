@@ -66,7 +66,7 @@ function caches(doc: DocxDocument): string[] {
 }
 
 describe("update pass: locally resolved instructions", () => {
-  const clock = new Date(Date.UTC(2024, 2, 14, 15, 9, 26));
+  const clock = new Date(2024, 2, 14, 15, 9, 26);
 
   it("DATE takes the injected clock, not the wall clock or the cache", () => {
     const doc = load(`<w:p>${field('DATE \\@ "yyyy-MM-dd"', "1999-01-01")}</w:p>`);
@@ -200,7 +200,7 @@ describe("update pass: field XML shapes", () => {
         `<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">1999</w:t></w:r>` +
         `</w:fldSimple></w:p>`,
     );
-    updateFields(doc, { now: new Date(Date.UTC(2024, 0, 1)) });
+    updateFields(doc, { now: new Date(2024, 0, 1) });
     const xml = documentXml(doc);
     // The run and its bold formatting survive: only the text changed.
     expect(xml).toContain(`<w:rPr><w:b/></w:rPr><w:t xml:space="preserve">2024</w:t>`);
@@ -271,7 +271,7 @@ describe("update pass: replication", () => {
   it("results computed on one replica apply identically on another", () => {
     const origin = load(body);
     const replica = load(body);
-    const results = computeFieldResults(origin, { now: new Date(Date.UTC(2024, 0, 1)), author: "A" });
+    const results = computeFieldResults(origin, { now: new Date(2024, 0, 1), author: "A" });
     expect(applyFieldResults(origin, results)).toBe(true);
     expect(applyFieldResults(replica, results)).toBe(true);
     expect(documentXml(replica)).toBe(documentXml(origin));
@@ -343,7 +343,7 @@ const footerCaches = (doc: DocxDocument): string[] => cachesIn([...doc.footers.v
 const allXml = (doc: DocxDocument): string => doc.editableRoots().map((r) => serializeXml(r)).join("|");
 
 describe("update pass: headers and footers", () => {
-  const clock = new Date(Date.UTC(2024, 2, 14, 15, 9, 26));
+  const clock = new Date(2024, 2, 14, 15, 9, 26);
   const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
   const heading = (text: string) =>
     `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;

@@ -99,7 +99,11 @@ export class Face implements FaceInfo {
     }
 
     const cmap = readCmap(this.table("cmap"));
-    this.cmap = cmap.map;
+    // A color bitmap face (sbix, CBDT: Apple Color Emoji, Noto Color Emoji)
+    // keeps a bitmap per glyph and an outline that is a stand-in at most,
+    // so it has no glyph to embed: a monochrome face draws its characters,
+    // or they are reported as missing.
+    this.cmap = tables.has("sbix") || tables.has("CBDT") ? new Map() : cmap.map;
     this.symbolCmap = cmap.symbol;
     const gpos = tables.get("GPOS");
     const lookups = gpos ? readKernLookups(gpos) : [];
@@ -131,18 +135,8 @@ export class Face implements FaceInfo {
     return 0;
   }
 
-  /**
-   * Whether the face draws the code point. A color bitmap face (sbix, CBDT:
-   * Apple Color Emoji, Noto Color Emoji) keeps a bitmap per glyph and an
-   * outline that is a stand-in at most, so its glyphs count as missing: a
-   * monochrome face takes them, or they are reported as missing characters.
-   */
   hasGlyph(codePoint: number): boolean {
-    return this.glyphId(codePoint) !== 0 && !this.colorBitmaps;
-  }
-
-  private get colorBitmaps(): boolean {
-    return this.tables.has("sbix") || this.tables.has("CBDT");
+    return this.glyphId(codePoint) !== 0;
   }
 
   /** Advance width in font units. */

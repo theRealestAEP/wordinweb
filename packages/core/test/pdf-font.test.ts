@@ -53,11 +53,11 @@ describe("sfnt faces", () => {
 
 describe("color bitmap faces", () => {
   const appleColorEmoji = "/System/Library/Fonts/Apple Color Emoji.ttc";
-  it.skipIf(!existsSync(appleColorEmoji))("counts a glyph with no outline as missing, so a monochrome face or the report takes it", () => {
+  it.skipIf(!existsSync(appleColorEmoji))("has no glyph to embed, so a monochrome face or the missing-characters report takes its characters", () => {
     const face = new Face(appleColorEmoji, 0);
-    const smile = 0x1f600;
-    expect(face.glyphId(smile)).toBeGreaterThan(0);
-    expect(face.hasGlyph(smile)).toBe(false);
+    expect(face.family).toBe("Apple Color Emoji");
+    expect(face.glyphId(0x1f600)).toBe(0);
+    expect(face.hasGlyph(0x1f600)).toBe(false);
     expect(new Face(carlito).hasGlyph("A".codePointAt(0) as number)).toBe(true);
   });
 });
