@@ -80,7 +80,7 @@ interface Char {
  * Fields whose result the renderer computes itself (layout/inline.ts
  * resolveField; a MERGEFIELD shows its «name»).
  */
-const RECOMPUTED = /^\s*(PAGE|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|REF|STYLEREF|AUTHOR|FILENAME|DATE|TIME|MERGEFIELD)\b/i;
+const RECOMPUTED = /^\s*(PAGE|PAGEREF|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|REF|STYLEREF|AUTHOR|FILENAME|DATE|TIME|MERGEFIELD)\b/i;
 const LIVE = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i;
 
 /**
@@ -226,8 +226,13 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
     }
     props = mergeRunProps(props, resolveParagraphStyleChain(doc.styles, ctx.pStyle, false).rPr);
     const direct = parseRunProps(rPr, { theme: doc.theme });
-    if (direct.styleId && !ctx.tocLink) props = mergeRunProps(props, resolveCharacterStyleChain(doc.styles, direct.styleId));
+    if (direct.styleId) props = mergeRunProps(props, resolveCharacterStyleChain(doc.styles, direct.styleId));
     props = mergeRunProps(props, direct);
+    // A TOC entry's hyperlink is black and plain unless the run itself says otherwise (parse/document.ts suppressTocHyperlinkFormatting).
+    if (ctx.tocLink) {
+      if (direct.color === undefined) props.color = "auto";
+      if (direct.underline === undefined) props.underline = "none";
+    }
     return {
       color: props.color === undefined || props.color === "auto" ? undefined : props.color.toLowerCase(),
       underline: props.underline === undefined || props.underline === "none" ? undefined : props.underline,
@@ -342,7 +347,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
         ctx.fields.revised.pop();
       } else if (ln === "customXml" || ln === "dir" || ln === "bdo") {
         visit(node, { ...ctx, unrendered: true }, prefix);
-      } else if (ln === "hyperlink" && /^TOC[1-9]$/i.test(ctx.pStyle ?? "")) {
+      } else if (ln === "hyperlink" && /^(TOC[1-9]|TableofFigures)$/i.test(ctx.pStyle ?? "")) {
         // A hyperlink in a TOC-styled paragraph loses its character style, as in Word; direct properties stay.
         visit(node, { ...ctx, tocLink: true }, prefix);
       } else if (ln === "txbxContent") {
@@ -730,9 +735,10 @@ function roman(n: number): string {
 
 /**
  * The marked text drawn in the PDF against the copy's: a histogram of
- * letters per class. A header's or footer's letters are drawn once per
- * page that shows it: between once (or never, for one a page may show)
- * and `pages` times.
+ * letters per class. A table header row's letters are drawn once per page
+ * the table runs onto: between once and `pages` times. A header's or
+ * footer's, a text box's and an exact row's may be drawn on no page, in
+ * part, or on every page: between never and `pages` times.
  */
 function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: number, out: Failure[]): void {
   const histogram = (): Record<Class, Map<string, number>> => ({ ins: new Map(), del: new Map(), other: new Map() });
@@ -748,9 +754,9 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: 
   };
   let endnotes = 0;
   for (const p of paras) {
-    // A text box of a fixed size and a row of an exact height clip their text.
-    if (p.path.includes("/txbx") || p.clipped) continue;
-    const into = p.repeated === undefined ? want : p.repeated ? wantRepeated : wantMaybe;
+    // A text box of a fixed size and a row of an exact height clip their text: drawn in part, or whole.
+    const maybe = p.repeated === false || p.path.includes("/txbx") || p.clipped;
+    const into = maybe ? wantMaybe : p.repeated ? wantRepeated : want;
     // An equation's text is drawn with its runs' marks too, its letters as mathematical italics.
     for (const c of p.chars) if ((c.kind === "text" || c.kind === "math") && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks), into);
     // An endnote's reference mark is a roman numeral, in the reference run's colors; a hidden reference draws nothing.
