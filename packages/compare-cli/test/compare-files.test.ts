@@ -951,6 +951,32 @@ describe("the printable copy's marks", () => {
     expect(textGroups(ops, BLUE)).toEqual([{ underlined: true }]);
   });
 
+  it("keeps the visible text that shares a run with a field character when it unlinks the field", () => {
+    // A valid field may put text in the runs that hold its characters: text before
+    // begin, the separate marker with an unchanged result prefix, text after end.
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const paragraph = parseXml(
+      `<w:p ${W}>` +
+        `<w:r><w:t xml:space="preserve">Date: </w:t><w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> DATE </w:instrText></w:r>` +
+        `<w:r><w:fldChar w:fldCharType="separate"/><w:t xml:space="preserve">October </w:t></w:r>` +
+        `<w:del w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>15</w:delText></w:r></w:del>` +
+        `<w:ins w:id="2" w:author="a" w:date="2026-01-01T00:00:00Z"><w:r><w:t>16</w:t></w:r></w:ins>` +
+        `<w:r><w:t xml:space="preserve">, 2026</w:t><w:fldChar w:fldCharType="end"/><w:t xml:space="preserve"> (printed)</w:t></w:r>` +
+        `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>3</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>` +
+        `</w:p>`,
+    );
+    const xml = serializeXml(flatten(paragraph));
+    expect(xml).not.toMatch(/fldCharType="(?:begin|separate|end)"[^]*DATE|DATE[^]*fldCharType="separate"/);
+    expect(xml).not.toContain(" DATE ");
+    // Every visible piece of the unlinked field survives, in order, with the marks on the changed day.
+    const text = [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map((m) => m[1]).join("");
+    expect(text).toBe("Date: October 1516, 2026 (printed)3");
+    expect(xml).toMatch(/<w:color w:val="FF0000"\/><\/w:rPr><w:t>15<\/w:t>/);
+    // The PAGE field holds no revision: it stays a field.
+    expect(xml).toContain(" PAGE ");
+    expect((xml.match(/w:fldCharType/g) ?? []).length).toBe(3);
+  });
+
   it("bars the paragraph of an inserted picture", async () => {
     const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
     const picture =
