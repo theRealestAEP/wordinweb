@@ -8,7 +8,7 @@ import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, child, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { CompareNote, compareDocuments } from "../../core/src/edit/compare/index.js";
 import { acceptAllRevisions, collectRevisions, rejectAllRevisions } from "../../core/src/edit/suggest.js";
-import { makeDocx, wrapDocument } from "../../core/test/helpers.js";
+import { makeDocx, makeDocxWithMedia, wrapDocument, W_NS } from "../../core/test/helpers.js";
 import { AUTHOR, DATE, canonicalBody, para } from "../../core/test/compare-helpers.js";
 import { compareFiles } from "../src/compare.js";
 import { CompareError } from "../src/errors.js";
@@ -544,6 +544,30 @@ describe("the pdf option", () => {
     expect(pdfPages).toBe(2);
     expect(missingCharacters).toEqual([]);
     expect(strFromU8(unzipSync(readFileSync(printable))["word/document.xml"])).toContain("Insertions: 1");
+  });
+
+  it("lists the picture parts the PDF drew as empty frames", async () => {
+    const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture 1"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="1" name="p.bmp"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip ${R} r:embed="rId5"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const rels =
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.bmp"/></Relationships>`;
+    // A BMP: a format the renderer does not read.
+    const bytes = makeDocxWithMedia(
+      { "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${para("Before.")}${picture}${para("After.")}</w:body></w:document>`, "word/_rels/document.xml.rels": rels },
+      { "word/media/image1.bmp": new Uint8Array([0x42, 0x4d, 0, 0, 0, 0]) },
+    );
+    const original = join(dir, "bmp-o.docx");
+    const revised = join(dir, "bmp-r.docx");
+    writeFileSync(original, bytes);
+    writeFileSync(revised, bytes);
+    const { pdfPages, unsupportedImages } = await compareFiles(original, revised, join(dir, "bmp-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: join(dir, "bmp.pdf") } });
+    expect(pdfPages).toBe(1);
+    expect(unsupportedImages).toEqual(["word/media/image1.bmp"]);
   });
 
   it("reports a script the PDF renderer cannot shape as unsupported_script", async () => {

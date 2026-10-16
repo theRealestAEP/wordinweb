@@ -76,6 +76,9 @@ export interface CompareFilesResult {
    * them), and characters no installed font has (each an empty box). */
   missingFonts?: string[];
   missingCharacters?: string[];
+  /** With `pdf`: picture parts drawn as empty frames (a format the renderer
+   * does not read, or an image over its pixel budget). */
+  unsupportedImages?: string[];
 }
 
 /**
@@ -171,7 +174,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
     if (options.pdf && printableSpec) {
       const rendered = await renderDocxToPdf(printableSpec.path, createWriteStream(options.pdf.path), { comments: options.pdf.comments });
-      return { revisions, pdfPages: rendered.pages, missingFonts: rendered.missingFonts, missingCharacters: rendered.missingCharacters };
+      return { revisions, pdfPages: rendered.pages, missingFonts: rendered.missingFonts, missingCharacters: rendered.missingCharacters, unsupportedImages: rendered.unsupportedImages };
     }
     return { revisions };
   } catch (error) {
