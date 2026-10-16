@@ -70,7 +70,11 @@ interface Char {
    * (PAGE, DATE: `recomputed`), so their text is unknown.
    */
   field: { marks: Marks; recomputed: boolean } | null;
-  /** Inside a run container the renderer does not read (w:customXml). */
+  /**
+   * Inside a run container the renderer does not read (w:customXml), or
+   * one it draws its own way (a hyperlink in a TOC-styled paragraph loses
+   * its hyperlink style, as in Word).
+   */
   unrendered: boolean;
 }
 
@@ -79,7 +83,7 @@ interface Char {
  * computed (layout/inline.ts resolveField; a MERGEFIELD shows its «name»),
  * or a table of contents, whose entries lose their hyperlink style.
  */
-const RECOMPUTED = /^\s*(PAGE|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|DATE|TIME|MERGEFIELD|TOC)\b/i;
+const RECOMPUTED = /^\s*(PAGE|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|REF|STYLEREF|AUTHOR|FILENAME|DATE|TIME|MERGEFIELD|TOC)\b/i;
 const LIVE = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i;
 
 /**
@@ -87,7 +91,8 @@ const LIVE = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i;
  * begin. The renderer reads fields as a flat sequence: a field that opens
  * inside another's code leaves the outer's result unmodeled (`nested`); one
  * that opens inside the result ends the outer field there, so the rest of
- * the result draws as plain runs (`flushed`).
+ * the result draws as plain runs (`flushed`), except in a w:fldSimple
+ * (`simple`), whose whole content is its cached result.
  */
 interface FieldFrame {
   result: boolean;
@@ -95,6 +100,7 @@ interface FieldFrame {
   carrier: Marks | null;
   nested: boolean;
   flushed: boolean;
+  simple: boolean;
 }
 
 interface Para {
@@ -108,6 +114,8 @@ interface Para {
   ordered: boolean;
   /** In a row of an exact height: the PDF may show only part of it. */
   clipped: boolean;
+  /** A header's or footer's paragraph: whether some page shows it for sure (see renderedParts). */
+  shownForSure?: boolean;
   noteRefs: { kind: "footnote" | "endnote"; id: string; marks: Marks }[];
 }
 
@@ -138,8 +146,8 @@ interface Doc {
   parts: Map<string, XmlElement>;
   styles: Styles;
   theme: Theme;
-  /** The header and footer parts the PDF is sure to draw. */
-  rendered: Set<string>;
+  /** The header and footer parts the PDF draws: true for sure, false maybe. */
+  rendered: Map<string, boolean>;
 }
 
 /** The parts that can carry revisions, by name, in package order: the body first. */
@@ -156,19 +164,26 @@ function readDoc(bytes: Uint8Array): Doc {
 }
 
 /**
- * The header and footer parts the PDF shows for sure: each section's default
- * header and footer, unless a first-page header hides it (a section of one
- * page). A referenced note is shown; the rest of the parts are not.
+ * The header and footer parts the PDF shows, by name: true for one shown
+ * for sure (a section's default header without a first-page one, or its
+ * first-page one), false for one it may show (a default header behind a
+ * first-page one, an even-page one). A referenced note is shown; the rest
+ * of the parts are not.
  */
-function renderedParts(files: Record<string, Uint8Array>, document: XmlElement | undefined): Set<string> {
-  const rendered = new Set<string>();
+function renderedParts(files: Record<string, Uint8Array>, document: XmlElement | undefined): Map<string, boolean> {
+  const rendered = new Map<string, boolean>();
   const rels = files["word/_rels/document.xml.rels"] ? parseXml(strFromU8(files["word/_rels/document.xml.rels"])) : undefined;
   const targets = new Map<string, string>();
   for (const rel of rels?.children ?? []) targets.set(attr(rel, "Id") ?? "", `word/${attr(rel, "Target")}`);
   const walk = (el: XmlElement): void => {
-    if (localName(el.name) === "sectPr" && !child(el, "titlePg")) {
+    if (localName(el.name) === "sectPr") {
+      const titlePage = !!child(el, "titlePg");
       for (const ref of el.children) {
-        if (/^(header|footer)Reference$/.test(localName(ref.name)) && attr(ref, "type") === "default") rendered.add(targets.get(attr(ref, "id") ?? "") ?? "");
+        if (!/^(header|footer)Reference$/.test(localName(ref.name))) continue;
+        const type = attr(ref, "type");
+        const part = targets.get(attr(ref, "id") ?? "") ?? "";
+        const sure = type === "first" ? titlePage : type === "default" ? !titlePage : false;
+        rendered.set(part, sure || !!rendered.get(part));
       }
     }
     for (const c of el.children) walk(c);
@@ -249,8 +264,8 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
         const type = attr(el, "fldCharType");
         for (const fields of sides) {
           if (type === "begin") {
-            for (const f of fields) f[f.result ? "flushed" : "nested"] = true;
-            fields.push({ result: false, instr: "", carrier: marks, nested: false, flushed: false });
+            for (const f of fields) f[f.result && !f.simple ? "flushed" : "nested"] = true;
+            fields.push({ result: false, instr: "", carrier: marks, nested: false, flushed: false, simple: false });
           } else if (type === "separate" && fields.length) fields[fields.length - 1].result = true;
           else if (type === "end") fields.pop();
         }
@@ -273,7 +288,8 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
           if (ctx.rev) para.needsBar = true;
           push("", "object");
         }
-        visit({ name: "w:dxw-run-child", attrs: {}, children: [el], text: "" }, ctx, para.path);
+        // A text box in a hidden run is hidden with it.
+        visit({ name: "w:dxw-run-child", attrs: {}, children: [el], text: "" }, { ...ctx, unrendered: ctx.unrendered || marks.vanish }, para.path);
       }
     }
   };
@@ -315,13 +331,13 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
         visit(node, { ...ctx, rev: ctx.rev ?? "del" }, prefix);
       } else if (ln === "fldSimple") {
         // Its children are its result; its first run's properties draw it.
-        const frame = (): FieldFrame => ({ result: true, instr: attr(node, "instr") ?? "", carrier: null, nested: false, flushed: false });
+        const frame = (): FieldFrame => ({ result: true, instr: attr(node, "instr") ?? "", carrier: null, nested: false, flushed: false, simple: true });
         ctx.fields.original.push(frame());
         ctx.fields.revised.push(frame());
         visit(node, ctx, prefix);
         ctx.fields.original.pop();
         ctx.fields.revised.pop();
-      } else if (ln === "customXml" || ln === "dir" || ln === "bdo") {
+      } else if (ln === "customXml" || ln === "dir" || ln === "bdo" || (ln === "hyperlink" && /^TOC[1-9]$/i.test(ctx.pStyle ?? ""))) {
         visit(node, { ...ctx, unrendered: true }, prefix);
       } else if (ln === "txbxContent") {
         visit(node, { ...ctx, fields: noFields(), inTextBox: true, inTable: false, para: null }, label(prefix, "txbx"));
@@ -714,15 +730,16 @@ function roman(n: number): string {
 /**
  * The marked text drawn in the PDF against the copy's: a histogram of
  * letters per class. A header's or footer's letters are drawn once per
- * page that shows it: between once and `pages` times.
+ * page that shows it: between once (or never, for one a page may show)
+ * and `pages` times.
  */
 function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: number, out: Failure[]): void {
   const histogram = (): Record<Class, Map<string, number>> => ({ ins: new Map(), del: new Map(), other: new Map() });
   const want = histogram();
   const wantRepeated = histogram();
+  const wantMaybe = histogram();
   const samples: Record<Class, string[]> = { ins: [], del: [], other: [] };
-  const expect = (text: string, cls: Class, repeated: boolean): void => {
-    const into = repeated ? wantRepeated : want;
+  const expect = (text: string, cls: Class, into: Record<Class, Map<string, number>>): void => {
     for (const ch of letters(text)) {
       into[cls].set(ch, (into[cls].get(ch) ?? 0) + 1);
       if (samples[cls].length < 60) samples[cls].push(ch);
@@ -730,11 +747,11 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: 
   };
   let endnotes = 0;
   for (const p of paras) {
-    const repeated = /^(header|footer)/.test(p.path);
+    const into = p.shownForSure === undefined ? want : p.shownForSure ? wantRepeated : wantMaybe;
     // An equation's text is drawn with its runs' marks too, its letters as mathematical italics.
-    for (const c of p.chars) if ((c.kind === "text" || c.kind === "math") && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks), repeated);
+    for (const c of p.chars) if ((c.kind === "text" || c.kind === "math") && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks), into);
     // An endnote's reference mark is a roman numeral, in the reference run's colors; a hidden reference draws nothing.
-    for (const ref of p.noteRefs) if (ref.kind === "endnote" && /^document\//.test(p.path) && !ref.marks.vanish) expect(roman(++endnotes), classOfMarks(ref.marks), false);
+    for (const ref of p.noteRefs) if (ref.kind === "endnote" && /^document\//.test(p.path) && !ref.marks.vanish) expect(roman(++endnotes), classOfMarks(ref.marks), want);
   }
   const got = histogram();
   const seen: Record<Class, string[]> = { ins: [], del: [], other: [] };
@@ -746,19 +763,21 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: 
   }
   for (const cls of ["ins", "del"] as const) {
     const diffs: string[] = [];
-    for (const ch of new Set([...want[cls].keys(), ...wantRepeated[cls].keys(), ...got[cls].keys()])) {
+    for (const ch of new Set([...want[cls].keys(), ...wantRepeated[cls].keys(), ...wantMaybe[cls].keys(), ...got[cls].keys()])) {
       const w = want[cls].get(ch) ?? 0;
       const r = wantRepeated[cls].get(ch) ?? 0;
+      const m = wantMaybe[cls].get(ch) ?? 0;
       const g = got[cls].get(ch) ?? 0;
-      if (g < w + r || g > w + r * Math.max(pages, 1)) diffs.push(`${JSON.stringify(ch)} ${w}${r ? `+${r}×` : ""}->${g}`);
+      if (g < w + r || g > w + (r + m) * Math.max(pages, 1)) diffs.push(`${JSON.stringify(ch)} ${w}${r + m ? `+${r + m}×` : ""}->${g}`);
     }
     if (diffs.length === 0) continue;
     const total = (h: Map<string, number>): number => [...h.values()].reduce((a, b) => a + b, 0);
+    const repeated = total(wantRepeated[cls]) + total(wantMaybe[cls]);
     out.push({
       invariant: 4,
       part: "pdf",
       detail: `${cls === "ins" ? "blue underlined" : "red struck"} characters drawn differ from the copy's`,
-      expected: `${total(want[cls])} chars${total(wantRepeated[cls]) ? ` and ${total(wantRepeated[cls])} in headers and footers` : ""}, e.g. ${JSON.stringify(samples[cls].join(""))}`,
+      expected: `${total(want[cls])} chars${repeated ? ` and ${repeated} in headers and footers` : ""}, e.g. ${JSON.stringify(samples[cls].join(""))}`,
       got: `${total(got[cls])} chars, e.g. ${JSON.stringify(seen[cls].join("|").slice(0, 80))}; per character (copy->drawn): ${diffs.slice(0, 12).join(", ")}${diffs.length > 12 ? ", …" : ""}`,
     });
   }
@@ -826,7 +845,8 @@ export function checkPrintable(result: Uint8Array, printable: Uint8Array, option
     const pParas = readPart(pRoot, P, part);
     checkPart(part, rParas, pParas, out);
     checkClean(part, pRoot, out, orderProblems(rRoot));
-    if (/\/(document|footnotes|endnotes)\.xml$/.test(part) || P.rendered.has(part)) drawn.push(...pParas);
+    if (/\/(document|footnotes|endnotes)\.xml$/.test(part)) drawn.push(...pParas);
+    else if (P.rendered.has(part)) drawn.push(...pParas.map((p) => ({ ...p, shownForSure: P.rendered.get(part) })));
     // A note whose reference is hidden is not drawn either.
     for (const p of pParas) for (const ref of p.noteRefs) if (!ref.marks.vanish) notes.add(`${ref.kind}#${ref.id}`);
   }
