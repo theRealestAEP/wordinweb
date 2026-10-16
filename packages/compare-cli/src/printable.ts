@@ -50,26 +50,74 @@ export function flatten(element: XmlElement): XmlElement {
   const rowMarker = ln === "tr" ? revisionIn(child(element, "trPr")) : null;
   const cellMarker = ln === "tc" ? (child(properties, "cellIns") ? "ins" : child(properties, "cellDel") ? "del" : null) : null;
   const lastSection = ln === "body" && !!child(child(element, "sectPr"), "sectPrChange");
+  // A field whose result holds a revision is unlinked: the renderer would
+  // recompute it (a date, a page number) and print the result unmarked.
+  const unlinked = ln === "p" ? fieldCodesToDrop(element) : null;
   const kept: XmlElement[] = [];
+  let picture = false;
   for (const node of element.children) {
     const name = localName(node.name);
     if (FORMAT_CHANGES.has(name)) continue;
     if (name === "ins" || name === "del") {
       if (PROPERTIES.has(localName(element.name))) continue;
+      // A picture has no text to color: its paragraph gets the change bar.
+      picture ||= ln === "p" && contains(node, PICTURES);
       flatten(node);
       for (const run of node.children) markRuns(run, name);
+      kept.push(...node.children);
+      continue;
+    }
+    if (name === "fldSimple" && contains(node, REVISIONS)) {
+      flatten(node);
       kept.push(...node.children);
       continue;
     }
     flatten(node);
     kept.push(node);
   }
-  element.children = kept;
+  element.children = unlinked ? kept.filter((c) => !unlinked.has(c)) : kept;
+  if (picture) changeBar(element);
   if (barred) barParagraphs(element);
   if (rowMarker) markRuns(element, rowMarker);
   if (cellMarker) markRuns(element, cellMarker);
   if (lastSection) markLastParagraph(element);
   return element;
+}
+
+const PICTURES = new Set(["drawing", "pict", "object"]);
+const REVISIONS = new Set(["ins", "del"]);
+
+/**
+ * The runs that hold the field characters and instructions of each field in
+ * the paragraph whose result holds a revision (the runs themselves, inside
+ * or outside a revision wrapper): dropping them keeps the result's runs as
+ * plain text with their marks.
+ */
+function fieldCodesToDrop(paragraph: XmlElement): Set<XmlElement> | null {
+  const drop = new Set<XmlElement>();
+  // Each open field: its code runs so far, and whether its result holds a revision.
+  const open: { codes: XmlElement[]; revised: boolean; inResult: boolean }[] = [];
+  const visit = (run: XmlElement, revised: boolean): void => {
+    const fldChar = child(run, "fldChar");
+    const type = fldChar?.attrs["w:fldCharType"];
+    if (type === "begin") open.push({ codes: [run], revised: false, inResult: false });
+    else if (open.length === 0) return;
+    else if (type === "separate") {
+      open[open.length - 1].codes.push(run);
+      open[open.length - 1].inResult = true;
+    } else if (type === "end") {
+      const field = open.pop() as { codes: XmlElement[]; revised: boolean };
+      field.codes.push(run);
+      if (field.revised) for (const code of field.codes) drop.add(code);
+    } else if (child(run, "instrText") || child(run, "delInstrText")) open[open.length - 1].codes.push(run);
+    else if (revised && open[open.length - 1].inResult) open[open.length - 1].revised = true;
+  };
+  for (const node of paragraph.children) {
+    const name = localName(node.name);
+    if (name === "r") visit(node, false);
+    else if (name === "ins" || name === "del") for (const run of node.children) if (localName(run.name) === "r") visit(run, true);
+  }
+  return drop.size > 0 ? drop : null;
 }
 
 /** The change bar on every paragraph below `el`: a table, row or cell whose format changed. */

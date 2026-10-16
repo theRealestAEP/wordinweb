@@ -215,7 +215,7 @@ export class CommentColumn {
           const author = source.author || (indent ? "Reply" : "Comment");
           const authorFont: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: true, italic: false };
           const date = source.date ? new Date(source.date) : null;
-          const dateText = date && !Number.isNaN(date.getTime()) ? date.toLocaleDateString() : "";
+          const dateText = date && !Number.isNaN(date.getTime()) ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : "";
           const textX = x + left + AVATAR + 8;
           this.text(drawer, this.clip(author, authorFont, width - AVATAR - 8), authorFont, fg, textX, y + (dateText ? 10 : 16));
           if (dateText) this.text(drawer, dateText, { family: UI_FONT, size: 11, bold: false, italic: false }, "#5f6368", textX, y + 22);

@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crc32, inflateSync } from "node:zlib";
+import { fileURLToPath } from "node:url";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
@@ -630,6 +631,25 @@ describe("the pdf option", () => {
     expect(pdfPages).toBe(1);
   });
 
+  it("fails as a CompareError when the PDF path cannot be opened, and leaves no partial PDF", async () => {
+    const original = join(dir, "pdf-err-o.docx");
+    const revised = join(dir, "pdf-err-r.docx");
+    writeFileSync(original, docx(para("The quick brown fox.")));
+    writeFileSync(revised, docx(para("The quick red fox.")));
+    // A folder as the PDF path: its own folder exists, and opening it to write fails.
+    const pdf = dir;
+    const error = await compareFiles(original, revised, join(dir, "pdf-err-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: pdf } }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CompareError);
+    expect((error as CompareError).code).toBe("failed");
+    expect((error as CompareError).message).toContain(pdf);
+    // A render that fails after the PDF was opened takes the partial file with it.
+    writeFileSync(revised, docx(para("مرحبا بالعالم")));
+    const scriptPdf = join(dir, "pdf-err-script.pdf");
+    const refused = await compareFiles(original, revised, join(dir, "pdf-err-out2.docx"), { author: AUTHOR, date: DATE, pdf: { path: scriptPdf } }).catch((e: unknown) => e);
+    expect((refused as CompareError).code).toBe("unsupported_script");
+    expect(existsSync(scriptPdf)).toBe(false);
+  });
+
   it("reports a script the PDF renderer cannot shape as unsupported_script", async () => {
     const original = join(dir, "pdf-arabic-o.docx");
     const revised = join(dir, "pdf-arabic-r.docx");
@@ -640,6 +660,24 @@ describe("the pdf option", () => {
     expect((error as CompareError).code).toBe("unsupported_script");
     expect((error as CompareError).message).toContain("Arabic");
   });
+});
+
+describe("the command line", () => {
+  it("refuses a --pdf path that is an input or the result", () => {
+    const original = join(dir, "cli-o.docx");
+    const revised = join(dir, "cli-r.docx");
+    writeFileSync(original, docx(para("One.")));
+    writeFileSync(revised, docx(para("Two.")));
+    const out = join(dir, "cli-out.docx");
+    const run = (pdf: string) =>
+      spawnSync(process.execPath, [fileURLToPath(new URL("../../../node_modules/.bin/vite-node", import.meta.url)), fileURLToPath(new URL("../src/cli.ts", import.meta.url)), original, revised, "-o", out, "--author", "A", "--pdf", pdf], { encoding: "utf8" });
+    for (const pdf of [out, original]) {
+      const result = run(pdf);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain("--pdf FILE must not be an input or the result");
+    }
+    expect(existsSync(out)).toBe(false);
+  }, 60000);
 });
 
 describe("the summary option", () => {
@@ -679,7 +717,7 @@ describe("the summary option", () => {
     expect(revisions).toMatchObject({ insertion: 1, deletion: 1, paragraphFormat: 1 });
     const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
     expect(tableRows(xml)).toEqual([
-      [`Summary report: document comparison done on ${new Date(DATE).toLocaleString("en-US")}`],
+      [`Summary report: document comparison done on ${new Date(DATE).toLocaleString("en-US", { timeZone: "UTC" })} UTC`],
       ["Original:", "Draft <1> & co.docx"],
       ["Modified:", "Draft 2.docx"],
       ["Add", "1"],
@@ -771,6 +809,23 @@ describe("the printable copy's marks", () => {
   const strikes = (ops: string, rgb: string): number => (ops.match(new RegExp(`^q ${rgb} rg [\\d. ]+ re f Q$`, "gm")) ?? []).length;
   const BLUE = "0 0 1";
   const RED = "1 0 0";
+  /** A 4 x 4 solid PNG. */
+  const solidPng = (): Uint8Array => {
+    const chunk = (type: string, data: Buffer): Buffer => {
+      const head = Buffer.alloc(8);
+      head.writeUInt32BE(data.length, 0);
+      head.write(type, 4, "latin1");
+      const crc = Buffer.alloc(4);
+      crc.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, "latin1"), data])), 0);
+      return Buffer.concat([head, data, crc]);
+    };
+    const ihdr = Buffer.alloc(13);
+    ihdr.writeUInt32BE(4, 0);
+    ihdr.writeUInt32BE(4, 4);
+    ihdr.set([8, 2, 0, 0, 0], 8);
+    const raw = Buffer.concat(Array.from({ length: 4 }, () => Buffer.from([0, ...Array(4).fill([200, 30, 30]).flat()])));
+    return new Uint8Array(Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]));
+  };
   const run = (text: string, rPr: string): string => `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
   const compared = async (name: string, original: Uint8Array, revised: Uint8Array): Promise<{ xml: string; ops: string }> => {
     const o = join(dir, `${name}-o.docx`);
@@ -877,6 +932,54 @@ describe("the printable copy's marks", () => {
     const gridXml = strFromU8(unzipSync(printable.save())["word/document.xml"]);
     expect(gridXml).not.toContain("tblGridChange");
     expect(gridXml).toContain(`${bar}<w:r><w:t xml:space="preserve">Left</w:t>`);
+  });
+
+  it("unlinks a field whose result holds a revision, so the marks print", async () => {
+    const field = (instr: string, result: string): string =>
+      `<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> ${instr} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>${result}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const { xml, ops } = await compared(
+      "marks-field",
+      docx(`<w:p><w:r><w:t xml:space="preserve">Page </w:t></w:r>${field("PAGE", "1")}<w:r><w:t xml:space="preserve"> of the document. Date: </w:t></w:r>${field('DATE \\@ "yyyy"', "2025")}<w:r><w:t>.</w:t></w:r></w:p>`),
+      docx(`<w:p><w:r><w:t xml:space="preserve">Page of the document. Date: </w:t></w:r>${field('DATE \\@ "yyyy"', "2026")}<w:r><w:t>.</w:t></w:r></w:p>`),
+    );
+    // Both fields' codes are gone (the PAGE field was deleted whole, the DATE field's result changed); the results stay, marked.
+    expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
+    expect(xml).toContain('<w:rPr><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><w:t xml:space="preserve">2025</w:t>');
+    expect(xml).toContain('<w:rPr><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">2026</w:t>');
+    // Drawn as marked text, not as a recomputed page number or today's date.
+    expect(strikes(ops, RED)).toBe(3);
+    expect(textGroups(ops, BLUE)).toEqual([{ underlined: true }]);
+  });
+
+  it("bars the paragraph of an inserted picture", async () => {
+    const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture 1"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="1" name="p.png"/><pic:cNvPicPr/></pic:nvPicPr>` +
+      `<pic:blipFill><a:blip ${R} r:embed="rId5"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const rels =
+      `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+      `<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>`;
+    const png = solidPng();
+    const withPicture = (body: string): Uint8Array =>
+      makeDocxWithMedia({ "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${body}</w:body></w:document>`, "word/_rels/document.xml.rels": rels }, { "word/media/image1.png": png });
+    const { xml, ops } = await compared("marks-picture", withPicture(para("Before.") + para("After.")), withPicture(para("Before.") + picture + para("After.")));
+    expect(xml).toMatch(/<w:p><w:pPr><w:pBdr><w:left w:val="single" w:sz="6" w:space="12" w:color="000000"\/><\/w:pBdr><\/w:pPr><w:r><w:rPr>[^<]*(?:<[^>]*>)*<\/w:rPr><w:drawing/);
+    const rules = [...ops.matchAll(/ w ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l S/g)].map((m) => m.slice(1).map(Number));
+    expect(rules.filter(([x1, y1, x2, y2]) => x1 === x2 && y1 !== y2)).toHaveLength(1);
+    expect(ops).toMatch(/\/Im\d+ Do/);
+  });
+
+  it("underlines and strikes a space alone, so a whitespace-only change shows", async () => {
+    const { ops } = await compared(
+      "marks-space",
+      docx(para("Join these: wordone wordtwo; remove here: one two three.")),
+      docx(para("Join these: wordonewordtwo; remove here: one two  three.")),
+    );
+    // The inserted space is drawn blue with an underline; the deleted one red with a strike rule.
+    expect(textGroups(ops, BLUE).some((g) => g.underlined)).toBe(true);
+    expect(strikes(ops, RED)).toBeGreaterThan(0);
   });
 
   it("marks a nested table's text in an inserted or a deleted row", async () => {

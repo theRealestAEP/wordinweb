@@ -1,4 +1,4 @@
-import { closeSync, createWriteStream, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
+import { WriteStream, closeSync, createWriteStream, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
@@ -137,6 +137,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
   const zips: ZipReader[] = [];
   const stores: { close(): void }[] = [];
   let dir: string | null = null;
+  let pdf: WriteStream | null = null;
   try {
     dir = mkdtempSync(join(options.tempDir ?? tmpdir(), "docx-compare-"));
     const oZip = openInput(originalPath, "original");
@@ -204,11 +205,19 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
     await options.onResultWritten?.();
     if (options.pdf && printableSpec) {
-      const rendered = await renderDocxToPdf(printableSpec.path, createWriteStream(options.pdf.path), { comments: options.pdf.comments });
+      // Opened here, so a path that cannot be written fails as a CompareError
+      // (a stream's open error would be an uncaught event); a partial PDF goes.
+      pdf = createWriteStream(options.pdf.path, { fd: openSync(options.pdf.path, "w") });
+      const rendered = await renderDocxToPdf(printableSpec.path, pdf, { comments: options.pdf.comments });
+      pdf = null;
       return { revisions, pdfPages: rendered.pages, missingFonts: rendered.missingFonts, missingCharacters: rendered.missingCharacters, unsupportedImages: rendered.unsupportedImages };
     }
     return { revisions };
   } catch (error) {
+    if (pdf) {
+      pdf.destroy();
+      rmSync(options.pdf?.path ?? "", { force: true });
+    }
     if (error instanceof CompareError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     if (error instanceof PdfRenderError && error.code === "unsupported_script") throw new CompareError("unsupported_script", message, undefined, { cause: error });
@@ -419,7 +428,7 @@ const NOTE_REF = /<w:(?:footnote|endnote)Reference /;
 const GLYPH = { ins: 1, del: 2 } as const;
 
 /** Revision markup: XML without it has no revision to count or flatten. */
-const REVISION = /<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange)[\s>/]/;
+const REVISION = /<w:(?:ins|del|moveFrom|moveTo|rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange|sectPrChange)[\s>/]/;
 
 /** Revision counts by kind, all zero. */
 function noRevisions(): Record<RevisionKind, number> {

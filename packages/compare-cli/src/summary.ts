@@ -18,7 +18,7 @@ export function summaryXml(spec: SummarySpec, date: string, revisions: Record<Re
   const width = textWidth(sectPr);
   const first = Math.round(width * 0.74);
   const widths = [first, width - first];
-  const when = new Date(date).toLocaleString("en-US");
+  const when = `${new Date(date).toLocaleString("en-US", { timeZone: "UTC" })} UTC`;
   const total = Object.values(revisions).reduce((sum, n) => sum + n, 0);
   const rows: string[] = [
     row([[`Summary report: document comparison done on ${when}`, true]]),

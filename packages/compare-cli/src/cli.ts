@@ -93,6 +93,7 @@ async function main(): Promise<void> {
   const pdf = typeof flags.pdf === "string" ? flags.pdf : undefined;
   if (pdf && !isFolder(dirname(resolve(pdf)))) throw new Error(`${pdf}: the folder for the PDF does not exist`);
   if (flags["pdf-comments"] && !pdf) throw new UsageError("--pdf-comments needs --pdf FILE");
+  if (pdf && [original, revised, out].some((path) => resolve(path) === resolve(pdf))) throw new UsageError("--pdf FILE must not be an input or the result");
   const pdfPartial = pdf ? `${pdf}.${process.pid}.partial` : undefined;
   const work = mkdtempSync(join(tempDir, "docx-compare-"));
   const cleanUp = (): void => {
