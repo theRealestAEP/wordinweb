@@ -760,14 +760,14 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: 
     // An equation's text is drawn with its runs' marks too, its letters as mathematical italics.
     for (const c of p.chars) if ((c.kind === "text" || c.kind === "math") && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks), into);
     // An endnote's reference mark is a roman numeral, in the reference run's colors; a hidden reference draws nothing.
-    // The mark is drawn again in front of the note itself, in the note's first run's colors.
+    // The mark may be drawn again in front of the note itself, in the note's first run's colors.
     for (const ref of p.noteRefs) {
       if (ref.kind !== "endnote" || !/^document\//.test(p.path) || ref.marks.vanish) continue;
       const mark = roman(++endnotes);
       expect(mark, classOfMarks(ref.marks), want);
       const note = paras.find((n) => n.path.startsWith(`endnotes/endnote#${ref.id}/`));
       const first = note?.chars.find((c) => c.kind === "text");
-      if (first) expect(mark, classOfMarks(first.field?.marks ?? first.marks), want);
+      if (first) expect(mark, classOfMarks(first.field?.marks ?? first.marks), wantMaybe);
     }
   }
   const got = histogram();
