@@ -159,6 +159,14 @@ describe("renderDocxToPdf", () => {
     // "Opening" starts with U+004F.
     expect(cmaps.join("\n")).toMatch(/<[0-9a-f]{4}> <004f>/);
   });
+  it("draws a run that is a soft hyphen alone, underlined, as nothing", async () => {
+    // The soft hyphen shapes to no glyph run; the underline took the first run's face.
+    const body = `<w:p><w:r><w:t>Before</w:t></w:r><w:r><w:rPr><w:u w:val="single"/><w:strike/></w:rPr><w:softHyphen/></w:r><w:r><w:t>after.</w:t></w:r></w:p>`;
+    const { pages, text } = await render(makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}</w:body></w:document>` }));
+    expect(pages).toBe(1);
+    expect(text.trimEnd().endsWith("%%EOF")).toBe(true);
+  });
+
   it("draws Word's underline styles, across spaces unless the style is words", async () => {
     const run = (style: string, text: string): string => `<w:r><w:rPr><w:u w:val="${style}"/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
     const body = `<w:p>${run("single", "x")}${run("single", " ")}${run("words", " ")}${run("words", "y")}</w:p><w:p>${run("wave", "wavy")}</w:p><w:p>${run("dotDash", "dots")}</w:p><w:p>${run("dashLongHeavy", "long")}</w:p>`;

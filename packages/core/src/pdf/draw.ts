@@ -291,6 +291,9 @@ export class PageDrawer {
     // The glyphs in the order they are drawn, left to right.
     const text = item.rtl ? visualOrder(item.text) : item.text;
     const runs = this.fonts.shape(text, font);
+    // A soft hyphen alone shapes to nothing: no glyph to draw, no face to
+    // size an underline by.
+    if (runs.length === 0) return;
     const letterSpacing = props.paintLetterSpacing ?? props.letterSpacing ?? 0;
     // Horizontal scale: w:w character scaling (the advances are already
     // scaled, the glyphs follow), a substitute's width correction, and the
