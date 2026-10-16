@@ -363,6 +363,41 @@ describe("layout engine", () => {
     expect(lineOf(mixed).lineHeight).toBeCloseTo(24, 3);
   });
 
+  it("moves a word that follows an inline picture down whole when it does not fit", () => {
+    // The word is split over two w:t of one run. Whatever the picture's width,
+    // the word stays whole: the picture is a break opportunity before it, and a
+    // run boundary never is (a fuzz case drew "two" after an inline text box
+    // and "zulu" of the same word on the next line).
+    const rels = `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>
+</Relationships>`;
+    const inlineImage = (cx: number) =>
+      `<w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="${cx}" cy="427990"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="427990"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing>`;
+    for (let cx = 1_500_000; cx <= 4_500_000; cx += 100_000) {
+      const { result } = layout({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:t xml:space="preserve">hotel three whiskey juliet</w:t></w:r><w:r>${inlineImage(cx)}</w:r>` +
+            `<w:r><w:t>two</w:t><w:t xml:space="preserve">zulu zulu lima seven</w:t></w:r></w:p>`,
+        ),
+        "word/_rels/document.xml.rels": rels,
+        "word/media/x.png": "PNGDATA",
+      });
+      const two = textItem(result, "two");
+      const zulu = result.pages[0].items.find((i) => i.kind === "text" && i.text === "zulu");
+      if (zulu?.kind !== "text") throw new Error("no zulu");
+      expect(zulu.lineTop, `picture cx=${cx}`).toBe(two.lineTop);
+      expect(zulu.x, `picture cx=${cx}`).toBeCloseTo(two.x + two.width, 1);
+    }
+  });
+
   it("snaps an auto-spaced inline-image line to whole grid pitches", () => {
     const rels = `<?xml version="1.0"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">

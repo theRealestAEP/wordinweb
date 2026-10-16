@@ -2260,10 +2260,15 @@ function breakParagraphImpl(
         }
         // Word never breaks a word at a run boundary: the head (if any, and
         // if it isn't the whole line) moves down with the rest of the word.
+        // An inline object before the head is a break opportunity like a
+        // space: the word after it moves down whole (a fuzz case drew "two"
+        // after an inline text box and "zulu" of the same word on the next
+        // line).
+        const before = cur[hi - 1];
         const breakBeforeHead =
           hi > minSpans &&
           hi < cur.length &&
-          ((cur[hi - 1].isSpace && !cur[hi - 1].noBreak) || cur[hi - 1].breakAfter);
+          ((before.isSpace && !before.noBreak) || before.breakAfter || before.image !== undefined || before.drawing !== undefined);
         const head = breakBeforeHead ? cur.splice(hi) : [];
         for (const h of head) curLineWidth -= h.width;
         // A float in the MIDDLE of the column leaves free space on both sides;
