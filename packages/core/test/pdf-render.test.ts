@@ -5,6 +5,11 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { DocxDocument } from "../src/docx.js";
+import { layoutDocument } from "../src/layout/engine.js";
+import type { TextItem } from "../src/layout/types.js";
+import { FontSet } from "../src/pdf/fonts.js";
+import { NodeMeasurer } from "../src/pdf/measure.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
 import { W_NS, makeDocx } from "./helpers.js";
@@ -175,9 +180,10 @@ describe("renderDocxToPdf", () => {
       .map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1"))
       .filter((s) => s.includes(" Tf"))
       .join("\n");
-    // The four runs of the first line, in order: a single underline covers a space alone; words leaves it out.
+    // The four runs of the first line, in order: "x" and the single-underlined space alone are one span,
+    // ruled once with the span's last item; words leaves its space out.
     const groups = [...ops.matchAll(/^q\n([\s\S]*?)\nQ$/gm)].filter((m) => m[1].includes("BT")).slice(0, 4);
-    expect(groups.map((m) => /ET\n[\d. ]+ re f/.test(m[1]))).toEqual([true, true, false, true]);
+    expect(groups.map((m) => /ET\n[\d. ]+ re f/.test(m[1]))).toEqual([false, true, false, true]);
     // A wave is a stroked curve; dotDash a dash pattern of 3:1:1:1 thicknesses; a heavy long dash twice as thick, 6:1.
     expect(ops).toMatch(/q [\d.]+ w 1 J 0 0 0 RG [\d. ]+ m(?: [\d. ]+ c)+ S Q/);
     const dashes = [...ops.matchAll(/q \[([\d. ]+)\] 0 d ([\d.]+) w/g)].map((m) => ({ pattern: m[1].split(" ").map(Number), width: Number(m[2]) }));
@@ -186,6 +192,104 @@ describe("renderDocxToPdf", () => {
     expect(dotDash.pattern.map((d) => Math.round(d / dotDash.width))).toEqual([3, 1, 1, 1]);
     expect(longHeavy.pattern.map((d) => Math.round(d / longHeavy.width))).toEqual([6, 1]);
     expect(longHeavy.width / dotDash.width).toBeCloseTo(2, 5);
+  });
+
+  describe("continuous decorations", () => {
+    // Word's export of this document: one underline rule per line under an
+    // inserted span, through spaces and across its runs (bold, 18pt), at the
+    // position and thickness of the largest font; one strike rule per run of
+    // words whose rule is the same, so "deleted bold part then" is one rule
+    // and the 18pt words take their own, higher and thicker.
+    const ins = (text: string, extra = ""): string => `<w:r><w:rPr>${extra}<w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const del = (text: string, extra = ""): string => `<w:r><w:rPr>${extra}<w:color w:val="FF0000"/><w:strike/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const plain = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const para = (...runs: string[]): string => `<w:p>${runs.join("")}</w:p>`;
+    const long = "inserted words that run on and on across the right margin so the marked span wraps onto a second line of the paragraph";
+    const body =
+      para(plain("Plain text, then "), ins("inserted words across spaces"), plain(" then plain again.")) +
+      para(plain("Mixed insertion: "), ins("inserted "), ins("bold part", "<w:b/>"), ins(" then "), ins("bigger size", '<w:sz w:val="36"/>'), ins(" end"), plain(".")) +
+      para(plain("Mixed deletion: "), del("deleted "), del("bold part", "<w:b/>"), del(" then "), del("bigger size", '<w:sz w:val="36"/>'), del(" end"), plain(".")) +
+      para(plain("Wrapping: "), ins(long), plain(" and plain to finish.")) +
+      para(plain("Wrapping deletion: "), del(long), plain(" and plain to finish.")) +
+      `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>`;
+    const docx = makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}</w:body></w:document>` });
+
+    /** The PDF's filled rules of one color, in points: x, y (the bottom edge), width, height. A strike is
+     * a group of its own; an underline a bare rect inside a text group, in the fill its own rg line set. */
+    const rulesOf = (ops: string, rgb: string) => {
+      const rules: { x: number; y: number; w: number; h: number }[] = [];
+      let fill = "";
+      for (const line of ops.split("\n")) {
+        let m: RegExpExecArray | null;
+        if ((m = /^q (\S+ \S+ \S+) rg (\S+) (\S+) (\S+) (\S+) re f Q$/.exec(line))) {
+          if (m[1] === rgb) rules.push({ x: Number(m[2]), y: Number(m[3]), w: Number(m[4]), h: Number(m[5]) });
+        } else if ((m = /^(\S+ \S+ \S+) rg$/.exec(line))) fill = m[1];
+        else if ((m = /^(\S+) (\S+) (\S+) (\S+) re f$/.exec(line)) && fill === rgb) rules.push({ x: Number(m[1]), y: Number(m[2]), w: Number(m[3]), h: Number(m[4]) });
+      }
+      return rules;
+    };
+    /** The lines whose items `decorated` picks: each line's decorated extent and baseline, in points, in page order. */
+    const decoratedLines = (decorated: (item: TextItem) => boolean) => {
+      const page = layoutDocument(DocxDocument.load(docx), { measurer: new NodeMeasurer(new FontSet()) }).pages[0];
+      const lines = new Map<number, { x0: number; x1: number; baseline: number }>();
+      for (const item of page.items) {
+        if (item.kind !== "text" || !decorated(item) || item.hanging) continue;
+        const line = lines.get(item.lineTop) ?? { x0: Infinity, x1: -Infinity, baseline: item.baseline };
+        line.x0 = Math.min(line.x0, item.x);
+        line.x1 = Math.max(line.x1, item.x + item.width);
+        lines.set(item.lineTop, line);
+      }
+      return [...lines.values()].map((l) => ({ x0: l.x0 * 0.75, x1: l.x1 * 0.75, baseline: (page.height - l.baseline) * 0.75 }));
+    };
+    const contentOps = async (): Promise<string> => {
+      const { bytes, text } = await render(docx);
+      return [...text.matchAll(/\/Length (\d+) >>\nstream\n/g)]
+        .map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1"))
+        .filter((s) => s.includes(" Tf"))
+        .join("\n");
+    };
+
+    it("underlines an inserted span with one rule per line, from its first glyph to its last, sized by its largest font", async () => {
+      const ops = await contentOps();
+      const lines = decoratedLines((item) => item.props.underline === "single");
+      expect(lines).toHaveLength(4); // the plain insertion, the mixed one, the wrapped one's two lines
+      const blue = rulesOf(ops, "0 0 1");
+      const perLine = lines.map((line) => blue.filter((r) => r.y < line.baseline && r.y > line.baseline - 9));
+      for (const [i, rules] of perLine.entries()) {
+        expect(rules, `line ${i}`).toHaveLength(1);
+        expect(rules[0].x).toBeCloseTo(lines[i].x0, 1);
+        expect(rules[0].x + rules[0].w).toBeCloseTo(lines[i].x1, 1);
+      }
+      // The mixed line's rule sits where the 18pt words put it: lower and thicker than a 12pt line's.
+      const [plainRule, mixedRule] = [perLine[0][0], perLine[1][0]];
+      expect(lines[1].baseline - mixedRule.y).toBeGreaterThan(lines[0].baseline - plainRule.y);
+      expect(mixedRule.h).toBeGreaterThan(plainRule.h);
+    });
+
+    it("strikes a deleted span with one rule per line while the rule stays the same, through spaces and run boundaries", async () => {
+      const ops = await contentOps();
+      const lines = decoratedLines((item) => item.props.strike === true);
+      expect(lines).toHaveLength(3); // the mixed deletion, the wrapped one's two lines
+      const red = rulesOf(ops, "1 0 0");
+      const perLine = lines.map((line) => red.filter((r) => r.y > line.baseline && r.y < line.baseline + 14).sort((a, b) => a.x - b.x));
+      // 12pt regular and bold, then the 18pt words, then 12pt again: three adjacent rules, the middle one higher and thicker.
+      const mixed = perLine[0];
+      expect(mixed).toHaveLength(3);
+      expect(mixed[0].x).toBeCloseTo(lines[0].x0, 1);
+      expect(mixed[0].x + mixed[0].w).toBeCloseTo(mixed[1].x, 1);
+      expect(mixed[1].x + mixed[1].w).toBeCloseTo(mixed[2].x, 1);
+      expect(mixed[2].x + mixed[2].w).toBeCloseTo(lines[0].x1, 1);
+      expect(mixed[1].y).toBeGreaterThan(mixed[0].y);
+      expect(mixed[1].h).toBeGreaterThan(mixed[0].h);
+      expect(mixed[2].y).toBe(mixed[0].y);
+      expect(mixed[2].h).toBe(mixed[0].h);
+      // The wrapped deletion: one rule on each of its lines.
+      for (const i of [1, 2]) {
+        expect(perLine[i], `line ${i}`).toHaveLength(1);
+        expect(perLine[i][0].x).toBeCloseTo(lines[i].x0, 1);
+        expect(perLine[i][0].x + perLine[i][0].w).toBeCloseTo(lines[i].x1, 1);
+      }
+    });
   });
 
   it("reports fonts no directory holds and characters no font has", async () => {

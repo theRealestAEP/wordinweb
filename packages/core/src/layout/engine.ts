@@ -262,6 +262,18 @@ type ResolvedFrame = NonNullable<ParaProps["frame"]> & {
   wrap: "around" | "auto" | "notBeside" | "through" | "tight" | "none";
 };
 
+/** A strike rule being joined across a line's spans (see emitLine). */
+interface StrikeRun {
+  /** The last span joined, by index in the line. */
+  index: number;
+  x0: number;
+  x1: number;
+  yMid: number;
+  size: number;
+  double: boolean;
+  fill: string;
+}
+
 interface InternalPage {
   items: PageItem[];
   /** Text-box lines hidden past a noAutofit box's bottom edge; see
@@ -5518,7 +5530,8 @@ class Engine {
       if (span.noteId !== undefined && page.physIndex !== -1) this.registerFootnote(span.noteId, page);
     }
     this.emitRunBorders(line, page, originX, topY, baseline);
-    for (const span of line.spans) {
+    const strikes: StrikeRun[] = [];
+    for (const [spanIndex, span] of line.spans.entries()) {
       if (span.math) {
         const bx = originX + span.x;
         for (const piece of span.math.pieces) {
@@ -5842,21 +5855,22 @@ class Engine {
       // Word draws strikethrough centered 0.216em above the baseline with a
       // ~0.75pt rule (measured from the benchmark reference); CSS
       // line-through sits noticeably higher, so we paint our own.
-      // Across spaces too, as Word strikes a run whole.
+      // Across spaces and run boundaries too: Word rules a struck span with
+      // one line while the rule stays the same (its export joins "deleted
+      // bold part then", 12pt regular and bold, and rules 18pt words on
+      // their own, higher and thicker). The rules are pushed after the loop.
       if ((span.props.strike || span.props.doubleStrike) && span.text && !span.hanging) {
         const size = span.font.size;
-        const thick = Math.max(0.75, size * 0.045);
+        const x = originX + span.x;
         const yMid = b - size * 0.216;
-        const offs = span.props.doubleStrike ? [-size * 0.06, size * 0.06] : [0];
-        for (const o of offs) {
-          page.items.push({
-            kind: "rect",
-            x: originX + span.x,
-            y: yMid + o - thick / 2,
-            width: span.width,
-            height: thick,
-            fill: span.props.color && span.props.color !== "auto" ? span.props.color : "#000000",
-          });
+        const double = span.props.doubleStrike === true;
+        const fill = span.props.color && span.props.color !== "auto" ? span.props.color : "#000000";
+        const last = strikes[strikes.length - 1];
+        if (last && last.index === spanIndex - 1 && Math.abs(last.x1 - x) < 1 && last.yMid === yMid && last.size === size && last.double === double && last.fill === fill) {
+          last.index = spanIndex;
+          last.x1 = x + span.width;
+        } else {
+          strikes.push({ index: spanIndex, x0: x, x1: x + span.width, yMid, size, double, fill });
         }
       }
 
@@ -5947,6 +5961,12 @@ class Engine {
           glyphTop: rtBaseline - rtm.ascent,
           glyphBoxH: rtm.ascent + rtm.descent,
         });
+      }
+    }
+    for (const s of strikes) {
+      const thick = Math.max(0.75, s.size * 0.045);
+      for (const o of s.double ? [-s.size * 0.06, s.size * 0.06] : [0]) {
+        page.items.push({ kind: "rect", x: s.x0, y: s.yMid + o - thick / 2, width: s.x1 - s.x0, height: thick, fill: s.fill });
       }
     }
   }

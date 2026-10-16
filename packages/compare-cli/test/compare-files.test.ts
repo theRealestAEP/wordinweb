@@ -967,8 +967,9 @@ describe("the printable copy's marks", () => {
     expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
     expect(xml).toContain('<w:rPr><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><w:t xml:space="preserve">2025</w:t>');
     expect(xml).toContain('<w:rPr><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">2026</w:t>');
-    // Drawn as marked text, not as a recomputed page number or today's date.
-    expect(strikes(ops, RED)).toBe(3);
+    // Drawn as marked text, not as a recomputed page number or today's date: the deleted
+    // "1" and the space after it share one strike rule, "2025" takes the other.
+    expect(strikes(ops, RED)).toBe(2);
     expect(textGroups(ops, BLUE)).toEqual([{ underlined: true }]);
   });
 

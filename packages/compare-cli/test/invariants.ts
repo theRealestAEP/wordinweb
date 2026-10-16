@@ -667,6 +667,21 @@ export function pdfItems(path: string): Item[] {
         if (Number(rh) < 3) rules.push({ color: c, x: Number(rx), y: Number(ry), w: Number(rw), h: Number(rh) });
         continue;
       }
+      // A stroked rule of its own (a dashed, dotted or wavy underline): its color, its path's left end and extent, its width.
+      const stroked = /^q(?: \/\w+ gs)?(?: \[[\d. ]*\] 0 d)? (\S+) w(?: 1 J)? (\S+ \S+ \S+) RG (.*) S Q$/.exec(line);
+      if (stroked) {
+        const tokens = stroked[3].split(" ");
+        const xs: number[] = [];
+        let operands: number[] = [];
+        for (const token of tokens) {
+          if (/^[mlc]$/.test(token)) {
+            for (let i = 0; i < operands.length; i += 2) xs.push(operands[i]);
+            operands = [];
+          } else operands.push(Number(token));
+        }
+        rules.push({ color: stroked[2], x: Math.min(...xs), y: Number(tokens[1]), w: Math.max(...xs) - Math.min(...xs), h: Number(stroked[1]) });
+        continue;
+      }
       const opened = /^q(?: \/\w+ gs)?(?: (\S+ \S+ \S+) rg)?$/.exec(line);
       if (opened) {
         stack.push(color);
@@ -697,14 +712,21 @@ export function pdfItems(path: string): Item[] {
         if (line.endsWith("Tj")) for (let i = 0; i < m[1].length; i += 4) text += font?.get(parseInt(m[1].slice(i, i + 4), 16)) ?? "";
         group.push({ text, color, underlined: false, struck: false, x, y, size });
       } else if (/( re f| S Q| S)$/.test(line) && group.length) {
-        // A rule after the text in its group, filled or stroked (dashed, wavy): the underline.
+        // A rule after the text in its group, filled or stroked (dashed, wavy): the underline. One rule
+        // covers a whole span of items (the earlier ones in groups of their own), so it is a rule too.
         for (const item of group) item.underlined = true;
+        const filled = /^(\S+) (\S+) (\S+) (\S+) re f$/.exec(line);
+        if (filled) rules.push({ color, x: Number(filled[1]), y: Number(filled[2]), w: Number(filled[3]), h: Number(filled[4]) });
       }
     }
     pending.push(...group);
     for (const item of pending) {
-      // A strike rule: the item's color, starting at its origin, above its baseline.
-      item.struck = rules.some((r) => r.color === item.color && Math.abs(r.x - item.x) < 1.5 && r.y > item.y && r.y < item.y + item.size);
+      // A rule of the item's color that reaches over the item's start (one
+      // rule covers a whole span of items): a strike above the baseline, an
+      // underline just below it.
+      const over = (r: (typeof rules)[number]): boolean => r.color === item.color && r.x <= item.x + 0.5 && r.x + r.w > item.x + 0.1;
+      item.struck = rules.some((r) => over(r) && r.y > item.y && r.y < item.y + item.size);
+      item.underlined ||= rules.some((r) => over(r) && r.y < item.y && r.y > item.y - item.size * 0.5);
       items.push({ text: item.text, color: item.color, underlined: item.underlined, struck: item.struck });
     }
   }

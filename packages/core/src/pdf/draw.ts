@@ -84,6 +84,8 @@ export class PageDrawer {
   /** Parts of images this page draws: XObject name by part. */
   readonly images = new Map<string, string>();
   private readonly sheetHeight: number;
+  /** Each underlined text item's span: the items one continuous underline covers (see collectUnderlines). */
+  private readonly underlineOf = new Map<TextItem, TextItem[]>();
 
   constructor(
     readonly fonts: FontSet,
@@ -116,7 +118,103 @@ export class PageDrawer {
       .map((item, index) => ({ item, index, layer: layer(item) }))
       .filter(({ item }) => item.kind !== "grip" && item.kind !== "drawingHit")
       .sort((a, b) => a.layer - b.layer || a.index - b.index);
+    this.collectUnderlines(items.map(({ item }) => item));
     for (const { item } of items) this.drawItem(item, picture);
+  }
+
+  /**
+   * Group the page's underlined text items into spans: the adjacent items of
+   * one line with the same underline style and color are one span. Word
+   * underlines an inserted span with one unbroken rule from its first to its
+   * last character on each line, through spaces and across runs of different
+   * formatting; a rule per item left gaps and steps. Rotated and scaled (math)
+   * items keep their own underline.
+   */
+  private collectUnderlines(items: PageItem[]): void {
+    let span: TextItem[] = [];
+    let key = "";
+    for (const item of items) {
+      // A soft hyphen alone draws nothing (fonts.ts skips U+00AD), so it is no part of a span.
+      if (item.kind !== "text" || item.hidden || !item.text.replace(/\u00AD/g, "")) continue;
+      const style = this.underlineStyle(item);
+      if (!style || item.rotate || item.mathScaleX || item.mathScaleY) {
+        span = [];
+        continue;
+      }
+      const c = this.textColor(item);
+      const itemKey = `${style}|${c.r},${c.g},${c.b},${c.a}|${item.lineTop.toFixed(2)}`;
+      const last = span[span.length - 1];
+      if (!last || itemKey !== key || Math.abs(item.x - (last.x + last.width)) > 1) {
+        span = [];
+        key = itemKey;
+      }
+      span.push(item);
+      this.underlineOf.set(item, span);
+    }
+  }
+
+  /** The underline an item draws, if any: a hung trailing space draws none, nor a space under w:u words. */
+  private underlineStyle(item: TextItem): string | undefined {
+    const u = item.props.underline;
+    if (!u || u === "none" || item.hanging || (u === "words" && !item.text.trim())) return undefined;
+    return u;
+  }
+
+  /** The color an item's glyphs and decorations take: its own, a link's blue, or black. */
+  private textColor(item: TextItem): Rgb {
+    const props = item.props;
+    return parseColor(props.color && props.color !== "auto" ? props.color : item.href && !props.color ? "#0563c1" : "#000000") ?? { r: 0, g: 0, b: 0, a: 1 };
+  }
+
+  /**
+   * The operators of one underline under `items`, a span on one line: a rule
+   * from the first item's start to the last item's end, at the position and
+   * thickness of the span's largest font, as Word rules it (its export of
+   * "inserted bold part then bigger size then Arial face end", 12pt with
+   * 18pt words, is one 0.5pt rule 1.25pt under the baseline, where a 12pt
+   * line alone takes a 0.25pt rule at 0.75pt). The operators go inside the
+   * group of the span's last item, whose fill is the span's color.
+   */
+  private underlineOps(items: TextItem[]): string[] {
+    const lead = items.reduce((a, b) => (b.font.size > a.font.size ? b : a));
+    const runs = this.fonts.shape(lead.rtl ? visualOrder(lead.text) : lead.text, lead.font);
+    if (runs.length === 0) return [];
+    const face = runs[0].face.face;
+    const size = lead.font.size;
+    const unit = size / face.unitsPerEm;
+    const base = Math.max(face.underlineThickness * unit, 0.75);
+    const top = lead.baseline - face.underlinePosition * unit;
+    const style = lead.props.underline ?? "single";
+    const color = this.textColor(lead);
+    const x0 = Math.min(...items.map((i) => i.x));
+    const x1 = Math.max(...items.map((i) => i.x + i.width));
+    // Word's names: a *Heavy or thick line is twice as thick; the dashes
+    // and dots are multiples of the thickness; the waves a sine of it.
+    const thickness = /Heavy$/.test(style) || style === "thick" ? base * 2 : base;
+    const plain = style.replace(/Heavy$/, "");
+    const draw = (y: number): string => `${this.rect(x0, y, x1 - x0, thickness)} f`;
+    const dashes = UNDERLINE_DASHES[plain];
+    if (style === "double") return [draw(top), draw(top + thickness * 2)];
+    if (dashes) {
+      const y = this.y(top + thickness / 2);
+      return [`q [${dashes.map((d) => num(d * thickness * PT)).join(" ")}] 0 d ${num(thickness * PT)} w ${rgbOp(color, true)} ${num(this.x(x0))} ${num(y)} m ${num(this.x(x1))} ${num(y)} l S Q`];
+    }
+    if (plain === "wave" || plain === "wavyDouble") {
+      const wave = (yMid: number): string => {
+        const period = Math.max(4 * thickness, 3);
+        const parts = [`${num(this.x(x0))} ${num(this.y(yMid))} m`];
+        for (let xa = x0; xa < x1; xa += period) {
+          const xb = Math.min(xa + period, x1);
+          const q = (xb - xa) / 4;
+          parts.push(`${num(this.x(xa + q))} ${num(this.y(yMid - thickness))} ${num(this.x(xa + 3 * q))} ${num(this.y(yMid + thickness))} ${num(this.x(xb))} ${num(this.y(yMid))} c`);
+        }
+        return parts.join(" ");
+      };
+      const yMid = top + thickness;
+      const waves = plain === "wavyDouble" ? [yMid, yMid + thickness * 3] : [yMid];
+      return [`q ${num(thickness * PT)} w 1 J ${rgbOp(color, true)} ${waves.map(wave).join(" ")} S Q`];
+    }
+    return [draw(top)];
   }
 
   drawItem(item: PageItem, picture: (part: string) => Picture | null): void {
@@ -285,7 +383,7 @@ export class PageDrawer {
   private drawText(item: TextItem): void {
     if (item.hidden || !item.text) return;
     const props = item.props;
-    const color = parseColor(props.color && props.color !== "auto" ? props.color : item.href && !props.color ? "#0563c1" : "#000000") ?? { r: 0, g: 0, b: 0, a: 1 };
+    const color = this.textColor(item);
     const font = item.font;
     const size = font.size;
     // The glyphs in the order they are drawn, left to right.
@@ -334,40 +432,11 @@ export class PageDrawer {
       }
       ops.push(rgbOp(color, false));
       this.showGlyphs(ops, runs, item, size, letterSpacing, hscale, 0, 0, mode, lineWidth);
-      // Spaces in an underlined run are underlined too, as Word does; only
-      // w:u val="words" leaves them out.
-      if (props.underline && props.underline !== "none" && !item.hanging && (props.underline !== "words" || item.text.trim())) {
-        const face = runs[0].face.face;
-        const unit = size / face.unitsPerEm;
-        const base = Math.max(face.underlineThickness * unit, 0.75);
-        const top = item.baseline - face.underlinePosition * unit;
-        const style = props.underline;
-        // Word's names: a *Heavy or thick line is twice as thick; the dashes
-        // and dots are multiples of the thickness; the waves a sine of it.
-        const thickness = /Heavy$/.test(style) || style === "thick" ? base * 2 : base;
-        const plain = style.replace(/Heavy$/, "");
-        const draw = (y: number): string => `${this.rect(item.x, y, item.width, thickness)} f`;
-        const dashes = UNDERLINE_DASHES[plain];
-        if (style === "double") ops.push(draw(top), draw(top + thickness * 2));
-        else if (dashes) {
-          const y = this.y(top + thickness / 2);
-          ops.push(`q [${dashes.map((d) => num(d * thickness * PT)).join(" ")}] 0 d ${num(thickness * PT)} w ${rgbOp(color, true)} ${num(this.x(item.x))} ${num(y)} m ${num(this.x(item.x + item.width))} ${num(y)} l S Q`);
-        } else if (plain === "wave" || plain === "wavyDouble") {
-          const wave = (yMid: number): string => {
-            const period = Math.max(4 * thickness, 3);
-            const parts = [`${num(this.x(item.x))} ${num(this.y(yMid))} m`];
-            for (let x0 = item.x; x0 < item.x + item.width; x0 += period) {
-              const x1 = Math.min(x0 + period, item.x + item.width);
-              const q = (x1 - x0) / 4;
-              parts.push(`${num(this.x(x0 + q))} ${num(this.y(yMid - thickness))} ${num(this.x(x0 + 3 * q))} ${num(this.y(yMid + thickness))} ${num(this.x(x1))} ${num(this.y(yMid))} c`);
-            }
-            return parts.join(" ");
-          };
-          const yMid = top + thickness;
-          const waves = plain === "wavyDouble" ? [yMid, yMid + thickness * 3] : [yMid];
-          ops.push(`q ${num(thickness * PT)} w 1 J ${rgbOp(color, true)} ${waves.map(wave).join(" ")} S Q`);
-        } else ops.push(draw(top));
-      }
+      // The underline: one rule under the whole span this item ends (see
+      // collectUnderlines); an item outside any span (rotated, scaled math)
+      // takes its own.
+      const span = this.underlineOf.get(item);
+      if (span ? span[span.length - 1] === item : this.underlineStyle(item)) ops.push(...this.underlineOps(span ?? [item]));
       ops.push("Q");
       this.ops.push(ops.join("\n"));
     });
