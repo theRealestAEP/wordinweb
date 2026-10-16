@@ -838,6 +838,20 @@ describe("the printable copy's marks", () => {
     expect(rules.filter(([x1, y1, x2, y2]) => x1 === x2 && y1 !== y2)).toHaveLength(1);
   });
 
+  it("marks an equation's runs through their w:rPr, and draws the marks", async () => {
+    const M = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"';
+    const math = (t: string): string =>
+      `<w:p><w:r><w:t xml:space="preserve">Formula: </w:t></w:r><m:oMath ${M}><m:r><m:rPr><m:sty m:val="p"/></m:rPr><w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/></w:rPr><m:t>${t}</m:t></m:r></m:oMath></w:p>`;
+    const { xml, ops } = await compared("marks-math", docx(math("a+b=c")), docx(math("a+b=d")));
+    // The marks sit in the math run's w:rPr, after its m:rPr, which stays as it was.
+    expect(xml).toContain('<m:r><m:rPr><m:sty m:val="p"/></m:rPr><w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><m:t>a+b=c</m:t></m:r>');
+    expect(xml).toContain('<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><m:t>a+b=d</m:t>');
+    // Each equation piece is drawn in its mark's color: struck red, underlined blue.
+    expect(textGroups(ops, RED).length).toBeGreaterThan(2);
+    expect(strikes(ops, RED)).toBeGreaterThan(2);
+    expect(textGroups(ops, BLUE).filter((g) => g.underlined).length).toBeGreaterThan(2);
+  });
+
   it("marks a nested table's text in an inserted or a deleted row", async () => {
     const cell = (body: string): string => `<w:tc><w:tcPr/>${body}</w:tc>`;
     const inner = `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1500"/></w:tblGrid><w:tr>${cell(para("NESTEDTEXT"))}</w:tr></w:tbl>`;

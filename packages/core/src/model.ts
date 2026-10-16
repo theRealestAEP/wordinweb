@@ -319,6 +319,11 @@ export type MathNode = (
       /** m:func function name (cos, log, …): Word kerns a thin space on
        * both sides of the name. */
       fname?: boolean;
+      /** The run's w:rPr color (hex, no #), strike and underline, when set:
+       * a redline marks an equation's runs with them. */
+      color?: string;
+      strike?: boolean;
+      underline?: string;
     }
   | { t: "sup" | "sub"; base: MathNode[]; script: MathNode[] }
   | { t: "frac"; num: MathNode[]; den: MathNode[]; bar?: boolean }

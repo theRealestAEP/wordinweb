@@ -344,6 +344,18 @@ function parseOmml(el: XmlElement): ParsedMathNode[] {
     );
     const runs = el.children.flatMap((ch) => (localName(ch.name) === "rPr" ? [] : parseOmml(ch)));
     if (normal) for (const run of runs) if (run.t === "run") run.normal = true;
+    // The run's w:rPr (beside m:rPr): a redline's color, strike and underline.
+    const wRPr = el.children.find((ch) => ch.name === "w:rPr" || (localName(ch.name) === "rPr" && !ch.name.startsWith("m:") && ch.name !== "rPr"));
+    if (wRPr) {
+      const marks: { color?: string; strike?: boolean; underline?: string } = {};
+      const color = attr(child(wRPr, "color"), "val");
+      if (color && color !== "auto") marks.color = color;
+      const strike = child(wRPr, "strike");
+      if (strike) marks.strike = !["0", "false", "off"].includes(attr(strike, "val") ?? "");
+      const u = attr(child(wRPr, "u"), "val");
+      if (u && u !== "none") marks.underline = u;
+      if (Object.keys(marks).length) for (const run of runs) if (run.t === "run") Object.assign(run, marks);
+    }
     return runs;
   }
   if (ln === "br") return [{ t: "break" }];

@@ -106,10 +106,12 @@ function contains(node: XmlElement, names: Set<string>): boolean {
   return names.has(localName(node.name)) || node.children.some((c) => contains(c, names));
 }
 
+/** The element's w: properties, made when missing: after an m:r's own m:rPr. */
 function propertiesOf(element: XmlElement, local: "pPr" | "rPr"): XmlElement {
-  const existing = child(element, local);
+  const existing = element.children.find((c) => c.name === `w:${local}`);
   if (existing) return existing;
   const created = nodes(`<w:${local}/>`)[0];
-  element.children.unshift(created);
+  const own = element.children.findIndex((c) => c.name === `m:${local}`);
+  element.children.splice(own + 1, 0, created);
   return created;
 }

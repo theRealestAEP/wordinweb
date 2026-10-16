@@ -192,6 +192,10 @@ export interface MathPiece {
    * do not grow enclosing delimiters (Word keeps regular parens around
    * A_l p^l sums, dense (0.8)). */
   script?: boolean;
+  /** The run's color, strike and underline (a redline's marks), when set. */
+  color?: string;
+  strike?: boolean;
+  underline?: string;
   /** Cached line extents (main-baseline relative), filled by layoutMath so
    * wrapDisplayMath can re-derive per-segment ascent/descent. */
   effAscent?: number;
@@ -527,6 +531,15 @@ export function layoutMath(
   return box;
 }
 
+/** A run node's color, strike and underline, for the pieces it becomes. */
+function marks(node: { color?: string; strike?: boolean; underline?: string }): Pick<MathPiece, "color" | "strike" | "underline"> {
+  const out: Pick<MathPiece, "color" | "strike" | "underline"> = {};
+  if (node.color) out.color = node.color;
+  if (node.strike) out.strike = true;
+  if (node.underline) out.underline = node.underline;
+  return out;
+}
+
 /** Append nodes at the current box width on baseline offset `dy`.
  * `tight` suppresses ALL operator spacing - Word only spaces operators in
  * limit positions glyph-to-glyph, so n-ary sub/sup limits set tight
@@ -561,7 +574,7 @@ function flow(
         // not ordinary Cambria Math word spaces. Taylor's two authored spaces
         // between "+…," and "-∞<x<∞" therefore occupy exactly two ems.
         if (node.normal && /^\s+$/.test(node.text)) {
-          box.pieces.push({ text: node.text, x: box.width, dy, font });
+          box.pieces.push({ text: node.text, x: box.width, dy, font, ...marks(node) });
           box.width += [...node.text].length * size;
           break;
         }
@@ -572,7 +585,7 @@ function flow(
           const gap = size * FUNC_NAME_SPACE;
           if (prevOperand) box.width += gap;
           const text = mathText(node.text, node.normal);
-          box.pieces.push({ text, x: box.width, dy, font });
+          box.pieces.push({ text, x: box.width, dy, font, ...marks(node) });
           box.width += measurer.width(text, font) + gap;
           prevOperand = true;
           break;
@@ -598,7 +611,7 @@ function flow(
           // gap, not 3 spaces + the kern).
           if (tok === "," || tok === ";") {
             const text = mathText(tok, node.normal);
-            box.pieces.push({ text, x: box.width, dy, font });
+            box.pieces.push({ text, x: box.width, dy, font, ...marks(node) });
             box.width += measurer.width(text, font);
             const nextIsSpace = ti + 1 < toks.length && /^\s/.test(toks[ti + 1]);
             const spacedSemicolon =
@@ -625,7 +638,7 @@ function flow(
             (box.breaks ??= []).push(box.width);
           }
           const text = mathText(tok, node.normal);
-          box.pieces.push({ text, x: box.width, dy, font });
+          box.pieces.push({ text, x: box.width, dy, font, ...marks(node) });
           box.width += measurer.width(text, font);
           if (spaced) box.width += gap;
           // Operators (unary or binary) are not a left operand for the next

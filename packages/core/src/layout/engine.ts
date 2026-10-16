@@ -5489,13 +5489,24 @@ class Engine {
         const bx = originX + span.x;
         for (const piece of span.math.pieces) {
           const m = this.measurer.metrics(piece.font);
+          const width = this.measurer.width(piece.text, piece.font);
+          // A redline's marks on an equation's runs: the color and underline
+          // as text properties, the strike as a rule like a run's.
+          const props: RunProps = {};
+          if (piece.color) props.color = `#${piece.color}`;
+          if (piece.underline) props.underline = piece.underline;
+          if (piece.strike && piece.text.trim()) {
+            const size = piece.font.size;
+            const thick = Math.max(0.75, size * 0.045);
+            page.items.push({ kind: "rect", x: bx + piece.x, y: baseline - piece.dy - size * 0.216 - thick / 2, width, height: thick, fill: props.color ?? "#000000" });
+          }
           page.items.push({
             kind: "text",
             x: bx + piece.x,
             baseline: baseline - piece.dy,
-            width: this.measurer.width(piece.text, piece.font),
+            width,
             text: piece.text,
-            props: {},
+            props,
             font: piece.font,
             lineTop: topY,
             lineHeight: line.height,
