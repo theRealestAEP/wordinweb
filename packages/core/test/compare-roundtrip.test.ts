@@ -667,6 +667,99 @@ describe("compareDocuments — headers, footers and notes", () => {
       expect(texts(rejected)).toEqual(texts(original));
       expect(texts(accepted)).toEqual({ ...texts(revised), "footer:default": "" });
     });
+
+    // FAILURE MODE: a revised last section that reuses an earlier section's
+    // header (A/B became A/A) compared with zero changes, and header B vanished.
+    describe("two sections, the last one's header reused from the first", () => {
+      /** Two sections over the header `parts`: the first section references
+       * part `first`, the last part `last` (none of its own when null, so it
+       * shows the first's). */
+      const twoSections = (parts: string[], first: number, last: number | null) =>
+        DocxDocument.load(
+          makeDocx({
+            "word/document.xml":
+              `<w:document ${W_NS} ${R}><w:body>` +
+              `<w:p><w:pPr><w:sectPr><w:headerReference w:type="default" r:id="rId${first + 1}"/></w:sectPr></w:pPr><w:r><w:t>Section one.</w:t></w:r></w:p>` +
+              `<w:p><w:r><w:t>Section two.</w:t></w:r></w:p>` +
+              `<w:sectPr>${last === null ? "" : `<w:headerReference w:type="default" r:id="rId${last + 1}"/>`}</w:sectPr></w:body></w:document>`,
+            "word/_rels/document.xml.rels":
+              `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+              parts.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header${i + 1}.xml"/>`).join("") +
+              `</Relationships>`,
+            ...Object.fromEntries(parts.map((text, i) => [`word/header${i + 1}.xml`, `<w:hdr ${W_NS}><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:hdr>`])),
+          }),
+        );
+      /** The header text each section shows, in order: its own, else the previous section's. */
+      const sectionHeaders = (doc: DocxDocument): string[] => {
+        const d = DocxDocument.load(doc.save());
+        const xml = d.pkg.text("word/document.xml") ?? "";
+        let shown = "";
+        return [...xml.matchAll(/<w:sectPr>([\s\S]*?)<\/w:sectPr>/g)].map((m) => {
+          const ref = /<w:headerReference [^>]*r:id="(\w+)"/.exec(m[1]);
+          if (ref) {
+            const target = d.documentRels.get(ref[1])?.target ?? "";
+            shown = [...(d.pkg.text(target) ?? "").matchAll(/<w:t[^>]*>([^<]*)/g)].map((x) => x[1]).join("").replace(/\s+/g, " ").trim();
+          }
+          return shown;
+        });
+      };
+
+      it("tracks the last section's header change as a revision of a part of its own", () => {
+        const { notes, counts, accepted, rejected } = compare(twoSections(["HEADER A", "HEADER B"], 0, 1), twoSections(["HEADER A"], 0, 0));
+        expect([counts("deletion"), counts("insertion")]).toEqual([1, 1]);
+        expect(notes).toEqual([]);
+        expect(sectionHeaders(accepted)).toEqual(["HEADER A", "HEADER A"]);
+        expect(sectionHeaders(rejected)).toEqual(["HEADER A", "HEADER B"]);
+      });
+
+      it("tracks the reverse change, from a shared header to one of its own", () => {
+        const { counts, accepted, rejected } = compare(twoSections(["HEADER A"], 0, 0), twoSections(["HEADER A", "HEADER B"], 0, 1));
+        expect([counts("deletion"), counts("insertion")]).toEqual([1, 1]);
+        expect(sectionHeaders(accepted)).toEqual(["HEADER A", "HEADER B"]);
+        expect(sectionHeaders(rejected)).toEqual(["HEADER A", "HEADER A"]);
+      });
+
+      it("reports nothing when both sections share the same header on both sides", () => {
+        const { counts } = compare(twoSections(["HEADER A"], 0, 0), twoSections(["HEADER A"], 0, 0));
+        expect([counts("deletion"), counts("insertion")]).toEqual([0, 0]);
+      });
+
+      it("tracks a last section linked to the previous one (its own header reference gone)", () => {
+        const { counts, accepted, rejected } = compare(twoSections(["HEADER A", "HEADER B"], 0, 1), twoSections(["HEADER A"], 0, null));
+        expect([counts("deletion"), counts("insertion")]).toEqual([1, 1]);
+        expect(sectionHeaders(accepted)).toEqual(["HEADER A", "HEADER A"]);
+        expect(sectionHeaders(rejected)).toEqual(["HEADER A", "HEADER B"]);
+      });
+
+      it("tracks two sections' headers swapped, in the last section's part", () => {
+        const { counts, accepted, rejected } = compare(twoSections(["HEADER A", "HEADER B"], 0, 1), twoSections(["HEADER A", "HEADER B"], 1, 0));
+        expect([counts("deletion"), counts("insertion")]).toEqual([2, 2]);
+        expect(sectionHeaders(accepted)).toEqual(["HEADER B", "HEADER A"]);
+        expect(sectionHeaders(rejected)).toEqual(["HEADER A", "HEADER B"]);
+      });
+
+      it("keeps a part's original content when its new content is another part's", () => {
+        // The first section's header became the last's text: a text change
+        // in its own part, paired by section, however alike the parts are.
+        const { counts, accepted, rejected } = compare(twoSections(["HEADER A", "HEADER B"], 0, 1), twoSections(["HEADER B", "HEADER B"], 0, 1));
+        expect([counts("deletion"), counts("insertion")]).toEqual([1, 1]);
+        expect(sectionHeaders(accepted)).toEqual(["HEADER B", "HEADER B"]);
+        expect(sectionHeaders(rejected)).toEqual(["HEADER A", "HEADER B"]);
+      });
+    });
+
+    it("notes a settings change no revision can carry", () => {
+      const settings = (on: boolean) => `<w:settings ${W_NS}>${on ? "<w:evenAndOddHeaders/>" : ""}</w:settings>`;
+      const build = (on: boolean) => DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(para("Body text.")), "word/settings.xml": settings(on) }));
+      const notes: CompareNote[] = [];
+      compareDocuments(build(false), build(true), { author: AUTHOR, date: DATE, onNote: (n) => notes.push(n) });
+      expect(notes.filter((n) => n.code === "settings").map((n) => n.detail)).toEqual([
+        "the settings' w:evenAndOddHeaders was turned on (even pages show the even-page header and footer); no revision carries a setting, so reject-all keeps it on",
+      ]);
+      const none: CompareNote[] = [];
+      compareDocuments(build(true), build(true), { author: AUTHOR, date: DATE, onNote: (n) => none.push(n) });
+      expect(none.filter((n) => n.code === "settings")).toEqual([]);
+    });
   });
 });
 

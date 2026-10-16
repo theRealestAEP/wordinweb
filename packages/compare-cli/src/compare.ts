@@ -14,6 +14,7 @@ import {
   applyMarkStep,
   compareContext,
   compareHeadersFooters,
+  compareSettings,
   compareLastSection,
   compareNotes,
   compareRow,
@@ -169,6 +170,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
 
     compareHeadersFooters(O.shell, R.shell, headerFooterPairs, ctx);
     compareLastSection(O.shell, R.shell, ctx);
+    compareSettings(O.shell, R.shell, ctx);
 
     // The body's revisions were counted as it was written; the rest are in
     // the shell (headers, footers) and in the notes the compare changed.

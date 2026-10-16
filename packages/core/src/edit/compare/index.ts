@@ -97,6 +97,8 @@ export interface CompareNote {
     | "unresolved-relationship"
     /** The last section gained or lost a header or footer; the reference is not a revision, so one review leaves it empty. */
     | "header-footer-reference"
+    /** A document setting differs (w:evenAndOddHeaders, w:mirrorMargins); no revision carries it, so the result keeps the revised one. */
+    | "settings"
     /** An input held tracked changes; it was compared as if they were accepted. */
     | "existing-revisions-accepted";
   detail: string;
@@ -211,6 +213,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
 
   compareHeadersFooters(original, merged, headerFooterPairs, ctx);
   compareLastSection(original, merged, ctx);
+  compareSettings(original, merged, ctx);
 
   if (issued > 0) merged.refresh();
   return merged;
@@ -263,6 +266,10 @@ export interface HeaderFooterPair {
   type: "default" | "first" | "even";
   from: string | null;
   into: string | null;
+  /** An original section shows `into` too, or it is paired with another
+   * original part already: the last section's change goes into a copy of
+   * it that the last section alone references. */
+  shared?: true;
 }
 
 /**
@@ -307,14 +314,14 @@ export function pairHeadersFooters(
   const theirs = refs(original);
   const mine = refs(merged);
   const pairs: HeaderFooterPair[] = [];
-  const paired = { from: new Set<string>(), into: new Set<string>() };
+  const paired = { from: new Set<string>(), into: new Map<string, string>() };
   const parse = (key: string): Pick<HeaderFooterPair, "kind" | "type"> => {
     const [, ln, type] = key.split(":");
     return { kind: ln === "headerReference" ? "header" : "footer", type: type as HeaderFooterPair["type"] };
   };
   const pair = (key: string, from: string, into: string): void => {
     paired.from.add(from);
-    paired.into.add(into);
+    paired.into.set(into, from);
     pairs.push({ ...parse(key), from, into });
   };
   const same = (from: string, into: string): boolean => {
@@ -322,26 +329,52 @@ export function pairHeadersFooters(
     const mRoot = merged.headerFooterRoot(into);
     return !!oRoot && !!mRoot && sameXml(oRoot, mRoot);
   };
-  // A part with the same content on both sides is the same part wherever
-  // its section now sits (a removed section shifts the ones after it): at
-  // its own section first, then anywhere, in section order. The rest pair
-  // section by section.
+  /** An original section other than `key`'s shows `into`: its struck
+   * section break keeps the reference, so the part must keep its content. */
+  const shownByOriginal = (key: string, into: string): boolean => [...theirs].some(([k, target]) => target === into && k !== key);
+  // A part with the same content on both sides is the same part: at its
+  // own section first, then under its own name at another section (a
+  // reference moved), then under any name when its section is gone or the
+  // other's is new (a removed or added section shifts the ones after it,
+  // and Word renumbers the parts). Then a part under its own name at its
+  // own section. The rest pair section by section.
   for (const [key, from] of theirs) {
     const into = mine.get(key);
     if (into && !paired.into.has(into) && same(from, into)) pair(key, from, into);
   }
   for (const [key, from] of theirs) {
     if (paired.from.has(from)) continue;
-    const into = [...mine.values()].find((target) => !paired.into.has(target) && same(from, target));
-    if (into) pair(key, from, into);
+    const gone = !mine.has(key);
+    const found = [...mine].find(([k, target]) => !paired.into.has(target) && (target === from || gone || !theirs.has(k)) && same(from, target));
+    if (found) pair(key, from, found[1]);
+  }
+  // A part under its own name at its own section, its content changed, is
+  // that part: it pairs ahead of a section whose reference moved onto it.
+  for (const [key, from] of theirs) {
+    const into = mine.get(key);
+    if (into === from && !paired.from.has(from) && !paired.into.has(into)) pair(key, from, into);
   }
   for (const [key, from] of theirs) {
     const into = mine.get(key);
-    if (into && !paired.into.has(into)) pair(key, from, into);
-    else if (!into && key.startsWith("last:")) pairs.push({ ...parse(key), from, into: null });
+    if (!into) {
+      if (key.startsWith("last:")) pairs.push({ ...parse(key), from, into: null });
+      continue;
+    }
+    if (!key.startsWith("last:")) {
+      if (!paired.into.has(into)) pair(key, from, into);
+      continue;
+    }
+    if (paired.into.get(into) === from) continue;
+    // The last section's part pairs with another original part already, or
+    // an original section shows it too (headers A/B became A/A, or B/A): a
+    // copy takes the change, and the part stays as it is for that section.
+    if (paired.into.has(into)) pairs.push({ ...parse(key), from, into, shared: true });
+    else if (same(from, into)) continue;
+    else if (shownByOriginal(key, into)) pairs.push({ ...parse(key), from, into, shared: true });
+    else pair(key, from, into);
   }
   for (const [key, into] of mine) {
-    if (key.startsWith("last:") && !theirs.has(key) && !paired.into.has(into)) pairs.push({ ...parse(key), from: null, into });
+    if (key.startsWith("last:") && !theirs.has(key) && !paired.into.has(into)) pairs.push({ ...parse(key), from: null, into, ...(shownByOriginal(key, into) ? { shared: true } : {}) });
   }
   return pairs;
 }
@@ -363,7 +396,30 @@ export function compareLastSection(original: DocxDocument, merged: DocxDocument,
 }
 
 /**
- * Compare each paired header or footer part in place. A part the last
+ * The document settings that change which header or footer a page shows:
+ * w:evenAndOddHeaders (even pages show the even-page parts) and
+ * w:mirrorMargins. No revision carries a setting, so the result keeps the
+ * revised document's and `onNote` says what that leaves wrong after a
+ * reject-all (even pages blank when the flag went on and no even-page part
+ * was there before).
+ */
+export function compareSettings(original: DocxDocument, merged: DocxDocument, ctx: Ctx): void {
+  for (const [flag, effect] of [
+    ["evenAndOddHeaders", "even pages show the even-page header and footer"],
+    ["mirrorMargins", "the inside and outside margins swap on even pages"],
+  ] as const) {
+    if (original[flag] === merged[flag]) continue;
+    ctx.note({
+      code: "settings",
+      detail: `the settings' w:${flag} was turned ${merged[flag] ? "on" : "off"} (${effect}); no revision carries a setting, so reject-all keeps it ${merged[flag] ? "on" : "off"}`,
+    });
+  }
+}
+
+/**
+ * Compare each paired header or footer part in place, or in a copy of the
+ * revised part that the last section alone references when the pair is
+ * `shared`. A part the last
  * section has on one side alone is compared against nothing: one the
  * revised document lost gets a new part in the result, referenced from the
  * last section, with the original's content struck; one it gained has its
@@ -372,23 +428,36 @@ export function compareLastSection(original: DocxDocument, merged: DocxDocument,
  * `onNote` says so.
  */
 export function compareHeadersFooters(original: DocxDocument, merged: DocxDocument, pairs: HeaderFooterPair[], ctx: Ctx): void {
-  for (const { kind, type, from, into } of pairs) {
+  const sectPr = child(child(merged.docRoot, "body"), "sectPr");
+  // The copies first: the part a copy is taken from may be compared in place after.
+  const ordered = [...pairs.filter((p) => p.shared), ...pairs.filter((p) => !p.shared)];
+  for (const pair of ordered) {
+    const { kind, type, from, shared } = pair;
+    let into = pair.into;
     const oRoot = from === null ? null : original.headerFooterRoot(from);
     let mRoot = into === null ? null : merged.headerFooterRoot(into);
-    if (from !== null && into !== null) {
-      if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
-      continue;
+    if (shared && into !== null && mRoot) {
+      // The last section's own copy of the part it shares: the other
+      // section's part is untouched by the change the copy takes.
+      if (!sectPr) continue;
+      const reference = kind === "header" ? "headerReference" : "footerReference";
+      sectPr.children = sectPr.children.filter((c) => localName(c.name) !== reference || (c.attrs["w:type"] ?? "default") !== type);
+      into = merged.addHfPart(kind, type, sectPr);
+      const copy = merged.headerFooterRoot(into) as XmlElement;
+      copy.children = mRoot.children.map(cloneXml);
+      mRoot = copy;
     }
     const name = `the last section's ${type === "default" ? "" : `${type}-page `}${kind}`;
-    if (from !== null) {
-      const sectPr = child(child(merged.docRoot, "body"), "sectPr");
+    if (from !== null && into !== null) {
+      if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
+    } else if (from !== null) {
       if (!oRoot || !sectPr) continue;
       const target = merged.addHfPart(kind, type, sectPr);
       mRoot = merged.headerFooterRoot(target) as XmlElement;
       mRoot.children = [];
       compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into: target } });
       ctx.note({ code: "header-footer-reference", detail: `${name} was removed; its reference is not a revision, so accept-all leaves the ${kind} empty` });
-    } else if (mRoot) {
+    } else if (mRoot && into !== null) {
       compareContainer({ ...mRoot, children: [] }, mRoot, { ...ctx, scope: { from: null, into } });
       ctx.note({ code: "header-footer-reference", detail: `${name} was added; its reference is not a revision, so reject-all leaves the ${kind} empty` });
     }
