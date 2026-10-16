@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,13 @@ import { flatten } from "../src/printable.js";
 import { MAX_HELD_BYTES, ZipWriter } from "../src/zip.js";
 
 const dir = mkdtempSync(join(tmpdir(), "compare-files-test-"));
+let hasPdftotext: boolean;
+try {
+  execFileSync("pdftotext", ["-v"], { stdio: "ignore" });
+  hasPdftotext = true;
+} catch {
+  hasPdftotext = false;
+}
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 let pairs = 0;
@@ -600,5 +608,115 @@ describe("the pdf option", () => {
     expect(error).toBeInstanceOf(CompareError);
     expect((error as CompareError).code).toBe("unsupported_script");
     expect((error as CompareError).message).toContain("Arabic");
+  });
+});
+
+describe("the summary option", () => {
+  const STYLES =
+    `<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/><w:sz w:val="28"/><w:szCs w:val="28"/><w:color w:val="1F4E79"/></w:rPr></w:rPrDefault>` +
+    `<w:pPrDefault><w:pPr><w:spacing w:after="360" w:line="480" w:lineRule="auto"/><w:jc w:val="both"/></w:pPr></w:pPrDefault></w:docDefaults>` +
+    `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:spacing w:after="360" w:line="480" w:lineRule="auto"/><w:ind w:left="720" w:firstLine="720"/><w:jc w:val="both"/></w:pPr>` +
+    `<w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:cs="Arial"/><w:color w:val="1F4E79"/><w:sz w:val="28"/><w:szCs w:val="28"/><w:u w:val="single"/></w:rPr></w:style>` +
+    `<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`;
+  const CONTENT_TYPES = `<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`;
+  /** The summary table's rows as their cells' text. */
+  const tableRows = (documentXml: string): string[][] => {
+    const table = /<w:tbl>[\s\S]*<\/w:tbl>/.exec(documentXml)?.[0] ?? "";
+    return [...table.matchAll(/<w:tr>([\s\S]*?)<\/w:tr>/g)].map((row) =>
+      [...row[1].matchAll(/<w:tc>([\s\S]*?)<\/w:tc>/g)].map((cell) =>
+        [...cell[1].matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map((t) => t[1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")).join(""),
+      ),
+    );
+  };
+  const summary = { originalName: "Draft <1> & co.docx", revisedName: "Draft 2.docx" };
+
+  it("ends the printable copy with the summary table: date, names, counts, total", async () => {
+    const original = join(dir, "sum-o.docx");
+    const revised = join(dir, "sum-r.docx");
+    writeFileSync(original, docx(para("The quick brown fox.") + para("A second paragraph.")));
+    writeFileSync(revised, docx(para("The quick red fox.") + para("A second paragraph.", { pPr: '<w:jc w:val="center"/>' })));
+    const printable = join(dir, "sum-printable.docx");
+    const out = join(dir, "sum-out.docx");
+    const { revisions } = await compareFiles(original, revised, out, { author: AUTHOR, date: DATE, printable: { path: printable }, summary });
+    expect(revisions).toMatchObject({ insertion: 1, deletion: 1, paragraphFormat: 1 });
+    const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
+    expect(tableRows(xml)).toEqual([
+      [`Summary report: document comparison done on ${new Date(DATE).toLocaleString("en-US")}`],
+      ["Original:", "Draft <1> & co.docx"],
+      ["Modified:", "Draft 2.docx"],
+      ["Add", "1"],
+      ["Delete", "1"],
+      ["Table Insert", "0"],
+      ["Table Delete", "0"],
+      ["Format changes", "1"],
+      ["Total Changes:", "3"],
+    ]);
+    // A page break ahead of the table, the table ahead of the final sectPr, and nothing of it in the result.
+    expect(xml).toMatch(/<w:br w:type="page"\/>[\s\S]*<w:tbl>[\s\S]*<\/w:tbl><\/w:body>/);
+    expect(xml).toContain("Draft &lt;1&gt; &amp; co.docx");
+    expect(strFromU8(unzipSync(readFileSync(out))["word/document.xml"])).not.toContain("Summary report");
+  });
+
+  it("lists each distinct note once, after a custom beforeSectPr", async () => {
+    // Two changed paragraphs holding inline math: the same note twice.
+    const math = (text: string) =>
+      `<w:p><w:r><w:t xml:space="preserve">${text} </w:t></w:r><m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath></w:p>`;
+    const original = join(dir, "sum-notes-o.docx");
+    const revised = join(dir, "sum-notes-r.docx");
+    writeFileSync(original, docx(math("One") + math("Two")));
+    writeFileSync(revised, docx(math("Uno") + math("Dos")));
+    const printable = join(dir, "sum-notes-printable.docx");
+    const notes: CompareNote[] = [];
+    await compareFiles(original, revised, join(dir, "sum-notes-out.docx"), {
+      author: AUTHOR,
+      date: DATE,
+      onNote: (n) => notes.push(n),
+      printable: { path: printable, beforeSectPr: `<w:p><w:r><w:t>Custom first</w:t></w:r></w:p>` },
+      summary,
+    });
+    expect(notes.filter((n) => n.code === "coarse-paragraph")).toHaveLength(2);
+    const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
+    expect(tableRows(xml).slice(9)).toEqual([["Note: a paragraph holding inline math or other content a word diff cannot rebuild changed; struck and reinserted whole"]]);
+    expect(xml.indexOf("Custom first")).toBeLessThan(xml.indexOf("<w:tbl>"));
+  });
+
+  it("keeps its own formatting under a justified, 14 pt, colored, spaced Normal style", async () => {
+    const parts = (body: string): Uint8Array => makeDocx({ "[Content_Types].xml": CONTENT_TYPES, "word/styles.xml": STYLES, "word/document.xml": wrapDocument(body) });
+    const original = join(dir, "sum-styled-o.docx");
+    const revised = join(dir, "sum-styled-r.docx");
+    writeFileSync(original, parts(para("The quick brown fox jumps over the lazy dog.")));
+    writeFileSync(revised, parts(para("The quick red fox jumps over the lazy dog.")));
+    const printable = join(dir, "sum-styled-printable.docx");
+    const pdf = join(dir, "sum-styled.pdf");
+    const { pdfPages } = await compareFiles(original, revised, join(dir, "sum-styled-out.docx"), { author: AUTHOR, date: DATE, printable: { path: printable }, pdf: { path: pdf }, summary });
+    expect(pdfPages).toBe(2);
+    const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
+    const table = /<w:tbl>[\s\S]*<\/w:tbl>/.exec(xml)![0];
+    // Nine rows: the title's one cell, then eight rows of two.
+    expect(table.match(/<w:p>/g)).toHaveLength(17);
+    expect(table.match(/<w:jc w:val="left"\/>/g)).toHaveLength(17);
+    expect(table.match(/<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"\/>/g)).toHaveLength(17);
+    expect(table.match(/<w:ind w:left="0" w:right="0" w:firstLine="0"\/>/g)).toHaveLength(17);
+    expect(table.match(/<w:rPr>/g)).toHaveLength(17);
+    expect(table.match(/<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"\/>/g)).toHaveLength(17);
+    expect(table.match(/<w:sz w:val="20"\/>/g)).toHaveLength(17);
+    expect(table.match(/<w:u w:val="none"\/>/g)).toHaveLength(17);
+    expect(table).toContain('<w:tblCellMar><w:top w:w="40" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="40" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar>');
+    expect(table).toContain('<w:tblGrid><w:gridCol w:w="6926"/><w:gridCol w:w="2434"/></w:tblGrid>');
+    expect(table).not.toContain("w:pStyle");
+    if (hasPdftotext) {
+      const page2 = execFileSync("pdftotext", ["-layout", pdf, "-"], { encoding: "utf8" }).split("\f")[1];
+      expect(page2).toContain("Summary report: document comparison done on");
+      expect(page2).toMatch(/Original:\s+Draft <1> & co.docx/);
+      expect(page2).toMatch(/Add\s+1/);
+      expect(page2).toMatch(/Total Changes:\s+2/);
+    }
   });
 });

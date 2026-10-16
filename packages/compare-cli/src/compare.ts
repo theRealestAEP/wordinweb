@@ -6,6 +6,7 @@ import { histogramMatch } from "../../core/src/edit/compare/histogram.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
 import {
   BlockClass,
+  CompareNote,
   CompareOptions,
   Ctx,
   Entry,
@@ -44,6 +45,7 @@ import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
 import { flatten } from "./printable.js";
 import { DiskNotes } from "./notes.js";
 import { BlockStore } from "./store.js";
+import { SummarySpec, summaryXml } from "./summary.js";
 import { ZipEntry, ZipReader, ZipWriter, mb } from "./zip.js";
 
 export { CompareError, type CompareErrorCode } from "./errors.js";
@@ -59,6 +61,14 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
    * function it is given the result's revision counts, known by then.
    */
   printable?: { path: string; beforeSectPr?: string | ((revisions: Record<RevisionKind, number>) => string) };
+  /**
+   * End the printable copy (and so the PDF) with a summary page the compare
+   * writes itself (summary.ts): the date, the two documents' names, the
+   * revision counts, their total, and each distinct note. It follows
+   * `printable.beforeSectPr` when both are given. It is never in the
+   * tracked result.
+   */
+  summary?: SummarySpec;
   /**
    * Also write the printable copy as a PDF to `path`, rendered without a
    * browser (core's pdf/render.ts) from the printable .docx (a working file
@@ -139,7 +149,14 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const R = await readNamed(rZip, "revised", dir);
     stores.push(R.blocks, R.texts, R.rows, ...notesOf(R));
 
-    const note = options.onNote ?? (() => {});
+    // Every note once more for the summary page, which lists them.
+    const noted: string[] = [];
+    const onNote = options.onNote;
+    const note = (n: CompareNote): void => {
+      noted.push(n.detail);
+      onNote?.(n);
+    };
+    options = { ...options, onNote: note };
     for (const input of [O, R]) {
       if (input.hadRevisions) {
         note({ code: "existing-revisions-accepted", detail: `the ${input.side} document held tracked changes; it was compared as if they were accepted` });
@@ -178,8 +195,10 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     for (const root of R.shell.revisionRoots()) countRevisions(root, revisions);
     for (const notes of notesOf(R)) notes.forEachChange((note) => countRevisions(note, revisions));
 
-    const summary = printableSpec?.beforeSectPr;
-    const beforeSectPr = typeof summary === "function" ? summary(revisions) : summary;
+    const custom = printableSpec?.beforeSectPr;
+    const beforeSectPr =
+      (typeof custom === "function" ? custom(revisions) : custom ?? "") +
+      (options.summary ? summaryXml(options.summary, options.date ?? new Date().toISOString(), revisions, noted, child(child(R.shell.docRoot, "body"), "sectPr")) : "");
     await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
     await options.onResultWritten?.();
     if (options.pdf && printableSpec) {
