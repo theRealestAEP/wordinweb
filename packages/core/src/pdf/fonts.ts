@@ -234,17 +234,46 @@ export class Fontconfig {
   private readonly answers = new Map<string, FaceInfo | null>();
   private readonly generic = new Map<string, Set<string>>();
 
-  /** fontconfig's face for a family and style; null for its generic answer. */
+  /** fontconfig's face for a family and style; null for its generic answer,
+   * unless a rule aliased the family to that face. */
   match(family: string, bold: boolean, italic: boolean): FaceInfo | null {
     const style = `weight=${bold ? 200 : 80}:slant=${italic ? 100 : 0}`;
     const key = `${family.toLowerCase()}:${style}`;
     let answer = this.answers.get(key);
     if (answer !== undefined) return answer;
     answer = null;
-    const found = this.ask(`${family.replace(/([\\:,-])/g, "\\$1")}:${style}`);
-    if (found && !this.genericFiles(style).has(found.path)) answer = found;
+    const found = this.ask(`${escape(family)}:${style}`);
+    if (found && (!this.genericFiles(style).has(found.path) || this.aliased(family).includes(found.family.toLowerCase()))) answer = found;
     this.answers.set(key, answer);
     return answer;
+  }
+
+  /**
+   * The families a rule put ahead of the generic chain for `family`: what
+   * `fc-pattern -c` lists after config substitution, less the family itself,
+   * up to where one of the generic chains (serif, sans-serif, monospace)
+   * begins. Empty when fontconfig only classed the family as a generic.
+   */
+  private aliased(family: string): string[] {
+    const chain = this.chain(escape(family)).filter((name) => name !== family.toLowerCase());
+    let end = chain.length;
+    for (const generic of ["serif", "sans-serif", "monospace"]) {
+      const head = this.chain(generic)[0];
+      const at = head ? chain.indexOf(head) : -1;
+      if (at !== -1) end = Math.min(end, at);
+    }
+    return chain.slice(0, end);
+  }
+
+  private readonly chains = new Map<string, string[]>();
+
+  private chain(pattern: string): string[] {
+    let chain = this.chains.get(pattern);
+    if (chain === undefined) {
+      chain = this.available === false ? [] : this.run("fc-pattern", ["-c", "-f", "%{family}", pattern]).toLowerCase().split(",").map((name) => name.trim()).filter(Boolean);
+      this.chains.set(pattern, chain);
+    }
+    return chain;
   }
 
   /** fontconfig's serif or sans face for an East Asian language and style. */
@@ -273,19 +302,29 @@ export class Fontconfig {
   }
 
   private ask(pattern: string): FaceInfo | null {
-    if (this.available === false) return null;
-    let out: string;
-    try {
-      out = execFileSync("fc-match", ["-f", "%{family[0]}\n%{file}\n%{index}\n%{weight}\n%{slant}", pattern], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-      this.available = true;
-    } catch {
-      if (this.available === null) this.available = false;
-      return null;
-    }
+    const out = this.run("fc-match", ["-f", "%{family[0]}\n%{file}\n%{index}\n%{weight}\n%{slant}", pattern]);
     const [family, file, index, weight, slant] = out.split("\n");
     if (!family || !file || !existsSync(file)) return null;
     return { path: file, index: Number(index) || 0, family, subfamily: "", postscriptName: family.replace(/\s+/g, ""), bold: Number(weight) >= 200, italic: Number(slant) > 0 };
   }
+
+  /** A fontconfig tool's output, or "" when it is not installed (asked once). */
+  private run(tool: string, args: string[]): string {
+    if (this.available === false) return "";
+    try {
+      const out = execFileSync(tool, args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+      this.available = true;
+      return out;
+    } catch {
+      if (this.available === null) this.available = false;
+      return "";
+    }
+  }
+}
+
+/** A family name in a fontconfig pattern: its separators escaped. */
+function escape(family: string): string {
+  return family.replace(/([\\:,-])/g, "\\$1");
 }
 
 /** The process's one fontconfig, so each question is asked once. */

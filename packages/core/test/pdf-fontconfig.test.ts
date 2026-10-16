@@ -39,6 +39,25 @@ describe("fontconfig", () => {
     expect(bold.faces[0].fakeBold).toBe(false);
   });
 
+  // An alias rule of the system's own (10-wordinweb-alias.conf in the Linux
+  // check): Consolas -> DejaVu Sans Mono, which is also the generic monospace
+  // face, and Garamond -> EB Garamond. The aliased face must be embedded.
+  it.skipIf(fcFamily("Garamond") !== "EB Garamond" || fcFamily("Consolas") !== "DejaVu Sans Mono")("embeds the face an alias rule names, even when it is a generic face too", async () => {
+    const { renderDocxToPdf } = await import("../src/pdf/render.js");
+    const { bytesSource } = await import("../src/stream/source.js");
+    const { makeDocx, wrapDocument } = await import("./helpers.js");
+    const run = (font: string, text: string): string => `<w:r><w:rPr><w:rFonts w:ascii="${font}" w:hAnsi="${font}"/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const docx = makeDocx({ "word/document.xml": wrapDocument(`<w:p>${run("Consolas", "mono ")}${run("Garamond", "serif")}</w:p>`) });
+    const chunks: Buffer[] = [];
+    const { Writable } = await import("node:stream");
+    const out = new Writable({ write: (chunk: Buffer, _encoding, callback) => (chunks.push(chunk), callback()) });
+    const result = await renderDocxToPdf(bytesSource(docx), out, { fontDirs: dirs });
+    const pdf = Buffer.concat(chunks).toString("latin1");
+    expect(pdf).toMatch(/\/BaseFont \/[A-Z]{6}\+DejaVuSansMono\b/);
+    expect(pdf).toMatch(/\/BaseFont \/[A-Z]{6}\+EBGaramond/);
+    expect(result.missingFonts).toEqual([]);
+  });
+
   it.skipIf(!hasFontconfig)("marks a family missing when fontconfig has only its generic answer", () => {
     const fonts = new FontSet(dirs);
     const stack = fonts.resolve({ family: "Wordinweb Imaginary Grotesk", size: 12, bold: false, italic: false });
