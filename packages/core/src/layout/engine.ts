@@ -3838,6 +3838,28 @@ class Engine {
     }
   }
 
+  /** A paragraph's positioned frame when it rides with the text (vAnchor text or paragraph) and has a width. */
+  private textFrame(block: Block | undefined): ResolvedFrame | undefined {
+    if (block?.type !== "paragraph") return undefined;
+    const props = this.doc.effectiveParaProps(block);
+    if (!props.frame || props.dropCap) return undefined;
+    const fr = this.resolveFrame(props.frame);
+    return fr.w !== undefined && (fr.vAnchor === "text" || fr.vAnchor === "paragraph") ? fr : undefined;
+  }
+
+  /** Whether a frame of the run of text-riding frame paragraphs from `index`
+   * would reach past the body bottom at the cursor. A frame of no declared
+   * height is not checked. */
+  private textFrameRunOverflows(siblings: Block[] | undefined, index: number | undefined): boolean {
+    if (!siblings || index === undefined) return false;
+    for (let i = index; i < siblings.length; i++) {
+      const fr = this.textFrame(siblings[i]);
+      if (!fr) return false;
+      if (fr.h !== undefined && this.y + fr.y + fr.h > this.bodyBottom + 0.01) return true;
+    }
+    return false;
+  }
+
   /** Fill framePr defaults after the (now attribute-wise) style cascade. A
    * widthless `wrap="notBeside"` frame spans the full section text width. */
   private resolveFrame(fr: NonNullable<ParaProps["frame"]>): ResolvedFrame {
@@ -3990,6 +4012,15 @@ class Engine {
         }
         this.flushBannerBand();
         this.clearBannerSlot();
+        // Word keeps a frame that rides with the text on the page of the
+        // paragraph it rides with: when a frame of the run of frame
+        // paragraphs here would reach past the body bottom, the run and that
+        // paragraph move to the next page together (probe2-dropcaps-frames
+        // with its text grown by a compare's marks: Word's export moves
+        // "Body paragraph 1" and both frames anchored above it to page 2).
+        if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
+          this.nextColumn();
+        }
         this.placeFrameParagraph(para, fr);
         return;
       }

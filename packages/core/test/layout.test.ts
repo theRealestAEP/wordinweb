@@ -1065,6 +1065,33 @@ describe("layout engine", () => {
     expect(bodyText.x).toBeGreaterThan(marginLeft + cap.width - 1);
   });
 
+  it("moves a run of text-riding frames, with the paragraph they ride with, to the next page when one would reach past the body bottom", () => {
+    // probe2-dropcaps-frames with its text grown by a compare's marks: the
+    // second frame (y=2400tw, h=900tw exact below the paragraph) no longer
+    // fits under "Body paragraph 1" at the page bottom. Word's export moves
+    // the paragraph and BOTH frames anchored above it to page 2; we painted
+    // the second frame past the page bottom.
+    const frame = (text: string, y: number, h: number) =>
+      `<w:p><w:pPr><w:framePr w:w="2600" w:h="${h}" w:hRule="exact" w:wrap="around" w:vAnchor="paragraph" w:hAnchor="margin" w:x="200" w:y="${y}"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const body = `<w:p><w:r><w:t>Body</w:t></w:r></w:p>`;
+    const section = `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>`;
+    // One exact line leaves `room` px of the 96..960 body under it.
+    const withRoom = (room: number) => {
+      const shim = `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="${Math.round((864 - room) * 15)}" w:lineRule="exact"/></w:pPr><w:r><w:t>SHIM</w:t></w:r></w:p>`;
+      return layout({ "word/document.xml": wrapDocument(shim + frame("First", 200, 1000) + frame("Second", 2400, 900) + body + section) }).result;
+    };
+    // 120px of room: the first frame (13 + 67px) fits, the second (160 + 60px) does not.
+    const tight = withRoom(120);
+    expect(tight.pages.length).toBe(2);
+    expect(pageText(tight, 0)).toBe("SHIM");
+    expect(pageText(tight, 1)).toBe("FirstSecondBody");
+    for (const it of tight.pages[1].items) if (it.kind === "text") expect(it.baseline).toBeLessThan(960);
+    // Room for both: nothing moves.
+    const roomy = withRoom(400);
+    expect(roomy.pages.length).toBe(1);
+    expect(pageText(roomy, 0)).toBe("SHIMFirstSecondBody");
+  });
+
   it("insets the wrap channel around a positioned frame by Word's default 6pt hSpace", () => {
     // probe2-dropcaps-frames p1: body text wrapping beside a w:framePr callout
     // starts 6pt (=8px) past the frame edge, not flush against it. Word applies

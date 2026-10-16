@@ -3168,11 +3168,20 @@ function finishLine(
     // grid line overruns). Charging a text-snapped line its whole pitch cost
     // that page its final paragraph - two 41.6px lines whose glyph boxes end
     // at 1022.3 of 1026.53 - and spilled it onto a page Word does not have.
+    //
+    // An EXACT line sits its text at the BOTTOM of the box (the leading is
+    // above), so its fit extent runs to the raw font box under THAT
+    // baseline: charging the top-anchored glyph box let a tall exact line
+    // start where only its leading fit and paint its text past the page
+    // bottom (probe-sectadvance's 2865tw shims pushed down by a compare's
+    // insertions; Word moves such a line to the next page).
     fitHeight: gridImageFit
       ? height
       : gridObjSnap
         ? finalBaselineH - maxDescent + maxRawDescent
-        : Math.min(height, Math.max(maxNatural, maxAscent + maxDescent) - maxDescent + maxRawDescent),
+        : ls?.rule === "exact"
+          ? Math.min(height, finalBaselineH - maxDescent + maxRawDescent)
+          : Math.min(height, Math.max(maxNatural, maxAscent + maxDescent) - maxDescent + maxRawDescent),
     isLast,
     endsWithBreak,
   };
