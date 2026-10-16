@@ -65,9 +65,10 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
   /**
    * End the printable copy (and so the PDF) with a summary page the compare
    * writes itself (summary.ts): the date, the two documents' names, the
-   * revision counts, their total, and each distinct note. It follows
-   * `printable.beforeSectPr` when both are given. It is never in the
-   * tracked result.
+   * revision counts, their total, and each distinct note. Its first row is
+   * "Summary report: document comparison done on <date>", or "<title>,
+   * <date>" with `summary.title`. It follows `printable.beforeSectPr` when
+   * both are given. It is never in the tracked result.
    */
   summary?: SummarySpec;
   /**
