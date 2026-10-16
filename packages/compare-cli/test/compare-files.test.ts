@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { crc32 } from "node:zlib";
+import { crc32, inflateSync } from "node:zlib";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
@@ -345,8 +345,8 @@ describe("compareFiles", () => {
         const xml = printed.pkg.text(part) ?? "";
         expect(xml).not.toMatch(/<w:(?:ins|del|delText)[\s>]/);
         // The struck word is a red, struck-through run; the new word a blue, underlined one.
-        expect(xml).toMatch(new RegExp(`<w:r><w:rPr><w:color w:val="FF0000"/><w:strike/></w:rPr><w:t[^>]*>${old}`));
-        expect(xml).toMatch(/<w:r><w:rPr><w:color w:val="0000FF"\/><w:u w:val="single"\/><\/w:rPr><w:t[^>]*>AFTER/);
+        expect(xml).toMatch(new RegExp(`<w:r><w:rPr><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><w:t[^>]*>${old}`));
+        expect(xml).toMatch(/<w:r><w:rPr><w:strike w:val="0"\/><w:dstrike w:val="0"\/><w:color w:val="0000FF"\/><w:u w:val="single"\/><\/w:rPr><w:t[^>]*>AFTER/);
       }
     });
 
@@ -718,5 +718,114 @@ describe("the summary option", () => {
       expect(page2).toMatch(/Add\s+1/);
       expect(page2).toMatch(/Total Changes:\s+2/);
     }
+  });
+});
+
+describe("the printable copy's marks", () => {
+  /** Every content stream of a PDF, inflated and joined. */
+  const contentOps = (pdf: string): string => {
+    const bytes = readFileSync(pdf);
+    const text = bytes.toString("latin1");
+    return [...text.matchAll(/\/Length (\d+) >>\nstream\n/g)]
+      .map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1"))
+      .filter((s) => s.includes(" Tf"))
+      .join("\n");
+  };
+  /** The text-showing groups (q … Q) whose fill is `rgb`, with whether an underline rule follows the text. */
+  const textGroups = (ops: string, rgb: string): { underlined: boolean }[] =>
+    [...ops.matchAll(/^q\n([\s\S]*?)\nQ$/gm)]
+      .filter((m) => m[1].includes(`${rgb} rg`) && m[1].includes("BT"))
+      .map((m) => ({ underlined: /ET\n[\d. ]+ re f/.test(m[1]) }));
+  /** The strike-through rules (a filled rect of its own) in `rgb`. */
+  const strikes = (ops: string, rgb: string): number => (ops.match(new RegExp(`^q ${rgb} rg [\\d. ]+ re f Q$`, "gm")) ?? []).length;
+  const BLUE = "0 0 1";
+  const RED = "1 0 0";
+  const run = (text: string, rPr: string): string => `<w:r><w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
+  const compared = async (name: string, original: Uint8Array, revised: Uint8Array): Promise<{ xml: string; ops: string }> => {
+    const o = join(dir, `${name}-o.docx`);
+    const r = join(dir, `${name}-r.docx`);
+    writeFileSync(o, original);
+    writeFileSync(r, revised);
+    const printable = join(dir, `${name}-printable.docx`);
+    const pdf = join(dir, `${name}.pdf`);
+    await compareFiles(o, r, join(dir, `${name}-out.docx`), { author: AUTHOR, date: DATE, printable: { path: printable }, pdf: { path: pdf } });
+    return { xml: strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]), ops: contentOps(pdf) };
+  };
+
+  it("marks runs whose own properties say black, no underline and no strike", async () => {
+    const plain = '<w:color w:val="000000"/><w:sz w:val="24"/><w:u w:val="none"/>';
+    const unstruck = '<w:strike w:val="0"/><w:dstrike w:val="false"/><w:color w:val="000000"/>';
+    const { xml, ops } = await compared(
+      "marks-direct",
+      docx(`<w:p><w:r><w:t xml:space="preserve">The quick </w:t></w:r>${run("brown", unstruck)}<w:r><w:t xml:space="preserve"> fox.</w:t></w:r></w:p>`),
+      docx(`<w:p><w:r><w:t xml:space="preserve">The quick </w:t></w:r>${run("red", plain)}<w:r><w:t xml:space="preserve"> fox.</w:t></w:r></w:p>`),
+    );
+    // The marks replace the run's own color, underline and strike, in schema order, each once.
+    expect(xml).toContain('<w:rPr><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><w:t xml:space="preserve">brown</w:t>');
+    expect(xml).toContain('<w:rPr><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:sz w:val="24"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">red</w:t>');
+    expect(textGroups(ops, BLUE)).toEqual([{ underlined: true }]);
+    expect(textGroups(ops, RED)).toEqual([{ underlined: false }]);
+    expect(strikes(ops, RED)).toBe(1);
+    expect(strikes(ops, BLUE)).toBe(0);
+  });
+
+  it("marks runs whose style says black, no underline and struck, since direct properties win", async () => {
+    const styles =
+      `<?xml version="1.0"?><w:styles ${W_NS}>` +
+      `<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr><w:strike/><w:color w:val="000000"/><w:u w:val="none"/></w:rPr></w:style>` +
+      `<w:style w:type="character" w:styleId="Plain"><w:name w:val="Plain"/><w:rPr><w:strike/><w:color w:val="000000"/><w:u w:val="none"/></w:rPr></w:style></w:styles>`;
+    const contentTypes = `<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`;
+    const styled = (body: string): Uint8Array => makeDocx({ "[Content_Types].xml": contentTypes, "word/styles.xml": styles, "word/document.xml": wrapDocument(body) });
+    const { xml, ops } = await compared(
+      "marks-styled",
+      styled(`<w:p><w:r><w:t xml:space="preserve">The quick </w:t></w:r>${run("brown", '<w:rStyle w:val="Plain"/>')}<w:r><w:t xml:space="preserve"> fox.</w:t></w:r></w:p>`),
+      styled(`<w:p><w:r><w:t xml:space="preserve">The quick </w:t></w:r>${run("red", '<w:rStyle w:val="Plain"/>')}<w:r><w:t xml:space="preserve"> fox.</w:t></w:r></w:p>`),
+    );
+    expect(xml).toContain('<w:rPr><w:rStyle w:val="Plain"/><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">red</w:t>');
+    // The plain words are struck black by the style; the new word is blue, underlined and not struck, the old one red and struck.
+    expect(strikes(ops, "0 0 0")).toBeGreaterThan(0);
+    expect(textGroups(ops, BLUE)).toEqual([{ underlined: true }]);
+    expect(strikes(ops, BLUE)).toBe(0);
+    expect(textGroups(ops, RED)).toEqual([{ underlined: false }]);
+    expect(strikes(ops, RED)).toBe(1);
+  });
+
+  it("adds the change bar to a paragraph's own borders, in place", async () => {
+    const bordered = (jc: string): Uint8Array =>
+      docx(`<w:p><w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="auto"/></w:pBdr>${jc}</w:pPr><w:r><w:t>Bordered text.</w:t></w:r></w:p>`);
+    const { xml, ops } = await compared("marks-bar", bordered(""), bordered('<w:jc w:val="center"/>'));
+    expect(xml).toContain('<w:pPr><w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="auto"/><w:left w:val="single" w:sz="6" w:space="12" w:color="000000"/></w:pBdr><w:jc w:val="center"/></w:pPr>');
+    // Two rules: the top border (horizontal) and the change bar (vertical).
+    const rules = [...ops.matchAll(/ w ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l S/g)].map((m) => m.slice(1).map(Number));
+    expect(rules.filter(([x1, y1, x2, y2]) => y1 === y2 && x2 > x1)).toHaveLength(1);
+    expect(rules.filter(([x1, y1, x2, y2]) => x1 === x2 && y1 !== y2)).toHaveLength(1);
+  });
+
+  it("marks a nested table's text in an inserted or a deleted row", async () => {
+    const cell = (body: string): string => `<w:tc><w:tcPr/>${body}</w:tc>`;
+    const inner = `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1500"/></w:tblGrid><w:tr>${cell(para("NESTEDTEXT"))}</w:tr></w:tbl>`;
+    const outer = (rows: string[]): string => `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid>${rows.map((r) => `<w:tr>${r}</w:tr>`).join("")}</w:tbl>`;
+    const one = para("Before.") + outer([cell(para("Plain row."))]) + para("After.");
+    const two = para("Before.") + outer([cell(para("Plain row.")), cell(inner + para("OUTERTEXT"))]) + para("After.");
+    for (const [name, original, revised, color, rPr] of [
+      ["marks-row-ins", one, two, BLUE, '<w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/>'],
+      ["marks-row-del", two, one, RED, '<w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/>'],
+    ] as const) {
+      const { xml, ops } = await compared(name, docx(original), docx(revised));
+      expect(xml).not.toMatch(/<w:(?:ins|del|delText)[\s>]/);
+      for (const text of ["NESTEDTEXT", "OUTERTEXT"]) expect(xml).toContain(`<w:rPr>${rPr}</w:rPr><w:t xml:space="preserve">${text}</w:t>`);
+      // Both words drawn in the mark's color: the nested table's and the outer cell's.
+      expect(textGroups(ops, color)).toHaveLength(2);
+      expect(strikes(ops, color)).toBe(color === RED ? 2 : 0);
+    }
+    // The printable copy is still the whole document flattened.
+    await check(one, two);
+    await check(two, one);
   });
 });
