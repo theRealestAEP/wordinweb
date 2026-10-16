@@ -977,6 +977,61 @@ describe("the printable copy's marks", () => {
     expect((xml.match(/w:fldCharType/g) ?? []).length).toBe(3);
   });
 
+  describe("unlinks a field that a revision touches anywhere, so no field code or w:delInstrText is left", () => {
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const DEL = '<w:del w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z">';
+    const INS = '<w:ins w:id="2" w:author="a" w:date="2026-01-01T00:00:00Z">';
+    const chars = (type: string): string => `<w:r><w:fldChar w:fldCharType="${type}"/></w:r>`;
+    const code = (instr: string, deleted = false): string => `<w:r><w:${deleted ? "delInstrText" : "instrText"} xml:space="preserve"> ${instr} </w:${deleted ? "delInstrText" : "instrText"}></w:r>`;
+    const texts = (xml: string): string => [...xml.matchAll(/<w:t(?: [^>]*)?>([^<]*)<\/w:t>/g)].map((m) => m[1]).join("|");
+    const flat = (body: string): string => serializeXml(flatten(parseXml(`<w:body ${W}>${body}</w:body>`)));
+
+    it("a deleted field with no result: its code goes, and nothing is left of it", () => {
+      const xml = flat(`<w:p>${DEL}${chars("begin")}${code("DATE", true)}${chars("separate")}${chars("end")}</w:del></w:p>`);
+      expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
+      expect(xml).toBe(`<w:body ${W}><w:p/></w:body>`);
+    });
+
+    it("a field inside a hyperlink or a content control, its code replaced", () => {
+      const field = `${chars("begin")}${DEL}${code("REF a", true)}</w:del>${INS}${code("REF b")}</w:ins>${chars("separate")}<w:r><w:t>result</w:t></w:r>${chars("end")}`;
+      for (const [open, close] of [['<w:hyperlink r:id="rId1">', "</w:hyperlink>"], ['<w:sdt><w:sdtPr><w:id w:val="1"/></w:sdtPr><w:sdtContent>', "</w:sdtContent></w:sdt>"]]) {
+        const xml = flat(`<w:p><w:r><w:t xml:space="preserve">See </w:t></w:r>${open}${field}${close}</w:p>`);
+        expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
+        expect(texts(xml)).toBe("See |result");
+        expect(xml).toContain(open);
+      }
+    });
+
+    it("a text box in a deleted run: the fields inside it go the same way", () => {
+      const box = (content: string): string => `<w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>${content}</w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+      const xml = flat(`<w:p>${DEL}${box(`<w:p>${chars("begin")}${code("PAGE", true)}${chars("separate")}<w:r><w:delText>7</w:delText></w:r>${chars("end")}</w:p>`)}</w:del></w:p>`);
+      expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText|delText)\b/);
+      expect(xml).toMatch(/<w:color w:val="FF0000"\/><\/w:rPr><w:t>7<\/w:t>/);
+    });
+
+    it("a field spanning paragraphs (a table of contents) deleted whole", () => {
+      const xml = flat(
+        `<w:p>${DEL}${chars("begin")}${code('TOC \\o "1-3"', true)}${chars("separate")}<w:r><w:delText>Heading 1</w:delText></w:r></w:del></w:p>` +
+          `<w:p>${DEL}<w:r><w:delText>Heading 2</w:delText></w:r>${chars("end")}</w:del></w:p>`,
+      );
+      expect(xml).not.toMatch(/<w:(?:instrText|delInstrText|delText)\b/);
+      expect(xml).not.toMatch(/fldCharType="(?:begin|separate)"/);
+      expect(texts(xml)).toBe("Heading 1|Heading 2");
+    });
+
+    it("a replaced field: the struck code and the inserted code both go, the text around them stays", () => {
+      // The compare strikes the old begin and code and inserts new text with a new begin and
+      // code, while the separate, result and end are shared: one field on each side.
+      const xml = flat(
+        `<w:p>${DEL}${chars("begin")}${code("MERGEFIELD x", true)}</w:del>${INS}<w:r><w:t xml:space="preserve">new </w:t></w:r>${chars("begin")}${code("PAGE")}</w:ins>` +
+          `<w:r><w:fldChar w:fldCharType="separate"/><w:t xml:space="preserve">result</w:t></w:r>${chars("end")}</w:p><w:p><w:r><w:t>After.</w:t></w:r></w:p>`,
+      );
+      expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
+      expect(texts(xml)).toBe("new |result|After.");
+      expect(xml).toMatch(/<w:u w:val="single"\/><\/w:rPr><w:t xml:space="preserve">new <\/w:t>/);
+    });
+  });
+
   it("bars the paragraph of an inserted picture", async () => {
     const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
     const picture =
