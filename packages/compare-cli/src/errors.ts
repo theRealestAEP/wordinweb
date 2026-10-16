@@ -14,6 +14,8 @@ export type CompareErrorCode =
   | "result_folder_missing"
   /** The result would overwrite an input. */
   | "result_is_input"
+  /** Two of the result, the printable copy and the PDF would be written to one path; the message says which. */
+  | "output_collision"
   /** The PDF (`pdf` option) holds text in a script the PDF renderer cannot shape; the message names it. */
   | "unsupported_script"
   /** Anything else. The message and `cause` say what. */

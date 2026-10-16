@@ -2486,7 +2486,7 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   let color = props.color && props.color !== "auto" ? props.color : "#000000";
   el.style.color = color;
   if (item.opacity !== undefined) el.style.opacity = String(item.opacity);
-  if (props.underline && props.underline !== "none") {
+  if (props.underline && props.underline !== "none" && !item.hanging) {
     el.style.textDecoration = "underline";
     if (props.underline === "double") el.style.textDecorationStyle = "double";
     else if (props.underline === "dotted") el.style.textDecorationStyle = "dotted";

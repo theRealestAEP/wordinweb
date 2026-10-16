@@ -44,6 +44,9 @@ export class Face implements FaceInfo {
   readonly sfnt: Uint8Array;
   private readonly tables: Map<string, Uint8Array>;
   private readonly cmap: Map<number, number>;
+  /** The face keeps color bitmaps (sbix, CBDT), so its outlines may be stand-ins. */
+  private readonly colorBitmaps: boolean;
+  private readonly inked = new Map<number, boolean>();
   /** A (3,0) symbol cmap maps U+F0xx; a bare xx looks the glyph up there. */
   private readonly symbolCmap: boolean;
   private readonly advances: Uint16Array;
@@ -99,12 +102,9 @@ export class Face implements FaceInfo {
     }
 
     const cmap = readCmap(this.table("cmap"));
-    // A color bitmap face (sbix, CBDT: Apple Color Emoji, Noto Color Emoji)
-    // keeps a bitmap per glyph and an outline that is a stand-in at most,
-    // so it has no glyph to embed: a monochrome face draws its characters,
-    // or they are reported as missing.
-    this.cmap = tables.has("sbix") || tables.has("CBDT") ? new Map() : cmap.map;
+    this.cmap = cmap.map;
     this.symbolCmap = cmap.symbol;
+    this.colorBitmaps = tables.has("sbix") || tables.has("CBDT");
     const gpos = tables.get("GPOS");
     const lookups = gpos ? readKernLookups(gpos) : [];
     this.gpos = lookups.length > 0 ? lookups : null;
@@ -127,12 +127,34 @@ export class Face implements FaceInfo {
     return bytes;
   }
 
-  /** The glyph for a code point, or 0 when the face has none. */
+  /**
+   * The glyph for a code point, or 0 when the face has none to draw. A
+   * color bitmap face (sbix, CBDT: Apple Color Emoji, Noto Color Emoji)
+   * keeps a bitmap per glyph and, beside it, an outline that is a stand-in
+   * (a point or two per contour) or nothing: such a glyph counts as missing,
+   * so a monochrome face draws the character or it is reported. An outline
+   * with ink is drawn as it is.
+   */
   glyphId(codePoint: number): number {
-    const gid = this.cmap.get(codePoint);
-    if (gid !== undefined) return gid;
-    if (this.symbolCmap && codePoint < 0x100) return this.cmap.get(0xf000 + codePoint) ?? 0;
-    return 0;
+    const gid = this.cmap.get(codePoint) ?? (this.symbolCmap && codePoint < 0x100 ? this.cmap.get(0xf000 + codePoint) : undefined) ?? 0;
+    return gid !== 0 && this.colorBitmaps && !this.hasInk(gid) ? 0 : gid;
+  }
+
+  private hasInk(gid: number): boolean {
+    let ink = this.inked.get(gid);
+    if (ink === undefined) {
+      const glyph = this.glyphBytes(gid);
+      if (glyph === null) ink = true;
+      else if (glyph.length < 10) ink = false;
+      else {
+        const v = view(glyph);
+        const contours = v.getInt16(0);
+        // A composite draws its parts; a simple glyph with more than two points per contour draws something.
+        ink = contours < 0 || (contours > 0 && glyph.length >= 10 + contours * 2 && v.getUint16(10 + (contours - 1) * 2) + 1 > contours * 2);
+      }
+      this.inked.set(gid, ink);
+    }
+    return ink;
   }
 
   hasGlyph(codePoint: number): boolean {

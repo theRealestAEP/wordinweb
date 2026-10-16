@@ -5809,7 +5809,7 @@ class Engine {
       // ~0.75pt rule (measured from the benchmark reference); CSS
       // line-through sits noticeably higher, so we paint our own.
       // Across spaces too, as Word strikes a run whole.
-      if ((span.props.strike || span.props.doubleStrike) && span.text) {
+      if ((span.props.strike || span.props.doubleStrike) && span.text && !span.hanging) {
         const size = span.font.size;
         const thick = Math.max(0.75, size * 0.045);
         const yMid = b - size * 0.216;
@@ -5864,6 +5864,7 @@ class Engine {
         src: span.src,
         rtl: span.rtl,
         caretClampX: span.caretClampX === undefined ? undefined : originX + span.caretClampX,
+        hanging: span.hanging,
       });
       if (span.ruby && span.ruby.rtText) {
         const rt = span.ruby;

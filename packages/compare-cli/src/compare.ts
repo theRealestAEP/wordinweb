@@ -124,15 +124,19 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     if (!stat) throw new CompareError("missing", `${path}: the ${which} file does not exist`, which);
     if (!stat.isFile()) throw new CompareError("missing", `${path}: the ${which} file is not a file`, which);
   }
-  for (const out of [outPath, options.printable?.path, options.pdf?.path]) {
-    if (out === undefined) continue;
+  const outputs: [string, string][] = [["result", outPath]];
+  if (options.printable) outputs.push(["printable copy", options.printable.path]);
+  if (options.pdf) outputs.push(["PDF", options.pdf.path]);
+  for (const [i, [what, out]] of outputs.entries()) {
     // The result is written while the inputs are still read.
     if ([originalPath, revisedPath].some((path) => resolve(path) === resolve(out))) {
-      throw new CompareError("result_is_input", `${out}: the result must not overwrite an input`);
+      throw new CompareError("result_is_input", `${out}: the ${what} must not overwrite an input`);
     }
     if (!statSync(dirname(resolve(out)), { throwIfNoEntry: false })?.isDirectory()) {
-      throw new CompareError("result_folder_missing", `${out}: the result's folder does not exist`);
+      throw new CompareError("result_folder_missing", `${out}: the ${what}'s folder does not exist`);
     }
+    const other = outputs.slice(0, i).find(([, path]) => resolve(path) === resolve(out));
+    if (other) throw new CompareError("output_collision", `${out}: the ${other[0]} and the ${what} must be different files`);
   }
   const zips: ZipReader[] = [];
   const stores: { close(): void }[] = [];

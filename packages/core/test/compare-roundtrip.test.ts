@@ -923,6 +923,41 @@ describe("compareDocuments — section breaks and notes when blocks move", () =>
     expect(notesByReference(review(merged, acceptAllRevisions))).toEqual(["Note two, kept", "Note three, inserted"]);
   });
 
+  it("gives a deleted row's note reference the original's note, in a nested table too", () => {
+    // The row was cloned without adopting its references: the struck
+    // reference kept the original's id, which named another note in the result.
+    const notesPart = (notes: Record<number, string>): string =>
+      `<w:footnotes ${W_NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>` +
+      Object.entries(notes).map(([n, t]) => `<w:footnote w:id="${n}"><w:p><w:r><w:t xml:space="preserve">${t}</w:t></w:r></w:p></w:footnote>`).join("") +
+      `</w:footnotes>`;
+    const ref = (n: number) => `<w:r><w:footnoteReference w:id="${n}"/></w:r>`;
+    const row = (text: string, note: number) => `<w:tr><w:tc><w:tcPr/><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r>${ref(note)}</w:p></w:tc></w:tr>`;
+    const tbl = (rows: string) => `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>${rows}</w:tbl>`;
+    const nested = (rows: string) => tbl(`<w:tr><w:tc><w:tcPr/>${tbl(rows)}${para("after")}</w:tc></w:tr>`);
+    const withNotes = (body: string, notes: Record<number, string>) =>
+      DocxDocument.load(
+        makeDocx({
+          "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${body}<w:sectPr/></w:body></w:document>`,
+          "word/_rels/document.xml.rels": RELS,
+          "word/footnotes.xml": notesPart(notes),
+          ...Object.fromEntries([1, 2, 3].map((n) => [`word/header${n}.xml`, `<w:hdr ${W_NS}><w:p><w:r><w:t>Header ${n}</w:t></w:r></w:p></w:hdr>`])),
+        }),
+      );
+    const notesByReference = (d: DocxDocument) => {
+      const texts = new Map(
+        [...(d.pkg.text("word/footnotes.xml") ?? "").matchAll(/<w:footnote w:id="(\d+)">([\s\S]*?)<\/w:footnote>/g)].map((m) => [m[1], [...m[2].matchAll(/<w:t[^>]*>([^<]*)/g)].map((t) => t[1]).join("")]),
+      );
+      return [...(d.pkg.text("word/document.xml") ?? "").matchAll(/<w:footnoteReference w:id="(\d+)"/g)].map((m) => texts.get(m[1]));
+    };
+    for (const wrap of [(rows: string) => tbl(rows), nested]) {
+      const original = withNotes(wrap(row("Row one", 1) + row("Row two", 2)), { 1: "Note one", 2: "Note two" });
+      const revised = withNotes(wrap(row("Row two", 1)), { 1: "Note two" });
+      const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+      expect(notesByReference(review(merged, rejectAllRevisions))).toEqual(["Note one", "Note two"]);
+      expect(notesByReference(review(merged, acceptAllRevisions))).toEqual(["Note two"]);
+    }
+  });
+
   it("keeps each note attached to its reference when notes swap", () => {
     // The paragraphs stay and their notes swap. The body matched references
     // by position while notes paired in order: reject-all kept a reference
@@ -958,10 +993,9 @@ describe("compareDocuments — comments on changed words", () => {
     const original = withComment(run("Kept, then ") + marked(1, "old words") + run(" and the end."), comment(1, "The original's comment"));
     const revised = withComment(run("Kept, then ") + marked(1, "new words") + run(" and the end."), comment(1, "The revised's comment"));
     const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
-    // The original's comment is copied under a fresh id, its range and reference struck with its words.
-    expect(bodyOf(merged)).toMatch(
-      /<w:del [^>]*><w:commentRangeStart w:id="2"\/><w:r><w:delText xml:space="preserve">old<\/w:delText><\/w:r><w:commentRangeEnd w:id="2"\/><w:r><w:commentReference w:id="2"\/><\/w:r><\/w:del>/,
-    );
+    // The original's comment is copied under a fresh id; its markers are struck where the original had them, with a struck reference.
+    expect(bodyOf(merged)).toMatch(/<w:del [^>]*><w:commentRangeStart w:id="2"\/><w:r><w:delText xml:space="preserve">old<\/w:delText><\/w:r><\/w:del>/);
+    expect(bodyOf(merged)).toMatch(/words<\/w:t><\/w:r><w:del [^>]*><w:commentRangeEnd w:id="2"\/><w:r><w:commentReference w:id="2"\/><\/w:r><\/w:del>/);
     expect(DocxDocument.load(merged.save()).pkg.text("word/comments.xml")).toContain('<w:comment w:id="2" w:author="Ann" w:date="2026-01-01T00:00:00Z" w:initials="A"><w:p><w:r><w:t>The original\'s comment</w:t>');
     const accepted = DocxDocument.load(merged.save());
     acceptAllRevisions(accepted);
@@ -969,16 +1003,91 @@ describe("compareDocuments — comments on changed words", () => {
     // Reject-all gives the words back with the original's comment on them.
     const rejected = DocxDocument.load(merged.save());
     rejectAllRevisions(rejected);
-    expect(bodyOf(rejected)).toContain('<w:commentRangeStart w:id="2"/><w:r><w:t xml:space="preserve">old</w:t></w:r><w:commentRangeEnd w:id="2"/><w:r><w:commentReference w:id="2"/></w:r>');
+    expect(covers(bodyOf(rejected), "2")).toBe("old words");
+    expect(bodyOf(rejected)).toContain('<w:commentRangeEnd w:id="2"/><w:r><w:commentReference w:id="2"/></w:r>');
     expect([...bodyOf(rejected).matchAll(/<w:t[^>]*>([^<]*)/g)].map((m) => m[1]).join("")).toBe("Kept, then old words and the end.");
   });
 
-  it("leaves a comment both documents hold unchanged to the revised range", () => {
+  /** The text a comment's range covers in a body. */
+  const covers = (xml: string, id: string): string => {
+    const s = xml.indexOf(`<w:commentRangeStart w:id="${id}"/>`);
+    const e = xml.indexOf(`<w:commentRangeEnd w:id="${id}"/>`);
+    return s === -1 || e === -1 ? "(no range)" : [...xml.slice(s, e).matchAll(/<w:(?:t|delText)[^>]*>([^<]*)/g)].map((m) => m[1]).join("");
+  };
+
+  it("closes the original's range where the original closed it, not after the paragraph's last struck word", () => {
+    const original = withComment(run("Keep ") + marked(1, "old word") + run(" stays gone"), comment(1, "orig"));
+    const revised = withComment(run("Keep ") + marked(1, "new word") + run(" stays"), comment(1, "changed"));
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    expect(covers(bodyOf(rejected), "2")).toBe("old word");
+    const accepted = DocxDocument.load(merged.save());
+    acceptAllRevisions(accepted);
+    expect(canonicalBody(accepted)).toBe(canonicalBody(revised));
+  });
+
+  it("keeps the original's range start on kept words, with its end: no dangling end marker", () => {
+    // The comment went in the revision, the words stayed: the start marker went with them before.
+    const original = withComment(run("Keep ") + marked(1, "these words") + run(" end."), comment(1, "orig"));
+    const revised = loadBody(run("Keep these words end."));
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+    const body = bodyOf(merged);
+    const starts = [...body.matchAll(/<w:commentRangeStart w:id="(\d+)"/g)].map((m) => m[1]);
+    const ends = [...body.matchAll(/<w:commentRangeEnd w:id="(\d+)"/g)].map((m) => m[1]);
+    expect(starts).toEqual(ends);
+    expect(covers(body, starts[0])).toBe("these words");
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    expect(covers(bodyOf(rejected), starts[0])).toBe("these words");
+  });
+
+  it("keeps a hyperlink or content control whole around the struck markers", () => {
+    for (const [open, close] of [['<w:hyperlink w:anchor="x">', "</w:hyperlink>"], ['<w:sdt><w:sdtPr><w:tag w:val="t"/></w:sdtPr><w:sdtContent>', "</w:sdtContent></w:sdt>"]]) {
+      const original = withComment(run("See ") + open + marked(1, "old link") + close + run(" here."), comment(1, "orig"));
+      const revised = withComment(run("See ") + open + marked(1, "new link") + close + run(" here."), comment(1, "changed"));
+      const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+      expect(bodyOf(merged).match(new RegExp(open.slice(0, 8), "g"))).toHaveLength(1);
+      const accepted = DocxDocument.load(merged.save());
+      acceptAllRevisions(accepted);
+      expect(canonicalBody(accepted)).toBe(canonicalBody(revised));
+    }
+  });
+
+  it("strikes a deleted paragraph's comment markers with its words; a comment the revised holds on other words gets its own inserted range", () => {
+    // Left outside the w:del, the markers survived accept-all as orphans.
+    const gone = withComment(marked(1, "Gone paragraph") + "</w:p><w:p>" + run("Stay"), comment(1, "orig"));
+    const merged = compareDocuments(gone, loadBody(run("Stay")), { author: AUTHOR, date: DATE });
+    expect(bodyOf(merged)).toMatch(/<w:del [^>]*><w:commentRangeStart w:id="0"\/><w:r><w:delText[^>]*>Gone paragraph<\/w:delText><\/w:r><w:commentRangeEnd w:id="0"\/><w:r><w:commentReference w:id="0"\/><\/w:r><\/w:del>/);
+    const accepted = DocxDocument.load(merged.save());
+    acceptAllRevisions(accepted);
+    expect(bodyOf(accepted)).not.toMatch(/comment/);
+    // The same comment, unchanged, on other words: each review leaves one range, on its own words.
+    const original = withComment(marked(1, "Gone words") + "</w:p><w:p>" + run("Stay"), comment(1, "same"));
+    const revised = withComment(marked(1, "Stay"), comment(1, "same"));
+    const moved = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+    const kept = DocxDocument.load(moved.save());
+    acceptAllRevisions(kept);
+    expect(covers(bodyOf(kept), "1")).toBe("Stay");
+    expect(canonicalBody(kept)).toBe(canonicalBody(revised));
+    const back = DocxDocument.load(moved.save());
+    rejectAllRevisions(back);
+    expect(covers(bodyOf(back), "1")).toBe("Gone words");
+    expect(canonicalBody(back)).toBe(canonicalBody(original));
+  });
+
+  it("keeps one plain range for a comment both documents hold unchanged, around the words either review gives", () => {
     const original = withComment(run("Kept, then ") + marked(1, "old words") + run(" and the end."), comment(1, "The same comment"));
     const revised = withComment(run("Kept, then ") + marked(1, "new words") + run(" and the end."), comment(1, "The same comment"));
     const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
     expect(bodyOf(merged).match(/<w:commentRangeStart /g)).toHaveLength(1);
     expect(bodyOf(merged).match(/<w:commentReference /g)).toHaveLength(1);
+    const accepted = DocxDocument.load(merged.save());
+    acceptAllRevisions(accepted);
+    expect(covers(bodyOf(accepted), "1")).toBe("new words");
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    expect(covers(bodyOf(rejected), "1")).toBe("old words");
   });
 });
 

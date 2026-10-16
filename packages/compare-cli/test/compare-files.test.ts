@@ -490,6 +490,14 @@ describe("compareFiles errors", () => {
     }
   });
 
+  it("refuses two outputs on one path, naming them", async () => {
+    const options = { author: AUTHOR, date: DATE };
+    const out = join(dir, "collide.docx");
+    await expect(compareFiles(good, good, out, { ...options, pdf: { path: out } })).rejects.toMatchObject({ code: "output_collision", message: `${out}: the result and the PDF must be different files` });
+    await expect(compareFiles(good, good, out, { ...options, printable: { path: join(dir, "p.docx") }, pdf: { path: join(dir, "p.docx") } })).rejects.toMatchObject({ code: "output_collision", message: expect.stringContaining("the printable copy and the PDF must be different files") });
+    expect(existsSync(out)).toBe(false);
+  });
+
   it("refuses to overwrite an input, and to write into a missing folder", async () => {
     await fails(good, good, good).toThrow(/must not overwrite an input/);
     await fails(good, good, join(dir, "no-such-folder", "x.docx")).toThrow(/folder does not exist/);

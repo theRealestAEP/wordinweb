@@ -17,6 +17,11 @@ const PASSENGERS = new Set(["proofErr", "bookmarkStart", "bookmarkEnd", "comment
 
 const COMMENT_MARKERS = new Set(["commentRangeStart", "commentRangeEnd"]);
 
+/** True for a comment range marker (w:commentRangeStart, w:commentRangeEnd). */
+export function isCommentMarker(ln: string): boolean {
+  return COMMENT_MARKERS.has(ln);
+}
+
 /** True for an element that rides along with the content instead of being diffed. */
 export function isPassenger(ln: string): boolean {
   return PASSENGERS.has(ln);

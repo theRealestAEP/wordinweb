@@ -85,6 +85,21 @@ describe("PNG streaming", () => {
     expect([...image.data.subarray(0, 3)]).toEqual([10, 20, 30]);
   });
 
+  it("compares a 16-bit transparent color key whole, not by its high byte", () => {
+    const png16 = (colorType: number, samples: number[], trns: number[]): Buffer => {
+      const ihdr = Buffer.alloc(13);
+      ihdr.writeUInt32BE(2, 0);
+      ihdr.writeUInt32BE(1, 4);
+      ihdr.set([16, colorType, 0, 0, 0], 8);
+      const raw = Buffer.from([0, ...samples]);
+      return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("tRNS", Buffer.from(trns)), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+    };
+    // Gray: pixel 0 is the key 0x1234, pixel 1 shares its high byte.
+    expect([...decodePng(png16(0, [0x12, 0x34, 0x12, 0xff], [0x12, 0x34]))!.alpha!]).toEqual([0, 255]);
+    // RGB: pixel 0 is the key, pixel 1 shares every high byte.
+    expect([...decodePng(png16(2, [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0x12, 0xff, 0x56, 0xff, 0x9a, 0xff], [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc]))!.alpha!]).toEqual([0, 255]);
+  });
+
   it("still decodes a PNG whole, for the interlaced case", () => {
     const png = solidPng(5, [1, 2, 3, 4]);
     expect(decodePng(png)).toMatchObject({ width: 5, height: 5, gray: false });

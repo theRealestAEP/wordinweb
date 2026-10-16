@@ -480,6 +480,8 @@ export interface LineSpan {
   rtlLevel?: number;
   /** Editor-only: max caret x for this span (cell-confined hanging spaces). */
   caretClampX?: number;
+  /** A trailing space hung past the line's end (a wrap, a paragraph end): it draws no underline or strike, as in Word without w:ulTrailSpace. */
+  hanging?: boolean;
   /** Render this span right-to-left (browser shapes/orders within the box). */
   rtl?: boolean;
   /** East-Asian ruby cluster: the base text rides in `text`; `ruby` carries
@@ -1494,6 +1496,7 @@ function breakParagraphImpl(
         s.x = hx;
         hx += s.width;
         s.caretClampX = clamp;
+        s.hanging = true;
         line.spans.push(s);
       }
     }
