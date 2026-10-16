@@ -1040,6 +1040,18 @@ describe("the printable copy's marks", () => {
     });
   });
 
+  it("unbinds a content control whose content holds a revision, so the property does not refill it", () => {
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const control = (content: string): string =>
+      `<w:sdt><w:sdtPr><w:alias w:val="Author"/><w:dataBinding w:xpath="/ns1:coreProperties[1]/ns0:creator[1]" w:storeItemID="{1}"/><w:text/></w:sdtPr><w:sdtContent><w:p>${content}</w:p></w:sdtContent></w:sdt>`;
+    const changed = control(`<w:del w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>Old Name</w:delText></w:r></w:del><w:ins w:id="2" w:author="a" w:date="2026-01-01T00:00:00Z"><w:r><w:t>New Name</w:t></w:r></w:ins>`);
+    const same = control("<w:r><w:t>Same Name</w:t></w:r>");
+    const xml = serializeXml(flatten(parseXml(`<w:body ${W}>${changed}${same}</w:body>`)));
+    expect(xml.match(/<w:dataBinding /g)).toHaveLength(1);
+    expect(xml).toMatch(/<w:sdtPr><w:alias w:val="Author"\/><w:text\/><\/w:sdtPr><w:sdtContent><w:p><w:r><w:rPr><w:strike\/>/);
+    expect(xml).toContain('<w:dataBinding w:xpath="/ns1:coreProperties[1]/ns0:creator[1]" w:storeItemID="{1}"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Same Name</w:t>');
+  });
+
   it("bars the paragraph of an inserted picture", async () => {
     const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
     const picture =

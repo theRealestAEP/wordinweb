@@ -56,6 +56,10 @@ export function flatten(element: XmlElement, inside: Revision = null): XmlElemen
   // A field that holds a revision is unlinked: the renderer would recompute
   // it (a date, a page number) and print the result unmarked.
   if (ln === "p") unlinkRevisedFields(element, inside);
+  // A content control bound to a document property is refilled from the
+  // property on open and by the renderer, which would hide a revision in it.
+  const sdtPr = ln === "sdt" && (below || contains(element, REVISIONS)) ? child(element, "sdtPr") : undefined;
+  if (sdtPr) removeNamed(sdtPr, "dataBinding");
   const kept: XmlElement[] = [];
   let picture = false;
   for (const node of element.children) {
