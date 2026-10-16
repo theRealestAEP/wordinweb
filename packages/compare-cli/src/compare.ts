@@ -65,6 +65,13 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
    * pages when `comments` is set.
    */
   pdf?: { path: string; comments?: boolean };
+  /**
+   * Called (and awaited) once the result and the printable copy are written,
+   * before the PDF is rendered: a caller that keeps the redline somewhere
+   * safe does it here, so it survives a render that fails or runs out of
+   * memory.
+   */
+  onResultWritten?: () => void | Promise<void>;
 }
 
 export interface CompareFilesResult {
@@ -172,6 +179,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const summary = printableSpec?.beforeSectPr;
     const beforeSectPr = typeof summary === "function" ? summary(revisions) : summary;
     await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
+    await options.onResultWritten?.();
     if (options.pdf && printableSpec) {
       const rendered = await renderDocxToPdf(printableSpec.path, createWriteStream(options.pdf.path), { comments: options.pdf.comments });
       return { revisions, pdfPages: rendered.pages, missingFonts: rendered.missingFonts, missingCharacters: rendered.missingCharacters, unsupportedImages: rendered.unsupportedImages };

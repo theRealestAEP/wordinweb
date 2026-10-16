@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32 } from "node:zlib";
@@ -568,6 +568,27 @@ describe("the pdf option", () => {
     const { pdfPages, unsupportedImages } = await compareFiles(original, revised, join(dir, "bmp-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: join(dir, "bmp.pdf") } });
     expect(pdfPages).toBe(1);
     expect(unsupportedImages).toEqual(["word/media/image1.bmp"]);
+  });
+
+  it("calls onResultWritten once the result and the printable copy exist, before the PDF is rendered", async () => {
+    const original = join(dir, "hook-o.docx");
+    const revised = join(dir, "hook-r.docx");
+    writeFileSync(original, docx(para("The quick brown fox.")));
+    writeFileSync(revised, docx(para("The quick red fox.")));
+    const out = join(dir, "hook-out.docx");
+    const pdf = join(dir, "hook.pdf");
+    let seen: { result: boolean; pdf: boolean } | null = null;
+    const { pdfPages } = await compareFiles(original, revised, out, {
+      author: AUTHOR,
+      date: DATE,
+      pdf: { path: pdf },
+      onResultWritten: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        seen = { result: existsSync(out), pdf: existsSync(pdf) };
+      },
+    });
+    expect(seen).toEqual({ result: true, pdf: false });
+    expect(pdfPages).toBe(1);
   });
 
   it("reports a script the PDF renderer cannot shape as unsupported_script", async () => {
