@@ -2809,6 +2809,23 @@ describe("footnotes and endnotes", () => {
   const note = (tag: "footnote" | "endnote", id: number, text: string) =>
     `<w:${tag} w:id="${id}"><w:p><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:${tag}Ref/></w:r><w:r><w:t xml:space="preserve"> ${text}</w:t></w:r></w:p></w:${tag}>`;
 
+  it("omits a note whose reference is in hidden text, as Word does", () => {
+    const hidden = `<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden text</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:endnoteReference w:id="1"/></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:footnoteReference w:id="1"/></w:r></w:p>`;
+    const shown = `<w:p><w:r><w:t>Shown text</w:t></w:r><w:r><w:endnoteReference w:id="2"/></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(hidden + shown),
+      "word/_rels/document.xml.rels": FN_RELS,
+      "word/footnotes.xml": footnotesXml(note("footnote", 1, "hidden footnote text")),
+      "word/endnotes.xml": endnotesXml(note("endnote", 1, "hidden endnote text") + note("endnote", 2, "shown endnote text")),
+    });
+    const text = result.pages.map((_, i) => pageText(result, i)).join("");
+    expect(text).not.toContain("hidden endnote text");
+    expect(text).not.toContain("hidden footnote text");
+    expect(text).toContain("shown endnote text");
+    // The shown endnote is the first (Word numbers endnotes i, ii, ...): the hidden one takes no number.
+    expect(result.pages.flatMap((page) => page.items).filter((i) => i.kind === "text" && i.props.verticalAlign === "superscript").map((i) => (i.kind === "text" ? i.text : ""))).toEqual(["i", "i"]);
+  });
+
   it("renders a footnote at the bottom of the referencing page with a separator", () => {
     const { result } = layout({
       "word/document.xml": wrapDocument(

@@ -702,6 +702,9 @@ export class Prescan {
         for (const rc of r.content) {
           if (rc.kind === "noteRef") {
             if (rc.self || rc.customMarkFollows) continue;
+            // A reference in hidden text (w:vanish, its own or its paragraph
+            // style's) is not shown, and Word omits its note too.
+            if (block.type === "paragraph" && this.doc.effectiveRunProps(block, r.props).vanish) continue;
             const known = rc.noteType === "footnote" ? this.doc.footnotes : this.doc.endnotes;
             if (known.has(rc.id)) this.notes.push({ type: rc.noteType, id: rc.id, section: this.section });
             continue;
