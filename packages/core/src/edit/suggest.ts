@@ -1083,7 +1083,9 @@ export function collectRevisionsIn(root: XmlElement, out: RevisionRef[]): void {
     // after the paragraph's runs, and it is collected below.
     const formatKind = ln === "p" ? undefined : FORMAT_KIND_BY_OWNER[ln];
     if (formatKind) {
-      const change = formatChangeIn(el, formatKind);
+      // A table's grid record rides with its w:tblPrChange; alone (a column
+      // width changed and nothing else), it is the table's format revision.
+      const change = formatChangeIn(el, formatKind) ?? (formatKind === "tableFormat" ? loneGridChange(el) : null);
       if (change) out.push({ el: change, kind: formatKind, author: attrByLocal(change, "author") });
     }
     // A row's w:trPr may hold its own structural w:ins / w:del. Those are not
@@ -1121,6 +1123,12 @@ export function collectRevisionsIn(root: XmlElement, out: RevisionRef[]): void {
     }
   };
   walk(root);
+}
+
+/** A table's w:tblGridChange with no w:tblPrChange beside it: reviewed on its own. */
+function loneGridChange(tbl: XmlElement): XmlElement | null {
+  const grid = tbl.children.find((c) => localName(c.name) === "tblGrid");
+  return grid?.children.find((c) => localName(c.name) === "tblGridChange") ?? null;
 }
 
 /** A section's w:sectPrChange, if it has one. */

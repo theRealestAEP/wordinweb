@@ -362,6 +362,22 @@ describe("tracked column widths (w:tblGridChange)", () => {
     expect(serializeXml(tblOf(doc))).toBe(before);
   });
 
+  it("reviews a grid record that stands alone (no w:tblPrChange) as the table's format revision", () => {
+    // A compare of two documents whose columns alone differ writes one; accept-all left it in place.
+    const grid = (a: number, b: number, change: string) => `<w:tblGrid><w:gridCol w:w="${a}"/><w:gridCol w:w="${b}"/>${change}</w:tblGrid>`;
+    const record = `<w:tblGridChange w:id="7"><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid></w:tblGridChange>`;
+    const row = `<w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p("a")}</w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${p("b")}</w:tc></w:tr>`;
+    const xml = (change: string) => `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr>${grid(3000, 1000, change)}${row}</w:tbl>`;
+    const doc = load(xml(record));
+    expect(collectRevisions(doc).map((r) => r.kind)).toEqual(["tableFormat"]);
+    expect(acceptAllRevisions(doc)).toBe(1);
+    expect(serializeXml(tblOf(doc))).toBe(xml(""));
+    const back = load(xml(record));
+    expect(rejectAllRevisions(back)).toBe(1);
+    expect(tblGridXml(back)).toBe(`<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>`);
+    expect(serializeXml(tblOf(back))).not.toContain("Change");
+  });
+
   it("accepts a column width by retiring the grid record with the table's", () => {
     const doc = load(tableXml(2, 2, `<w:tblW w:w="4000" w:type="dxa"/>`));
     setTableColumnWidth(doc, tblOf(doc), 0, 150, meta());
