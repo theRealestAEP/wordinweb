@@ -333,7 +333,7 @@ export class PageDrawer {
       this.showGlyphs(ops, runs, item, size, letterSpacing, hscale, 0, 0, mode, lineWidth);
       // Spaces in an underlined run are underlined too, as Word does; only
       // w:u val="words" leaves them out.
-      if (props.underline && props.underline !== "none" && (props.underline !== "words" || item.text.trim())) {
+      if (props.underline && props.underline !== "none" && !item.hanging && (props.underline !== "words" || item.text.trim())) {
         const face = runs[0].face.face;
         const unit = size / face.unitsPerEm;
         const base = Math.max(face.underlineThickness * unit, 0.75);

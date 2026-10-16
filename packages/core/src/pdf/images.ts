@@ -310,9 +310,11 @@ function pngConverter(h: PngHeader): { channels: number; gray: boolean; hasAlpha
     return (row[bit >> 3] >> (8 - bitDepth - (bit & 7))) & max;
   };
   const scale = bitDepth === 16 ? 1 : 255 / max;
-  const shift = bitDepth === 16 ? 8 : 0;
-  const key = trns && trns.length >= 6 ? [((trns[0] << 8) | trns[1]) >> shift, ((trns[2] << 8) | trns[3]) >> shift, ((trns[4] << 8) | trns[5]) >> shift] : null;
-  const grayKey = trns && trns.length >= 2 ? ((trns[0] << 8) | trns[1]) >> shift : null;
+  // The transparent color key, compared at the sample's own depth: a 16-bit
+  // key tells pixels apart that share a high byte.
+  const whole = (row: Uint8Array, px: number, c: number): number => (bitDepth === 16 ? (row[(px * channels + c) * 2] << 8) | row[(px * channels + c) * 2 + 1] : channel(row, px, c));
+  const key = trns && trns.length >= 6 ? [(trns[0] << 8) | trns[1], (trns[2] << 8) | trns[3], (trns[4] << 8) | trns[5]] : null;
+  const grayKey = trns && trns.length >= 2 ? (trns[0] << 8) | trns[1] : null;
   const convert = (row: Uint8Array, width: number, color: Uint8Array, alpha: Uint8Array): void => {
     for (let px = 0; px < width; px++) {
       if (colorType === 3) {
@@ -326,7 +328,7 @@ function pngConverter(h: PngHeader): { channels: number; gray: boolean; hasAlpha
       } else if (gray) {
         const g = channel(row, px, 0);
         color[px] = Math.round(g * scale);
-        alpha[px] = colorType === 4 ? Math.round(channel(row, px, 1) * scale) : grayKey !== null && g === grayKey ? 0 : 255;
+        alpha[px] = colorType === 4 ? Math.round(channel(row, px, 1) * scale) : grayKey !== null && whole(row, px, 0) === grayKey ? 0 : 255;
       } else {
         const r = channel(row, px, 0);
         const g = channel(row, px, 1);
@@ -334,7 +336,7 @@ function pngConverter(h: PngHeader): { channels: number; gray: boolean; hasAlpha
         color[px * 3] = Math.round(r * scale);
         color[px * 3 + 1] = Math.round(g * scale);
         color[px * 3 + 2] = Math.round(b * scale);
-        alpha[px] = colorType === 6 ? Math.round(channel(row, px, 3) * scale) : key && r === key[0] && g === key[1] && b === key[2] ? 0 : 255;
+        alpha[px] = colorType === 6 ? Math.round(channel(row, px, 3) * scale) : key && whole(row, px, 0) === key[0] && whole(row, px, 1) === key[1] && whole(row, px, 2) === key[2] ? 0 : 255;
       }
     }
   };

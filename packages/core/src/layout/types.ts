@@ -126,6 +126,8 @@ export interface TextItem {
    * confined to its table cell pins the caret at the cell's content edge
    * (Word behavior) while the span keeps its true hanging layout x. */
   caretClampX?: number;
+  /** A trailing space hung past the line's end: it draws no underline or strike. */
+  hanging?: boolean;
 }
 
 export interface RectItem {

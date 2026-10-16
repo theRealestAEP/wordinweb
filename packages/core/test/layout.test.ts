@@ -209,6 +209,13 @@ describe("layout engine", () => {
     );
     expect(hanging).toHaveLength(3);
     expect(hanging.map((space) => (space.kind === "text" ? space.src?.offset : undefined))).toEqual([4, 5, 6]);
+    // Hung spaces draw no underline or strike (Word, without w:ulTrailSpace): the renderers read the flag, the strike rule is never made.
+    expect(hanging.every((space) => space.kind === "text" && space.hanging === true)).toBe(true);
+    const struck = layout({ "word/document.xml": wrapDocument(`<w:p><w:r><w:rPr><w:strike/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">AAAA   BBBB</w:t></w:r></w:p>` + section) }).result;
+    const rules = struck.pages[0].items.filter((candidate) => candidate.kind === "rect");
+    expect(rules).toHaveLength(2);
+    const words = struck.pages[0].items.filter((candidate) => candidate.kind === "text" && candidate.text !== " ");
+    expect(rules.map((rule) => (rule.kind === "rect" ? rule.x : -1))).toEqual(words.map((word) => word.x));
     // Sequential advances starting at the end of the wrapping word.
     let edge = tripleA.x + tripleA.width;
     for (const space of hanging) {
