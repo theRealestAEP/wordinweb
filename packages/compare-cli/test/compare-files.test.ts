@@ -267,6 +267,37 @@ describe("compareFiles", () => {
     expect(strFromU8(unzipSync(bytes)["word/comments.xml"])).toBe(comments);
   });
 
+  it("gives a deleted note reference the original's note and an inserted one the revised's", async () => {
+    const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const rels = `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/footnotes" Target="footnotes.xml"/></Relationships>`;
+    const notesPart = (notes: Record<number, string>): string =>
+      `<w:footnotes ${W_NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>` +
+      Object.entries(notes).map(([n, t]) => `<w:footnote w:id="${n}"><w:p><w:r><w:t xml:space="preserve">${t}</w:t></w:r></w:p></w:footnote>`).join("") +
+      `</w:footnotes>`;
+    const ref = (n: number) => `<w:r><w:footnoteReference w:id="${n}"/></w:r>`;
+    const run = (t: string) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+    const withNotes = (paragraph: string, notes: Record<number, string>) =>
+      makeDocx({ "word/_rels/document.xml.rels": rels, "word/footnotes.xml": notesPart(notes), "word/document.xml": wrapDocument(`<w:p>${paragraph}</w:p>`) });
+    const original = withNotes(run("Alpha") + ref(1) + run(" beta") + ref(2) + run(" gamma."), { 1: "Note one, deleted", 2: "Note two, kept" });
+    const revised = withNotes(run("Alpha beta") + ref(1) + run(" gamma") + ref(2) + run("."), { 1: "Note two, kept", 2: "Note three, inserted" });
+    const n = pairs++;
+    const paths = [join(dir, `${n}-o.docx`), join(dir, `${n}-r.docx`), join(dir, `${n}-out.docx`)];
+    writeFileSync(paths[0], original);
+    writeFileSync(paths[1], revised);
+    const notes: CompareNote[] = [];
+    const { revisions } = await compareFiles(paths[0], paths[1], paths[2], { author: AUTHOR, date: DATE, onNote: (note) => notes.push(note) });
+    expect(revisions).toMatchObject({ insertion: 2, deletion: 2 });
+    expect(notes.filter((note) => note.code === "untracked-block")).toEqual([]);
+    const result = DocxDocument.load(new Uint8Array(readFileSync(paths[2])));
+    const expected = compareDocuments(DocxDocument.load(original), DocxDocument.load(revised), { author: AUTHOR, date: DATE });
+    expect(withoutIds(canonicalBody(result))).toBe(withoutIds(canonicalBody(expected)));
+    const footnotes = (doc: DocxDocument) => withoutIds(serializeXml(doc.footnotesTree() as XmlElement));
+    expect(footnotes(result)).toBe(footnotes(expected));
+    expect(footnotes(result)).toContain("<w:delText xml:space=\"preserve\">Note one, deleted</w:delText>");
+    expect(footnotes(result)).toMatch(/<w:ins [^>]*><w:r><w:t xml:space="preserve">Note three, inserted<\/w:t>/);
+  });
+
   describe("the parts beside the body", () => {
     const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';

@@ -147,6 +147,8 @@ export interface Ctx {
   scope: { from: string | null; into: string | null };
   /** Original note id -> the result's id for the same note (compareNotes). */
   noteIds: Record<"footnote" | "endnote", Map<string, string>>;
+  /** The note pairs compareNotes made by position alone, for settleLeftoverNotes to check against the body. */
+  leftoverNotes: Record<"footnote" | "endnote", LeftoverNote[]>;
   /** Original comment id -> the result's id for that comment (adoptComment). */
   commentIds: Map<string, string>;
 }
@@ -240,6 +242,7 @@ export function compareContext(original: DocxDocument, merged: DocxDocument, opt
     note: options.onNote ?? (() => {}),
     scope: { from: null, into: null },
     noteIds: { footnote: new Map(), endnote: new Map() },
+    leftoverNotes: { footnote: [], endnote: [] },
     commentIds: new Map(),
   };
 }
@@ -575,8 +578,12 @@ export function compareNotes(
   let oAt = 0;
   let rAt = 0;
   const rest = histogramMatch(oRest.map(oKey), rRest.map(rKey));
+  const byPosition = new Set<number>();
   for (const a of [...rest, { a: oRest.length, b: rRest.length }]) {
-    if (a.a - oAt === 1 && a.b - rAt === 1) pairs.push([oRest[oAt], rRest[rAt]]);
+    if (a.a - oAt === 1 && a.b - rAt === 1) {
+      pairs.push([oRest[oAt], rRest[rAt]]);
+      byPosition.add(pairs.length - 1);
+    }
     if (a.a < oRest.length && a.b < rRest.length) pairs.push([oRest[a.a], rRest[a.b]]);
     oAt = a.a + 1;
     rAt = a.b + 1;
@@ -585,15 +592,19 @@ export function compareNotes(
   const pairedO = new Set(pairs.map((p) => p[0]));
   const pairedR = new Set(pairs.map((p) => p[1]));
   let changed = false;
-  for (const [i, j] of pairs) {
+  pairs.forEach(([i, j], k) => {
     ids.set(oNotes[i], rNotes[j]);
     const before = ctx.meta.nextId;
     let touched = false;
     const note = (mPart as NotesPart).content(rNotes[j]) as XmlElement;
+    // A pair made by position alone may be two notes the body tells apart
+    // (one reference struck, another inserted): the revised content is kept
+    // for settleLeftoverNotes to put back.
+    if (byPosition.has(k)) ctx.leftoverNotes[kind].push({ original: oNotes[i], revised: rNotes[j], pristine: cloneXml(note) });
     compareContainer((oPart as NotesPart).content(oNotes[i]) as XmlElement, note, { ...ctx, meta: { ...ctx.meta, nextId: () => ((touched = true), before()) } });
     (mPart as NotesPart).update(rNotes[j], note);
     changed ||= touched;
-  }
+  });
   rNotes.forEach((id, j) => {
     if (pairedR.has(j)) return;
     const note = (mPart as NotesPart).content(id) as XmlElement;
@@ -632,24 +643,88 @@ export function compareNotes(
  */
 function giveStruckReferencesTheirOwnNotes(kind: "footnote" | "endnote", merged: DocxDocument, ctx: Ctx): void {
   const refs: NoteRef[] = [];
-  noteRefsIn(merged.docRoot, kind, false, refs);
+  noteRefsIn(merged.docRoot, kind, false, false, refs);
+  for (const [i, id] of settleLeftoverNotes(kind, ctx.original, merged, ctx, refs)) refs[i].el.attrs["w:id"] = id;
   for (const [i, id] of copyNotesForStruckReferences(kind, merged, ctx, refs)) refs[i].el.attrs["w:id"] = id;
 }
 
-/** A note reference, and whether a revision strikes it. */
+/** A note reference, and whether a revision strikes or inserts it. */
 export interface NoteRef {
   el: XmlElement;
   struck: boolean;
+  inserted: boolean;
 }
 
 /** The `kind` note references inside `el`, in document order, onto `out`. */
-export function noteRefsIn(el: XmlElement, kind: "footnote" | "endnote", struck: boolean, out: NoteRef[]): void {
-  if (localName(el.name) === `${kind}Reference`) out.push({ el, struck });
-  // A deleted row records it in its trPr, and its cells (a nested table's
-  // too) may hold references with no w:del around them.
-  const rowDeleted = (tr: XmlElement): boolean =>
-    localName(tr.name) === "tr" && !!child(child(tr, "trPr"), "del");
-  for (const c of el.children) noteRefsIn(c, kind, struck || localName(c.name) === "del" || rowDeleted(c), out);
+export function noteRefsIn(el: XmlElement, kind: "footnote" | "endnote", struck: boolean, inserted: boolean, out: NoteRef[]): void {
+  if (localName(el.name) === `${kind}Reference`) out.push({ el, struck, inserted });
+  // A deleted or inserted row records it in its trPr, and its cells (a
+  // nested table's too) may hold references with no w:del or w:ins around them.
+  const rowMarked = (tr: XmlElement, mark: "del" | "ins"): boolean => localName(tr.name) === "tr" && !!child(child(tr, "trPr"), mark);
+  for (const c of el.children) {
+    noteRefsIn(c, kind, struck || localName(c.name) === "del" || rowMarked(c, "del"), inserted || localName(c.name) === "ins" || rowMarked(c, "ins"), out);
+  }
+}
+
+/** A note pair compareNotes made by position: the ids on each side, and the revised note as it was. */
+export interface LeftoverNote {
+  original: string;
+  revised: string;
+  pristine: XmlElement;
+}
+
+/**
+ * The body's say on the note pairs compareNotes made by position alone.
+ * Each such pair carries the revised note's id. When the body struck that
+ * reference, the original's note was deleted: the struck reference gets a
+ * copy of the ORIGINAL's content, all struck, under a fresh id (the map
+ * gives the reference's index in `refs` and its new id). When the body
+ * inserted that reference, the revised note was added: it gets its own
+ * content back, all inserted. A reference the body kept was paired right,
+ * and its note keeps the compare.
+ */
+export function settleLeftoverNotes(
+  kind: "footnote" | "endnote",
+  original: DocxDocument,
+  merged: DocxDocument,
+  ctx: Ctx,
+  refs: readonly { el: { attrs: Record<string, string> }; struck: boolean; inserted: boolean }[],
+  parts?: { original: NotesPart | null; merged: NotesPart | null },
+): Map<number, string> {
+  const ids = new Map<number, string>();
+  const leftovers = ctx.leftoverNotes[kind];
+  if (leftovers.length === 0) return ids;
+  const oPart = parts ? parts.original : treeNotes(kind, original);
+  const mPart = parts ? parts.merged : treeNotes(kind, merged);
+  if (!oPart || !mPart) return ids;
+  let next = mPart.nextId();
+  let changed = false;
+  for (const { original: o, revised: r, pristine } of leftovers) {
+    const struck = refs.map((ref, i) => i).filter((i) => refs[i].el.attrs["w:id"] === r && refs[i].struck);
+    if (struck.length > 0) {
+      const copy = cloneXml(oPart.content(o) as XmlElement);
+      copy.attrs["w:id"] = String(next);
+      for (const i of struck) ids.set(i, String(next));
+      next++;
+      for (const block of blockList(copy)) {
+        if (localName(block.name) !== "p") continue;
+        adoptFromOriginal(block, { ...ctx, scope: { from: null, into: null } });
+        wrapContainerContent(block, "del", ctx);
+      }
+      mPart.append(copy);
+      changed = true;
+    }
+    if (refs.some((ref) => ref.el.attrs["w:id"] === r && ref.inserted)) {
+      // Changed in place: a tree's note is the live element.
+      const note = mPart.content(r) as XmlElement;
+      note.children = cloneXml(pristine).children;
+      for (const block of blockList(note)) if (localName(block.name) === "p") wrapContainerContent(block, "ins", ctx);
+      mPart.update(r, note);
+      changed = true;
+    }
+  }
+  if (changed) merged.markNotePartsChanged([kind === "footnote" ? "footnotes" : "endnotes"]);
+  return ids;
 }
 
 /**

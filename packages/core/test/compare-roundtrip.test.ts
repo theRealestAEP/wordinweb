@@ -887,6 +887,42 @@ describe("compareDocuments — section breaks and notes when blocks move", () =>
     for (const id of ids) expect(notes).toContain(`<w:footnote w:id="${id}">`);
   });
 
+  it("gives a deleted reference the original's note and an inserted one the revised's, not an edit between them", () => {
+    // Note 1 goes with its reference and note 3 arrives with a new one, while
+    // note 2 stays: the leftovers paired by position as "note 1 edited into
+    // note 3", and the struck reference got a copy of that edit.
+    const notesPart = (notes: Record<number, string>): string =>
+      `<w:footnotes ${W_NS}><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>` +
+      Object.entries(notes).map(([n, t]) => `<w:footnote w:id="${n}"><w:p><w:r><w:t xml:space="preserve">${t}</w:t></w:r></w:p></w:footnote>`).join("") +
+      `</w:footnotes>`;
+    const ref = (n: number) => `<w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:footnoteReference w:id="${n}"/></w:r>`;
+    const run = (t: string) => `<w:r><w:t xml:space="preserve">${t}</w:t></w:r>`;
+    const withNotes = (paragraph: string, notes: Record<number, string>) =>
+      DocxDocument.load(
+        makeDocx({
+          "word/document.xml": `<w:document ${W_NS} ${R}><w:body><w:p>${paragraph}</w:p><w:sectPr/></w:body></w:document>`,
+          "word/_rels/document.xml.rels": RELS,
+          "word/footnotes.xml": notesPart(notes),
+          ...Object.fromEntries([1, 2, 3].map((n) => [`word/header${n}.xml`, `<w:hdr ${W_NS}><w:p><w:r><w:t>Header ${n}</w:t></w:r></w:p></w:hdr>`])),
+        }),
+      );
+    const original = withNotes(run("Alpha") + ref(1) + run(" beta") + ref(2) + run(" gamma."), { 1: "Note one, deleted", 2: "Note two, kept" });
+    const revised = withNotes(run("Alpha beta") + ref(1) + run(" gamma") + ref(2) + run("."), { 1: "Note two, kept", 2: "Note three, inserted" });
+    const notes: CompareNote[] = [];
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE, onNote: (n) => notes.push(n) });
+    expect(notes.filter((n) => n.code === "untracked-block")).toEqual([]);
+    const counts = collectRevisions(merged).reduce((out, r) => ({ ...out, [r.kind]: (out[r.kind] ?? 0) + 1 }), {} as Record<string, number>);
+    expect(counts).toEqual({ insertion: 2, deletion: 2 });
+    const notesByReference = (d: DocxDocument) => {
+      const texts = new Map(
+        [...(d.pkg.text("word/footnotes.xml") ?? "").matchAll(/<w:footnote w:id="(\d+)">([\s\S]*?)<\/w:footnote>/g)].map((m) => [m[1], [...m[2].matchAll(/<w:t[^>]*>([^<]*)/g)].map((t) => t[1]).join("")]),
+      );
+      return [...(d.pkg.text("word/document.xml") ?? "").matchAll(/<w:footnoteReference w:id="(\d+)"/g)].map((m) => texts.get(m[1]));
+    };
+    expect(notesByReference(review(merged, rejectAllRevisions))).toEqual(["Note one, deleted", "Note two, kept"]);
+    expect(notesByReference(review(merged, acceptAllRevisions))).toEqual(["Note two, kept", "Note three, inserted"]);
+  });
+
   it("keeps each note attached to its reference when notes swap", () => {
     // The paragraphs stay and their notes swap. The body matched references
     // by position while notes paired in order: reject-all kept a reference

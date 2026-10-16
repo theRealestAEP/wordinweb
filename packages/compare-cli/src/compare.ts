@@ -21,6 +21,7 @@ import {
   compareRow,
   compareTableProps,
   copyNotesForStruckReferences,
+  settleLeftoverNotes,
   deletedRow,
   emitDeleted,
   emitGapOp,
@@ -183,7 +184,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const charts = [O, R].some((input) => [...input.shell.documentRels.values()].some((rel) => rel.type.endsWith("/chart")));
     const sink = new BodySink(body, printable, charts ? new Set() : null);
     emitBody(plan, O, R, ctx, sink);
-    const noteIds = giveStruckReferencesTheirOwnNotes(body, sink.withNoteRefs, R, ctx);
+    const noteIds = giveStruckReferencesTheirOwnNotes(body, sink.withNoteRefs, O, R, ctx);
 
     compareHeadersFooters(O.shell, R.shell, headerFooterPairs, ctx);
     compareLastSection(O.shell, R.shell, ctx);
@@ -726,21 +727,24 @@ type NoteIdChanges = Map<number, Record<"footnote" | "endnote", Map<number, stri
  * read from the pieces that hold them, the notes copied, and the new ids
  * returned for the writer to put in.
  */
-function giveStruckReferencesTheirOwnNotes(body: BlockStore, withNoteRefs: number[], R: Input, ctx: Ctx): NoteIdChanges {
+function giveStruckReferencesTheirOwnNotes(body: BlockStore, withNoteRefs: number[], O: Input, R: Input, ctx: Ctx): NoteIdChanges {
   const changes: NoteIdChanges = new Map();
   for (const kind of ["footnote", "endnote"] as const) {
-    const refs: { el: { attrs: Record<string, string> }; struck: boolean; block: number; place: number }[] = [];
+    const refs: { el: { attrs: Record<string, string> }; struck: boolean; inserted: boolean; block: number; place: number }[] = [];
     for (const k of withNoteRefs) {
       const found: NoteRef[] = [];
       // Walked as a child, so a piece that is a deleted row counts as struck.
-      noteRefsIn({ name: "w:dxw-piece", attrs: {}, children: [parseXml(body.read(k))], text: "" }, kind, false, found);
-      found.forEach((ref, place) => refs.push({ el: { attrs: { "w:id": ref.el.attrs["w:id"] } }, struck: ref.struck, block: k, place }));
+      noteRefsIn({ name: "w:dxw-piece", attrs: {}, children: [parseXml(body.read(k))], text: "" }, kind, false, false, found);
+      found.forEach((ref, place) => refs.push({ el: { attrs: { "w:id": ref.el.attrs["w:id"] } }, struck: ref.struck, inserted: ref.inserted, block: k, place }));
     }
-    for (const [i, id] of copyNotesForStruckReferences(kind, R.shell, ctx, refs, R.notes[kind] ?? undefined)) {
+    const repoint = (i: number, id: string): void => {
+      refs[i].el.attrs["w:id"] = id;
       let block = changes.get(refs[i].block);
       if (!block) changes.set(refs[i].block, (block = { footnote: new Map(), endnote: new Map() }));
       block[kind].set(refs[i].place, id);
-    }
+    };
+    for (const [i, id] of settleLeftoverNotes(kind, O.shell, R.shell, ctx, refs, { original: O.notes[kind], merged: R.notes[kind] })) repoint(i, id);
+    for (const [i, id] of copyNotesForStruckReferences(kind, R.shell, ctx, refs, R.notes[kind] ?? undefined)) repoint(i, id);
   }
   return changes;
 }
@@ -824,7 +828,7 @@ function writeDocument(path: string, head: string, store: BlockStore, noteIds: N
       const el = parseXml(store.read(k));
       for (const kind of ["footnote", "endnote"] as const) {
         const found: NoteRef[] = [];
-        noteRefsIn(el, kind, false, found);
+        noteRefsIn(el, kind, false, false, found);
         for (const [place, id] of change[kind]) found[place].el.attrs["w:id"] = id;
       }
       write(serializeXml(el));
