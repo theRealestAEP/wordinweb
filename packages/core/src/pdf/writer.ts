@@ -52,10 +52,17 @@ export class PdfWriter {
     await this.endStream();
   }
 
-  /** Open a stream object whose `length` bytes follow through write(). */
-  async beginStream(num: number, dict: string, length: number): Promise<void> {
+  /** Open a stream object whose bytes follow through write(): `length` is
+   * their count, or the number of an object (allocated, written after the
+   * stream) that will hold it. */
+  async beginStream(num: number, dict: string, length: number | { ref: number }): Promise<void> {
     await this.beginObject(num);
-    await this.write(`<< ${dict} /Length ${length} >>\nstream\n`);
+    await this.write(`<< ${dict} /Length ${typeof length === "number" ? length : `${length.ref} 0 R`} >>\nstream\n`);
+  }
+
+  /** Bytes written so far: the difference across a stream's data is its length. */
+  get offset(): number {
+    return this.position;
   }
 
   async endStream(): Promise<void> {

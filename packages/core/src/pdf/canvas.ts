@@ -1,7 +1,7 @@
 import { FontSpec } from "../layout/types.js";
 import { parseColor } from "./draw.js";
 import { FontSet } from "./fonts.js";
-import { SampleImage, splitRgba } from "./images.js";
+import { SampleImage, boundedRgba } from "./images.js";
 import { Resources } from "./resources.js";
 import { num } from "./writer.js";
 
@@ -454,7 +454,7 @@ export class RecordingContext {
     if (dw === undefined) dw = source.width;
     if (dh === undefined) dh = source.height;
     const index = this.canvas.images.length;
-    this.canvas.images.push(splitRgba(pixels.data, pixels.width, pixels.height));
+    this.canvas.images.push(boundedRgba(pixels.data, pixels.width, pixels.height));
     // The image's unit square onto its destination, in canvas pixels.
     const m = multiply(this.state.ctm, [dw, 0, 0, dh, dx, dy]);
     const ops = ["q"];

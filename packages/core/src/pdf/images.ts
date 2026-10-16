@@ -1,4 +1,4 @@
-import { inflateSync } from "node:zlib";
+import { Unzlib, Zlib } from "fflate";
 import { decodeTiff } from "../render/tiff.js";
 import { PdfWriter } from "./writer.js";
 
@@ -10,33 +10,46 @@ export interface WrittenImage {
 }
 
 /**
+ * The most pixels an image is embedded with. A PNG is decoded a row at a
+ * time and one over the budget is averaged down by a whole factor as it
+ * streams, so its memory is a few rows and the output's alpha plane; a
+ * TIFF or GIF, decoded whole, is refused over it (an empty frame, reported
+ * as unsupported); a metafile's bitmap is averaged down after the fact.
+ */
+export const PIXEL_BUDGET = 16_000_000;
+/** Compressed PNG bytes per inflater push (each inflates to a megabyte or so at most). */
+const INFLATE_STEP = 1024;
+
+/**
  * Write a picture part as an image XObject, from its bytes a piece at a
  * time: a JPEG passes through as DCTDecode once its frame header gives the
- * size, a PNG is decoded and re-encoded as Flate samples with an SMask for
- * its alpha, a TIFF likewise through render/tiff.ts. Null for a format not
- * read here (GIF, BMP, SVG), which the page draws as an empty frame; EMF
- * and WMF go through metafile.ts instead.
+ * size, a PNG streams through the decoder into Flate samples with an SMask
+ * for its alpha, a TIFF (render/tiff.ts) and a GIF are decoded and written
+ * the same way. Null for a format not read here (BMP, SVG) or an image
+ * over the pixel budget, which the page draws as an empty frame; EMF and
+ * WMF go through metafile.ts instead.
  */
 export async function writeImage(
   writer: PdfWriter,
   part: string,
   size: number,
-  pieces: (onPiece: (piece: Uint8Array) => void) => Promise<boolean>,
+  pieces: (onPiece: (piece: Uint8Array) => void | Promise<void>) => Promise<boolean>,
 ): Promise<WrittenImage | null> {
   const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
   if (ext === "jpg" || ext === "jpeg" || ext === "jpe") return writeJpeg(writer, size, pieces);
-  if (ext !== "png" && ext !== "tif" && ext !== "tiff") return null;
+  if (ext === "png") return writePng(writer, pieces);
+  if (ext !== "tif" && ext !== "tiff" && ext !== "gif") return null;
   const bytes = new Uint8Array(size);
   let at = 0;
   if (!(await pieces((piece) => {
     bytes.set(piece, at);
     at += piece.length;
   }))) return null;
-  if (ext === "png") {
-    const png = decodePng(bytes);
-    return png ? writeSamples(writer, png) : null;
+  if (ext === "gif") {
+    const gif = decodeGif(bytes);
+    return gif ? writeSamples(writer, gif) : null;
   }
-  const tiff = decodeTiff(bytes);
+  const tiff = decodeTiff(bytes, PIXEL_BUDGET);
   return tiff ? writeSamples(writer, splitRgba(tiff.rgba, tiff.width, tiff.height)) : null;
 }
 
@@ -67,6 +80,35 @@ export function splitRgba(rgba: ArrayLike<number>, width: number, height: number
   return { width, height, gray: false, samples, alpha: opaque ? null : alpha };
 }
 
+/** The whole factor that brings `width x height` under the pixel budget: 1 when it is under. */
+export function shrinkFactor(width: number, height: number): number {
+  return Math.max(1, Math.ceil(Math.sqrt((width * height) / PIXEL_BUDGET)));
+}
+
+/** RGBA pixels over the budget averaged down by shrinkFactor, else as they are. */
+export function boundedRgba(rgba: ArrayLike<number>, width: number, height: number): SampleImage {
+  const k = shrinkFactor(width, height);
+  if (k === 1) return splitRgba(rgba, width, height);
+  const outW = Math.ceil(width / k);
+  const outH = Math.ceil(height / k);
+  const out = new Uint8Array(outW * outH * 4);
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      const sums = [0, 0, 0, 0];
+      let n = 0;
+      for (let sy = y * k; sy < Math.min(height, (y + 1) * k); sy++) {
+        for (let sx = x * k; sx < Math.min(width, (x + 1) * k); sx++, n++) {
+          const i = (sy * width + sx) * 4;
+          for (let c = 0; c < 4; c++) sums[c] += rgba[i + c];
+        }
+      }
+      const o = (y * outW + x) * 4;
+      for (let c = 0; c < 4; c++) out[o + c] = Math.round(sums[c] / n);
+    }
+  }
+  return splitRgba(out, outW, outH);
+}
+
 /** Write a SampleImage as a Flate image XObject, with an SMask for its alpha. */
 export async function writeSamples(writer: PdfWriter, image: SampleImage): Promise<WrittenImage> {
   const objNum = writer.allocate();
@@ -84,7 +126,9 @@ export async function writeSamples(writer: PdfWriter, image: SampleImage): Promi
   return { objNum, width: image.width, height: image.height };
 }
 
-async function writeJpeg(writer: PdfWriter, size: number, pieces: (onPiece: (piece: Uint8Array) => void) => Promise<boolean>): Promise<WrittenImage | null> {
+type Pieces = (onPiece: (piece: Uint8Array) => void | Promise<void>) => Promise<boolean>;
+
+async function writeJpeg(writer: PdfWriter, size: number, pieces: Pieces): Promise<WrittenImage | null> {
   const objNum = writer.allocate();
   // Pieces are held until the frame header is parsed (it is near the
   // front), then the stream opens and every piece goes out as it comes.
@@ -93,10 +137,7 @@ async function writeJpeg(writer: PdfWriter, size: number, pieces: (onPiece: (pie
   let frame: { width: number; height: number; components: number; adobe: boolean } | null = null;
   let chain = Promise.resolve();
   const found = await pieces((piece) => {
-    if (frame) {
-      chain = chain.then(() => writer.write(piece));
-      return;
-    }
+    if (frame) return (chain = chain.then(() => writer.write(piece)));
     head.push(piece);
     headBytes += piece.length;
     const joined = concat(head, headBytes);
@@ -109,6 +150,7 @@ async function writeJpeg(writer: PdfWriter, size: number, pieces: (onPiece: (pie
     chain = chain
       .then(() => writer.beginStream(objNum, `/Type /XObject /Subtype /Image /Width ${f.width} /Height ${f.height} /ColorSpace ${colorSpace} /BitsPerComponent 8 /Filter /DCTDecode${decode}`, size))
       .then(() => writer.write(joined));
+    return chain;
   });
   await chain;
   if (!found || !frame) {
@@ -163,51 +205,103 @@ function jpegFrame(bytes: Uint8Array): { width: number; height: number; componen
   return null;
 }
 
-/** A PNG as 8-bit gray or RGB samples plus alpha: every color type and bit
- * depth, interlaced or not. Null when the bytes are not a PNG. */
-export function decodePng(bytes: Uint8Array): SampleImage | null {
-  if (bytes.length < 33 || bytes[0] !== 0x89 || bytes[1] !== 0x50 || bytes[2] !== 0x4e || bytes[3] !== 0x47) return null;
-  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  let width = 0;
-  let height = 0;
-  let bitDepth = 8;
-  let colorType = 0;
-  let interlaced = false;
-  let palette: Uint8Array | null = null;
-  let trns: Uint8Array | null = null;
-  const idat: Uint8Array[] = [];
-  let idatBytes = 0;
-  let at = 8;
-  while (at + 8 <= bytes.length) {
-    const length = v.getUint32(at);
-    const type = String.fromCharCode(bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]);
-    const data = bytes.subarray(at + 8, at + 8 + length);
-    if (type === "IHDR") {
-      width = v.getUint32(at + 8);
-      height = v.getUint32(at + 12);
-      bitDepth = bytes[at + 16];
-      colorType = bytes[at + 17];
-      interlaced = bytes[at + 20] === 1;
-    } else if (type === "PLTE") palette = data;
-    else if (type === "tRNS") trns = data;
-    else if (type === "IDAT") {
-      idat.push(data);
-      idatBytes += length;
-    } else if (type === "IEND") break;
-    at += 12 + length;
+// ---------------------------------------------------------------- PNG
+
+/** What a PNG's IHDR says, plus its palette and transparency chunks. */
+interface PngHeader {
+  width: number;
+  height: number;
+  bitDepth: number;
+  colorType: number;
+  interlaced: boolean;
+  palette: Uint8Array | null;
+  trns: Uint8Array | null;
+}
+
+/**
+ * The PNG's chunks as they arrive: IHDR, PLTE and tRNS kept (small), each
+ * IDAT's data handed on as it comes, the rest skipped. `onHeader` is called
+ * at the first IDAT, when the header chunks are all in.
+ */
+class PngChunks {
+  private buffer: Uint8Array = new Uint8Array(0);
+  private remaining = 0;
+  private type = "";
+  private started = false;
+  readonly header: PngHeader = { width: 0, height: 0, bitDepth: 8, colorType: 0, interlaced: false, palette: null, trns: null };
+  done = false;
+
+  constructor(
+    private onHeader: ((header: PngHeader) => void) | null,
+    private readonly onData: (data: Uint8Array) => void,
+  ) {}
+
+  push(piece: Uint8Array): void {
+    if (this.done) return;
+    let at = 0;
+    if (!this.started) {
+      // The signature, then chunks.
+      this.buffer = concat([this.buffer, piece], this.buffer.length + piece.length);
+      if (this.buffer.length < 8) return;
+      if (this.buffer[0] !== 0x89 || this.buffer[1] !== 0x50 || this.buffer[2] !== 0x4e || this.buffer[3] !== 0x47) throw new Error("not a PNG");
+      this.started = true;
+      piece = this.buffer.subarray(8);
+      this.buffer = new Uint8Array(0);
+    }
+    while (at < piece.length && !this.done) {
+      if (this.remaining === 0) {
+        // A chunk header: length and type, 8 bytes, which may straddle pieces.
+        const need = 8 - this.buffer.length;
+        const take = piece.subarray(at, at + need);
+        this.buffer = concat([this.buffer, take], this.buffer.length + take.length);
+        at += take.length;
+        if (this.buffer.length < 8) return;
+        const v = new DataView(this.buffer.buffer, this.buffer.byteOffset, 8);
+        this.remaining = v.getUint32(0) + 4;
+        this.type = String.fromCharCode(this.buffer[4], this.buffer[5], this.buffer[6], this.buffer[7]);
+        this.buffer = new Uint8Array(0);
+        if (this.type === "IDAT" && this.onHeader) {
+          const onHeader = this.onHeader;
+          this.onHeader = null;
+          onHeader(this.header);
+        }
+        if (this.type === "IEND") this.done = true;
+        continue;
+      }
+      // The chunk's data (the last 4 of `remaining` are its CRC).
+      const dataLeft = this.remaining - 4;
+      const take = piece.subarray(at, at + Math.min(this.remaining, piece.length - at));
+      at += take.length;
+      this.remaining -= take.length;
+      const data = take.subarray(0, Math.min(take.length, Math.max(0, dataLeft)));
+      if (this.type === "IDAT") {
+        if (data.length) this.onData(data);
+      } else if (this.type === "IHDR" || this.type === "PLTE" || this.type === "tRNS") {
+        if (this.buffer.length + data.length <= 1024 + 12) this.buffer = concat([this.buffer, data], this.buffer.length + data.length);
+      }
+      if (this.remaining === 0) {
+        if (this.type === "IHDR" && this.buffer.length >= 13) {
+          const v = new DataView(this.buffer.buffer, this.buffer.byteOffset, this.buffer.byteLength);
+          this.header.width = v.getUint32(0);
+          this.header.height = v.getUint32(4);
+          this.header.bitDepth = this.buffer[8];
+          this.header.colorType = this.buffer[9];
+          this.header.interlaced = this.buffer[12] === 1;
+        } else if (this.type === "PLTE") this.header.palette = this.buffer;
+        else if (this.type === "tRNS") this.header.trns = this.buffer;
+        this.buffer = new Uint8Array(0);
+      }
+    }
   }
-  if (!width || !height) return null;
+}
+
+/** How a PNG row's samples become 8-bit color and alpha. */
+function pngConverter(h: PngHeader): { channels: number; gray: boolean; hasAlpha: boolean; convert: (row: Uint8Array, width: number, color: Uint8Array, alpha: Uint8Array) => void } {
+  const { bitDepth, colorType, palette, trns } = h;
   const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 3 ? 1 : colorType === 4 ? 2 : 4;
   const gray = colorType === 0 || colorType === 4;
   const hasAlpha = colorType === 4 || colorType === 6 || trns !== null;
-  const raw = new Uint8Array(inflateSync(concat(idat, idatBytes)));
-  const samples = new Uint8Array(width * height * (gray ? 1 : 3));
-  const alpha = hasAlpha ? new Uint8Array(width * height) : null;
-  if (alpha) alpha.fill(255);
   const max = (1 << bitDepth) - 1;
-  const bpp = Math.max(1, (channels * bitDepth) >> 3);
-
-  // One pixel's channel values from an unfiltered row.
   const channel = (row: Uint8Array, px: number, c: number): number => {
     const index = px * channels + c;
     if (bitDepth === 8) return row[index];
@@ -215,46 +309,245 @@ export function decodePng(bytes: Uint8Array): SampleImage | null {
     const bit = index * bitDepth;
     return (row[bit >> 3] >> (8 - bitDepth - (bit & 7))) & max;
   };
-  const store = (row: Uint8Array, px: number, x: number, y: number): void => {
-    const out = y * width + x;
-    if (colorType === 3) {
-      const index = channel(row, px, 0);
-      if (palette) {
-        samples[out * 3] = palette[index * 3];
-        samples[out * 3 + 1] = palette[index * 3 + 1];
-        samples[out * 3 + 2] = palette[index * 3 + 2];
-      }
-      if (alpha && trns) alpha[out] = index < trns.length ? trns[index] : 255;
-      return;
-    }
-    const scale = bitDepth === 16 ? 1 : 255 / max;
-    if (gray) {
-      const g = channel(row, px, 0);
-      samples[out] = Math.round(g * scale);
-      if (alpha) {
-        if (colorType === 4) alpha[out] = Math.round(channel(row, px, 1) * scale);
-        else if (trns && trns.length >= 2) alpha[out] = g === ((trns[0] << 8) | trns[1]) >> (bitDepth === 16 ? 8 : 0) ? 0 : 255;
-      }
-      return;
-    }
-    const r = channel(row, px, 0);
-    const g = channel(row, px, 1);
-    const b = channel(row, px, 2);
-    samples[out * 3] = Math.round(r * scale);
-    samples[out * 3 + 1] = Math.round(g * scale);
-    samples[out * 3 + 2] = Math.round(b * scale);
-    if (alpha) {
-      if (colorType === 6) alpha[out] = Math.round(channel(row, px, 3) * scale);
-      else if (trns && trns.length >= 6) {
-        const shift = bitDepth === 16 ? 8 : 0;
-        const key = [((trns[0] << 8) | trns[1]) >> shift, ((trns[2] << 8) | trns[3]) >> shift, ((trns[4] << 8) | trns[5]) >> shift];
-        alpha[out] = r === key[0] && g === key[1] && b === key[2] ? 0 : 255;
+  const scale = bitDepth === 16 ? 1 : 255 / max;
+  const shift = bitDepth === 16 ? 8 : 0;
+  const key = trns && trns.length >= 6 ? [((trns[0] << 8) | trns[1]) >> shift, ((trns[2] << 8) | trns[3]) >> shift, ((trns[4] << 8) | trns[5]) >> shift] : null;
+  const grayKey = trns && trns.length >= 2 ? ((trns[0] << 8) | trns[1]) >> shift : null;
+  const convert = (row: Uint8Array, width: number, color: Uint8Array, alpha: Uint8Array): void => {
+    for (let px = 0; px < width; px++) {
+      if (colorType === 3) {
+        const index = channel(row, px, 0);
+        if (palette) {
+          color[px * 3] = palette[index * 3];
+          color[px * 3 + 1] = palette[index * 3 + 1];
+          color[px * 3 + 2] = palette[index * 3 + 2];
+        }
+        alpha[px] = trns && index < trns.length ? trns[index] : 255;
+      } else if (gray) {
+        const g = channel(row, px, 0);
+        color[px] = Math.round(g * scale);
+        alpha[px] = colorType === 4 ? Math.round(channel(row, px, 1) * scale) : grayKey !== null && g === grayKey ? 0 : 255;
+      } else {
+        const r = channel(row, px, 0);
+        const g = channel(row, px, 1);
+        const b = channel(row, px, 2);
+        color[px * 3] = Math.round(r * scale);
+        color[px * 3 + 1] = Math.round(g * scale);
+        color[px * 3 + 2] = Math.round(b * scale);
+        alpha[px] = colorType === 6 ? Math.round(channel(row, px, 3) * scale) : key && r === key[0] && g === key[1] && b === key[2] ? 0 : 255;
       }
     }
   };
+  return { channels, gray, hasAlpha, convert };
+}
 
-  // Each pass of the image (one for a plain PNG, seven for Adam7).
-  const passes = interlaced
+/** A streaming PNG's output objects and state. */
+interface PngOut {
+  objNum: number;
+  lengthNum: number;
+  maskNum: number | null;
+  width: number;
+  height: number;
+  /** The writer's offset where the stream's data began. */
+  start: number;
+  deflate: Zlib;
+  alpha: Uint8Array | null;
+  rows: number;
+}
+
+/**
+ * A PNG written as it streams in: each IDAT piece is inflated, each row
+ * unfiltered against the one before (the only row kept), converted, and
+ * averaged into an output row when the image is over the pixel budget;
+ * the color samples go out through a Flate stream whose length is an
+ * object written after it, and the alpha plane (the output's size at
+ * most) is written as the SMask at the end. An interlaced PNG is decoded
+ * whole when it is under the budget.
+ */
+async function writePng(writer: PdfWriter, pieces: Pieces): Promise<WrittenImage | null> {
+  let chain = Promise.resolve();
+  let failed: Error | null = null;
+  let whole: Uint8Array[] | null = null;
+  let wholeBytes = 0;
+  // Set at the first IDAT, once the header is known.
+  let out: PngOut | null = null;
+  const current = (): PngOut | null => out;
+  let inflater: Unzlib | null = null;
+  const chunks = new PngChunks(
+    (h) => {
+      if (!h.width || !h.height) throw new Error("PNG has no size");
+      if (h.interlaced) {
+        // Adam7 scatters each pass over the image: decoded whole, within the budget.
+        if (h.width * h.height > PIXEL_BUDGET) throw new Error("interlaced PNG over the pixel budget");
+        whole = [];
+        return;
+      }
+      const { channels, gray, hasAlpha, convert } = pngConverter(h);
+      const k = shrinkFactor(h.width, h.height);
+      const width = Math.ceil(h.width / k);
+      const height = Math.ceil(h.height / k);
+      const samples = gray ? 1 : 3;
+      const stride = Math.ceil((h.width * channels * h.bitDepth) / 8);
+      const bpp = Math.max(1, (channels * h.bitDepth) >> 3);
+      const objNum = writer.allocate();
+      const lengthNum = writer.allocate();
+      const maskNum = hasAlpha ? writer.allocate() : null;
+      const deflate = new Zlib((data) => {
+        chain = chain.then(() => writer.write(data));
+      });
+      const o = { objNum, lengthNum, maskNum, width, height, start: 0, deflate, alpha: hasAlpha ? new Uint8Array(width * height) : null, rows: 0 };
+      out = o;
+      chain = chain
+        .then(() => writer.beginStream(objNum, `/Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /${gray ? "DeviceGray" : "DeviceRGB"} /BitsPerComponent 8 /Filter /FlateDecode${maskNum ? ` /SMask ${maskNum} 0 R` : ""}`, { ref: lengthNum }))
+        .then(() => {
+          o.start = writer.offset;
+        });
+      // Row assembly: a filter byte and `stride` bytes per row.
+      let pending: Uint8Array = new Uint8Array(0);
+      let previous: Uint8Array = new Uint8Array(stride);
+      const color = new Uint8Array(h.width * samples);
+      const alpha = new Uint8Array(h.width);
+      // Averaging over k x k blocks into one output row.
+      const sums = new Uint32Array(width * samples);
+      const alphaSums = new Uint32Array(width);
+      const counts = new Uint32Array(width);
+      let sourceRow = 0;
+      let inBlock = 0;
+      const emitRow = (): void => {
+        const outRow = new Uint8Array(width * samples);
+        for (let x = 0; x < width; x++) {
+          const n = counts[x] || 1;
+          for (let c = 0; c < samples; c++) outRow[x * samples + c] = Math.round(sums[x * samples + c] / n);
+          if (o.alpha) o.alpha[o.rows * width + x] = Math.round(alphaSums[x] / n);
+        }
+        sums.fill(0);
+        alphaSums.fill(0);
+        counts.fill(0);
+        o.rows++;
+        deflate.push(outRow, false);
+      };
+      const takeRow = (line: Uint8Array): void => {
+        convert(line, h.width, color, alpha);
+        if (k === 1) {
+          o.rows++;
+          deflate.push(color.slice(), false);
+          if (o.alpha) o.alpha.set(alpha, (o.rows - 1) * width);
+          return;
+        }
+        for (let sx = 0; sx < h.width; sx++) {
+          const x = Math.floor(sx / k);
+          for (let c = 0; c < samples; c++) sums[x * samples + c] += color[sx * samples + c];
+          alphaSums[x] += alpha[sx];
+          counts[x]++;
+        }
+        if (++inBlock === k || sourceRow + 1 === h.height) {
+          emitRow();
+          inBlock = 0;
+        }
+      };
+      inflater = new Unzlib((data) => {
+        const buffer = pending.length ? concat([pending, data], pending.length + data.length) : data;
+        let at = 0;
+        while (buffer.length - at >= 1 + stride && sourceRow < h.height && o.rows <= height) {
+          // Unfiltered in place: the row stays a view of the inflated data.
+          const line = buffer.subarray(at + 1, at + 1 + stride);
+          unfilter(buffer[at], line, previous, bpp);
+          at += 1 + stride;
+          takeRow(line);
+          previous = line;
+          sourceRow++;
+        }
+        pending = buffer.slice(at);
+      });
+    },
+    (data) => {
+      if (whole) {
+        whole.push(data.slice());
+        wholeBytes += data.length;
+        return;
+      }
+      // Inflated a little at a time: a run of one color inflates a
+      // thousandfold, and the inflater hands out each push's output whole.
+      for (let at = 0; at < data.length; at += INFLATE_STEP) inflater?.push(data.subarray(at, at + INFLATE_STEP));
+    },
+  );
+  const found = await pieces((piece) => {
+    if (failed) return;
+    try {
+      chunks.push(piece);
+    } catch (error) {
+      failed = error as Error;
+    }
+    return chain;
+  });
+  await chain;
+  if (!found || failed || (!out && !whole)) {
+    const o = current();
+    if (o) {
+      // The objects were reserved: null objects keep the table whole.
+      await writer.endStream();
+      await writer.object(o.lengthNum, "0");
+      if (o.maskNum) await writer.object(o.maskNum, "null");
+    }
+    return null;
+  }
+  if (whole) {
+    const h = chunks.header;
+    const image = decodePngRows(h, inflateWhole(concat(whole, wholeBytes)));
+    return image ? writeSamples(writer, image) : null;
+  }
+  const o = current() as PngOut;
+  o.deflate.push(new Uint8Array(0), true);
+  await chain;
+  const length = writer.offset - o.start;
+  await writer.endStream();
+  await writer.object(o.lengthNum, String(length));
+  if (o.maskNum && o.alpha) {
+    await writer.deflatedStream(o.maskNum, `/Type /XObject /Subtype /Image /Width ${o.width} /Height ${o.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, o.alpha);
+  }
+  return { objNum: o.objNum, width: o.width, height: o.height };
+}
+
+function inflateWhole(data: Uint8Array): Uint8Array {
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  const inflater = new Unzlib((chunk) => {
+    parts.push(chunk);
+    total += chunk.length;
+  });
+  inflater.push(data, true);
+  return concat(parts, total);
+}
+
+/** A PNG decoded whole from its chunks and inflated rows: every color type
+ * and bit depth, interlaced or not. For tests, and interlaced images. */
+export function decodePng(bytes: Uint8Array): SampleImage | null {
+  let data: Uint8Array[] = [];
+  let total = 0;
+  const chunks = new PngChunks(() => undefined, (d) => {
+    data.push(d.slice());
+    total += d.length;
+  });
+  try {
+    chunks.push(bytes);
+  } catch {
+    return null;
+  }
+  if (!chunks.header.width || !chunks.header.height) return null;
+  const image = decodePngRows(chunks.header, inflateWhole(concat(data, total)));
+  data = [];
+  return image;
+}
+
+function decodePngRows(h: PngHeader, raw: Uint8Array): SampleImage | null {
+  const { width, height, bitDepth } = h;
+  const { channels, gray, hasAlpha, convert } = pngConverter(h);
+  const samples = gray ? 1 : 3;
+  const out = new Uint8Array(width * height * samples);
+  const alpha = new Uint8Array(width * height);
+  alpha.fill(255);
+  const bpp = Math.max(1, (channels * bitDepth) >> 3);
+  const passes = h.interlaced
     ? [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]]
     : [[0, 0, 1, 1]];
   let offset = 0;
@@ -263,18 +556,25 @@ export function decodePng(bytes: Uint8Array): SampleImage | null {
     const passHeight = Math.ceil((height - y0) / dy);
     if (passWidth <= 0 || passHeight <= 0) continue;
     const stride = Math.ceil((passWidth * channels * bitDepth) / 8);
-    let previous = new Uint8Array(stride);
+    let previous: Uint8Array = new Uint8Array(stride);
+    const color = new Uint8Array(passWidth * samples);
+    const rowAlpha = new Uint8Array(passWidth);
     for (let row = 0; row < passHeight; row++) {
       if (offset + 1 + stride > raw.length) return null;
-      const filter = raw[offset];
       const line = raw.slice(offset + 1, offset + 1 + stride);
+      unfilter(raw[offset], line, previous, bpp);
       offset += 1 + stride;
-      unfilter(filter, line, previous, bpp);
-      for (let px = 0; px < passWidth; px++) store(line, px, x0 + px * dx, y0 + row * dy);
+      convert(line, passWidth, color, rowAlpha);
+      const y = y0 + row * dy;
+      for (let px = 0; px < passWidth; px++) {
+        const x = x0 + px * dx;
+        for (let c = 0; c < samples; c++) out[(y * width + x) * samples + c] = color[px * samples + c];
+        alpha[y * width + x] = rowAlpha[px];
+      }
       previous = line;
     }
   }
-  return { width, height, gray, samples, alpha };
+  return { width, height, gray, samples: out, alpha: hasAlpha ? alpha : null };
 }
 
 function unfilter(filter: number, line: Uint8Array, previous: Uint8Array, bpp: number): void {
@@ -302,4 +602,175 @@ function unfilter(filter: number, line: Uint8Array, previous: Uint8Array, bpp: n
       }
       break;
   }
+}
+
+// ---------------------------------------------------------------- GIF
+
+/** A GIF's first frame as RGB samples with its transparent index as alpha;
+ * null when the bytes are not a GIF or the frame is over the pixel budget. */
+export function decodeGif(bytes: Uint8Array): SampleImage | null {
+  if (bytes.length < 13 || String.fromCharCode(bytes[0], bytes[1], bytes[2]) !== "GIF") return null;
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const screenW = v.getUint16(6, true);
+  const screenH = v.getUint16(8, true);
+  let at = 13;
+  let palette: Uint8Array | null = null;
+  if (bytes[10] & 0x80) {
+    const size = 3 * (1 << ((bytes[10] & 7) + 1));
+    palette = bytes.subarray(at, at + size);
+    at += size;
+  }
+  let transparent = -1;
+  while (at < bytes.length) {
+    const block = bytes[at++];
+    if (block === 0x21) {
+      // An extension: the graphic control one carries the transparent index.
+      const label = bytes[at++];
+      if (label === 0xf9 && bytes[at] >= 4) transparent = bytes[at + 1] & 1 ? bytes[at + 4] : -1;
+      while (at < bytes.length && bytes[at] !== 0) at += bytes[at] + 1;
+      at++;
+      continue;
+    }
+    if (block !== 0x2c) return null;
+    const left = v.getUint16(at, true);
+    const top = v.getUint16(at + 2, true);
+    const width = v.getUint16(at + 4, true);
+    const height = v.getUint16(at + 6, true);
+    const flags = bytes[at + 8];
+    at += 9;
+    if (flags & 0x80) {
+      const size = 3 * (1 << ((flags & 7) + 1));
+      palette = bytes.subarray(at, at + size);
+      at += size;
+    }
+    if (!palette || !width || !height || width * height > PIXEL_BUDGET) return null;
+    const minCode = bytes[at++];
+    // The LZW data, its sub-blocks joined.
+    const parts: Uint8Array[] = [];
+    let total = 0;
+    while (at < bytes.length && bytes[at] !== 0) {
+      parts.push(bytes.subarray(at + 1, at + 1 + bytes[at]));
+      total += bytes[at];
+      at += bytes[at] + 1;
+    }
+    const indices = lzwDecode(concat(parts, total), minCode, width * height);
+    if (!indices) return null;
+    // The frame on the logical screen, interlaced rows put in their place.
+    const outW = Math.min(screenW || width, left + width);
+    const outH = Math.min(screenH || height, top + height);
+    const samples = new Uint8Array(outW * outH * 3);
+    const alpha = new Uint8Array(outW * outH);
+    const rowOrder: number[] = [];
+    if (flags & 0x40) for (const [start, step] of [[0, 8], [4, 8], [2, 4], [1, 2]]) for (let y = start; y < height; y += step) rowOrder.push(y);
+    else for (let y = 0; y < height; y++) rowOrder.push(y);
+    rowOrder.forEach((y, row) => {
+      for (let x = 0; x < width; x++) {
+        const index = indices[row * width + x];
+        const ox = left + x;
+        const oy = top + y;
+        if (ox >= outW || oy >= outH) continue;
+        const o = oy * outW + ox;
+        samples[o * 3] = palette![index * 3];
+        samples[o * 3 + 1] = palette![index * 3 + 1];
+        samples[o * 3 + 2] = palette![index * 3 + 2];
+        alpha[o] = index === transparent ? 0 : 255;
+      }
+    });
+    return { width: outW, height: outH, gray: false, samples, alpha: transparent === -1 ? null : alpha };
+  }
+  return null;
+}
+
+/** GIF's LZW: variable code width from minCode + 1, clear and end codes. */
+function lzwDecode(data: Uint8Array, minCode: number, pixels: number): Uint8Array | null {
+  const out = new Uint8Array(pixels);
+  const clear = 1 << minCode;
+  const end = clear + 1;
+  // Each code's string: its prefix code and last byte, and its length.
+  const prefix = new Int32Array(4096);
+  const suffix = new Uint8Array(4096);
+  const length = new Uint16Array(4096);
+  for (let i = 0; i < clear; i++) {
+    prefix[i] = -1;
+    suffix[i] = i;
+    length[i] = 1;
+  }
+  let codeSize = minCode + 1;
+  let next = end + 1;
+  let previous = -1;
+  let bits = 0;
+  let bitCount = 0;
+  let at = 0;
+  let written = 0;
+  const emit = (code: number): void => {
+    let n = length[code];
+    let c = code;
+    const start = written;
+    written += n;
+    if (written > pixels) throw new Error("GIF data runs past its frame");
+    while (n-- > 0) {
+      out[start + n] = suffix[c];
+      c = prefix[c];
+    }
+  };
+  try {
+    while (written < pixels) {
+      while (bitCount < codeSize && at < data.length) {
+        bits |= data[at++] << bitCount;
+        bitCount += 8;
+      }
+      if (bitCount < codeSize) break;
+      const code = bits & ((1 << codeSize) - 1);
+      bits >>>= codeSize;
+      bitCount -= codeSize;
+      if (code === clear) {
+        codeSize = minCode + 1;
+        next = end + 1;
+        previous = -1;
+        continue;
+      }
+      if (code === end) break;
+      if (previous === -1) {
+        emit(code);
+        previous = code;
+        continue;
+      }
+      // A code past the table's next entry is corrupt data; an entry made
+      // from it would chain the table in a loop.
+      if (code > next) throw new Error("GIF code past the table");
+      // A new table entry: the previous string plus the first byte of this one.
+      let first: number;
+      if (code < next) {
+        emit(code);
+        let c = code;
+        while (prefix[c] !== -1) c = prefix[c];
+        first = suffix[c];
+      } else {
+        let c = previous;
+        while (prefix[c] !== -1) c = prefix[c];
+        first = suffix[c];
+        if (next < 4096) {
+          prefix[next] = previous;
+          suffix[next] = first;
+          length[next] = length[previous] + 1;
+        }
+        emit(next < 4096 ? next : previous);
+        previous = code;
+        if (next < 4096) next++;
+        if (next === 1 << codeSize && codeSize < 12) codeSize++;
+        continue;
+      }
+      if (next < 4096) {
+        prefix[next] = previous;
+        suffix[next] = first;
+        length[next] = length[previous] + 1;
+        next++;
+        if (next === 1 << codeSize && codeSize < 12) codeSize++;
+      }
+      previous = code;
+    }
+  } catch {
+    return null;
+  }
+  return out;
 }

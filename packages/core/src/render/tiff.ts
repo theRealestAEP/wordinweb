@@ -21,7 +21,7 @@ interface Reader {
 const TYPE_SIZE: Record<number, number> = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8 };
 
 /** Decode a baseline TIFF (first IFD only). Returns null if unsupported. */
-export function decodeTiff(bytes: Uint8Array): DecodedImage | null {
+export function decodeTiff(bytes: Uint8Array, maxPixels = Infinity): DecodedImage | null {
   try {
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const bom = dv.getUint16(0, false);
@@ -68,6 +68,8 @@ export function decodeTiff(bytes: Uint8Array): DecodedImage | null {
     const width = one(256, 0);
     const height = one(257, 0);
     if (!width || !height) return null;
+    // The pixels are decoded whole: a caller with a bound says so here.
+    if (width * height > maxPixels) return null;
     const bits = readValues(258) ?? [1];
     const compression = one(259, 1);
     const photometric = one(262, 1);

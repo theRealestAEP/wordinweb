@@ -22,8 +22,9 @@ export interface StreamingDocument {
   bodyHasPageTotal: boolean;
   /** A binary part's bytes, read from the file when asked. */
   media(part: string): Promise<Uint8Array | undefined>;
-  /** A binary part's bytes a piece at a time, never held whole; false when the part is missing. */
-  mediaPieces(part: string, onPiece: (piece: Uint8Array) => void): Promise<boolean>;
+  /** A binary part's bytes a piece at a time, never held whole; false when
+   * the part is missing. A promise `onPiece` gives back holds the reading. */
+  mediaPieces(part: string, onPiece: (piece: Uint8Array) => void | Promise<void>): Promise<boolean>;
   /** A binary part's size in bytes, from the zip directory; undefined when missing. */
   mediaSize(part: string): number | undefined;
   /** The ids of the comments whose ranges cover a body w:t (the element a

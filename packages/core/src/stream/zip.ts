@@ -63,17 +63,30 @@ export class ZipIndex {
   /**
    * An entry's content a piece at a time, inflated as its compressed bytes
    * are fetched: nothing holds the entry whole. Stops as soon as the content
-   * outgrows the size the directory gives, so a zip bomb stops here.
+   * outgrows the size the directory gives, so a zip bomb stops here. A
+   * promise `onPiece` gives back is waited for before the next fetch, so a
+   * consumer that writes the pieces on holds the reading back.
    */
-  async pieces(entry: ZipEntry, onPiece: (piece: Uint8Array) => void): Promise<void> {
+  async pieces(entry: ZipEntry, onPiece: (piece: Uint8Array) => void | Promise<void>): Promise<void> {
     let size = 0;
+    let pending: Promise<void>[] = [];
     const take = (piece: Uint8Array): void => {
       size += piece.length;
       if (size > entry.size) throw new Error(`${entry.name} is corrupt`);
-      onPiece(piece);
+      const wait = onPiece(piece);
+      if (wait) pending.push(wait);
     };
-    if (entry.method !== 8) await this.compressed(entry, take);
-    else {
+    const settle = async (): Promise<void> => {
+      const waits = pending;
+      pending = [];
+      await Promise.all(waits);
+    };
+    if (entry.method !== 8) {
+      await this.compressed(entry, (piece) => {
+        take(piece);
+        return settle();
+      });
+    } else {
       const inflater = new Inflate(take);
       let done = 0;
       await this.compressed(entry, (piece) => {
@@ -82,6 +95,7 @@ export class ZipIndex {
           done += next - at;
           inflater.push(piece.subarray(at, next), done === entry.compressedSize);
         }
+        return settle();
       });
     }
     if (size !== entry.size) throw new Error(`${entry.name} is corrupt`);
@@ -93,12 +107,12 @@ export class ZipIndex {
   }
 
   /** An entry's compressed bytes, FETCH_BYTES at a time. */
-  private async compressed(entry: ZipEntry, onPiece: (piece: Uint8Array) => void): Promise<void> {
+  private async compressed(entry: ZipEntry, onPiece: (piece: Uint8Array) => void | Promise<void>): Promise<void> {
     const header = view(await this.source.read(entry.headerOffset, entry.headerOffset + 30));
     if (header.getUint32(0, true) !== 0x04034b50) throw new Error(`bad local header for ${entry.name}`);
     const start = entry.headerOffset + 30 + header.getUint16(26, true) + header.getUint16(28, true);
     const end = start + entry.compressedSize;
-    for (let at = start; at < end; at += FETCH_BYTES) onPiece(await this.source.read(at, Math.min(at + FETCH_BYTES, end)));
+    for (let at = start; at < end; at += FETCH_BYTES) await onPiece(await this.source.read(at, Math.min(at + FETCH_BYTES, end)));
   }
 
   private async readDirectory(): Promise<void> {
