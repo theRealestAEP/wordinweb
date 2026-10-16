@@ -991,7 +991,7 @@ function treeSide(els: XmlElement[], doc: DocxDocument, original: boolean, ctx: 
   return {
     kind: (i) => localName(els[i].name),
     text: (i) => paragraphText(els[i]),
-    section: (i) => sectionKey(els[i], doc),
+    section: (i) => sectionReferences(els[i], doc),
     cells: (i) => els[i].children.filter((c) => localName(c.name) === "tc").length,
     keyParts: (i) => {
       let parts = keys.get(i);
@@ -1224,15 +1224,27 @@ function pairable(O: GapSide, i: number, R: GapSide, j: number): boolean {
 }
 
 /**
- * The section a paragraph ends, as its w:sectPr's header and footer
- * references with each relationship id replaced by the part it points to,
- * so the two documents' ids compare; "" for a paragraph that ends no
- * section. The rest of the section's properties are not in the key: a
- * break whose page setup changed pairs, and alignParagraphProps records
- * the change as a w:sectPrChange. A reference change is no revision, so a
- * break whose references changed is struck and reinserted whole.
+ * The section a paragraph ends, as its w:sectPr with each relationship id
+ * replaced by the part it points to, so the two documents' ids compare; ""
+ * for a paragraph that ends no section. The anchor fingerprint holds it
+ * whole, so empty break paragraphs of different sections never anchor to
+ * one another.
  */
 export function sectionKey(el: XmlElement, doc: DocxDocument): string {
+  const sectPr = child(child(el, "pPr"), "sectPr");
+  if (!sectPr) return "";
+  return serializeXml(sectPr).replace(/r:id="([^"]*)"/g, (_, id: string) => `r:id="${doc.documentRels.get(id)?.target ?? id}"`);
+}
+
+/**
+ * The header and footer references of the section a paragraph ends, as
+ * sectionKey writes them; "" for a paragraph that ends no section. What
+ * two break paragraphs in a gap must share to pair: a break whose page
+ * setup changed pairs, and alignParagraphProps records the change as a
+ * w:sectPrChange, while a reference change is no revision, so a break
+ * whose references changed is struck and reinserted whole.
+ */
+export function sectionReferences(el: XmlElement, doc: DocxDocument): string {
   const sectPr = child(child(el, "pPr"), "sectPr");
   if (!sectPr) return "";
   const refs = sectPr.children.filter((c) => localName(c.name) === "headerReference" || localName(c.name) === "footerReference");

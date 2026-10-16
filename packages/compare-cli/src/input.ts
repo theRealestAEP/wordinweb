@@ -5,7 +5,7 @@ import { DocxDocument } from "../../core/src/docx.js";
 import { XmlElement, child, cyrb53, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { acceptAllRevisions, collectRevisions } from "../../core/src/edit/suggest.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
-import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionKey } from "../../core/src/edit/compare/index.js";
+import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionReferences } from "../../core/src/edit/compare/index.js";
 import { normalizeText } from "../../core/src/edit/compare/text.js";
 import { resolvePartPath } from "../../core/src/zip.js";
 import { CompareError } from "./errors.js";
@@ -66,7 +66,7 @@ export interface Input {
   kinds: string[];
   /** Whether each block is a paragraph that ends a section. */
   endsSection: boolean[];
-  /** The sectionKey of each block that ends a section. */
+  /** The sectionReferences of each block that ends a section (pairable). */
   sectionKeys: Map<number, string>;
   /** The w:sectPr of each block that ends a section, in order. */
   sectPrs: XmlElement[];
@@ -206,7 +206,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       const sectPr = localName(el.name) === "p" ? child(child(el, "pPr"), "sectPr") : undefined;
       input.endsSection.push(!!sectPr);
       if (sectPr) {
-        input.sectionKeys.set(i, sectionKey(el, shell));
+        input.sectionKeys.set(i, sectionReferences(el, shell));
         input.sectPrs.push(sectPr);
       }
       noteRefsIn(el);
