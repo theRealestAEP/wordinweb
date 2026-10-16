@@ -74,8 +74,12 @@ interface Char {
   unrendered: boolean;
 }
 
-/** Fields whose result the renderer computes itself (layout/inline.ts resolveField; a MERGEFIELD shows its «name»). */
-const RECOMPUTED = /^\s*(PAGE|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|DATE|TIME|MERGEFIELD)\b/i;
+/**
+ * Fields whose result the renderer draws otherwise than as cached:
+ * computed (layout/inline.ts resolveField; a MERGEFIELD shows its «name»),
+ * or a table of contents, whose entries lose their hyperlink style.
+ */
+const RECOMPUTED = /^\s*(PAGE|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|DATE|TIME|MERGEFIELD|TOC)\b/i;
 const LIVE = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i;
 
 /**
@@ -102,6 +106,8 @@ interface Para {
   hasBar: boolean;
   /** A body paragraph outside tables and text boxes: its text is found in order in the PDF. */
   ordered: boolean;
+  /** In a row of an exact height: the PDF may show only part of it. */
+  clipped: boolean;
   noteRefs: { kind: "footnote" | "endnote"; id: string; marks: Marks }[];
 }
 
@@ -186,6 +192,7 @@ interface Ctx {
   inTable: boolean;
   inTextBox: boolean;
   unrendered: boolean;
+  clipped: boolean;
   para: Para | null;
 }
 
@@ -231,7 +238,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
       const inner = own[own.length - 1];
       if (inner && !inner.carrier) inner.carrier = marks;
       const field =
-        inner && !inner.flushed ? { marks: LIVE.test(inner.instr) ? marks : inner.carrier ?? marks, recomputed: RECOMPUTED.test(inner.instr) || inner.nested || own.length > 1 } : null;
+        inner && !inner.flushed ? { marks: LIVE.test(inner.instr) ? marks : inner.carrier ?? marks, recomputed: own.some((f) => RECOMPUTED.test(f.instr)) || inner.nested || own.length > 1 } : null;
       para.chars.push({ ch, rev: ctx.rev, marks, kind, field, unrendered: ctx.unrendered });
     };
     for (const el of r.children) {
@@ -284,6 +291,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
           needsBar: ctx.bar || contains(node, FORMAT_CHANGES),
           hasBar: isChangeBar(child(child(pPr, "pBdr"), "left")),
           ordered: !ctx.inTable && !ctx.inTextBox && base === "document",
+          clipped: ctx.clipped,
           noteRefs: [],
         };
         paras.push(para);
@@ -295,7 +303,8 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
       } else if (ln === "tr") {
         const trPr = child(node, "trPr");
         const rev = ctx.rev ?? (child(trPr, "ins") ? "ins" : child(trPr, "del") ? "del" : null);
-        visit(node, { ...ctx, rev, bar: ctx.bar || !!child(trPr, "trPrChange") }, label(prefix, "tr"));
+        const clipped = ctx.clipped || attr(child(trPr, "trHeight"), "hRule") === "exact";
+        visit(node, { ...ctx, rev, bar: ctx.bar || !!child(trPr, "trPrChange"), clipped }, label(prefix, "tr"));
       } else if (ln === "tc") {
         const tcPr = child(node, "tcPr");
         const rev = ctx.rev ?? (child(tcPr, "cellIns") ? "ins" : child(tcPr, "cellDel") ? "del" : null);
@@ -328,7 +337,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
   };
 
   const body = child(root, "body") ?? root;
-  const ctx: Ctx = { rev: null, bar: false, tableStyle: undefined, pStyle: undefined, fields: noFields(), inTable: false, inTextBox: false, unrendered: false, para: null };
+  const ctx: Ctx = { rev: null, bar: false, tableStyle: undefined, pStyle: undefined, fields: noFields(), inTable: false, inTextBox: false, unrendered: false, clipped: false, para: null };
   visit(body, ctx, base);
   // The final section's own format change bars the body's last paragraph.
   if (child(child(body, "sectPr"), "sectPrChange")) {
@@ -437,7 +446,8 @@ function checkClean(part: string, root: XmlElement, out: Failure[], orderBudget:
   let order = 0;
   const walk = (el: XmlElement, path: string): void => {
     const ln = localName(el.name);
-    if (REVISION_MARKUP.has(ln) && out.filter((f) => f.invariant === 3 && f.part === part).length < 5) {
+    // WordprocessingML's elements only: a shape's path has an a:moveTo of its own.
+    if (REVISION_MARKUP.has(ln) && el.name === `w:${ln}` && out.filter((f) => f.invariant === 3 && f.part === part).length < 5) {
       out.push({ invariant: 3, part, paragraph: path, detail: `revision markup left: <${el.name}>` });
     }
     const expected = ORDERS[ln];
@@ -487,27 +497,46 @@ function normalize(s: string): string {
   return s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 }
 
-/** Letters only: the digits a page number, a note mark or a date add are not the copy's. */
+/**
+ * Letters only, lowercased: the digits a page number, a note mark or a
+ * date add are not the copy's. A mathematical alphanumeric symbol (the
+ * italic 𝑥 an equation's x is drawn as) counts as its plain letter.
+ * Right-to-left scripts are left out: the bidi layout draws them as many
+ * small items whose strike rules this check cannot attribute.
+ */
 function letters(s: string): string {
-  return s.toLowerCase().replace(/[^\p{L}]/gu, "");
+  return [...s.toLowerCase().replace(/[^\p{L}]|[\p{Script=Hebrew}\p{Script=Arabic}]/gu, "")]
+    .map((ch) => {
+      const cp = ch.codePointAt(0) as number;
+      if (cp === 0x210e) return "h";
+      if (cp < 0x1d400 || cp > 0x1d6a3) return ch;
+      return String.fromCharCode(0x61 + ((cp - 0x1d400) % 26)).toLowerCase();
+    })
+    .join("");
 }
 
 /** Whether the PDF checks can say anything about a character of the copy. */
 function drawnAsIs(c: Char, missing: Set<string>): boolean {
   const vanish = (c.field?.marks ?? c.marks).vanish;
-  return !(c.field?.recomputed || c.unrendered || c.kind === "sym" || c.kind === "math" || c.kind === "object" || vanish || missing.has(c.ch) || c.ch === "­");
+  return !(c.field?.recomputed || c.unrendered || c.kind === "sym" || c.kind === "object" || vanish || missing.has(c.ch) || c.ch === "­");
 }
 
 /** The copy's text as pdftotext should give it: each paragraph's words, in order. */
 function pdfWords(paras: Para[], missing: Set<string>): { words: string[]; ordered: boolean; path: string }[] {
   const pieces: { words: string[]; ordered: boolean; path: string }[] = [];
   for (const p of paras) {
-    // A text box of a fixed size clips what overflows it.
-    if (p.path.includes("/txbx")) continue;
-    // A recomputed field's result is unknown; a symbol, an equation and a
-    // character no font has are drawn otherwise; hidden text is not drawn.
-    const text = p.chars.map((c) => (drawnAsIs(c, missing) ? c.ch : " ")).join("");
-    const words = text.split(/[^\p{L}\p{N}]+/u).map(normalize).filter(Boolean);
+    // A text box of a fixed size, or a row of an exact height, clips what overflows it.
+    if (p.path.includes("/txbx") || p.clipped) continue;
+    // A recomputed field's result is unknown; a symbol, an equation (laid
+    // out its own way) and a character no font has are drawn otherwise;
+    // hidden text is not drawn.
+    const text = p.chars.map((c) => (drawnAsIs(c, missing) && c.kind !== "math" ? c.ch : " ")).join("");
+    // Right-to-left text comes out of pdftotext in visual order: a number or a Latin word beside it changes sides.
+    const words = text
+      .replace(/(?<=[\p{Script=Hebrew}\p{Script=Arabic}])(?=[^\p{Script=Hebrew}\p{Script=Arabic}\P{L}\P{N}])|(?<=[^\p{Script=Hebrew}\p{Script=Arabic}\P{L}\P{N}])(?=[\p{Script=Hebrew}\p{Script=Arabic}])/gu, " ")
+      .split(/[^\p{L}\p{N}]+/u)
+      .map(normalize)
+      .filter(Boolean);
     if (words.length) pieces.push({ words, ordered: p.ordered, path: p.path });
   }
   return pieces;
@@ -579,21 +608,18 @@ export function pdfItems(path: string): Item[] {
     for (const fm of dict.matchAll(/\/Font\s*<<([^>]*)>>/g)) fontDicts.push(fm[1]);
     for (const fm of dict.matchAll(/\/Font (\d+) 0 R/g)) fontDicts.push(dicts.get(Number(fm[1])) ?? "");
   }
-  {
-    for (const fontDict of fontDicts) {
-      for (const [, name, num] of fontDict.matchAll(/\/(\w+) (\d+) 0 R/g)) {
-        if (fonts.has(name)) continue;
-        const fontDict = dicts.get(Number(num)) ?? "";
-        const toUnicode = /\/ToUnicode (\d+) 0 R/.exec(fontDict);
-        const map = new Map<number, string>();
-        const cmap = toUnicode ? streams.get(Number(toUnicode[1]))?.toString("latin1") ?? "" : "";
-        for (const [, cid, utf16] of cmap.matchAll(/<([0-9a-fA-F]{4})> <([0-9a-fA-F]+)>/g)) {
-          let s = "";
-          for (let i = 0; i < utf16.length; i += 4) s += String.fromCharCode(parseInt(utf16.slice(i, i + 4), 16));
-          map.set(parseInt(cid, 16), s);
-        }
-        fonts.set(name, map);
+  for (const fontDict of fontDicts) {
+    for (const [, name, num] of fontDict.matchAll(/\/(\w+) (\d+) 0 R/g)) {
+      if (fonts.has(name)) continue;
+      const toUnicode = /\/ToUnicode (\d+) 0 R/.exec(dicts.get(Number(num)) ?? "");
+      const map = new Map<number, string>();
+      const cmap = toUnicode ? streams.get(Number(toUnicode[1]))?.toString("latin1") ?? "" : "";
+      for (const [, cid, utf16] of cmap.matchAll(/<([0-9a-fA-F]{4})> <([0-9a-fA-F]+)>/g)) {
+        let s = "";
+        for (let i = 0; i < utf16.length; i += 4) s += String.fromCharCode(parseInt(utf16.slice(i, i + 4), 16));
+        map.set(parseInt(cid, 16), s);
       }
+      fonts.set(name, map);
     }
   }
   const items: Item[] = [];
@@ -685,22 +711,30 @@ function roman(n: number): string {
   return s;
 }
 
-/** The marked text drawn in the PDF against the copy's: a histogram of letters per class. */
-function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, out: Failure[]): void {
+/**
+ * The marked text drawn in the PDF against the copy's: a histogram of
+ * letters per class. A header's or footer's letters are drawn once per
+ * page that shows it: between once and `pages` times.
+ */
+function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: number, out: Failure[]): void {
   const histogram = (): Record<Class, Map<string, number>> => ({ ins: new Map(), del: new Map(), other: new Map() });
   const want = histogram();
+  const wantRepeated = histogram();
   const samples: Record<Class, string[]> = { ins: [], del: [], other: [] };
-  const expect = (text: string, cls: Class): void => {
+  const expect = (text: string, cls: Class, repeated: boolean): void => {
+    const into = repeated ? wantRepeated : want;
     for (const ch of letters(text)) {
-      want[cls].set(ch, (want[cls].get(ch) ?? 0) + 1);
+      into[cls].set(ch, (into[cls].get(ch) ?? 0) + 1);
       if (samples[cls].length < 60) samples[cls].push(ch);
     }
   };
   let endnotes = 0;
   for (const p of paras) {
-    for (const c of p.chars) if (c.kind === "text" && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks));
+    const repeated = /^(header|footer)/.test(p.path);
+    // An equation's text is drawn with its runs' marks too, its letters as mathematical italics.
+    for (const c of p.chars) if ((c.kind === "text" || c.kind === "math") && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks), repeated);
     // An endnote's reference mark is a roman numeral, in the reference run's colors; a hidden reference draws nothing.
-    for (const ref of p.noteRefs) if (ref.kind === "endnote" && /^document\//.test(p.path) && !ref.marks.vanish) expect(roman(++endnotes), classOfMarks(ref.marks));
+    for (const ref of p.noteRefs) if (ref.kind === "endnote" && /^document\//.test(p.path) && !ref.marks.vanish) expect(roman(++endnotes), classOfMarks(ref.marks), false);
   }
   const got = histogram();
   const seen: Record<Class, string[]> = { ins: [], del: [], other: [] };
@@ -712,10 +746,11 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, out: Fa
   }
   for (const cls of ["ins", "del"] as const) {
     const diffs: string[] = [];
-    for (const ch of new Set([...want[cls].keys(), ...got[cls].keys()])) {
+    for (const ch of new Set([...want[cls].keys(), ...wantRepeated[cls].keys(), ...got[cls].keys()])) {
       const w = want[cls].get(ch) ?? 0;
+      const r = wantRepeated[cls].get(ch) ?? 0;
       const g = got[cls].get(ch) ?? 0;
-      if (w !== g) diffs.push(`${JSON.stringify(ch)} ${w}->${g}`);
+      if (g < w + r || g > w + r * Math.max(pages, 1)) diffs.push(`${JSON.stringify(ch)} ${w}${r ? `+${r}×` : ""}->${g}`);
     }
     if (diffs.length === 0) continue;
     const total = (h: Map<string, number>): number => [...h.values()].reduce((a, b) => a + b, 0);
@@ -723,7 +758,7 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, out: Fa
       invariant: 4,
       part: "pdf",
       detail: `${cls === "ins" ? "blue underlined" : "red struck"} characters drawn differ from the copy's`,
-      expected: `${total(want[cls])} chars, e.g. ${JSON.stringify(samples[cls].join(""))}`,
+      expected: `${total(want[cls])} chars${total(wantRepeated[cls]) ? ` and ${total(wantRepeated[cls])} in headers and footers` : ""}, e.g. ${JSON.stringify(samples[cls].join(""))}`,
       got: `${total(got[cls])} chars, e.g. ${JSON.stringify(seen[cls].join("|").slice(0, 80))}; per character (copy->drawn): ${diffs.slice(0, 12).join(", ")}${diffs.length > 12 ? ", …" : ""}`,
     });
   }
@@ -751,7 +786,7 @@ export async function comparePair(originalPath: string, revisedPath: string, dir
   const printable = join(dir, "printable.docx");
   const pdf = join(dir, "printable.pdf");
   const started = Date.now();
-  let rendered: { missingCharacters?: string[] } | null = null;
+  let rendered: { pdfPages?: number; missingCharacters?: string[] } | null = null;
   let pdfSkipped: string | undefined;
   try {
     rendered = await compareFiles(originalPath, revisedPath, out, { author: "Reviewer", date: "2026-01-01T00:00:00Z", printable: { path: printable }, ...(options.pdf === false ? {} : { pdf: { path: pdf } }) });
@@ -761,13 +796,13 @@ export async function comparePair(originalPath: string, revisedPath: string, dir
     if (!existsSync(out) || !existsSync(printable)) return { failures: [], error: `${e.code ?? "error"}: ${e.message}`, ms: Date.now() - started };
     pdfSkipped = `${e.code ?? "error"}: ${e.message.split("\n")[0].slice(0, 200)}`;
   }
-  const failures = checkPrintable(readFileSync(out), readFileSync(printable), rendered && options.pdf !== false ? { pdf: { path: pdf, missingCharacters: rendered.missingCharacters } } : {});
+  const failures = checkPrintable(readFileSync(out), readFileSync(printable), rendered && options.pdf !== false ? { pdf: { path: pdf, pages: rendered.pdfPages ?? 1, missingCharacters: rendered.missingCharacters } } : {});
   return { failures, pdfSkipped, ms: Date.now() - started };
 }
 
 export interface CheckOptions {
-  /** The PDF of the printable copy, when one was rendered. */
-  pdf?: { path: string; missingCharacters?: string[] };
+  /** The PDF of the printable copy, when one was rendered: its path, page count, and the characters no font had. */
+  pdf?: { path: string; pages: number; missingCharacters?: string[] };
 }
 
 /**
@@ -803,7 +838,7 @@ export function checkPrintable(result: Uint8Array, printable: Uint8Array, option
       return !note || notes.has(note[1]);
     });
     checkPdfText(options.pdf.path, shown, missing, out);
-    checkPdfMarks(options.pdf.path, shown, missing, out);
+    checkPdfMarks(options.pdf.path, shown, missing, options.pdf.pages, out);
   }
   return out;
 }

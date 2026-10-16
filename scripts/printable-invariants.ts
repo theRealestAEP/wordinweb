@@ -54,6 +54,8 @@ export function signature(f: Failure): string {
 // ---------------------------------------------------------------------------
 
 async function worker(): Promise<void> {
+  // Only the results go to stdout: a library's console.log goes to stderr with the rest.
+  console.log = console.error;
   const pdf = !args.has("no-pdf");
   const saveDir = args.get("save");
   const work = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), "printable-invariants-"));
@@ -166,6 +168,10 @@ async function main(): Promise<void> {
           child.stdin.write(JSON.stringify(next) + "\n");
         };
         createInterface({ input: child.stdout }).on("line", (line) => {
+          if (!line.startsWith("{")) {
+            console.error(line);
+            return;
+          }
           const result = JSON.parse(line) as Result;
           results.push(result);
           console.error(progress(result, results.length, total));
