@@ -944,6 +944,72 @@ describe("compareDocuments — section breaks and notes when blocks move", () =>
   });
 });
 
+describe("compareDocuments — comments on changed words", () => {
+  const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+  const rels = `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL}/comments" Target="comments.xml"/></Relationships>`;
+  const comment = (id: number, text: string): string => `<w:comment w:id="${id}" w:author="Ann" w:date="2026-01-01T00:00:00Z" w:initials="A"><w:p><w:r><w:t>${text}</w:t></w:r></w:p></w:comment>`;
+  const marked = (id: number, text: string): string => `<w:commentRangeStart w:id="${id}"/><w:r><w:t xml:space="preserve">${text}</w:t></w:r><w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r>`;
+  const run = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+  const withComment = (body: string, comments: string) =>
+    DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(`<w:p>${body}</w:p>`), "word/_rels/document.xml.rels": rels, "word/comments.xml": `<w:comments ${W_NS}>${comments}</w:comments>` }));
+  const bodyOf = (d: DocxDocument): string => (DocxDocument.load(d.save()).pkg.text("word/document.xml") ?? "").match(/<w:body>([\s\S]*)<\/w:body>/)?.[1] ?? "";
+
+  it("carries the original's comment onto the struck words when the revised comment differs", () => {
+    const original = withComment(run("Kept, then ") + marked(1, "old words") + run(" and the end."), comment(1, "The original's comment"));
+    const revised = withComment(run("Kept, then ") + marked(1, "new words") + run(" and the end."), comment(1, "The revised's comment"));
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+    // The original's comment is copied under a fresh id, its range and reference struck with its words.
+    expect(bodyOf(merged)).toMatch(
+      /<w:del [^>]*><w:commentRangeStart w:id="2"\/><w:r><w:delText xml:space="preserve">old<\/w:delText><\/w:r><w:commentRangeEnd w:id="2"\/><w:r><w:commentReference w:id="2"\/><\/w:r><\/w:del>/,
+    );
+    expect(DocxDocument.load(merged.save()).pkg.text("word/comments.xml")).toContain('<w:comment w:id="2" w:author="Ann" w:date="2026-01-01T00:00:00Z" w:initials="A"><w:p><w:r><w:t>The original\'s comment</w:t>');
+    const accepted = DocxDocument.load(merged.save());
+    acceptAllRevisions(accepted);
+    expect(canonicalBody(accepted)).toBe(canonicalBody(revised));
+    // Reject-all gives the words back with the original's comment on them.
+    const rejected = DocxDocument.load(merged.save());
+    rejectAllRevisions(rejected);
+    expect(bodyOf(rejected)).toContain('<w:commentRangeStart w:id="2"/><w:r><w:t xml:space="preserve">old</w:t></w:r><w:commentRangeEnd w:id="2"/><w:r><w:commentReference w:id="2"/></w:r>');
+    expect([...bodyOf(rejected).matchAll(/<w:t[^>]*>([^<]*)/g)].map((m) => m[1]).join("")).toBe("Kept, then old words and the end.");
+  });
+
+  it("leaves a comment both documents hold unchanged to the revised range", () => {
+    const original = withComment(run("Kept, then ") + marked(1, "old words") + run(" and the end."), comment(1, "The same comment"));
+    const revised = withComment(run("Kept, then ") + marked(1, "new words") + run(" and the end."), comment(1, "The same comment"));
+    const merged = compareDocuments(original, revised, { author: AUTHOR, date: DATE });
+    expect(bodyOf(merged).match(/<w:commentRangeStart /g)).toHaveLength(1);
+    expect(bodyOf(merged).match(/<w:commentReference /g)).toHaveLength(1);
+  });
+});
+
+describe("compareDocuments — a mid-document section's page setup", () => {
+  const sect = (left: number): string => `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="${left}" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>`;
+  it("is tracked as a sectPrChange on the break paragraph, which stays paired", () => {
+    const { notes, merged } = roundTrip(para("First section.", { pPr: sect(1440) }) + para("Second section."), para("First section.", { pPr: sect(2880) }) + para("Second section."));
+    expect(notes).toEqual([]);
+    expect(collectRevisions(merged).map((r) => r.kind)).toEqual(["sectionFormat"]);
+  });
+});
+
+describe("compareDocuments — notes name the part", () => {
+  it("says which header shares no paragraph with its counterpart", () => {
+    const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const withHeader = (text: string) =>
+      DocxDocument.load(
+        makeDocx({
+          "word/document.xml": `<w:document ${W_NS} ${R}><w:body>${para("Body.")}<w:sectPr><w:headerReference w:type="default" r:id="rId1"/></w:sectPr></w:body></w:document>`,
+          "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`,
+          "word/header1.xml": `<w:hdr ${W_NS}>${text}</w:hdr>`,
+        }),
+      );
+    // A table became a paragraph: nothing on either side is a paragraph the other has.
+    const onlyTable = `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>${para("Only")}</w:tc></w:tr></w:tbl>`;
+    const notes: CompareNote[] = [];
+    compareDocuments(withHeader(onlyTable), withHeader(para("Only")), { author: AUTHOR, date: DATE, onNote: (n) => notes.push(n) });
+    expect(notes.map((n) => n.detail)).toContain("the documents share no paragraph in word/header1.xml, so the final paragraph mark difference is left untracked");
+  });
+});
+
 describe("compareDocuments — a table's column grid", () => {
   it("records a grid change with a table format change, so a review can take it back", () => {
     // The grid record carries no author or date: alone, accept-all and

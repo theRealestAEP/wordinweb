@@ -151,6 +151,8 @@ export interface Ctx {
   leftoverNotes: Record<"footnote" | "endnote", LeftoverNote[]>;
   /** Original comment id -> the result's id for that comment (adoptComment). */
   commentIds: Map<string, string>;
+  /** The container being compared when it is not the body (a header part, "footnote 3"), for the notes. */
+  container?: string;
 }
 
 /** Where a block ended up, which is what decides the paragraph-mark revisions. */
@@ -392,10 +394,13 @@ export function compareLastSection(original: DocxDocument, merged: DocxDocument,
   const before = child(child(original.docRoot, "body"), "sectPr");
   const after = child(child(merged.docRoot, "body"), "sectPr");
   if (!after) return;
-  const contents = (sectPr: XmlElement | undefined): string =>
-    (sectPr?.children ?? []).filter((c) => !["headerReference", "footerReference", "sectPrChange"].includes(localName(c.name))).map((c) => serializeXml(c)).join("");
-  if (contents(before) === contents(after)) return;
+  if (sectionContents(before) === sectionContents(after)) return;
   recordSectionFormatChange(after, before ?? { name: after.name, attrs: {}, children: [], text: "" }, ctx.meta);
+}
+
+/** A section's properties less its references and change record: what a w:sectPrChange carries. */
+function sectionContents(sectPr: XmlElement | undefined): string {
+  return (sectPr?.children ?? []).filter((c) => !["headerReference", "footerReference", "sectPrChange"].includes(localName(c.name))).map((c) => serializeXml(c)).join("");
 }
 
 /**
@@ -452,16 +457,16 @@ export function compareHeadersFooters(original: DocxDocument, merged: DocxDocume
     }
     const name = `the last section's ${type === "default" ? "" : `${type}-page `}${kind}`;
     if (from !== null && into !== null) {
-      if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into } });
+      if (oRoot && mRoot) compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into }, container: into });
     } else if (from !== null) {
       if (!oRoot || !sectPr) continue;
       const target = merged.addHfPart(kind, type, sectPr);
       mRoot = merged.headerFooterRoot(target) as XmlElement;
       mRoot.children = [];
-      compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into: target } });
+      compareContainer(oRoot, mRoot, { ...ctx, scope: { from, into: target }, container: target });
       ctx.note({ code: "header-footer-reference", detail: `${name} was removed; its reference is not a revision, so accept-all leaves the ${kind} empty` });
     } else if (mRoot && into !== null) {
-      compareContainer({ ...mRoot, children: [] }, mRoot, { ...ctx, scope: { from: null, into } });
+      compareContainer({ ...mRoot, children: [] }, mRoot, { ...ctx, scope: { from: null, into }, container: into });
       ctx.note({ code: "header-footer-reference", detail: `${name} was added; its reference is not a revision, so reject-all leaves the ${kind} empty` });
     }
   }
@@ -601,7 +606,7 @@ export function compareNotes(
     // (one reference struck, another inserted): the revised content is kept
     // for settleLeftoverNotes to put back.
     if (byPosition.has(k)) ctx.leftoverNotes[kind].push({ original: oNotes[i], revised: rNotes[j], pristine: cloneXml(note) });
-    compareContainer((oPart as NotesPart).content(oNotes[i]) as XmlElement, note, { ...ctx, meta: { ...ctx.meta, nextId: () => ((touched = true), before()) } });
+    compareContainer((oPart as NotesPart).content(oNotes[i]) as XmlElement, note, { ...ctx, meta: { ...ctx.meta, nextId: () => ((touched = true), before()) }, container: `${kind} ${rNotes[j]}` });
     (mPart as NotesPart).update(rNotes[j], note);
     changed ||= touched;
   });
@@ -1219,14 +1224,19 @@ function pairable(O: GapSide, i: number, R: GapSide, j: number): boolean {
 }
 
 /**
- * The section a paragraph ends, as its w:sectPr with each relationship id
- * replaced by the part it points to, so the two documents' ids compare; "" for
- * a paragraph that ends no section.
+ * The section a paragraph ends, as its w:sectPr's header and footer
+ * references with each relationship id replaced by the part it points to,
+ * so the two documents' ids compare; "" for a paragraph that ends no
+ * section. The rest of the section's properties are not in the key: a
+ * break whose page setup changed pairs, and alignParagraphProps records
+ * the change as a w:sectPrChange. A reference change is no revision, so a
+ * break whose references changed is struck and reinserted whole.
  */
 export function sectionKey(el: XmlElement, doc: DocxDocument): string {
   const sectPr = child(child(el, "pPr"), "sectPr");
   if (!sectPr) return "";
-  return serializeXml(sectPr).replace(/r:id="([^"]*)"/g, (_, id: string) => `r:id="${doc.documentRels.get(id)?.target ?? id}"`);
+  const refs = sectPr.children.filter((c) => localName(c.name) === "headerReference" || localName(c.name) === "footerReference");
+  return `S${refs.map((c) => serializeXml(c)).join("")}`.replace(/r:id="([^"]*)"/g, (_, id: string) => `r:id="${doc.documentRels.get(id)?.target ?? id}"`);
 }
 
 /**
@@ -1620,6 +1630,7 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
     }
   }
   for (const it of items) if (it.kind === "del") it.path = it.path.map((c) => counterpart.get(c) ?? c);
+  carryOriginalComments(items, ctx);
   for (const el of rc.tail) items.push({ el: cloneXml(el), path: [], kind: null });
   // Containers met in the original paragraph: any still in a path after the
   // mapping above has no revised counterpart and is carried across.
@@ -1628,6 +1639,54 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
 }
 
 type Item = Placed & { kind: "ins" | "del" | null };
+
+/**
+ * The original's comments on struck words. Their range markers rode with
+ * the struck slices (sliceItems) and were adopted (adoptFromOriginal): a
+ * comment the revised document holds unchanged keeps the revised range,
+ * so those markers go; another's range is closed after its last struck
+ * word when the revised side kept its end, and gets a struck reference run
+ * when the revised side kept the reference, so the comment stays anchored
+ * to the words it was on.
+ */
+function carryOriginalComments(items: Item[], ctx: Ctx): void {
+  const ranges = new Map<string, { start: number; end: number; ref: boolean; last: number }>();
+  items.forEach((it, k) => {
+    if (it.kind !== "del") return;
+    const ln = localName(it.el.name);
+    const id = it.el.attrs["w:id"];
+    if (ln === "commentRangeStart") ranges.set(id, { start: k, end: -1, ref: false, last: k });
+    else if (ln === "commentRangeEnd") {
+      const range = ranges.get(id);
+      if (range) range.end = k;
+    } else {
+      const ref = child(it.el, "commentReference")?.attrs["w:id"];
+      const referenced = ref === undefined ? undefined : ranges.get(ref);
+      if (referenced) referenced.ref = true;
+      for (const range of ranges.values()) if (range.end === -1) range.last = k;
+    }
+  });
+  const unchanged = (id: string): boolean => [...ctx.commentIds].some(([from, to]) => from === id && to === id);
+  const marker = (name: string, id: string): Item => ({ el: { name, attrs: { "w:id": id }, children: [], text: "" }, path: [], kind: "del" });
+  const edits: { at: number; put: Item[] }[] = [];
+  for (const [id, range] of ranges) {
+    if (unchanged(id)) {
+      edits.push({ at: range.start, put: [] });
+      if (range.end !== -1) edits.push({ at: range.end, put: [] });
+      continue;
+    }
+    const w = items[range.start].el.name.slice(0, -"commentRangeStart".length);
+    const reference = marker(`${w}r`, id);
+    reference.el = { name: `${w}r`, attrs: {}, children: [{ name: `${w}commentReference`, attrs: { "w:id": id }, children: [], text: "" }], text: "" };
+    if (range.end === -1) edits.push({ at: range.last + 1, put: [marker(`${w}commentRangeEnd`, id), reference], keep: true } as { at: number; put: Item[] });
+    else if (!range.ref) edits.push({ at: range.end + 1, put: [reference], keep: true } as { at: number; put: Item[] });
+  }
+  // From the back, so the earlier indexes hold: an edit with items inserts, one without removes.
+  for (const edit of edits.sort((a, b) => b.at - a.at)) {
+    if (edit.put.length) items.splice(edit.at, 0, ...edit.put);
+    else items.splice(edit.at, 1);
+  }
+}
 
 /** Containers a revision may wrap whole (run content in the schema). */
 const WRAPPABLE_CONTAINERS = new Set(["sdt", "customXml"]);
@@ -2079,6 +2138,14 @@ export function alignParagraphProps(
   previous: XmlElement | undefined,
   ctx: Ctx,
 ): void {
+  // The section the paragraph ends, when it is the paragraph's own: its page
+  // setup change is a w:sectPrChange, as the last section's is
+  // (compareLastSection); the references are left out of it.
+  const liveSect = child(live, "sectPr");
+  const prevSect = child(previous, "sectPr");
+  if (liveSect && prevSect && live === child(pEl, "pPr") && sectionContents(liveSect) !== sectionContents(prevSect)) {
+    recordSectionFormatChange(liveSect, prevSect, ctx.meta);
+  }
   const liveBase = baseChildren(live, PARA_KEPT);
   const prevBase = baseChildren(previous, PARA_KEPT);
   if (keyOf(liveBase) === keyOf(prevBase)) return;
@@ -2322,7 +2389,7 @@ export function applyMarkStep(
   if (step.kind === "untracked") {
     ctx.note({
       code: "no-common-paragraph",
-      detail: "the documents share no paragraph, so the final paragraph mark difference is left untracked",
+      detail: `the documents share no paragraph${ctx.container ? ` in ${ctx.container}` : ""}, so the final paragraph mark difference is left untracked`,
     });
   } else if (step.kind === "glyph") {
     markParagraphGlyph(entry(step.at).el, step.glyph, ctx.meta);

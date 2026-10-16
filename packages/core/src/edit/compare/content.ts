@@ -15,6 +15,8 @@ import { wordTokens } from "./text.js";
 /** Elements that carry no visible content and must never read as a difference. */
 const PASSENGERS = new Set(["proofErr", "bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd"]);
 
+const COMMENT_MARKERS = new Set(["commentRangeStart", "commentRangeEnd"]);
+
 /** True for an element that rides along with the content instead of being diffed. */
 export function isPassenger(ln: string): boolean {
   return PASSENGERS.has(ln);
@@ -287,8 +289,12 @@ export function sliceItems(
   };
   for (let i = from; i < to; i++) {
     const token = tokens[i];
-    if (!deleted && token.lead) {
-      out.push(...token.lead.map((el) => ({ el: cloneXml(el), path: token.path })));
+    // The original's comment markers ride with its struck words, so the
+    // comment stays on them (carryOriginalComments); its other passengers
+    // (bookmarks, proofing marks) are the revised side's to keep.
+    const lead = deleted ? token.lead?.filter((el) => COMMENT_MARKERS.has(localName(el.name))) : token.lead;
+    if (lead?.length) {
+      out.push(...lead.map((el) => ({ el: cloneXml(el), path: token.path })));
       open = null;
       text = null;
     }
