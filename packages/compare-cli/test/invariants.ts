@@ -70,11 +70,7 @@ interface Char {
    * (PAGE, DATE: `recomputed`), so their text is unknown.
    */
   field: { marks: Marks; recomputed: boolean } | null;
-  /**
-   * Inside a run container the renderer does not read (w:customXml), or
-   * one it draws its own way (a hyperlink in a TOC-styled paragraph loses
-   * its hyperlink style, as in Word).
-   */
+  /** Inside a run container the renderer does not read (w:customXml). */
   unrendered: boolean;
 }
 
@@ -114,8 +110,12 @@ interface Para {
   ordered: boolean;
   /** In a row of an exact height: the PDF may show only part of it. */
   clipped: boolean;
-  /** A header's or footer's paragraph: whether some page shows it for sure (see renderedParts). */
-  shownForSure?: boolean;
+  /**
+   * Drawn once per page: a header's or footer's paragraph (true when some
+   * page shows it for sure, false when a page may; see renderedParts), or a
+   * table header row's (true).
+   */
+  repeated?: boolean;
   noteRefs: { kind: "footnote" | "endnote"; id: string; marks: Marks }[];
 }
 
@@ -208,6 +208,10 @@ interface Ctx {
   inTextBox: boolean;
   unrendered: boolean;
   clipped: boolean;
+  /** In a hyperlink of a TOC-styled paragraph: the character style does not apply. */
+  tocLink: boolean;
+  /** In a table's header row, drawn again on each page the table runs onto. */
+  repeated: boolean;
   para: Para | null;
 }
 
@@ -231,7 +235,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
     }
     props = mergeRunProps(props, resolveParagraphStyleChain(doc.styles, ctx.pStyle, false).rPr);
     const direct = parseRunProps(rPr, { theme: doc.theme });
-    if (direct.styleId) props = mergeRunProps(props, resolveCharacterStyleChain(doc.styles, direct.styleId));
+    if (direct.styleId && !ctx.tocLink) props = mergeRunProps(props, resolveCharacterStyleChain(doc.styles, direct.styleId));
     props = mergeRunProps(props, direct);
     return {
       color: props.color === undefined || props.color === "auto" ? undefined : props.color.toLowerCase(),
@@ -308,6 +312,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
           hasBar: isChangeBar(child(child(pPr, "pBdr"), "left")),
           ordered: !ctx.inTable && !ctx.inTextBox && base === "document",
           clipped: ctx.clipped,
+          repeated: ctx.repeated ? true : undefined,
           noteRefs: [],
         };
         paras.push(para);
@@ -320,7 +325,8 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
         const trPr = child(node, "trPr");
         const rev = ctx.rev ?? (child(trPr, "ins") ? "ins" : child(trPr, "del") ? "del" : null);
         const clipped = ctx.clipped || attr(child(trPr, "trHeight"), "hRule") === "exact";
-        visit(node, { ...ctx, rev, bar: ctx.bar || !!child(trPr, "trPrChange"), clipped }, label(prefix, "tr"));
+        const repeated = ctx.repeated || !!child(trPr, "tblHeader");
+        visit(node, { ...ctx, rev, bar: ctx.bar || !!child(trPr, "trPrChange"), clipped, repeated }, label(prefix, "tr"));
       } else if (ln === "tc") {
         const tcPr = child(node, "tcPr");
         const rev = ctx.rev ?? (child(tcPr, "cellIns") ? "ins" : child(tcPr, "cellDel") ? "del" : null);
@@ -337,8 +343,11 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
         visit(node, ctx, prefix);
         ctx.fields.original.pop();
         ctx.fields.revised.pop();
-      } else if (ln === "customXml" || ln === "dir" || ln === "bdo" || (ln === "hyperlink" && /^TOC[1-9]$/i.test(ctx.pStyle ?? ""))) {
+      } else if (ln === "customXml" || ln === "dir" || ln === "bdo") {
         visit(node, { ...ctx, unrendered: true }, prefix);
+      } else if (ln === "hyperlink" && /^TOC[1-9]$/i.test(ctx.pStyle ?? "")) {
+        // A hyperlink in a TOC-styled paragraph loses its character style, as in Word; direct properties stay.
+        visit(node, { ...ctx, tocLink: true }, prefix);
       } else if (ln === "txbxContent") {
         visit(node, { ...ctx, fields: noFields(), inTextBox: true, inTable: false, para: null }, label(prefix, "txbx"));
       } else if (ln === "AlternateContent") {
@@ -353,7 +362,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
   };
 
   const body = child(root, "body") ?? root;
-  const ctx: Ctx = { rev: null, bar: false, tableStyle: undefined, pStyle: undefined, fields: noFields(), inTable: false, inTextBox: false, unrendered: false, clipped: false, para: null };
+  const ctx: Ctx = { rev: null, bar: false, tableStyle: undefined, pStyle: undefined, fields: noFields(), inTable: false, inTextBox: false, unrendered: false, clipped: false, tocLink: false, repeated: false, para: null };
   visit(body, ctx, base);
   // The final section's own format change bars the body's last paragraph.
   if (child(child(body, "sectPr"), "sectPrChange")) {
@@ -541,8 +550,9 @@ function drawnAsIs(c: Char, missing: Set<string>): boolean {
 function pdfWords(paras: Para[], missing: Set<string>): { words: string[]; ordered: boolean; path: string }[] {
   const pieces: { words: string[]; ordered: boolean; path: string }[] = [];
   for (const p of paras) {
-    // A text box of a fixed size, or a row of an exact height, clips what overflows it.
-    if (p.path.includes("/txbx") || p.clipped) continue;
+    // A text box of a fixed size, or a row of an exact height, clips what
+    // overflows it; a header a page may show is not sure to be there.
+    if (p.path.includes("/txbx") || p.clipped || p.repeated === false) continue;
     // A recomputed field's result is unknown; a symbol, an equation (laid
     // out its own way) and a character no font has are drawn otherwise;
     // hidden text is not drawn.
@@ -747,7 +757,7 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: 
   };
   let endnotes = 0;
   for (const p of paras) {
-    const into = p.shownForSure === undefined ? want : p.shownForSure ? wantRepeated : wantMaybe;
+    const into = p.repeated === undefined ? want : p.repeated ? wantRepeated : wantMaybe;
     // An equation's text is drawn with its runs' marks too, its letters as mathematical italics.
     for (const c of p.chars) if ((c.kind === "text" || c.kind === "math") && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks), into);
     // An endnote's reference mark is a roman numeral, in the reference run's colors; a hidden reference draws nothing.
@@ -846,7 +856,7 @@ export function checkPrintable(result: Uint8Array, printable: Uint8Array, option
     checkPart(part, rParas, pParas, out);
     checkClean(part, pRoot, out, orderProblems(rRoot));
     if (/\/(document|footnotes|endnotes)\.xml$/.test(part)) drawn.push(...pParas);
-    else if (P.rendered.has(part)) drawn.push(...pParas.map((p) => ({ ...p, shownForSure: P.rendered.get(part) })));
+    else if (P.rendered.has(part)) drawn.push(...pParas.map((p) => ({ ...p, repeated: P.rendered.get(part) })));
     // A note whose reference is hidden is not drawn either.
     for (const p of pParas) for (const ref of p.noteRefs) if (!ref.marks.vanish) notes.add(`${ref.kind}#${ref.id}`);
   }
