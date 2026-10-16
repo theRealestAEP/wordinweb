@@ -72,14 +72,15 @@ interface Char {
   field: { marks: Marks; recomputed: boolean } | null;
   /** Inside a run container the renderer does not read (w:customXml). */
   unrendered: boolean;
+  /** The first character of its run: pdftotext may put a space where runs of different sizes meet. */
+  runStart: boolean;
 }
 
 /**
- * Fields whose result the renderer draws otherwise than as cached:
- * computed (layout/inline.ts resolveField; a MERGEFIELD shows its «name»),
- * or a table of contents, whose entries lose their hyperlink style.
+ * Fields whose result the renderer computes itself (layout/inline.ts
+ * resolveField; a MERGEFIELD shows its «name»).
  */
-const RECOMPUTED = /^\s*(PAGE|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|REF|STYLEREF|AUTHOR|FILENAME|DATE|TIME|MERGEFIELD|TOC)\b/i;
+const RECOMPUTED = /^\s*(PAGE|NUMPAGES|SECTIONPAGES|NUMWORDS|NUMCHARS|SEQ|REF|STYLEREF|AUTHOR|FILENAME|DATE|TIME|MERGEFIELD)\b/i;
 const LIVE = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i;
 
 /**
@@ -111,9 +112,9 @@ interface Para {
   /** In a row of an exact height: the PDF may show only part of it. */
   clipped: boolean;
   /**
-   * Drawn once per page: a header's or footer's paragraph (true when some
-   * page shows it for sure, false when a page may; see renderedParts), or a
-   * table header row's (true).
+   * Drawn once per page that shows it: a table header row's paragraph
+   * (true: once at least), a header's or footer's (false: on none, some or
+   * all pages; see referencedParts).
    */
   repeated?: boolean;
   noteRefs: { kind: "footnote" | "endnote"; id: string; marks: Marks }[];
@@ -147,7 +148,7 @@ interface Doc {
   styles: Styles;
   theme: Theme;
   /** The header and footer parts the PDF draws: true for sure, false maybe. */
-  rendered: Map<string, boolean>;
+  referenced: Set<string>;
 }
 
 /** The parts that can carry revisions, by name, in package order: the body first. */
@@ -160,36 +161,26 @@ function readDoc(bytes: Uint8Array): Doc {
   const names = Object.keys(files).filter((n) => /^word\/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$/.test(n));
   names.sort((a, b) => Number(!a.endsWith("document.xml")) - Number(!b.endsWith("document.xml")) || a.localeCompare(b));
   for (const name of names) parts.set(name, xml(name) as XmlElement);
-  return { parts, styles, theme, rendered: renderedParts(files, parts.get("word/document.xml")) };
+  return { parts, styles, theme, referenced: referencedParts(files, parts.get("word/document.xml")) };
 }
 
 /**
- * The header and footer parts the PDF shows, by name: true for one shown
- * for sure (a section's default header without a first-page one, or its
- * first-page one), false for one it may show (a default header behind a
- * first-page one, an even-page one). A referenced note is shown; the rest
- * of the parts are not.
+ * The header and footer parts a section references, by name: the PDF may
+ * show each on none, some or all of its pages (a first-page header on a
+ * section of one page hides the default one; an even-page one needs an
+ * even page). A referenced note is shown; the rest of the parts are not.
  */
-function renderedParts(files: Record<string, Uint8Array>, document: XmlElement | undefined): Map<string, boolean> {
-  const rendered = new Map<string, boolean>();
+function referencedParts(files: Record<string, Uint8Array>, document: XmlElement | undefined): Set<string> {
+  const referenced = new Set<string>();
   const rels = files["word/_rels/document.xml.rels"] ? parseXml(strFromU8(files["word/_rels/document.xml.rels"])) : undefined;
   const targets = new Map<string, string>();
   for (const rel of rels?.children ?? []) targets.set(attr(rel, "Id") ?? "", `word/${attr(rel, "Target")}`);
   const walk = (el: XmlElement): void => {
-    if (localName(el.name) === "sectPr") {
-      const titlePage = !!child(el, "titlePg");
-      for (const ref of el.children) {
-        if (!/^(header|footer)Reference$/.test(localName(ref.name))) continue;
-        const type = attr(ref, "type");
-        const part = targets.get(attr(ref, "id") ?? "") ?? "";
-        const sure = type === "first" ? titlePage : type === "default" ? !titlePage : false;
-        rendered.set(part, sure || !!rendered.get(part));
-      }
-    }
+    if (/^(header|footer)Reference$/.test(localName(el.name))) referenced.add(targets.get(attr(el, "id") ?? "") ?? "");
     for (const c of el.children) walk(c);
   };
   if (document) walk(document);
-  return rendered;
+  return referenced;
 }
 
 interface Ctx {
@@ -250,6 +241,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
     const para = ctx.para;
     if (!para) return;
     const marks = resolve(ctx, r.children.find((c) => c.name === "w:rPr"));
+    const runStart = para.chars.length;
     const own = ctx.rev === "del" ? ctx.fields.original : ctx.fields.revised;
     const sides = ctx.rev === "del" ? [ctx.fields.original] : ctx.rev === "ins" ? [ctx.fields.revised] : [ctx.fields.original, ctx.fields.revised];
     const push = (ch: string, kind: Char["kind"]): void => {
@@ -262,7 +254,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
         inner && (simple || !inner.flushed)
           ? { marks: LIVE.test(inner.instr) ? marks : inner.carrier ?? marks, recomputed: own.some((f) => RECOMPUTED.test(f.instr)) || inner.nested || own.length > 1 }
           : null;
-      para.chars.push({ ch, rev: ctx.rev, marks, kind, field, unrendered: ctx.unrendered });
+      para.chars.push({ ch, rev: ctx.rev, marks, kind, field, unrendered: ctx.unrendered, runStart: para.chars.length === runStart });
     };
     for (const el of r.children) {
       const ln = localName(el.name);
@@ -320,7 +312,8 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
           noteRefs: [],
         };
         paras.push(para);
-        visit(node, { ...ctx, pStyle: attr(child(pPr, "pStyle"), "val"), para }, para.path);
+        // The renderer reads each paragraph's fields afresh (parse/document.ts parseParagraph).
+        visit(node, { ...ctx, pStyle: attr(child(pPr, "pStyle"), "val"), fields: noFields(), para }, para.path);
       } else if (ln === "tbl") {
         const tblPr = child(node, "tblPr");
         const barred = !!child(tblPr, "tblPrChange") || !!child(child(node, "tblGrid"), "tblGridChange");
@@ -534,14 +527,8 @@ function normalize(s: string): string {
  * small items whose strike rules this check cannot attribute.
  */
 function letters(s: string): string {
-  return [...s.toLowerCase().replace(/[^\p{L}]|[\p{Script=Hebrew}\p{Script=Arabic}]/gu, "")]
-    .map((ch) => {
-      const cp = ch.codePointAt(0) as number;
-      if (cp === 0x210e) return "h";
-      if (cp < 0x1d400 || cp > 0x1d6a3) return ch;
-      return String.fromCharCode(0x61 + ((cp - 0x1d400) % 26)).toLowerCase();
-    })
-    .join("");
+  // NFKD: a ligature to its letters, a mathematical italic to its plain letter, an accent off its base.
+  return s.normalize("NFKD").toLowerCase().replace(/[^\p{L}]|[\p{Script=Hebrew}\p{Script=Arabic}]/gu, "");
 }
 
 /** Whether the PDF checks can say anything about a character of the copy. */
@@ -560,10 +547,10 @@ function pdfWords(paras: Para[], missing: Set<string>): { words: string[]; order
     // A recomputed field's result is unknown; a symbol, an equation (laid
     // out its own way) and a character no font has are drawn otherwise;
     // hidden text is not drawn.
-    const text = p.chars.map((c) => (drawnAsIs(c, missing) && c.kind !== "math" ? c.ch : " ")).join("");
+    const text = p.chars.map((c) => (c.runStart ? " " : "") + (drawnAsIs(c, missing) && c.kind !== "math" ? c.ch : " ")).join("");
     // Right-to-left text comes out of pdftotext in visual order: a number or a Latin word beside it changes sides.
     const words = text
-      .replace(/(?<=[\p{Script=Hebrew}\p{Script=Arabic}])(?=[^\p{Script=Hebrew}\p{Script=Arabic}\P{L}\P{N}])|(?<=[^\p{Script=Hebrew}\p{Script=Arabic}\P{L}\P{N}])(?=[\p{Script=Hebrew}\p{Script=Arabic}])/gu, " ")
+      .replace(/(?<=[\p{Script=Hebrew}\p{Script=Arabic}])(?=[\p{L}\p{N}])(?![\p{Script=Hebrew}\p{Script=Arabic}])|(?<=[\p{L}\p{N}])(?<![\p{Script=Hebrew}\p{Script=Arabic}])(?=[\p{Script=Hebrew}\p{Script=Arabic}])/gu, " ")
       .split(/[^\p{L}\p{N}]+/u)
       .map(normalize)
       .filter(Boolean);
@@ -761,11 +748,21 @@ function checkPdfMarks(pdf: string, paras: Para[], missing: Set<string>, pages: 
   };
   let endnotes = 0;
   for (const p of paras) {
+    // A text box of a fixed size and a row of an exact height clip their text.
+    if (p.path.includes("/txbx") || p.clipped) continue;
     const into = p.repeated === undefined ? want : p.repeated ? wantRepeated : wantMaybe;
     // An equation's text is drawn with its runs' marks too, its letters as mathematical italics.
     for (const c of p.chars) if ((c.kind === "text" || c.kind === "math") && drawnAsIs(c, missing)) expect(c.ch, classOfMarks(c.field?.marks ?? c.marks), into);
     // An endnote's reference mark is a roman numeral, in the reference run's colors; a hidden reference draws nothing.
-    for (const ref of p.noteRefs) if (ref.kind === "endnote" && /^document\//.test(p.path) && !ref.marks.vanish) expect(roman(++endnotes), classOfMarks(ref.marks), want);
+    // The mark is drawn again in front of the note itself, in the note's first run's colors.
+    for (const ref of p.noteRefs) {
+      if (ref.kind !== "endnote" || !/^document\//.test(p.path) || ref.marks.vanish) continue;
+      const mark = roman(++endnotes);
+      expect(mark, classOfMarks(ref.marks), want);
+      const note = paras.find((n) => n.path.startsWith(`endnotes/endnote#${ref.id}/`));
+      const first = note?.chars.find((c) => c.kind === "text");
+      if (first) expect(mark, classOfMarks(first.field?.marks ?? first.marks), want);
+    }
   }
   const got = histogram();
   const seen: Record<Class, string[]> = { ins: [], del: [], other: [] };
@@ -860,7 +857,7 @@ export function checkPrintable(result: Uint8Array, printable: Uint8Array, option
     checkPart(part, rParas, pParas, out);
     checkClean(part, pRoot, out, orderProblems(rRoot));
     if (/\/(document|footnotes|endnotes)\.xml$/.test(part)) drawn.push(...pParas);
-    else if (P.rendered.has(part)) drawn.push(...pParas.map((p) => ({ ...p, repeated: P.rendered.get(part) })));
+    else if (P.referenced.has(part)) drawn.push(...pParas.map((p) => ({ ...p, repeated: false })));
     // A note whose reference is hidden is not drawn either.
     for (const p of pParas) for (const ref of p.noteRefs) if (!ref.marks.vanish) notes.add(`${ref.kind}#${ref.id}`);
   }
