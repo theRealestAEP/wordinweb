@@ -852,6 +852,33 @@ describe("the printable copy's marks", () => {
     expect(textGroups(ops, BLUE).filter((g) => g.underlined).length).toBeGreaterThan(2);
   });
 
+  it("bars every paragraph of a table, row or cell whose format changed, and the last paragraph for the final section's", async () => {
+    const bordered = `<w:tblBorders><w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/><w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/></w:tblBorders>`;
+    const cell = (text: string, tcPr = ""): string => `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/>${tcPr}</w:tcPr>${para(text)}</w:tc>`;
+    const tbl = (tblW: string, trHeight: string, shd: string): string =>
+      `<w:tbl><w:tblPr><w:tblW w:w="${tblW}" w:type="dxa"/>${bordered}</w:tblPr><w:tblGrid><w:gridCol w:w="4000"/><w:gridCol w:w="4000"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:val="${trHeight}"/></w:trPr>${cell("Cell one", shd)}${cell("Cell two")}</w:tr><w:tr>${cell("Cell three")}${cell("Cell four")}</w:tr></w:tbl>`;
+    const sect = (left: number): string => `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="${left}" w:header="720" w:footer="720" w:gutter="0"/></w:sectPr>`;
+    const one = para("Before") + tbl("8000", "300", "") + para("After") + sect(1440);
+    const two = para("Before") + tbl("6000", "900", '<w:shd w:val="clear" w:color="auto" w:fill="FFFF00"/>') + para("After") + sect(2880);
+    const { xml, ops } = await compared("marks-formats", docx(one), docx(two));
+    expect(xml).not.toMatch(/<w:(?:tblPrChange|trPrChange|tcPrChange|sectPrChange|tblGridChange)\b/);
+    const bar = '<w:pPr><w:pBdr><w:left w:val="single" w:sz="6" w:space="12" w:color="000000"/></w:pBdr></w:pPr>';
+    for (const text of ["Cell one", "Cell two", "Cell three", "Cell four", "After"]) expect(xml).toContain(`${bar}<w:r><w:t xml:space="preserve">${text}</w:t>`);
+    expect(xml).not.toContain(`${bar}<w:r><w:t xml:space="preserve">Before</w:t>`);
+    // Five change bars drawn: one vertical rule per barred paragraph.
+    const rules = [...ops.matchAll(/ w ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l S/g)].map((m) => m.slice(1).map(Number));
+    expect(rules.filter(([x1, y1, x2, y2]) => x1 === x2 && y1 !== y2)).toHaveLength(5);
+    // A column grid change alone, with no table property change, bars the table too; and the copies still flatten whole.
+    await check(one, two);
+    const grid = (a: number, b: number): string =>
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>${bordered}</w:tblPr><w:tblGrid><w:gridCol w:w="${a}"/><w:gridCol w:w="${b}"/></w:tblGrid><w:tr>${cell("Left")}${cell("Right")}</w:tr></w:tbl>`;
+    const { printable } = await check(para("Before") + grid(4000, 4000), para("Before") + grid(2000, 6000));
+    const gridXml = strFromU8(unzipSync(printable.save())["word/document.xml"]);
+    expect(gridXml).not.toContain("tblGridChange");
+    expect(gridXml).toContain(`${bar}<w:r><w:t xml:space="preserve">Left</w:t>`);
+  });
+
   it("marks a nested table's text in an inserted or a deleted row", async () => {
     const cell = (body: string): string => `<w:tc><w:tcPr/>${body}</w:tc>`;
     const inner = `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1500"/></w:tblGrid><w:tr>${cell(para("NESTEDTEXT"))}</w:tr></w:tbl>`;

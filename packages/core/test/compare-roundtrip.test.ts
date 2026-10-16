@@ -944,6 +944,19 @@ describe("compareDocuments — section breaks and notes when blocks move", () =>
   });
 });
 
+describe("compareDocuments — a table's column grid", () => {
+  it("records a grid change with a table format change, so a review can take it back", () => {
+    // The grid record carries no author or date: alone, accept-all and
+    // reject-all left it in place and the body never came back to either side.
+    const grid = (a: number, b: number): string =>
+      `<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="${a}"/><w:gridCol w:w="${b}"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${para("Left")}</w:tc><w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${para("Right")}</w:tc></w:tr></w:tbl>`;
+    const { notes, merged } = roundTrip(para("Before") + grid(4000, 4000), para("Before") + grid(2000, 6000));
+    expect(notes).toEqual([]);
+    expect(collectRevisions(merged).map((r) => r.kind)).toEqual(["tableFormat"]);
+  });
+});
+
 describe("compareDocuments — reuseRevised", () => {
   it("writes the result into the revised document, byte for byte the same as a copy", () => {
     const original = para("The quick brown fox jumps over the lazy dog.") + para("A second paragraph.");

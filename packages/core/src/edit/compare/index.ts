@@ -2052,6 +2052,10 @@ function alignTableGrid(oTbl: XmlElement, rTbl: XmlElement, ctx: Ctx): void {
   recordTableGridChange(rTbl, ctx.meta);
   const record = rGrid.children[rGrid.children.length - 1];
   rGrid.children = [...live, record];
+  // The grid record is no revision of its own: it rides with the table's
+  // w:tblPrChange (counted, accepted and rejected with it), so a table whose
+  // properties did not change gets one that records them as they are.
+  if (!child(child(rTbl, "tblPr"), "tblPrChange")) recordTableFormatChange(rTbl, ctx.meta);
 }
 
 // ---------------------------------------------------------------------------

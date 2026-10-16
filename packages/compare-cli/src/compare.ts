@@ -43,7 +43,7 @@ import { CompareError, isDiskFull } from "./errors.js";
 import { PdfRenderError } from "../../core/src/pdf/errors.js";
 import { renderDocxToPdf } from "../../core/src/pdf/render.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
-import { flatten } from "./printable.js";
+import { barParagraphs, flatten, markLastParagraph } from "./printable.js";
 import { DiskNotes } from "./notes.js";
 import { BlockStore } from "./store.js";
 import { SummarySpec, summaryXml } from "./summary.js";
@@ -189,6 +189,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     compareHeadersFooters(O.shell, R.shell, headerFooterPairs, ctx);
     compareLastSection(O.shell, R.shell, ctx);
     compareSettings(O.shell, R.shell, ctx);
+    sink.finish(!!child(child(child(R.shell.docRoot, "body"), "sectPr"), "sectPrChange"));
 
     // The body's revisions were counted as it was written; the rest are in
     // the shell (headers, footers) and in the notes the compare changed.
@@ -454,6 +455,10 @@ class BodySink {
   /** The result entries that hold note references. */
   readonly withNoteRefs: number[] = [];
   readonly revisions = noRevisions();
+  /** The printable copy's last piece, held back for the mark the body's end decides. */
+  private held: string | null = null;
+  /** Inside a table whose own format changed: each row's paragraphs get the change bar. */
+  tableBarred = false;
 
   constructor(
     readonly out: BlockStore,
@@ -470,14 +475,33 @@ class BodySink {
   /** An element as the compare left it. */
   element(el: XmlElement): void {
     const xml = serializeXml(el);
-    if (!REVISION.test(xml)) return this.put(xml, xml);
-    countRevisions(el, this.revisions);
-    this.put(xml, this.printable ? serializeXml(flatten(el)) : xml);
+    const changed = REVISION.test(xml);
+    if (changed) countRevisions(el, this.revisions);
+    if (!this.printable || (!changed && !this.tableBarred)) return this.put(xml, xml);
+    flatten(el);
+    if (this.tableBarred) barParagraphs(el);
+    this.put(xml, serializeXml(el));
+  }
+
+  /** The body is written: the final section's format change bars its last paragraph (a piece that is one). */
+  finish(sectionChanged: boolean): void {
+    if (!this.printable || this.held === null) return;
+    let last = this.held;
+    if (sectionChanged && /^<w:p[\s>]/.test(last)) {
+      const body = parseXml(`<w:body>${last}</w:body>`);
+      markLastParagraph(body);
+      last = serializeXml(body.children[0]);
+    }
+    this.printable.add(last);
+    this.held = null;
   }
 
   private put(xml: string, printableXml: string): void {
     const k = this.out.add(xml);
-    this.printable?.add(printableXml);
+    if (this.printable) {
+      if (this.held !== null) this.printable.add(this.held);
+      this.held = printableXml;
+    }
     if (NOTE_REF.test(xml)) this.withNoteRefs.push(k);
     if (this.relIds) for (const m of xml.matchAll(/="(rId\d+)"/g)) this.relIds.add(m[1]);
   }
@@ -665,9 +689,12 @@ function emitMatchedTables(O: Input, o: number, R: Input, r: number, ctx: Ctx, s
   const [head, tail] = serializeXml(shell).split(ROW_SLOT_XML);
   // The table's own format change, here; its rows' as they are written.
   countRevisions(shell, sink.revisions);
+  // The table's own format change bars every row's paragraphs (flatten).
+  sink.tableBarred = !!child(child(shell, "tblPr"), "tblPrChange") || !!child(child(shell, "tblGrid"), "tblGridChange");
   sink.raw(head, sink.printable ? serializeXml(flatten(shell)).split(ROW_SLOT_XML)[0] : head);
   const [oFrom, oTo] = O.tables.get(o) as [number, number];
   emitComparedRows(O, oFrom, oTo, R, rFrom, rTo, ctx, sink);
+  sink.tableBarred = false;
   sink.raw(tail);
 }
 

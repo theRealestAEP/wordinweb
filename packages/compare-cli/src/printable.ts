@@ -7,7 +7,7 @@ import { XmlElement, child, localName, parseXml } from "../../core/src/xml.js";
  * block as it is written.
  */
 
-const FORMAT_CHANGES = new Set(["rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange"]);
+const FORMAT_CHANGES = new Set(["rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "tblGridChange", "numberingChange", "cellIns", "cellDel", "cellMerge"]);
 const PROPERTIES = new Set(["rPr", "pPr", "trPr", "tcPr"]);
 const INSERTED = ['<w:strike w:val="0"/>', '<w:dstrike w:val="0"/>', '<w:color w:val="0000FF"/>', '<w:u w:val="single"/>'];
 const DELETED = ["<w:strike/>", '<w:dstrike w:val="0"/>', '<w:color w:val="FF0000"/>'];
@@ -31,18 +31,25 @@ const PBDR_ORDER = ["top", "left", "bottom", "right", "between", "bar"];
  * Rewrite each revision in `element` as plain formatting: an insertion's
  * runs blue and underlined, a deletion's red and struck through. A format
  * change keeps its words, so there is nothing to color; its paragraph gets
- * a change bar in the margin. The revision markers inside paragraph and row
- * properties carry no text and are dropped; a row the marker inserted or
- * deleted has every run below it marked, nested tables and all. Returns
- * `element`, changed.
+ * a change bar in the margin, and a table's, row's, cell's or section's
+ * format change puts the bar on every paragraph of it (the body's last
+ * paragraph for the final section). The revision markers inside paragraph
+ * and row properties carry no text and are dropped; a row or cell the
+ * marker inserted or deleted has every run below it marked, nested tables
+ * and all. Returns `element`, changed.
  */
 export function flatten(element: XmlElement): XmlElement {
-  if (localName(element.name) === "p" && contains(element, FORMAT_CHANGES)) {
-    const pPr = propertiesOf(element, "pPr");
-    const pBdr = child(pPr, "pBdr") ?? set(pPr, PPR_ORDER, nodes("<w:pBdr/>")[0]);
-    set(pBdr, PBDR_ORDER, nodes(CHANGE_BAR)[0]);
-  }
-  const rowMarker = localName(element.name) === "tr" ? revisionIn(child(element, "trPr")) : null;
+  const ln = localName(element.name);
+  // What the element's own properties say, read before the markers go.
+  if (ln === "p" && contains(element, FORMAT_CHANGES)) changeBar(element);
+  const properties = child(element, `${ln}Pr`);
+  const barred =
+    (ln === "tbl" && (child(properties, "tblPrChange") || child(child(element, "tblGrid"), "tblGridChange"))) ||
+    (ln === "tr" && child(properties, "trPrChange")) ||
+    (ln === "tc" && (child(properties, "tcPrChange") || child(properties, "cellMerge")));
+  const rowMarker = ln === "tr" ? revisionIn(child(element, "trPr")) : null;
+  const cellMarker = ln === "tc" ? (child(properties, "cellIns") ? "ins" : child(properties, "cellDel") ? "del" : null) : null;
+  const lastSection = ln === "body" && !!child(child(element, "sectPr"), "sectPrChange");
   const kept: XmlElement[] = [];
   for (const node of element.children) {
     const name = localName(node.name);
@@ -58,8 +65,32 @@ export function flatten(element: XmlElement): XmlElement {
     kept.push(node);
   }
   element.children = kept;
+  if (barred) barParagraphs(element);
   if (rowMarker) markRuns(element, rowMarker);
+  if (cellMarker) markRuns(element, cellMarker);
+  if (lastSection) markLastParagraph(element);
   return element;
+}
+
+/** The change bar on every paragraph below `el`: a table, row or cell whose format changed. */
+export function barParagraphs(el: XmlElement): void {
+  for (const p of paragraphsIn(el)) changeBar(p);
+}
+
+/** The change bar on the body's last paragraph (the final section's own format change). */
+export function markLastParagraph(body: XmlElement): void {
+  const last = body.children.filter((c) => localName(c.name) !== "sectPr").at(-1);
+  if (last && localName(last.name) === "p") changeBar(last);
+}
+
+function changeBar(paragraph: XmlElement): void {
+  const pPr = propertiesOf(paragraph, "pPr");
+  const pBdr = child(pPr, "pBdr") ?? set(pPr, PPR_ORDER, nodes("<w:pBdr/>")[0]);
+  set(pBdr, PBDR_ORDER, nodes(CHANGE_BAR)[0]);
+}
+
+function paragraphsIn(el: XmlElement): XmlElement[] {
+  return el.children.flatMap((c) => (localName(c.name) === "p" ? [c] : paragraphsIn(c)));
 }
 
 function revisionIn(properties: XmlElement | undefined): "ins" | "del" | null {
