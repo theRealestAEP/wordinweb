@@ -18,7 +18,7 @@ import {
   revisionWrapper,
   MARKERS,
 } from "../suggest.js";
-import { CONTAINERS, ContentToken, Placed, ReadOptions, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
+import { CONTAINERS, ContentToken, Placed, ReadOptions, isCommentMarker, isPassenger, paragraphText, readParagraph, runPropsKey, sliceItems, textBoxesIn } from "./content.js";
 import { Key, histogramMatch } from "./histogram.js";
 import { COMPARE_TUNING, normalizeText, similarity, similarityFloor } from "./text.js";
 
@@ -151,6 +151,8 @@ export interface Ctx {
   leftoverNotes: Record<"footnote" | "endnote", LeftoverNote[]>;
   /** Original comment id -> the result's id for that comment (adoptComment). */
   commentIds: Map<string, string>;
+  /** The ids of the comments adoptComment copied into the result from the original. */
+  commentCopies: Set<string>;
   /** The container being compared when it is not the body (a header part, "footnote 3"), for the notes. */
   container?: string;
 }
@@ -246,6 +248,7 @@ export function compareContext(original: DocxDocument, merged: DocxDocument, opt
     noteIds: { footnote: new Map(), endnote: new Map() },
     leftoverNotes: { footnote: [], endnote: [] },
     commentIds: new Map(),
+    commentCopies: new Set(),
   };
 }
 
@@ -1471,6 +1474,7 @@ function adoptComment(id: string, ctx: Ctx): string {
     root.children.push(copy);
     ctx.doc.markCommentsChanged();
     to = String(next);
+    ctx.commentCopies.add(to);
   }
   ctx.commentIds.set(id, to);
   return to;
@@ -1542,7 +1546,11 @@ export function wrapContainerContent(container: XmlElement, kind: "ins" | "del",
   // m:oMathPara (EG_MathContent, through EG_RunLevelElements). Left plain,
   // a struck paragraph's equation survived accept-all beside the inserted
   // one, so the result showed it twice (parity-math2).
-  const WRAPPABLE = ["r", "sdt", "customXml", "oMath", "oMathPara"];
+  // A comment's range markers go with the words they mark (EG_RunLevelElements
+  // sits inside a w:ins or w:del): a review that takes the words takes the
+  // range, and a comment the revised document holds on other words keeps
+  // its own, inserted range there.
+  const WRAPPABLE = ["r", "sdt", "customXml", "oMath", "oMathPara", "commentRangeStart", "commentRangeEnd"];
   const out: XmlElement[] = [];
   let group: XmlElement[] = [];
   const flush = (): void => {
@@ -1569,6 +1577,28 @@ export function wrapContainerContent(container: XmlElement, kind: "ins" | "del",
   }
   flush();
   container.children = out;
+}
+
+/**
+ * A comment both documents hold alike under `id`: the revised document's
+ * range is the comment's, wherever the words went. A copy adoptComment
+ * made is the original's, however alike, so it never counts.
+ */
+function unchangedComment(id: string | undefined, ctx: Ctx): boolean {
+  if (id === undefined || ctx.commentCopies.has(id)) return false;
+  const find = (root: XmlElement | null): XmlElement | undefined => root?.children.find((c) => localName(c.name) === "comment" && c.attrs["w:id"] === id);
+  const theirs = find(ctx.original.commentsTree());
+  const mine = find(ctx.doc.commentsTree());
+  return !!theirs && !!mine && sameXml(theirs, mine);
+}
+
+/** The comment a range marker, or a run holding only a reference, belongs to. */
+function commentPieceId(el: XmlElement): string | undefined {
+  const ln = localName(el.name);
+  if (isCommentMarker(ln)) return el.attrs["w:id"];
+  if (ln !== "r") return undefined;
+  const reference = child(el, "commentReference");
+  return reference && el.children.every((c) => c === reference || localName(c.name) === "rPr") ? reference.attrs["w:id"] : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -1627,7 +1657,7 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
   const counterpart = new Map<XmlElement, XmlElement>();
   for (const seg of segments) {
     if (seg.equal) {
-      for (const it of emitEqualSpan(oc.tokens, rc.tokens, seg, ctx, counterpart)) items.push({ ...it, kind: null });
+      for (const it of emitEqualSpan(oc.tokens, rc.tokens, seg, ctx, counterpart)) items.push({ ...it, kind: it.kind ?? null });
       continue;
     }
     if (seg.aEnd > seg.aStart) {
@@ -1642,7 +1672,8 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
     }
   }
   for (const it of items) if (it.kind === "del") it.path = it.path.map((c) => counterpart.get(c) ?? c);
-  carryOriginalComments(items, ctx);
+  for (const el of oc.tail) if (isCommentMarker(localName(el.name))) items.push(struckMarker(el, ctx));
+  placeComments(items, ctx);
   for (const el of rc.tail) items.push({ el: cloneXml(el), path: [], kind: null });
   // Containers met in the original paragraph: any still in a path after the
   // mapping above has no revised counterpart and is carried across.
@@ -1652,52 +1683,78 @@ function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
 
 type Item = Placed & { kind: "ins" | "del" | null };
 
+/** An original comment marker as a struck item, its id adopted. */
+function struckMarker(el: XmlElement, ctx: Ctx): Item {
+  const copy = cloneXml(el);
+  adoptFromOriginal(copy, ctx);
+  return { el: copy, path: [], kind: "del" };
+}
+
 /**
- * The original's comments on struck words. Their range markers rode with
- * the struck slices (sliceItems) and were adopted (adoptFromOriginal): a
- * comment the revised document holds unchanged keeps the revised range,
- * so those markers go; another's range is closed after its last struck
- * word when the revised side kept its end, and gets a struck reference run
- * when the revised side kept the reference, so the comment stays anchored
- * to the words it was on.
+ * The comment markers of both sides, placed. The original's are struck
+ * items where the original had them: with the struck words (sliceItems)
+ * and ahead of kept words (emitEqualSpan), so each range starts and ends
+ * where it did; a struck reference run follows an end marker when the
+ * revised side kept the reference run, so the comment copy (adoptComment)
+ * is anchored. The revised document's markers are insertions, so a
+ * reject-all takes the range with the comment rather than leaving its end
+ * behind on kept words. A comment both documents hold alike, on words
+ * that pair (both sides' markers are in the paragraph), keeps one
+ * plain range around whatever the words became: the original's start
+ * (the earlier) when the revised start is in the paragraph, the revised
+ * end (the later) and reference; the other markers go. A range that opens
+ * or closes in another paragraph is left as it is: its other marker is
+ * placed there.
  */
-function carryOriginalComments(items: Item[], ctx: Ctx): void {
-  const ranges = new Map<string, { start: number; end: number; ref: boolean; last: number }>();
-  items.forEach((it, k) => {
-    if (it.kind !== "del") return;
+function placeComments(items: Item[], ctx: Ctx): void {
+  const originalHere = new Set<string>();
+  const originalEnds = new Map<string, Item>();
+  const originalReferenced = new Set<string>();
+  const revisedHere = new Set<string>();
+  const revisedStarts = new Map<string, Item>();
+  for (const it of items) {
+    const id = commentPieceId(it.el);
+    if (id === undefined) continue;
     const ln = localName(it.el.name);
-    const id = it.el.attrs["w:id"];
-    if (ln === "commentRangeStart") ranges.set(id, { start: k, end: -1, ref: false, last: k });
-    else if (ln === "commentRangeEnd") {
-      const range = ranges.get(id);
-      if (range) range.end = k;
+    if (it.kind === "del") {
+      originalHere.add(id);
+      if (ln === "commentRangeEnd") originalEnds.set(id, it);
+      else if (ln === "r") originalReferenced.add(id);
     } else {
-      const ref = child(it.el, "commentReference")?.attrs["w:id"];
-      const referenced = ref === undefined ? undefined : ranges.get(ref);
-      if (referenced) referenced.ref = true;
-      for (const range of ranges.values()) if (range.end === -1) range.last = k;
+      revisedHere.add(id);
+      if (ln === "commentRangeStart") revisedStarts.set(id, it);
     }
-  });
-  const unchanged = (id: string): boolean => [...ctx.commentIds].some(([from, to]) => from === id && to === id);
-  const marker = (name: string, id: string): Item => ({ el: { name, attrs: { "w:id": id }, children: [], text: "" }, path: [], kind: "del" });
-  const edits: { at: number; put: Item[] }[] = [];
-  for (const [id, range] of ranges) {
-    if (unchanged(id)) {
-      edits.push({ at: range.start, put: [] });
-      if (range.end !== -1) edits.push({ at: range.end, put: [] });
+  }
+  const drop = new Set<Item>();
+  const after = new Map<Item, Item[]>();
+  for (const it of items) {
+    const id = commentPieceId(it.el);
+    if (id === undefined) continue;
+    const unchanged = originalHere.has(id) && revisedHere.has(id) && unchangedComment(id, ctx);
+    if (it.kind !== "del") {
+      it.kind = unchanged ? null : "ins";
       continue;
     }
-    const w = items[range.start].el.name.slice(0, -"commentRangeStart".length);
-    const reference = marker(`${w}r`, id);
-    reference.el = { name: `${w}r`, attrs: {}, children: [{ name: `${w}commentReference`, attrs: { "w:id": id }, children: [], text: "" }], text: "" };
-    if (range.end === -1) edits.push({ at: range.last + 1, put: [marker(`${w}commentRangeEnd`, id), reference], keep: true } as { at: number; put: Item[] });
-    else if (!range.ref) edits.push({ at: range.end + 1, put: [reference], keep: true } as { at: number; put: Item[] });
+    if (!unchanged) continue;
+    const revisedStart = localName(it.el.name) === "commentRangeStart" ? revisedStarts.get(id) : undefined;
+    if (revisedStart) {
+      it.kind = null;
+      drop.add(revisedStart);
+    } else drop.add(it);
   }
-  // From the back, so the earlier indexes hold: an edit with items inserts, one without removes.
-  for (const edit of edits.sort((a, b) => b.at - a.at)) {
-    if (edit.put.length) items.splice(edit.at, 0, ...edit.put);
-    else items.splice(edit.at, 1);
+  for (const [id, end] of originalEnds) {
+    if (drop.has(end) || originalReferenced.has(id)) continue;
+    const w = end.el.name.slice(0, -"commentRangeEnd".length);
+    const reference: XmlElement = { name: `${w}r`, attrs: {}, children: [{ name: `${w}commentReference`, attrs: { "w:id": id }, children: [], text: "" }], text: "" };
+    after.set(end, [{ el: reference, path: end.path, kind: "del" }]);
   }
+  if (drop.size === 0 && after.size === 0) return;
+  const out: Item[] = [];
+  for (const it of items) {
+    if (drop.has(it)) continue;
+    out.push(it, ...(after.get(it) ?? []));
+  }
+  items.splice(0, items.length, ...out);
 }
 
 /** Containers a revision may wrap whole (run content in the schema). */
@@ -1786,13 +1843,13 @@ function emitEqualSpan(
   seg: Segment,
   ctx: Ctx,
   counterpart: Map<XmlElement, XmlElement>,
-): Placed[] {
+): (Placed & { kind?: "del" })[] {
   // Matched words are emitted from the REVISED runs, split wherever EITHER
   // side changes run, so each stretch compares with the original's
   // properties at exactly that place. A word can now span runs (see
   // readParagraph), and taking the formatting of only its first piece put the
   // colon's bold of "Purpose:" onto the plain space after it.
-  type Unit = { token: ContentToken; run: XmlElement; t?: XmlElement; text: string; atom?: XmlElement; oAtom?: XmlElement; was: XmlElement };
+  type Unit = { token: ContentToken; original: ContentToken; run: XmlElement; t?: XmlElement; text: string; atom?: XmlElement; oAtom?: XmlElement; was: XmlElement };
   const units: Unit[] = [];
   const pieceAt = (pieces: NonNullable<ContentToken["pieces"]>, offset: number) => {
     let base = 0;
@@ -1812,8 +1869,8 @@ function emitEqualSpan(
     if (r.atom || !r.pieces || !o.pieces || o.text !== r.text) {
       // An atom, or a word matched by key with different whitespace (the
       // whitespace option off): token by token, as one stretch.
-      if (r.atom) units.push({ token: r, run: r.run, text: "", atom: r.atom, oAtom: o.atom, was: o.run });
-      else for (const p of r.pieces ?? []) units.push({ token: r, run: p.run, t: p.t, text: p.text, was: o.run });
+      if (r.atom) units.push({ token: r, original: o, run: r.run, text: "", atom: r.atom, oAtom: o.atom, was: o.run });
+      else for (const p of r.pieces ?? []) units.push({ token: r, original: o, run: p.run, t: p.t, text: p.text, was: o.run });
       continue;
     }
     const cuts = new Set<number>([0, r.text.length]);
@@ -1827,11 +1884,11 @@ function emitEqualSpan(
       const to = sorted[c + 1];
       if (from === to) continue;
       const rp = pieceAt(r.pieces, from);
-      units.push({ token: r, run: rp.run, t: rp.t, text: r.text.slice(from, to), was: pieceAt(o.pieces, from).run });
+      units.push({ token: r, original: o, run: rp.run, t: rp.t, text: r.text.slice(from, to), was: pieceAt(o.pieces, from).run });
     }
   }
 
-  const out: Placed[] = [];
+  const out: (Placed & { kind?: "del" })[] = [];
   let open: { run: XmlElement; was: string; el: XmlElement; prev: XmlElement | undefined } | null = null;
   let text: { t: XmlElement; el: XmlElement } | null = null;
   const close = (): void => {
@@ -1841,9 +1898,12 @@ function emitEqualSpan(
   };
   let lastToken: ContentToken | null = null;
   for (const u of units) {
-    if (u.token !== lastToken && u.token.lead) {
+    if (u.token !== lastToken) {
       close();
-      out.push(...u.token.lead.map((el) => ({ el: cloneXml(el), path: u.token.path })));
+      // The original's comment markers ahead of the word, struck, so its
+      // comment's range starts and ends where it did (carryOriginalComments).
+      for (const el of u.original.lead ?? []) if (isCommentMarker(localName(el.name))) out.push({ el: struckMarker(el, ctx).el, path: u.token.path, kind: "del" });
+      if (u.token.lead) out.push(...u.token.lead.map((el) => ({ el: cloneXml(el), path: u.token.path })));
     }
     lastToken = u.token;
     const was = runPropsKey(u.was);
@@ -2070,6 +2130,8 @@ function rowsIn(el: XmlElement): XmlElement[] {
 
 export function deletedRow(el: XmlElement, ctx: Ctx): XmlElement {
   const clone = cloneXml(el);
+  // The row's notes, comments and relationships are the original's (emitDeleted).
+  adoptFromOriginal(clone, ctx);
   for (const tr of rowsIn(clone)) {
     markRowRevision(tr, "del", ctx.meta);
     wrapRowContent(tr, "del", ctx);
