@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { zipSync, strToU8 } from "fflate";
-import { DocxDocument, localName, type XmlElement } from "@wordinweb/core";
+import { DocxDocument } from "../src/docx.js";
+import { localName, type XmlElement } from "../src/xml.js";
 
 /**
  * DocxDocument memoizes two lookups that used to scan the whole document on
