@@ -256,8 +256,12 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
       if (!own.every((f) => f.result)) return;
       const inner = own[own.length - 1];
       if (inner && !inner.carrier) inner.carrier = marks;
+      // Inside a w:fldSimple everything is its cached result, flushed or not.
+      const simple = own.some((f) => f.simple);
       const field =
-        inner && !inner.flushed ? { marks: LIVE.test(inner.instr) ? marks : inner.carrier ?? marks, recomputed: own.some((f) => RECOMPUTED.test(f.instr)) || inner.nested || own.length > 1 } : null;
+        inner && (simple || !inner.flushed)
+          ? { marks: LIVE.test(inner.instr) ? marks : inner.carrier ?? marks, recomputed: own.some((f) => RECOMPUTED.test(f.instr)) || inner.nested || own.length > 1 }
+          : null;
       para.chars.push({ ch, rev: ctx.rev, marks, kind, field, unrendered: ctx.unrendered });
     };
     for (const el of r.children) {
