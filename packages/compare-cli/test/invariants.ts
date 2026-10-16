@@ -645,8 +645,9 @@ export function pdfItems(path: string): Item[] {
     }
   }
   const items: Item[] = [];
-  // Thin filled rectangles of their own: strike-through rules (and other thin rules).
-  const rules: { color: string; x: number; y: number; w: number; h: number }[] = [];
+  // Thin rules: a strike is a thin filled rectangle of its own (as other thin rules are); an
+  // underline is drawn with its text, filled inside the text's group or stroked on its own.
+  const rules: { color: string; x: number; y: number; w: number; h: number; underline: boolean }[] = [];
   for (const [num, data] of streams) {
     const dict = dicts.get(num) ?? "";
     if (/\/Type \/XObject/.test(dict) && !/\/Subtype \/Form/.test(dict)) continue;
@@ -664,7 +665,7 @@ export function pdfItems(path: string): Item[] {
       const rule = /^q(?: \/\w+ gs)? (\S+ \S+ \S+) rg (\S+) (\S+) (\S+) (\S+) re f Q$/.exec(line);
       if (rule) {
         const [, c, rx, ry, rw, rh] = rule;
-        if (Number(rh) < 3) rules.push({ color: c, x: Number(rx), y: Number(ry), w: Number(rw), h: Number(rh) });
+        if (Number(rh) < 3) rules.push({ color: c, x: Number(rx), y: Number(ry), w: Number(rw), h: Number(rh), underline: false });
         continue;
       }
       // A stroked rule of its own (a dashed, dotted or wavy underline): its color, its path's left end and extent, its width.
@@ -679,7 +680,7 @@ export function pdfItems(path: string): Item[] {
             operands = [];
           } else operands.push(Number(token));
         }
-        rules.push({ color: stroked[2], x: Math.min(...xs), y: Number(tokens[1]), w: Math.max(...xs) - Math.min(...xs), h: Number(stroked[1]) });
+        rules.push({ color: stroked[2], x: Math.min(...xs), y: Number(tokens[1]), w: Math.max(...xs) - Math.min(...xs), h: Number(stroked[1]), underline: true });
         continue;
       }
       const opened = /^q(?: \/\w+ gs)?(?: (\S+ \S+ \S+) rg)?$/.exec(line);
@@ -716,17 +717,19 @@ export function pdfItems(path: string): Item[] {
         // covers a whole span of items (the earlier ones in groups of their own), so it is a rule too.
         for (const item of group) item.underlined = true;
         const filled = /^(\S+) (\S+) (\S+) (\S+) re f$/.exec(line);
-        if (filled) rules.push({ color, x: Number(filled[1]), y: Number(filled[2]), w: Number(filled[3]), h: Number(filled[4]) });
+        if (filled) rules.push({ color, x: Number(filled[1]), y: Number(filled[2]), w: Number(filled[3]), h: Number(filled[4]), underline: true });
       }
     }
     pending.push(...group);
     for (const item of pending) {
       // A rule of the item's color that reaches over the item's start (one
       // rule covers a whole span of items): a strike above the baseline, an
-      // underline just below it.
+      // underline below it at the span's largest font's position, which for
+      // a superscript note mark in a heading is 8pt under its raised
+      // baseline.
       const over = (r: (typeof rules)[number]): boolean => r.color === item.color && r.x <= item.x + 0.5 && r.x + r.w > item.x + 0.1;
-      item.struck = rules.some((r) => over(r) && r.y > item.y && r.y < item.y + item.size);
-      item.underlined ||= rules.some((r) => over(r) && r.y < item.y && r.y > item.y - item.size * 0.5);
+      item.struck = rules.some((r) => !r.underline && over(r) && r.y > item.y && r.y < item.y + item.size);
+      item.underlined ||= rules.some((r) => r.underline && over(r) && r.y < item.y && r.y > item.y - Math.max(item.size * 0.5, 9));
       items.push({ text: item.text, color: item.color, underlined: item.underlined, struck: item.struck });
     }
   }

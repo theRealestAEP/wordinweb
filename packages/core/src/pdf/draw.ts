@@ -64,6 +64,11 @@ function rgbOp(c: Rgb, stroke: boolean): string {
  * operators a metafile converter recorded in its canvas's pixel space. */
 export type Picture = { name: string } | { vector: { ops: string; width: number; height: number } };
 
+/** Whether an item is a superscript or subscript: it rides with the base text's underline. */
+function baselineShifted(item: TextItem): boolean {
+  return item.props.verticalAlign === "superscript" || item.props.verticalAlign === "subscript";
+}
+
 /** The paint layer of an item, as the DOM renderer's z-index puts it. */
 function layer(item: PageItem): number {
   const z = item as { behind?: boolean; front?: boolean; z?: number };
@@ -127,12 +132,16 @@ export class PageDrawer {
    * one line with the same underline style and color are one span. Word
    * underlines an inserted span with one unbroken rule from its first to its
    * last character on each line, through spaces and across runs of different
-   * formatting; a rule per item left gaps and steps. Rotated and scaled (math)
-   * items keep their own underline.
+   * formatting; a rule per item left gaps and steps. A superscript or
+   * subscript rides with the span's base text; an item on another baseline
+   * (a drop cap sharing the line top, a run moved by w:position) starts a
+   * span of its own. Rotated and scaled (math) items keep their own
+   * underline.
    */
   private collectUnderlines(items: PageItem[]): void {
     let span: TextItem[] = [];
     let key = "";
+    let baseline: number | undefined;
     for (const item of items) {
       // A soft hyphen alone draws nothing (fonts.ts skips U+00AD), so it is no part of a span.
       if (item.kind !== "text" || item.hidden || !item.text.replace(/\u00AD/g, "")) continue;
@@ -144,10 +153,13 @@ export class PageDrawer {
       const c = this.textColor(item);
       const itemKey = `${style}|${c.r},${c.g},${c.b},${c.a}|${item.lineTop.toFixed(2)}`;
       const last = span[span.length - 1];
-      if (!last || itemKey !== key || Math.abs(item.x - (last.x + last.width)) > 1) {
+      const shifted = baselineShifted(item);
+      if (!last || itemKey !== key || Math.abs(item.x - (last.x + last.width)) > 1 || (!shifted && baseline !== undefined && Math.abs(item.baseline - baseline) > 0.5)) {
         span = [];
         key = itemKey;
+        baseline = undefined;
       }
+      if (!shifted && baseline === undefined) baseline = item.baseline;
       span.push(item);
       this.underlineOf.set(item, span);
     }
@@ -176,7 +188,9 @@ export class PageDrawer {
    * group of the span's last item, whose fill is the span's color.
    */
   private underlineOps(items: TextItem[]): string[] {
-    const lead = items.reduce((a, b) => (b.font.size > a.font.size ? b : a));
+    // The span's largest font among its base-text items (a superscript's own, when it stands alone).
+    const unshifted = items.filter((item) => !baselineShifted(item));
+    const lead = (unshifted.length ? unshifted : items).reduce((a, b) => (b.font.size > a.font.size ? b : a));
     const runs = this.fonts.shape(lead.rtl ? visualOrder(lead.text) : lead.text, lead.font);
     if (runs.length === 0) return [];
     const face = runs[0].face.face;
