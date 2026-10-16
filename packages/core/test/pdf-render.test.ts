@@ -159,6 +159,27 @@ describe("renderDocxToPdf", () => {
     // "Opening" starts with U+004F.
     expect(cmaps.join("\n")).toMatch(/<[0-9a-f]{4}> <004f>/);
   });
+  it("draws Word's underline styles, across spaces unless the style is words", async () => {
+    const run = (style: string, text: string): string => `<w:r><w:rPr><w:u w:val="${style}"/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const body = `<w:p>${run("single", "x")}${run("single", " ")}${run("words", " ")}${run("words", "y")}</w:p><w:p>${run("wave", "wavy")}</w:p><w:p>${run("dotDash", "dots")}</w:p><w:p>${run("dashLongHeavy", "long")}</w:p>`;
+    const { bytes, text } = await render(makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}</w:body></w:document>` }));
+    const ops = [...text.matchAll(/\/Length (\d+) >>\nstream\n/g)]
+      .map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1"))
+      .filter((s) => s.includes(" Tf"))
+      .join("\n");
+    // The four runs of the first line, in order: a single underline covers a space alone; words leaves it out.
+    const groups = [...ops.matchAll(/^q\n([\s\S]*?)\nQ$/gm)].filter((m) => m[1].includes("BT")).slice(0, 4);
+    expect(groups.map((m) => /ET\n[\d. ]+ re f/.test(m[1]))).toEqual([true, true, false, true]);
+    // A wave is a stroked curve; dotDash a dash pattern of 3:1:1:1 thicknesses; a heavy long dash twice as thick, 6:1.
+    expect(ops).toMatch(/q [\d.]+ w 1 J 0 0 0 RG [\d. ]+ m(?: [\d. ]+ c)+ S Q/);
+    const dashes = [...ops.matchAll(/q \[([\d. ]+)\] 0 d ([\d.]+) w/g)].map((m) => ({ pattern: m[1].split(" ").map(Number), width: Number(m[2]) }));
+    expect(dashes).toHaveLength(2);
+    const [dotDash, longHeavy] = dashes;
+    expect(dotDash.pattern.map((d) => Math.round(d / dotDash.width))).toEqual([3, 1, 1, 1]);
+    expect(longHeavy.pattern.map((d) => Math.round(d / longHeavy.width))).toEqual([6, 1]);
+    expect(longHeavy.width / dotDash.width).toBeCloseTo(2, 5);
+  });
+
   it("reports fonts no directory holds and characters no font has", async () => {
     const body = `<w:p><w:r><w:rPr><w:rFonts w:ascii="No Such Font Family" w:hAnsi="No Such Font Family"/></w:rPr><w:t>Plain words \u{10FFFD}</w:t></w:r></w:p>`;
     const docx = makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}</w:body></w:document>` });

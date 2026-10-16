@@ -4340,9 +4340,8 @@ const DP_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday
  * minute (m); the AM/PM designator renders UPPERCASE whatever the token's own
  * case (fixture token "am/pm", Word's PDF paints "PM"). */
 function formatDatePicture(d: Date, picture: string): string {
-  // Field values follow the document clock's UTC components. This keeps the
-  // same instant stable when a document is opened in another browser zone.
-  const h24 = d.getUTCHours();
+  // The machine's local time, as Word shows it (a server on UTC gets UTC).
+  const h24 = d.getHours();
   const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
   const pad = (n: number) => String(n).padStart(2, "0");
   const hasAmPm = /am\/pm/i.test(picture);
@@ -4352,24 +4351,24 @@ function formatDatePicture(d: Date, picture: string): string {
     (tok) => {
       if (tok.startsWith("'")) return tok.slice(1, -1); // quoted literal
       switch (tok) {
-        case "yyyy": return String(d.getUTCFullYear());
-        case "yy": return pad(d.getUTCFullYear() % 100);
-        case "MMMM": return DP_MONTHS[d.getUTCMonth()];
-        case "MMM": return DP_MONTHS[d.getUTCMonth()].slice(0, 3);
-        case "MM": return pad(d.getUTCMonth() + 1);
-        case "M": return String(d.getUTCMonth() + 1);
-        case "dddd": return DP_DAYS[d.getUTCDay()];
-        case "ddd": return DP_DAYS[d.getUTCDay()].slice(0, 3);
-        case "dd": return pad(d.getUTCDate());
-        case "d": return String(d.getUTCDate());
+        case "yyyy": return String(d.getFullYear());
+        case "yy": return pad(d.getFullYear() % 100);
+        case "MMMM": return DP_MONTHS[d.getMonth()];
+        case "MMM": return DP_MONTHS[d.getMonth()].slice(0, 3);
+        case "MM": return pad(d.getMonth() + 1);
+        case "M": return String(d.getMonth() + 1);
+        case "dddd": return DP_DAYS[d.getDay()];
+        case "ddd": return DP_DAYS[d.getDay()].slice(0, 3);
+        case "dd": return pad(d.getDate());
+        case "d": return String(d.getDate());
         case "HH": return pad(h24);
         case "H": return String(h24);
         case "hh": return pad(hasAmPm ? h12 : h24);
         case "h": return String(hasAmPm ? h12 : h24);
-        case "mm": return pad(d.getUTCMinutes());
-        case "m": return String(d.getUTCMinutes());
-        case "ss": return pad(d.getUTCSeconds());
-        case "s": return String(d.getUTCSeconds());
+        case "mm": return pad(d.getMinutes());
+        case "m": return String(d.getMinutes());
+        case "ss": return pad(d.getSeconds());
+        case "s": return String(d.getSeconds());
         default: return /^am\/pm$/i.test(tok) ? (h24 < 12 ? "AM" : "PM") : tok;
       }
     },

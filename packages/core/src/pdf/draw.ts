@@ -47,6 +47,15 @@ export function parseColor(css: string | undefined): Rgb | null {
   return named[s] ? parseColor(named[s]) : null;
 }
 
+/** The dash pattern of each dashed or dotted underline, in thicknesses (on, off, ...). */
+const UNDERLINE_DASHES: Record<string, number[]> = {
+  dotted: [1, 1],
+  dash: [3, 1],
+  dashLong: [6, 1],
+  dotDash: [3, 1, 1, 1],
+  dotDotDash: [3, 1, 1, 1, 1, 1],
+};
+
 function rgbOp(c: Rgb, stroke: boolean): string {
   return `${num(c.r / 255)} ${num(c.g / 255)} ${num(c.b / 255)} ${stroke ? "RG" : "rg"}`;
 }
@@ -322,16 +331,38 @@ export class PageDrawer {
       }
       ops.push(rgbOp(color, false));
       this.showGlyphs(ops, runs, item, size, letterSpacing, hscale, 0, 0, mode, lineWidth);
-      if (props.underline && props.underline !== "none" && item.text.trim()) {
+      // Spaces in an underlined run are underlined too, as Word does; only
+      // w:u val="words" leaves them out.
+      if (props.underline && props.underline !== "none" && (props.underline !== "words" || item.text.trim())) {
         const face = runs[0].face.face;
         const unit = size / face.unitsPerEm;
-        const thickness = Math.max(face.underlineThickness * unit, 0.75);
+        const base = Math.max(face.underlineThickness * unit, 0.75);
         const top = item.baseline - face.underlinePosition * unit;
+        const style = props.underline;
+        // Word's names: a *Heavy or thick line is twice as thick; the dashes
+        // and dots are multiples of the thickness; the waves a sine of it.
+        const thickness = /Heavy$/.test(style) || style === "thick" ? base * 2 : base;
+        const plain = style.replace(/Heavy$/, "");
         const draw = (y: number): string => `${this.rect(item.x, y, item.width, thickness)} f`;
-        if (props.underline === "double") ops.push(draw(top), draw(top + thickness * 2));
-        else if (props.underline === "dotted" || props.underline.toLowerCase().includes("dash")) {
-          const on = props.underline === "dotted" ? thickness : thickness * 3;
-          ops.push(`q [${num(on * PT)} ${num(thickness * PT)}] 0 d ${num(thickness * PT)} w ${rgbOp(color, true)} ${num(this.x(item.x))} ${num(this.y(top + thickness / 2))} m ${num(this.x(item.x + item.width))} ${num(this.y(top + thickness / 2))} l S Q`);
+        const dashes = UNDERLINE_DASHES[plain];
+        if (style === "double") ops.push(draw(top), draw(top + thickness * 2));
+        else if (dashes) {
+          const y = this.y(top + thickness / 2);
+          ops.push(`q [${dashes.map((d) => num(d * thickness * PT)).join(" ")}] 0 d ${num(thickness * PT)} w ${rgbOp(color, true)} ${num(this.x(item.x))} ${num(y)} m ${num(this.x(item.x + item.width))} ${num(y)} l S Q`);
+        } else if (plain === "wave" || plain === "wavyDouble") {
+          const wave = (yMid: number): string => {
+            const period = Math.max(4 * thickness, 3);
+            const parts = [`${num(this.x(item.x))} ${num(this.y(yMid))} m`];
+            for (let x0 = item.x; x0 < item.x + item.width; x0 += period) {
+              const x1 = Math.min(x0 + period, item.x + item.width);
+              const q = (x1 - x0) / 4;
+              parts.push(`${num(this.x(x0 + q))} ${num(this.y(yMid - thickness))} ${num(this.x(x0 + 3 * q))} ${num(this.y(yMid + thickness))} ${num(this.x(x1))} ${num(this.y(yMid))} c`);
+            }
+            return parts.join(" ");
+          };
+          const yMid = top + thickness;
+          const waves = plain === "wavyDouble" ? [yMid, yMid + thickness * 3] : [yMid];
+          ops.push(`q ${num(thickness * PT)} w 1 J ${rgbOp(color, true)} ${waves.map(wave).join(" ")} S Q`);
         } else ops.push(draw(top));
       }
       ops.push("Q");

@@ -144,8 +144,8 @@ describe("DATE/TIME re-evaluation (Word recomputes on open; cache is stale)", ()
     // Inject a fixed clock so the expectation and resolveField evaluate the
     // same instant (avoids a midnight race between two new Date() calls).
     const now = new Date();
-    // formatDatePicture uses UTC; match it so the test is timezone-independent.
-    const iso = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}-${String(now.getUTCDate()).padStart(2, "0")}`;
+    // formatDatePicture uses the machine's local time, as Word does.
+    const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     expect(resolveField('DATE \\@ "yyyy-MM-dd"', "1999-01-01", ctx({ now }))).toBe(iso);
   });
   it("TIME am/pm token renders the designator UPPERCASE like Word", () => {
@@ -154,7 +154,7 @@ describe("DATE/TIME re-evaluation (Word recomputes on open; cache is stale)", ()
   it("month (M) and minute (m) stay case-distinguished in mixed pictures", () => {
     const now = new Date();
     const out = resolveField('DATE \\@ "M/d/yy H:mm"', "x", ctx({ now }));
-    expect(out.startsWith(`${now.getUTCMonth() + 1}/${now.getUTCDate()}/`)).toBe(true);
+    expect(out.startsWith(`${now.getMonth() + 1}/${now.getDate()}/`)).toBe(true);
     expect(out).toMatch(/ \d{1,2}:\d{2}$/);
   });
   it("CREATEDATE keeps its stored cache (a document moment, not the clock)", () => {

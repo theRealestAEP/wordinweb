@@ -5808,7 +5808,8 @@ class Engine {
       // Word draws strikethrough centered 0.216em above the baseline with a
       // ~0.75pt rule (measured from the benchmark reference); CSS
       // line-through sits noticeably higher, so we paint our own.
-      if ((span.props.strike || span.props.doubleStrike) && span.text && span.text.trim()) {
+      // Across spaces too, as Word strikes a run whole.
+      if ((span.props.strike || span.props.doubleStrike) && span.text) {
         const size = span.font.size;
         const thick = Math.max(0.75, size * 0.045);
         const yMid = b - size * 0.216;

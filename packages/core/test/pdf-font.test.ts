@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -47,6 +48,17 @@ describe("sfnt faces", () => {
     expect(v.getUint16(maxpAt + 4)).toBe(3);
     const hmtxAt = v.getUint32(12 + tags.indexOf("hmtx") * 16 + 8);
     expect(v.getUint16(hmtxAt + 4)).toBe(face.advance(face.glyphId(72)));
+  });
+});
+
+describe("color bitmap faces", () => {
+  const appleColorEmoji = "/System/Library/Fonts/Apple Color Emoji.ttc";
+  it.skipIf(!existsSync(appleColorEmoji))("counts a glyph with no outline as missing, so a monochrome face or the report takes it", () => {
+    const face = new Face(appleColorEmoji, 0);
+    const smile = 0x1f600;
+    expect(face.glyphId(smile)).toBeGreaterThan(0);
+    expect(face.hasGlyph(smile)).toBe(false);
+    expect(new Face(carlito).hasGlyph("A".codePointAt(0) as number)).toBe(true);
   });
 });
 
