@@ -11,12 +11,18 @@ import { RevisionKind } from "../../core/src/edit/suggest.js";
 export interface SummarySpec {
   originalName: string;
   revisedName: string;
-  /**
-   * The first row's heading. Without one the row reads "Summary report:
-   * document comparison done on <date>" (en-US, UTC); with one it reads
-   * the title alone. The caller names the product.
-   */
+  /** The first row's heading; the caller names the product. Default
+   * "Summary report: document comparison". */
   title?: string;
+  /** Put the compare's date (en-US, UTC) after the heading. Default true. */
+  date?: boolean;
+}
+
+/** The first row: "<title>, <date>", "<title>", or the default with "done on <date>". */
+function heading(spec: SummarySpec, when: string): string {
+  const withDate = spec.date !== false;
+  if (spec.title !== undefined) return withDate ? `${spec.title}, ${when}` : spec.title;
+  return withDate ? `Summary report: document comparison done on ${when}` : "Summary report: document comparison";
 }
 
 /** The summary as body XML, to go ahead of the body's final sectPr. */
@@ -27,7 +33,7 @@ export function summaryXml(spec: SummarySpec, date: string, revisions: Record<Re
   const when = `${new Date(date).toLocaleString("en-US", { timeZone: "UTC" })} UTC`;
   const total = Object.values(revisions).reduce((sum, n) => sum + n, 0);
   const rows: string[] = [
-    row([[spec.title ?? `Summary report: document comparison done on ${when}`, true]]),
+    row([[heading(spec, when), true]]),
     row([["Original:", true], [spec.originalName, false]]),
     row([["Modified:", true], [spec.revisedName, false]]),
     row([["Add", false], [String(revisions.insertion + revisions.markInsertion), false]]),

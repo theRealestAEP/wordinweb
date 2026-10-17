@@ -741,17 +741,24 @@ describe("the summary option", () => {
     expect(strFromU8(unzipSync(readFileSync(out))["word/document.xml"])).not.toContain("Summary report");
   });
 
-  it("heads the table with the caller's title alone when a title is given", async () => {
+  it("heads the table with the caller's title, and the date unless it is turned off", async () => {
     const original = join(dir, "sum-title-o.docx");
     const revised = join(dir, "sum-title-r.docx");
     writeFileSync(original, docx(para("The quick brown fox.")));
     writeFileSync(revised, docx(para("The quick red fox.")));
     const printable = join(dir, "sum-title-printable.docx");
-    await compareFiles(original, revised, join(dir, "sum-title-out.docx"), { author: AUTHOR, date: DATE, printable: { path: printable }, summary: { ...summary, title: "Cobbery <comparison> & results" } });
-    const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
-    expect(tableRows(xml)[0]).toEqual(["Cobbery <comparison> & results"]);
-    expect(xml).toContain("Cobbery &lt;comparison&gt; &amp; results<");
-    expect(xml).not.toContain("Summary report");
+    const heading = async (extra: { title?: string; date?: boolean }): Promise<{ row: string[]; xml: string }> => {
+      await compareFiles(original, revised, join(dir, "sum-title-out.docx"), { author: AUTHOR, date: DATE, printable: { path: printable }, summary: { ...summary, ...extra } });
+      const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
+      return { row: tableRows(xml)[0], xml };
+    };
+    const when = `${new Date(DATE).toLocaleString("en-US", { timeZone: "UTC" })} UTC`;
+    const titled = await heading({ title: "Cobbery <comparison> & results" });
+    expect(titled.row).toEqual([`Cobbery <comparison> & results, ${when}`]);
+    expect(titled.xml).toContain("Cobbery &lt;comparison&gt; &amp; results, ");
+    expect((await heading({ title: "Cobbery comparison results", date: false })).row).toEqual(["Cobbery comparison results"]);
+    expect((await heading({ date: false })).row).toEqual(["Summary report: document comparison"]);
+    expect((await heading({})).row).toEqual([`Summary report: document comparison done on ${when}`]);
   });
 
   it("lists each distinct note once, after a custom beforeSectPr", async () => {
