@@ -741,7 +741,7 @@ describe("the summary option", () => {
     expect(strFromU8(unzipSync(readFileSync(out))["word/document.xml"])).not.toContain("Summary report");
   });
 
-  it("heads the table with the caller's title and the date when a title is given", async () => {
+  it("heads the table with the caller's title alone when a title is given", async () => {
     const original = join(dir, "sum-title-o.docx");
     const revised = join(dir, "sum-title-r.docx");
     writeFileSync(original, docx(para("The quick brown fox.")));
@@ -749,8 +749,8 @@ describe("the summary option", () => {
     const printable = join(dir, "sum-title-printable.docx");
     await compareFiles(original, revised, join(dir, "sum-title-out.docx"), { author: AUTHOR, date: DATE, printable: { path: printable }, summary: { ...summary, title: "Cobbery <comparison> & results" } });
     const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
-    expect(tableRows(xml)[0]).toEqual([`Cobbery <comparison> & results, ${new Date(DATE).toLocaleString("en-US", { timeZone: "UTC" })} UTC`]);
-    expect(xml).toContain("Cobbery &lt;comparison&gt; &amp; results, ");
+    expect(tableRows(xml)[0]).toEqual(["Cobbery <comparison> & results"]);
+    expect(xml).toContain("Cobbery &lt;comparison&gt; &amp; results<");
     expect(xml).not.toContain("Summary report");
   });
 

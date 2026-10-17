@@ -13,8 +13,8 @@ export interface SummarySpec {
   revisedName: string;
   /**
    * The first row's heading. Without one the row reads "Summary report:
-   * document comparison done on <date>"; with one it reads "<title>, <date>"
-   * (the date as before: en-US, UTC). The caller names the product.
+   * document comparison done on <date>" (en-US, UTC); with one it reads
+   * the title alone. The caller names the product.
    */
   title?: string;
 }
@@ -27,7 +27,7 @@ export function summaryXml(spec: SummarySpec, date: string, revisions: Record<Re
   const when = `${new Date(date).toLocaleString("en-US", { timeZone: "UTC" })} UTC`;
   const total = Object.values(revisions).reduce((sum, n) => sum + n, 0);
   const rows: string[] = [
-    row([[spec.title ? `${spec.title}, ${when}` : `Summary report: document comparison done on ${when}`, true]]),
+    row([[spec.title ?? `Summary report: document comparison done on ${when}`, true]]),
     row([["Original:", true], [spec.originalName, false]]),
     row([["Modified:", true], [spec.revisedName, false]]),
     row([["Add", false], [String(revisions.insertion + revisions.markInsertion), false]]),
