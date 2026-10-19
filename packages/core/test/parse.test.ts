@@ -1280,14 +1280,16 @@ describe("phase23 fidelity rules", () => {
     );
     const para = doc.sections[0].blocks[0];
     if (para.type !== "paragraph") throw new Error("expected paragraph");
-    const runs = para.children.filter((c) => c.type === "run");
+    // The result runs are a hyperlink child's, with the field's URL.
+    const link = para.children.find((c) => c.type === "hyperlink");
+    if (!link || link.type !== "hyperlink") throw new Error("expected hyperlink");
+    expect(link.href).toBe("https://example.com/");
+    const runs = para.children.flatMap((c) => (c.type === "run" ? [c] : c.runs));
     // No opaque field content is emitted - the result run itself renders.
-    const fieldContents = runs.flatMap((r) => (r.type === "run" ? r.content : [])).filter((c) => c.kind === "field");
+    const fieldContents = runs.flatMap((r) => r.content).filter((c) => c.kind === "field");
     expect(fieldContents).toEqual([]);
-    const textRun = runs.find(
-      (r) => r.type === "run" && r.content.some((c) => c.kind === "text" && c.text === "Blue upright link"),
-    );
-    if (!textRun || textRun.type !== "run") throw new Error("expected result run");
+    const textRun = link.runs.find((r) => r.content.some((c) => c.kind === "text" && c.text === "Blue upright link"));
+    if (!textRun) throw new Error("expected result run");
     expect(textRun.props.color).toBe("#0000FF");
     expect(textRun.props.italic).toBe(false);
   });

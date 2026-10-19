@@ -220,6 +220,8 @@ export interface StreamLayoutResult {
   totalPages: number;
   /** Bookmark name -> display page number. */
   bookmarks: Map<string, string>;
+  /** Bookmark name -> the index (from 0) of the page it starts on. */
+  bookmarkPageIndices: Map<string, number>;
 }
 
 /** Lay the document out front to back, handing each page to `options.onPage`
@@ -1142,7 +1144,7 @@ class Engine {
     this.placeEndnotes();
     await this.flushPages(true);
     this.stream = null;
-    return { totalPages: this.pages.length, bookmarks: this.bookmarkPages };
+    return { totalPages: this.pages.length, bookmarks: this.bookmarkPages, bookmarkPageIndices: this.bookmarkPageIndices };
   }
 
   /** Hand every page no later block can touch to the stream's sink: all of

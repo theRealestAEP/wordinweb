@@ -13,10 +13,11 @@ import { PageDrawer, Picture } from "./draw.js";
 import { PdfRenderError, asPdfRenderError, unsupportedScript } from "./errors.js";
 import { FontSet, defaultFontDirs, deobfuscateFont } from "./fonts.js";
 import { writeImage, writeSamples } from "./images.js";
+import { bookmarkTops, linkAction, linkBoxes, pdfName } from "./links.js";
 import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
 import { Resources } from "./resources.js";
-import { PdfWriter, pdfString } from "./writer.js";
+import { PdfWriter, num, pdfString } from "./writer.js";
 
 // The package's "./pdf" entry is this module: everything a caller needs is here.
 export { PdfRenderError } from "./errors.js";
@@ -96,6 +97,13 @@ export function fileSource(path: string): ByteSource {
  * pages, and the rendering pass writes each page's objects to `out` as the
  * layout finishes it. Fonts embed once at the end, subset to the glyphs
  * used. `out` is ended when the PDF is complete.
+ *
+ * A link (w:hyperlink, a HYPERLINK field) is a /Link annotation over each
+ * line of its text, written with the page: a URL one opens it, a bookmark
+ * one goes to a named destination (the catalog's /Dests, written at the
+ * end, when every bookmark's page object is known) at the top of the
+ * bookmark's line, or at the top of its page when no page drew the text
+ * it starts on.
  */
 export async function renderDocxToPdf(source: string | ByteSource, out: Writable, options: RenderPdfOptions = {}): Promise<RenderPdfResult> {
   try {
@@ -190,17 +198,37 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
 
   const column = printComments || (options.markup && hasChanges) ? new CommentColumn(opened.doc, measurer, resources, opened, undrawn?.anchors() ?? new Map()) : null;
   const sheet = column ? { width: final.maxWidth + RAIL_WIDTH, height: final.maxHeight } : null;
+  /** Each page's top edge in PDF units, by page index from 0. */
+  const pageTops: string[] = [];
+  /** Where each bookmark some page drew the text of begins: the page's index from 0 and the line's top in PDF units. */
+  const bookmarkAt = new Map<string, { page: number; y: number }>();
 
-  const writePage = async (drawer: PageDrawer, width: number, height: number, xobjects: string[]): Promise<void> => {
+  const writePage = async (drawer: PageDrawer, width: number, height: number, xobjects: string[], annots: number[] = []): Promise<void> => {
     const content = writer.allocate();
     await writer.deflatedStream(content, "", Buffer.from(drawer.ops.join("\n"), "latin1"));
     const pageNum = writer.allocate();
     pageNums.push(pageNum);
+    pageTops.push(pt(height));
     await writer.object(
       pageNum,
       `<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${pt(width)} ${pt(height)}] /Contents ${content} 0 R ` +
-        `/Resources << ${resources.shared()}${xobjects.length ? ` /XObject << ${xobjects.join(" ")} >>` : ""} >> >>`,
+        `/Resources << ${resources.shared()}${xobjects.length ? ` /XObject << ${xobjects.join(" ")} >>` : ""} >>` +
+        `${annots.length ? ` /Annots [${annots.map((n) => `${n} 0 R`).join(" ")}]` : ""} >>`,
     );
+  };
+
+  /** The page's link annotations, written before the page that lists them. */
+  const writeLinks = async (page: LaidOutPage, drawer: PageDrawer): Promise<number[]> => {
+    const annots: number[] = [];
+    for (const box of linkBoxes(page)) {
+      const action = linkAction(box.href, final.result.bookmarkPageIndices);
+      if (!action) continue;
+      const annot = writer.allocate();
+      const rect = [drawer.x(box.x), drawer.y(box.y + box.height), drawer.x(box.x + box.width), drawer.y(box.y)].map(num).join(" ");
+      await writer.object(annot, `<< /Type /Annot /Subtype /Link /Rect [${rect}] /Border [0 0 0] ${action} >>`);
+      annots.push(annot);
+    }
+    return annots;
   };
 
   const onPage = async (page: LaidOutPage): Promise<void> => {
@@ -221,7 +249,8 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, sheet?.height ?? page.height);
     drawer.drawPage((part) => shown.get(part) ?? null);
     if (column && sheet) column.draw(page, drawer, sheet.height, printComments && page.index === final.result.totalPages);
-    await writePage(drawer, sheet?.width ?? page.width, sheet?.height ?? page.height, xobjects);
+    for (const [name, top] of bookmarkTops(page)) if (!bookmarkAt.has(name)) bookmarkAt.set(name, { page: page.index - 1, y: drawer.y(top) });
+    await writePage(drawer, sheet?.width ?? page.width, sheet?.height ?? page.height, xobjects, await writeLinks(page, drawer));
     if (page.index % 25 === 0) clearBreakCache(measurer);
   };
   clearBreakCache(measurer);
@@ -242,7 +271,21 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
 
   await resources.write();
   await writer.object(pagesNum, `<< /Type /Pages /Count ${pageNums.length} /Kids [${pageNums.map((n) => `${n} 0 R`).join(" ")}] >>`);
-  await writer.object(catalog, `<< /Type /Catalog /Pages ${pagesNum} 0 R >>`);
+  // The named destinations: every bookmark, at its line or at its page's top.
+  let dests = "";
+  if (final.result.bookmarkPageIndices.size > 0) {
+    const destsNum = writer.allocate();
+    const entries: string[] = [];
+    for (const [name, index] of final.result.bookmarkPageIndices) {
+      const at = bookmarkAt.get(name);
+      const page = at?.page ?? index;
+      if (page < 0 || page >= pageNums.length) continue;
+      entries.push(`${pdfName(name)} [${pageNums[page]} 0 R /XYZ null ${at ? num(at.y) : pageTops[page]} null]`);
+    }
+    await writer.object(destsNum, `<< ${entries.join(" ")} >>`);
+    dests = ` /Dests ${destsNum} 0 R`;
+  }
+  await writer.object(catalog, `<< /Type /Catalog /Pages ${pagesNum} 0 R${dests} >>`);
   await writer.object(info, `<< /Producer (wordinweb)${options.title ? ` /Title ${pdfString(options.title)}` : ""} >>`);
   await writer.finish(catalog, info);
   await new Promise<void>((resolve, reject) => out.end((error?: Error | null) => (error ? reject(error) : resolve())));

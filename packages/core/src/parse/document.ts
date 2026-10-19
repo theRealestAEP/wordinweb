@@ -164,6 +164,9 @@ interface FieldState {
    * phase23 p5's field-hyperlink bullets carry italic on the fldChar runs
    * but paint blue upright in Word. No field content is emitted at end. */
   live?: boolean;
+  /** A live HYPERLINK field's target: its result runs are gathered into
+   * this hyperlink, as a w:hyperlink's runs are. */
+  link?: Hyperlink;
   /** Legacy FORMCHECKBOX: the w:checkBox element from the fldChar begin's
    * w:ffData, carried onto the emitted field content so it becomes a
    * click-to-toggle target. */
@@ -632,7 +635,11 @@ function parseParaChildren(
       // Keep empty runs that carry an open complex field: the field content
       // is appended to the carrier when fldChar end arrives.
       if (run && (run.content.length > 0 || field.carrier === run)) {
-        out.push(run);
+        const link = field.mode === "result" ? field.link : undefined;
+        if (link) {
+          if (out[out.length - 1] !== link) out.push(link);
+          link.runs.push(run);
+        } else out.push(run);
         captureRefBookmarkRun(ctx, run);
       }
     } else if (ln === "ins" || ln === "del" || ln === "moveTo" || ln === "moveFrom") {
@@ -756,7 +763,8 @@ function parseParaChildren(
         props,
         content: [{ kind: "field", instruction, cachedResult: cached, src: el }],
       };
-      out.push(fieldRun);
+      const link = hyperlinkTarget(instruction);
+      out.push(link ? { type: "hyperlink", ...link, runs: [fieldRun] } : fieldRun);
       captureRefBookmarkRun(ctx, fieldRun);
     } else if (ln === "smartTag" || ln === "sdt") {
       const content = ln === "sdt" ? child(el, "sdtContent") : el;
@@ -782,6 +790,33 @@ function parseParaChildren(
   }
 }
 
+/**
+ * Where a HYPERLINK field points: its URL (the first argument) and the
+ * bookmark its \l switch names; undefined for any other field. The \o
+ * (screen tip) and \t (target frame) switches take an argument of their
+ * own, which is no URL.
+ */
+export function hyperlinkTarget(instruction: string): { href?: string; anchor?: string } | undefined {
+  const match = /^\s*HYPERLINK\b([\s\S]*)$/i.exec(instruction);
+  if (!match) return undefined;
+  const unquote = (token: string): string => (token.startsWith('"') ? token.slice(1, token.length > 1 && token.endsWith('"') ? -1 : undefined) : token);
+  const tokens = match[1].match(/"[^"]*"?|\S+/g) ?? [];
+  let href: string | undefined;
+  let anchor: string | undefined;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.startsWith("\\")) {
+      const letter = token.slice(1).toLowerCase();
+      if (letter === "l" && i + 1 < tokens.length) anchor = unquote(tokens[++i]);
+      else if (letter === "o" || letter === "t") i++;
+      continue;
+    }
+    href ??= unquote(token);
+  }
+  if (href === undefined && anchor === undefined) return undefined;
+  return { ...(href !== undefined ? { href } : {}), ...(anchor !== undefined ? { anchor } : {}) };
+}
+
 /** Append a parsed run to every open `_Ref` bookmark range (REF re-render). */
 function captureRefBookmarkRun(ctx: DocParseContext, run: Run): void {
   const open = ctx.refBookmarks?.open;
@@ -804,6 +839,7 @@ function flushField(field: FieldState): void {
   field.cachedResult = "";
   field.carrier = null;
   field.live = false;
+  field.link = undefined;
   field.checkbox = undefined;
   field.beginEl = undefined;
 }
@@ -957,6 +993,8 @@ function parseRun(
           // string. (\b keeps INDEX from matching an XE mark, which has no
           // separate and never reaches here anyway.)
           field.live = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i.test(field.instruction);
+          const target = hyperlinkTarget(field.instruction);
+          if (target) field.link = { type: "hyperlink", ...target, runs: [] };
         } else if (type === "end") {
           if (!field.live) {
             const carrier = field.carrier ?? run;
@@ -973,6 +1011,7 @@ function parseRun(
           field.mode = null;
           field.instruction = "";
           field.cachedResult = "";
+          field.link = undefined;
           field.carrier = null;
           field.live = false;
           field.checkbox = undefined;
