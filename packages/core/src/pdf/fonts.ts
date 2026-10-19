@@ -9,7 +9,7 @@ import { embeddingLevels, mirrored } from "./bidi.js";
 import { PdfRenderError, unsupportedScript } from "./errors.js";
 import { ShapedScript, isHebrewMark, needsShaping, plainText, shapedScriptOf } from "./scripts.js";
 import { shapeText } from "./shaper.js";
-import { Face, FaceInfo, scanFaces } from "./sfnt.js";
+import { Face, FaceInfo, scanCoverage, scanFaces } from "./sfnt.js";
 
 /**
  * Font resolution for the PDF renderer. A document's font name goes through
@@ -32,7 +32,11 @@ import { Face, FaceInfo, scanFaces } from "./sfnt.js";
  *   6. The fallback list, each family with the glyphs the ones before lack:
  *      Arial Unicode MS, DejaVu Sans, Noto Sans, Liberation Sans, Arial,
  *      Helvetica, Hiragino Sans GB, Apple Symbols, Symbol; then, for an
- *      East Asian character none has, fontconfig's face for its language.
+ *      East Asian character none has, fontconfig's face for its language;
+ *      then, for any character none has (an emoji, a symbol), fontconfig's
+ *      face with that character ("fc-match :charset=..."), else the first
+ *      scanned face whose cmap has it (so a font in one of our own
+ *      directories, which fontconfig does not know, is found too).
  *   7. When none of those is installed either, the first family scanned.
  *
  * A family is missing (FontSet.missing) when only steps 6 and 7 drew it.
@@ -52,7 +56,8 @@ import { Face, FaceInfo, scanFaces } from "./sfnt.js";
  * Within a family, the face with the asked bold and italic; when the family
  * lacks it, the nearest face and the missing style is synthesized (a fake
  * bold strokes the glyphs, a fake italic skews them). A glyph none of the
- * faces have draws as the primary face's .notdef.
+ * faces have draws as the primary face's .notdef; a variation selector or
+ * a joiner none has draws nothing and is not reported.
  */
 const PDF_SUBSTITUTES: Record<string, string> = {
   arial: "Liberation Sans",
@@ -175,6 +180,12 @@ export function defaultFontDirs(): string[] {
 /** Every face under a list of directories, by family name. */
 export class FontRegistry {
   private readonly byFamily = new Map<string, FaceInfo[]>();
+  /** Every face in scan order: the first directory's first. */
+  private readonly all: FaceInfo[] = [];
+  /** Each face's cmap ranges (scanCoverage), read on first need. */
+  private readonly ranges = new Map<FaceInfo, number[]>();
+  /** The face found for each code point asked (faceWith), null for none. */
+  private readonly byCodePoint = new Map<number, FaceInfo | null>();
 
   constructor(readonly dirs: string[]) {
     for (const dir of dirs) this.scan(dir, 0);
@@ -220,6 +231,7 @@ export class FontRegistry {
         continue;
       }
       for (const face of faces) {
+        this.all.push(face);
         const key = face.family.toLowerCase();
         const list = this.byFamily.get(key);
         if (list) list.push(face);
@@ -245,6 +257,37 @@ export class FontRegistry {
   faces(family: string, bold: boolean, italic: boolean): StyledFaces | undefined {
     const all = this.byFamily.get(family.toLowerCase());
     return all && nearestStyle(all, bold, italic);
+  }
+
+  /**
+   * The first face, in scan order, that `has` a code point, among those
+   * whose cmap ranges include it; null when none. Each face's ranges are
+   * read on first need, and each code point is asked once. The ranges are
+   * an index: `has` confirms on the face itself (a format 4 cmap segment
+   * may map part of its range to no glyph; a color bitmap face has no
+   * outline to draw).
+   */
+  faceWith(cp: number, has: (info: FaceInfo) => boolean): FaceInfo | null {
+    let found = this.byCodePoint.get(cp);
+    if (found === undefined) {
+      found = this.all.find((info) => this.covers(info, cp) && has(info)) ?? null;
+      this.byCodePoint.set(cp, found);
+    }
+    return found;
+  }
+
+  private covers(info: FaceInfo, cp: number): boolean {
+    let ranges = this.ranges.get(info);
+    if (!ranges) {
+      try {
+        ranges = scanCoverage(info.path, info.index);
+      } catch {
+        ranges = [];
+      }
+      this.ranges.set(info, ranges);
+    }
+    for (let i = 0; i < ranges.length; i += 2) if (cp >= ranges[i] && cp <= ranges[i + 1]) return true;
+    return false;
   }
 }
 
@@ -420,6 +463,20 @@ export class Fontconfig {
     return answer;
   }
 
+  /** fontconfig's face for a code point (":charset=1f44b"): its nearest
+   * match, which it gives even when no installed face has the character,
+   * so the answer counts only once the face is seen to have the glyph
+   * (FontSet.charFace). Asked once per code point. */
+  matchChar(cp: number): FaceInfo | null {
+    const key = `:charset=${cp.toString(16)}`;
+    let answer = this.answers.get(key);
+    if (answer === undefined) {
+      answer = this.ask(key);
+      this.answers.set(key, answer);
+    }
+    return answer;
+  }
+
   /** The files fontconfig answers with for the generic families and for a family that cannot exist. */
   private genericFiles(style: string): Set<string> {
     let files = this.generic.get(style);
@@ -502,6 +559,13 @@ interface Segment {
   script: ShapedScript | null;
 }
 
+/** A zero-width joiner or non-joiner (U+200C, U+200D) or a variation
+ * selector (U+FE00 to U+FE0F): the emoji presentation selector U+FE0F and
+ * the ZWJ of an emoji sequence among them. */
+function isInvisible(cp: number): boolean {
+  return cp === 0x200c || cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f);
+}
+
 /** Whether a code point takes the script of the letters around it: spaces,
  * digits, punctuation, combining marks, joiners and format characters. */
 function isCommon(cp: number): boolean {
@@ -523,6 +587,8 @@ export class FontSet {
   readonly missing = new Set<string>();
   /** Code points no face in their stack has: each drew as an empty box. */
   readonly missingCodePoints = new Set<number>();
+  /** The face found for a code point no stack had (charFace), null for none. */
+  private readonly charFaces = new Map<number, Face | null>();
 
   constructor(dirs: string[] = defaultFontDirs()) {
     this.registry = FontRegistry.for(dirs);
@@ -626,6 +692,25 @@ export class FontSet {
     if (!found) return null;
     const face = this.load(found);
     if (!face.hasGlyph(cp)) return null;
+    const entry = { face, fakeBold: false, fakeItalic: false };
+    stack.faces.push(entry);
+    return entry;
+  }
+
+  /** A face with a glyph for a code point no face in the stack has (an
+   * emoji, a symbol): fontconfig's face for the character, when it has
+   * the glyph, else the first scanned face that has it; found once per
+   * code point. The face joins the stack for the glyphs after it. */
+  private charFace(stack: FontStack, cp: number): StackFace | null {
+    let face = this.charFaces.get(cp);
+    if (face === undefined) {
+      const has = (info: FaceInfo): boolean => this.load(info).hasGlyph(cp);
+      const asked = fontconfig.matchChar(cp);
+      const info = asked && has(asked) ? asked : this.registry.faceWith(cp, has);
+      face = info ? this.load(info) : null;
+      this.charFaces.set(cp, face);
+    }
+    if (!face) return null;
     const entry = { face, fakeBold: false, fakeItalic: false };
     stack.faces.push(entry);
     return entry;
@@ -830,7 +915,11 @@ export class FontSet {
         }
       }
       if (gid === 0 && shown !== 32) {
-        const extra = this.langFace(stack, shown);
+        // A variation selector or joiner no face has draws nothing: it
+        // tells how its neighbours join, which this plain path leaves as
+        // they are.
+        if (isInvisible(cp)) continue;
+        const extra = this.langFace(stack, shown) ?? this.charFace(stack, shown);
         if (extra) {
           chosen = extra;
           gid = extra.face.glyphId(shown);

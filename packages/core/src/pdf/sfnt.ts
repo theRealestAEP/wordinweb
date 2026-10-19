@@ -483,7 +483,8 @@ function readNames(name: Uint8Array): Map<number, string> {
   return out;
 }
 
-function readCmap(cmap: Uint8Array): { map: Map<number, number>; symbol: boolean } {
+/** The cmap subtable read: the Unicode full-range (format 12) one first, else the BMP (format 4) one, else a (3,0) symbol one. */
+function bestCmapSubtable(cmap: Uint8Array): { offset: number; symbol: boolean } | null {
   const v = view(cmap);
   const count = v.getUint16(2);
   let best: { offset: number; score: number; symbol: boolean } | null = null;
@@ -505,6 +506,12 @@ function readCmap(cmap: Uint8Array): { map: Map<number, number>; symbol: boolean
     } else continue;
     if (!best || score > best.score) best = { offset, score, symbol };
   }
+  return best;
+}
+
+function readCmap(cmap: Uint8Array): { map: Map<number, number>; symbol: boolean } {
+  const v = view(cmap);
+  const best = bestCmapSubtable(cmap);
   const map = new Map<number, number>();
   if (!best) return { map, symbol: false };
   const at = best.offset;
@@ -546,6 +553,40 @@ function readCmap(cmap: Uint8Array): { map: Map<number, number>; symbol: boolean
     }
   }
   return { map, symbol: best.symbol };
+}
+
+/**
+ * The code point ranges a cmap's subtable (bestCmapSubtable) maps, as
+ * pairs of first and last, flat: an index of the face's coverage. A
+ * format 4 segment may map some of its range to glyph 0, so a hit here is
+ * confirmed on the face (Face.hasGlyph). A symbol cmap's code points are
+ * the font's own, not Unicode, so it indexes nothing.
+ */
+function cmapRanges(cmap: Uint8Array): number[] {
+  const v = view(cmap);
+  const best = bestCmapSubtable(cmap);
+  const ranges: number[] = [];
+  if (!best || best.symbol) return ranges;
+  const at = best.offset;
+  const format = v.getUint16(at);
+  if (format === 4) {
+    const segCount = v.getUint16(at + 6) >> 1;
+    const ends = at + 14;
+    const starts = ends + segCount * 2 + 2;
+    for (let s = 0; s < segCount; s++) {
+      const end = v.getUint16(ends + s * 2);
+      const start = v.getUint16(starts + s * 2);
+      if (start <= end && start !== 0xffff) ranges.push(start, end);
+    }
+  } else if (format === 12) {
+    const groups = v.getUint32(at + 12);
+    for (let g = 0; g < groups; g++) {
+      const entry = at + 16 + g * 12;
+      if (entry + 12 > cmap.length) break;
+      ranges.push(v.getUint32(entry), v.getUint32(entry + 4));
+    }
+  }
+  return ranges;
 }
 
 /** Pairs of a kern table (version 0, format 0 subtables), keyed left<<16|right. */
@@ -724,6 +765,47 @@ function readClassDef(gpos: Uint8Array, at: number): Map<number, number> {
  * directory never reads a whole file.
  */
 export function scanFaces(path: string): FaceInfo[] {
+  const faces: FaceInfo[] = [];
+  scanTables(path, new Set(["name", "head", "OS/2"])).forEach(({ tables }, index) => {
+    const name = tables.get("name");
+    const head = tables.get("head");
+    if (!name || !head || head.length < 54) return;
+    const os2 = tables.get("OS/2");
+    const names = readNames(name);
+    const macStyle = view(head).getUint16(44);
+    const fsSelection = os2 && os2.length >= 64 ? view(os2).getUint16(62) : 0;
+    const weight = os2 && os2.length >= 6 ? view(os2).getUint16(4) : 400;
+    const family = names.get(16) ?? names.get(1) ?? "";
+    if (!family) return;
+    faces.push({
+      path,
+      index,
+      family,
+      subfamily: names.get(17) ?? names.get(2) ?? "",
+      postscriptName: names.get(6) ?? family.replace(/\s+/g, ""),
+      bold: (macStyle & 1) !== 0 || (fsSelection & 0x20) !== 0 || weight >= 600,
+      italic: (macStyle & 2) !== 0 || (fsSelection & 1) !== 0,
+    });
+  });
+  return faces;
+}
+
+/**
+ * The code point ranges a face's cmap maps (cmapRanges), from that table
+ * alone, read in place. A color bitmap face (sbix, CBDT) covers nothing:
+ * its outlines are stand-ins (see Face.glyphId), and its bitmaps make the
+ * file too large to open for the few glyphs that have ink.
+ */
+export function scanCoverage(path: string, index: number): number[] {
+  const face = scanTables(path, new Set(["cmap"]))[index];
+  const cmap = face?.tables.get("cmap");
+  return cmap && !face.tags.has("sbix") && !face.tags.has("CBDT") ? cmapRanges(cmap) : [];
+}
+
+/** The wanted tables of each face in a font file, by the face's index, and
+ * the tags of all its tables: the directory and the wanted tables are read
+ * in place, never the whole file. */
+function scanTables(path: string, wanted: Set<string>): { tags: Set<string>; tables: Map<string, Uint8Array> }[] {
   const fd = openSync(path, "r");
   try {
     const read = (at: number, length: number): Uint8Array => {
@@ -740,20 +822,21 @@ export function scanFaces(path: string): FaceInfo[] {
     if (header.length < 16) return [];
     const v = view(header);
     const tag = v.getUint32(0);
-    const WANTED = new Set(["name", "head", "OS/2"]);
-    const faces: FaceInfo[] = [];
-    const fromDirectory = (directory: number, index: number, woff: boolean): void => {
+    const faces: { tags: Set<string>; tables: Map<string, Uint8Array> }[] = [];
+    const fromDirectory = (directory: number, woff: boolean): void => {
       const numTables = woff ? v.getUint16(12) : view(read(directory, 12)).getUint16(4);
       const entrySize = woff ? 20 : 16;
       const entriesAt = woff ? 44 : directory + 12;
       const entries = read(entriesAt, numTables * entrySize);
       const ev = view(entries);
+      const tags = new Set<string>();
       const tables = new Map<string, Uint8Array>();
       for (let i = 0; i < numTables; i++) {
         const at = i * entrySize;
         if (at + entrySize > entries.length) break;
         const name = tagName(entries, at);
-        if (!WANTED.has(name)) continue;
+        tags.add(name);
+        if (!wanted.has(name)) continue;
         // A WOFF entry is tag, offset, compressed length, original length;
         // an sfnt entry is tag, checksum, offset, length.
         const offset = ev.getUint32(at + (woff ? 4 : 8));
@@ -762,32 +845,14 @@ export function scanFaces(path: string): FaceInfo[] {
         if (woff && length < ev.getUint32(at + 12)) tables.set(name, new Uint8Array(inflateSync(data)));
         else tables.set(name, data);
       }
-      const name = tables.get("name");
-      const head = tables.get("head");
-      if (!name || !head || head.length < 54) return;
-      const os2 = tables.get("OS/2");
-      const names = readNames(name);
-      const macStyle = view(head).getUint16(44);
-      const fsSelection = os2 && os2.length >= 64 ? view(os2).getUint16(62) : 0;
-      const weight = os2 && os2.length >= 6 ? view(os2).getUint16(4) : 400;
-      const family = names.get(16) ?? names.get(1) ?? "";
-      if (!family) return;
-      faces.push({
-        path,
-        index,
-        family,
-        subfamily: names.get(17) ?? names.get(2) ?? "",
-        postscriptName: names.get(6) ?? family.replace(/\s+/g, ""),
-        bold: (macStyle & 1) !== 0 || (fsSelection & 0x20) !== 0 || weight >= 600,
-        italic: (macStyle & 2) !== 0 || (fsSelection & 1) !== 0,
-      });
+      faces.push({ tags, tables });
     };
-    if (tag === 0x774f4646) fromDirectory(0, 0, true);
+    if (tag === 0x774f4646) fromDirectory(0, true);
     else if (tag === 0x74746366) {
       const numFonts = v.getUint32(8);
       const offsets = read(12, numFonts * 4);
-      for (let i = 0; i < numFonts; i++) fromDirectory(view(offsets).getUint32(i * 4), i, false);
-    } else if (tag === 0x00010000 || tag === 0x4f54544f || tag === 0x74727565) fromDirectory(0, 0, false);
+      for (let i = 0; i < numFonts; i++) fromDirectory(view(offsets).getUint32(i * 4), false);
+    } else if (tag === 0x00010000 || tag === 0x4f54544f || tag === 0x74727565) fromDirectory(0, false);
     return faces;
   } finally {
     closeSync(fd);
