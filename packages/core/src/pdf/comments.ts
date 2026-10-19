@@ -177,7 +177,10 @@ export class CommentColumn {
       drawer.ops.push(ops.join(" "));
     };
     /** Draw a card at `at` and give its top, or carry it to the next sheet
-     * (null). Only a card taller than the rail splits, at a line. */
+     * (null). Only a card taller than the rail splits, at a line. A line
+     * taller than the rail itself fits no sheet: at the top of an empty
+     * rail it is drawn anyway, past the sheet's bottom, so that every sheet
+     * takes at least one line and the carrying ends. */
     const place = (balloon: Balloon, at: number): number | null => {
       const height = balloon.lines.reduce((sum, line) => sum + line.height, 0);
       let lines = balloon.lines;
@@ -189,11 +192,12 @@ export class CommentColumn {
         let fit = 0;
         let fitHeight = 0;
         while (fit < lines.length && at + fitHeight + lines[fit].height <= bottom) fitHeight += lines[fit++].height;
-        if (fit === 0) {
+        if (fit === 0 && at > RAIL_PAD) {
           carried.push(balloon);
           return null;
         }
-        carried.push({ ...balloon, lines: lines.slice(fit) });
+        if (fit === 0) fit = 1;
+        if (fit < lines.length) carried.push({ ...balloon, lines: lines.slice(fit) });
         lines = lines.slice(0, fit);
       }
       const drawn = lines.reduce((sum, line) => sum + line.height, 0);
@@ -213,9 +217,9 @@ export class CommentColumn {
     this.carried = carried;
   }
 
-  /** Whether lines wait for another sheet after the last page. */
-  hasCarried(): boolean {
-    return this.carried.length > 0;
+  /** How many balloon lines wait for another sheet after the last page. */
+  carriedLines(): number {
+    return this.carried.reduce((sum, balloon) => sum + balloon.lines.length, 0);
   }
 
   /** The lines of a comment's balloon: its head, text, and replies. A

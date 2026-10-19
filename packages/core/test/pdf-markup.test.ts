@@ -138,6 +138,18 @@ describe("renderDocxToPdf with markup", () => {
     expect(sheets[2]).toContain("Inserted row");
   });
 
+  it.skipIf(!hasPdftotext)("ends on a page shorter than a change's balloon, which goes on sheets after the page a line at a time", async () => {
+    // A 2 x 0.3 in page: the rail is shorter than the balloon's head line.
+    const tiny = `<w:sectPr><w:pgSz w:w="2880" w:h="400"/><w:pgMar w:top="30" w:right="30" w:bottom="30" w:left="30" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>`;
+    const bytes = makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${p(`<w:ins w:id="1" ${ADA}>${t("new")}</w:ins>`)}${tiny}</w:body></w:document>` });
+    const { pdf, pages } = await render(bytes, true);
+    expect(pages).toBeGreaterThan(1);
+    expect(pages).toBeLessThan(12);
+    const text = pdfText(pdf);
+    expect(text).toContain("Ada Reviewer");
+    expect(text).toContain("Inserted");
+  });
+
   it("gives the authors Word's colors in the order they first appear, the ninth taking the first again", async () => {
     const authors = Array.from({ length: 9 }, (_, i) => `Author ${i}`);
     const paras = authors.map((author, i) => p(`<w:ins w:id="${i + 1}" w:author="${author}" w:date="2026-01-01T00:00:00Z">${t(`by ${author}`)}</w:ins>`)).join("");

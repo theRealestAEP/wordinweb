@@ -12,12 +12,15 @@ import { W_NS, makeDocx } from "./helpers.js";
 const W14 = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
 const W15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"';
 
+/** US Letter with 1" margins, in twips. */
+const LETTER = { w: 12240, h: 15840, margin: 1440 };
+
 /**
  * A document of `pages` pages with `perPage` commented paragraphs each; a
  * reply under every third comment. `repeats` is how many sentences each
  * comment's text carries, so a page's balloons can outgrow the sheet.
  */
-export function commentedDocx(pages: number, perPage: number, repeats = 0): { docx: Uint8Array; texts: string[] } {
+export function commentedDocx(pages: number, perPage: number, repeats = 0, page = LETTER): { docx: Uint8Array; texts: string[] } {
   const body: string[] = [];
   const comments: string[] = [];
   const extended: string[] = [];
@@ -48,7 +51,7 @@ export function commentedDocx(pages: number, perPage: number, repeats = 0): { do
       }
     }
   }
-  body.push(`<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr>`);
+  body.push(`<w:sectPr><w:pgSz w:w="${page.w}" w:h="${page.h}"/><w:pgMar w:top="${page.margin}" w:bottom="${page.margin}" w:left="${page.margin}" w:right="${page.margin}"/></w:sectPr>`);
   const docx = makeDocx({
     "word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${W_NS}><w:body>${body.join("")}</w:body></w:document>`,
     "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS} ${W14}>${comments.join("")}</w:comments>`,
@@ -124,6 +127,28 @@ describe("renderDocxToPdf with comments", () => {
     const text = pdfText(bytes);
     for (const t of texts) expect(text).toContain(t.split(":")[0]);
     expect(text.match(/wording/g)?.length).toBe(120);
+  });
+
+  it.skipIf(!hasPdftotext)("ends on a tiny page whose rail holds a few lines of a long comment, losing nothing", async () => {
+    const { docx, texts } = commentedDocx(1, 1, 30, { w: 2880, h: 2880, margin: 200 });
+    const { bytes, pages } = await render(docx, true);
+    expect(pages).toBeGreaterThan(1);
+    expect(pages).toBeLessThan(40);
+    const text = pdfText(bytes);
+    expect(text.match(/wording/g)?.length).toBe(30);
+    expect(text).toContain(texts[0].split(":")[0]);
+  });
+
+  it.skipIf(!hasPdftotext)("ends on a page shorter than one balloon line: each sheet takes a line, past its bottom", async () => {
+    // 20 px tall: the rail is 4 px, less than any line of a card.
+    const { docx, texts } = commentedDocx(1, 1, 3, { w: 2880, h: 300, margin: 30 });
+    const { bytes, pages } = await render(docx, true);
+    const text = pdfText(bytes);
+    expect(text).toContain(texts[0].split(":")[0]);
+    expect(text.match(/wording/g)?.length).toBe(3);
+    // One line per sheet: the card's lines, each on a sheet of its own.
+    expect(pages).toBeGreaterThan(3);
+    expect(pages).toBeLessThan(20);
   });
 
   it("draws a dashed leader from each card's text to the card", async () => {

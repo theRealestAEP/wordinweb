@@ -207,11 +207,15 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   clearBreakCache(measurer);
   await layoutDocumentStream(opened.doc, { measurer, prescan: opened.prescan, knownTotalPages: final.knownTotalPages, final: final.result, onPage });
 
-  // Balloons past the last page go on sheets of their own.
-  while (column && sheet && column.hasCarried()) {
+  // Balloons past the last page go on sheets of their own. Each such sheet
+  // must take some of the waiting lines: one that takes none would be
+  // followed by another just like it, without end.
+  while (column && sheet && column.carriedLines() > 0) {
+    const waiting = column.carriedLines();
     const blank: LaidOutPage = { width: final.maxWidth, height: final.maxHeight, index: 0, number: 0, items: [], bodyTop: 0, bodyBottom: 0, hfStart: 0, columnBands: [] };
     const drawer = new PageDrawer(fonts, resources, opened.doc.theme, blank, 0, sheet.height);
     column.draw(blank, drawer, sheet.height);
+    if (column.carriedLines() >= waiting) throw new PdfRenderError("failed", `sheet ${pageNums.length + 1} holds no page and took none of the ${waiting} balloon lines waiting after the last page`);
     await writePage(drawer, sheet.width, sheet.height, []);
   }
 
