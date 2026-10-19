@@ -5595,6 +5595,7 @@ class Engine {
           model3D: span.image.model3D,
           webVideo: span.image.webVideo,
           embeddedObject: span.image.embeddedObject,
+          ...(span.changes ? { changes: span.changes, changeColor: span.props.color } : {}),
         });
         continue;
       }
@@ -5684,6 +5685,7 @@ class Engine {
             crop: img.crop,
             rotation: img.rotation,
             border: img.border,
+            ...(span.changes ? { changes: span.changes, changeColor: span.props.color } : {}),
           });
         }
         for (const l of span.drawing.lines) {

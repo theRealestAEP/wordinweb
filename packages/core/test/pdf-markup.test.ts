@@ -3,11 +3,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { inflateSync } from "node:zlib";
+import { crc32, deflateSync, inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
-import { W_NS, makeDocx } from "./helpers.js";
+import { W_NS, makeDocx, makeDocxWithMedia } from "./helpers.js";
 
 /**
  * The markup option prints a document's tracked changes as Word's All
@@ -34,6 +34,25 @@ const body =
   `</w:tbl>` +
   p(t("After the table."));
 const docx = (...bodies: string[]): Uint8Array => makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${bodies.join("")}${SECT}</w:body></w:document>` });
+
+/** An RGBA PNG of one color, `side` square (as pdf-images.test.ts makes one). */
+function solidPng(side: number, rgba: number[]): Buffer {
+  const chunk = (type: string, data: Uint8Array): Buffer => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length, 0);
+    head.write(type, 4, "latin1");
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, "latin1"), data])), 0);
+    return Buffer.concat([head, data, crc]);
+  };
+  const row = Buffer.alloc(1 + side * 4);
+  for (let x = 0; x < side; x++) row.set(rgba, 1 + x * 4);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(side, 0);
+  ihdr.writeUInt32BE(side, 4);
+  ihdr.set([8, 6, 0, 0, 0], 8);
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", deflateSync(Buffer.concat(Array.from({ length: side }, () => row)))), chunk("IEND", Buffer.alloc(0))]);
+}
 
 class Collect extends Writable {
   readonly chunks: Buffer[] = [];
@@ -162,6 +181,39 @@ describe("renderDocxToPdf with markup", () => {
       .join("\n");
     expect(all).toMatch(/1 0\.784 0\.353 rg [\d. ]+ re f Q/);
     expect(rules(ops, "1 0 0").length).toBeGreaterThan(0);
+  });
+
+  it.skipIf(!hasPdftotext)("marks a deleted or inserted picture: a frame in the author's color, a strike through a deleted one, a balloon and a change bar", async () => {
+    const picture = (id: number): string =>
+      `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><wp:extent cx="914400" cy="457200"/><wp:docPr id="${id}" name="Pic${id}"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip r:embed="rIdImg" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+    const body = p(t("Deleted picture: "), `<w:del w:id="1" ${BOB}>${picture(1)}</w:del>`) + p(t("Inserted picture: "), `<w:ins w:id="2" ${ADA}>${picture(2)}</w:ins>`) + p(t("Kept picture: "), picture(3));
+    const bytes = makeDocxWithMedia(
+      {
+        "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}${SECT}</w:body></w:document>`,
+        "word/_rels/document.xml.rels": `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>`,
+      },
+      { "word/media/image1.png": solidPng(8, [40, 120, 200, 255]) },
+    );
+    const { pdf, pages, ops } = await render(bytes, true);
+    expect(pages).toBe(1);
+    const text = pdfText(pdf);
+    expect(text).toContain("Bob Editor 8/13/2026 UTC Deleted");
+    expect(text).toContain("Ada Reviewer 8/12/2026 UTC Inserted");
+    // Bob, first to appear, is red: he framed and struck his deleted picture; Ada (blue) framed her inserted one; the kept one has neither.
+    const frames = [...ops.matchAll(/^q 1\.5 w (\S+ \S+ \S+) RG [\d. ]+ re S Q$/gm)].map((m) => m[1]);
+    expect(frames).toEqual(["1 0 0", "0 0 1"]);
+    // The strike is the one level rule (the leaders' ticks are upright), as wide as the picture (96 px = 72 pt).
+    const strikes = [...ops.matchAll(/^q 1\.5 w (\S+ \S+ \S+) RG ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l S Q$/gm)].filter((m) => m[3] === m[5]).map((m) => ({ color: m[1], width: Number(m[4]) - Number(m[2]) }));
+    expect(strikes).toEqual([{ color: "1 0 0", width: 72 }]);
+    // A change bar beside each changed picture's line, as tall as the picture (48 px = 36 pt).
+    const bars = rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3);
+    expect(bars).toHaveLength(2);
+    for (const bar of bars) expect(bar.h).toBeGreaterThanOrEqual(36);
+    // The pictures themselves still draw.
+    expect(ops.match(/\/Im\d+ Do/g)?.length).toBe(3);
   });
 
   it.skipIf(!hasPdftotext)("balloons an inserted or deleted paragraph mark with its author, and bars its line", async () => {

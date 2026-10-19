@@ -2,7 +2,7 @@ import { Border, Theme } from "../model.js";
 import { drawChart } from "./chart.js";
 import { drawWarpText } from "./warp.js";
 import { fontWidthScale } from "../layout/measure.js";
-import { FontSpec, LaidOutPage, LineEdgeItem, PageItem, PathItem, RectItem, TextItem } from "../layout/types.js";
+import { FontSpec, ImageItem, LaidOutPage, LineEdgeItem, PageItem, PathItem, RectItem, TextItem } from "../layout/types.js";
 import { FontSet, GlyphRun } from "./fonts.js";
 import { Resources } from "./resources.js";
 import { num } from "./writer.js";
@@ -131,13 +131,14 @@ export class PageDrawer {
   /**
    * Printed markup: a bar in the left margin beside each line that holds a
    * tracked change (Word's "changed lines", at the outside border), one
-   * per line whatever the number of changes on it.
+   * per line whatever the number of changes on it; a changed picture's
+   * height counts as a line.
    */
   private drawChangeBars(): void {
     const lines = new Map<number, number>();
     for (const item of this.page.items) {
-      if (item.kind !== "text" || !item.changed || item.hidden) continue;
-      lines.set(item.lineTop, Math.max(lines.get(item.lineTop) ?? 0, item.lineHeight));
+      if (item.kind === "text" && item.changed && !item.hidden) lines.set(item.lineTop, Math.max(lines.get(item.lineTop) ?? 0, item.lineHeight));
+      else if (item.kind === "image" && item.changes) lines.set(item.y, Math.max(lines.get(item.y) ?? 0, item.height));
     }
     if (lines.size === 0) return;
     const bodyLeft = Math.min(...this.page.columnBands.flatMap((band) => band.colXs), 96);
@@ -270,6 +271,7 @@ export class PageDrawer {
           if (!found) {
             // A format no decoder here reads: an empty frame where it sits.
             this.ops.push(`q 0.5 w 0.6 G ${this.rect(item.x, item.y, item.width, item.height)} S Q`);
+            this.drawImageChange(item);
             return;
           }
           const c = item.crop;
@@ -303,6 +305,7 @@ export class PageDrawer {
           if (item.border) {
             this.ops.push(`q ${num(item.border.width * PT)} w ${rgbOp(parseColor(item.border.color) ?? { r: 0, g: 0, b: 0, a: 1 }, true)} ${this.rect(item.x - item.border.width / 2, item.y - item.border.width / 2, item.width + item.border.width, item.height + item.border.width)} S Q`);
           }
+          this.drawImageChange(item);
         });
         break;
       }
@@ -319,6 +322,20 @@ export class PageDrawer {
       case "drawingHit":
         break;
     }
+  }
+
+  /**
+   * Printed markup's mark on a changed picture: a frame in its author's
+   * color, and through a deleted (or moved-away) picture a rule across its
+   * middle, as Word strikes a deleted picture on its line.
+   */
+  private drawImageChange(item: ImageItem): void {
+    if (!item.changes) return;
+    const color = rgbOp(parseColor(item.changeColor) ?? { r: 0, g: 0, b: 0, a: 1 }, true);
+    this.ops.push(`q 1.5 w ${color} ${this.rect(item.x, item.y, item.width, item.height)} S Q`);
+    if (!item.changes.some((change) => change.kind === "del" || change.kind === "moveFrom")) return;
+    const yMid = this.y(item.y + item.height / 2);
+    this.ops.push(`q 1.5 w ${color} ${num(this.x(item.x))} ${num(yMid)} m ${num(this.x(item.x + item.width))} ${num(yMid)} l S Q`);
   }
 
   /** `x y w h re` for a px box. */

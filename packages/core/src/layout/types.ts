@@ -1,4 +1,4 @@
-import { Border, EmbeddedObjectReference, Model3DReference, Run, RunProps, WebVideoReference } from "../model.js";
+import { Border, EmbeddedObjectReference, Model3DReference, Revision, Run, RunProps, WebVideoReference } from "../model.js";
 import type { ChartData, SmartArtData } from "../model.js";
 import type { XmlElement } from "../xml.js";
 
@@ -201,6 +201,11 @@ export interface ImageItem {
   model3D?: Model3DReference;
   webVideo?: WebVideoReference;
   embeddedObject?: EmbeddedObjectReference;
+  /** Printed markup: the tracked changes the picture's run is part of, and
+   * the run's revision color, which frames the picture (and strikes a
+   * deleted one). A balloon and a change bar go with them, as for text. */
+  changes?: Revision[];
+  changeColor?: string;
 }
 
 export interface ChartItem {

@@ -45,9 +45,10 @@ export interface RenderPdfOptions {
    * struck through in their author's color (Word's "by author" colors, in
    * the order the authors first appear: red, blue, green, violet, dark red,
    * teal, dark yellow, gray), moved text double underlined or struck in
-   * green, a bar in the left margin beside every changed line, and, in the
-   * margin column with the comments (which this prints too), a balloon per
-   * change with its author, date and what it is ("Inserted", "Deleted",
+   * green, a changed picture framed in the color (a deleted one struck
+   * through), a bar in the left margin beside every changed line, and, in
+   * the margin column with the comments (which this prints too), a balloon
+   * per change with its author, date and what it is ("Inserted", "Deleted",
    * "Moved from", "Inserted row", "Formatted: Font: Bold", ...).
    */
   markup?: boolean;

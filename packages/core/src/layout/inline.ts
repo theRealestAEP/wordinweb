@@ -6,6 +6,7 @@ import {
   Model3DReference,
   Paragraph,
   ParaProps,
+  Revision,
   Run,
   RunProps,
   Shape,
@@ -196,12 +197,15 @@ interface ImageAtom {
   model3D?: Model3DReference;
   webVideo?: WebVideoReference;
   embeddedObject?: EmbeddedObjectReference;
+  /** Printed markup: the run's tracked changes (see LineSpan.changes). */
+  changes?: Revision[];
 }
 interface DrawingAtom {
   kind: "drawing";
   props: RunProps;
   font: FontSpec;
   drawing: DrawingContent;
+  changes?: Revision[];
 }
 interface MathAtom {
   kind: "math";
@@ -441,6 +445,9 @@ export interface LineSpan {
     embeddedObject?: EmbeddedObjectReference;
   };
   drawing?: DrawingContent;
+  /** Printed markup: the tracked changes a picture's or drawing's run is
+   * part of (text carries its own through src.run.changes). */
+  changes?: Revision[];
   math?: MathBox;
   mathSrc?: XmlElement;
   props: RunProps;
@@ -2036,6 +2043,7 @@ function breakParagraphImpl(
               }
             : undefined,
         drawing: atom.kind === "drawing" ? atom.drawing : undefined,
+        changes: atom.changes,
         props: atom.props,
         font: fontOf({}, fallbackFamily),
         // Keep the old fallback-font geometry for ordinary image lines, but
@@ -3515,6 +3523,7 @@ function buildAtoms(
             model3D: content.model3D,
             webVideo: content.webVideo,
             embeddedObject: content.embeddedObject,
+            changes: run.changes,
           });
           break;
         case "anchor":
@@ -3522,7 +3531,7 @@ function buildAtoms(
           atoms.push({ kind: "anchorPoint", shape: content.shape });
           break;
         case "drawing":
-          atoms.push({ kind: "drawing", props, font, drawing: content });
+          atoms.push({ kind: "drawing", props, font, drawing: content, changes: run.changes });
           break;
         case "math": {
           const size = props.size ?? 14.666;

@@ -95,20 +95,23 @@ export class CommentColumn {
         else items.set(id, [item]);
       }
     }
-    // Each tracked change's first text item on this page, in paint order,
-    // and where the change ends on that line.
-    const changes = new Map<string, { change: Revision; item: TextItem; x1: number }>();
+    // Each tracked change's first line on this page, in paint order (a
+    // changed picture's box counts as a line), and where the change ends on it.
+    const changes = new Map<string, { change: Revision; top: number; bottom: number; x1: number }>();
     for (const item of page.items) {
-      if (item.kind !== "text" || item.hidden) continue;
-      for (const change of item.src?.run.changes ?? []) {
+      let line: { list: Revision[] | undefined; top: number; bottom: number; x1: number };
+      if (item.kind === "text" && !item.hidden) line = { list: item.src?.run.changes, top: item.lineTop, bottom: item.lineTop + item.lineHeight, x1: item.x + item.width };
+      else if (item.kind === "image") line = { list: item.changes, top: item.y, bottom: item.y + item.height, x1: item.x + item.width };
+      else continue;
+      for (const change of line.list ?? []) {
         const first = changes.get(change.id);
-        if (!first) changes.set(change.id, { change, item, x1: item.x + item.width });
-        else if (item.lineTop === first.item.lineTop) first.x1 = Math.max(first.x1, item.x + item.width);
+        if (!first) changes.set(change.id, { change, top: line.top, bottom: line.bottom, x1: line.x1 });
+        else if (line.top === first.top) first.x1 = Math.max(first.x1, line.x1);
       }
     }
     // The end of each comment's first highlighted line, where its leader starts.
     const firstLine = new Map<string, { x: number; y: number; top: number; bottom: number }>();
-    for (const [id, { item, x1 }] of changes) firstLine.set(`rev:${id}`, { x: x1, y: item.lineTop + item.lineHeight / 2, top: item.lineTop, bottom: item.lineTop + item.lineHeight });
+    for (const [id, { top, bottom, x1 }] of changes) firstLine.set(`rev:${id}`, { x: x1, y: (top + bottom) / 2, top, bottom });
     for (const [id, list] of items) {
       const resolved = this.byId.get(id)?.resolved;
       // One continuous rect per line, as word-granular spans would gap at spaces.
@@ -141,11 +144,11 @@ export class CommentColumn {
       this.placed.add(id);
       balloons.push({ top: list[0].lineTop, balloon: this.balloon(this.byId.get(id) as DocComment) });
     }
-    for (const [id, { change, item }] of changes) {
+    for (const [id, { change, top }] of changes) {
       if (this.placed.has(`rev:${id}`)) continue;
       this.placed.add(`rev:${id}`);
       const card: DocComment = { id: `rev:${id}`, author: change.author, date: change.date, text: change.label };
-      balloons.push({ top: item.lineTop, balloon: this.balloon(card, this.doc.revisionColor(change.author)) });
+      balloons.push({ top, balloon: this.balloon(card, this.doc.revisionColor(change.author)) });
     }
     balloons.sort((a, b) => a.top - b.top);
 
