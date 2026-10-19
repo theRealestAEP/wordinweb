@@ -315,6 +315,9 @@ export function parseRunProps(rPr: XmlElement | undefined, ctx: ParseContext): R
 
   const lang = childVal(rPr, "lang");
   if (lang) props.lang = lang;
+  const langEl = child(rPr, "lang");
+  const langBidi = langEl && attr(langEl, "bidi");
+  if (langBidi) props.langBidi = langBidi;
 
   return props;
 }

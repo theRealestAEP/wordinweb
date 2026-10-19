@@ -24,6 +24,9 @@ export interface FontSpec {
   italic: boolean;
   /** Pair kerning is active because the run met its w:kern size threshold. */
   kerning?: boolean;
+  /** The run's complex-script language (w:lang w:bidi, BCP 47), for the
+   * shaper's language-specific forms; absent when the run names none. */
+  lang?: string;
   /** Optional PAINT-only family tried before `family` in the CSS stack, without
    * affecting metrics or width lookups (keyed by `family`). Used for CJK: the
    * line-pitch profile stays keyed by the macOS substitute face while the real

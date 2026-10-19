@@ -31,7 +31,7 @@ export interface TextMeasurer {
 
 export function fontKey(font: FontSpec): string {
   const paint = font.paintFamily && font.paintFamily !== font.family ? `${font.paintFamily}>` : "";
-  return `${font.bold ? "bold " : ""}${font.italic ? "italic " : ""}${font.kerning ? "kern " : ""}${font.size}px ${paint}${font.family}`;
+  return `${font.bold ? "bold " : ""}${font.italic ? "italic " : ""}${font.kerning ? "kern " : ""}${font.lang ? `${font.lang} ` : ""}${font.size}px ${paint}${font.family}`;
 }
 
 /**

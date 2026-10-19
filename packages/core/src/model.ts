@@ -140,6 +140,8 @@ export interface RunProps {
   /** Character style id (w:rStyle). */
   styleId?: string;
   lang?: string;
+  /** w:lang w:bidi — the language of the run's complex-script text (Arabic, Hebrew, Indic, Thai, ...). */
+  langBidi?: string;
 }
 
 // ---------- paragraph properties ----------

@@ -239,7 +239,7 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
     const scale = EA_FAMILY_RE.test(family) ? 0.52 : 0.65;
     size = Math.round(size * 1.5 * scale) / 1.5;
   }
-  return {
+  const font: FontSpec = {
     family,
     size,
     bold: props.bold ?? false,
@@ -249,6 +249,8 @@ export function fontOf(props: RunProps, fallbackFamily: string): FontSpec {
       props.kerningThreshold !== null &&
       size >= props.kerningThreshold,
   };
+  if (props.langBidi) font.lang = props.langBidi;
+  return font;
 }
 
 function displayText(text: string, props: RunProps): string {
@@ -272,6 +274,29 @@ function runPlainText(run: Run): string {
 /** Alphanumeric test for hyphen break context (word-internal only). */
 function isWordAlnum(ch: string | undefined): boolean {
   return ch !== undefined && /[\p{L}\p{Nd}]/u.test(ch);
+}
+
+/** Scripts written without spaces between words: Thai, Lao, Myanmar, Khmer. */
+const NO_SPACE_SCRIPT_RE = /[฀-໿က-႟ក-៿]/;
+/** Intl.Segmenter (ES2022), which the compile target's lib does not declare. */
+interface WordSegmenter {
+  segment(text: string): Iterable<{ index: number }>;
+}
+const intl = Intl as unknown as { Segmenter?: new (locale: undefined, options: { granularity: "word" }) => WordSegmenter };
+let wordSegmenter: WordSegmenter | null | undefined;
+
+/**
+ * Offsets inside a word of a script with no spaces between words where a
+ * line may break: the word boundaries Intl.Segmenter's dictionary finds
+ * (ICU's, the same source Word's Thai, Lao, Myanmar and Khmer breaking
+ * draws on). Empty where the host has no segmenter.
+ */
+function dictionaryBreaks(word: string): number[] {
+  if (wordSegmenter === undefined) wordSegmenter = intl.Segmenter ? new intl.Segmenter(undefined, { granularity: "word" }) : null;
+  if (!wordSegmenter) return [];
+  const out: number[] = [];
+  for (const segment of wordSegmenter.segment(word)) if (segment.index > 0) out.push(segment.index);
+  return out;
 }
 
 /**
@@ -3958,8 +3983,11 @@ function buildAtoms(
               isWordAlnum(beforeText[beforeText.length - 1]));
           if (runBoundaryWordBefore) hyBreaks.unshift(1);
         }
-        let breaks = softBreaks.length
-          ? [...new Set([...hyBreaks, ...softBreaks])].sort((a, b) => a - b)
+        // Thai, Lao, Myanmar and Khmer words run together: the dictionary's
+        // word boundaries are break opportunities, as a space's would be.
+        const dictBreaks = NO_SPACE_SCRIPT_RE.test(part) ? dictionaryBreaks(part) : [];
+        let breaks = softBreaks.length || dictBreaks.length
+          ? [...new Set([...hyBreaks, ...softBreaks, ...dictBreaks])].sort((a, b) => a - b)
           : hyBreaks;
         if (charRtl) {
           const set = new Set(breaks);
@@ -3968,7 +3996,7 @@ function buildAtoms(
           }
           breaks = [...set].sort((a, b) => a - b);
         }
-        const hySet = new Set(hyBreaks);
+        const hySet = new Set([...hyBreaks, ...dictBreaks]);
         const shSet = new Set(softBreaks);
         // A pure-digit word is a European Number regardless of the run's
         // w:rtl flag (UAX#9: EN takes an EVEN embedding level inside an RTL
