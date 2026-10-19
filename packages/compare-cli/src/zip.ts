@@ -2,6 +2,7 @@ import { closeSync, createReadStream, createWriteStream, fstatSync, openSync, re
 import { PassThrough, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { crc32, createDeflateRaw, createInflateRaw, deflateRawSync, inflateRawSync } from "node:zlib";
+import { StrictRewriter, normalizeStrictXml } from "../../core/src/strict.js";
 import { CompareError } from "./errors.js";
 
 /** One entry of a zip's central directory. */
@@ -83,10 +84,16 @@ export class ZipReader {
       throw new CompareError("damaged", `${this.path}: ${entry.name} is corrupt`);
     }
     if (data.length !== entry.size || crc32(data) !== entry.crc) throw new CompareError("damaged", `${this.path}: ${entry.name} is corrupt`);
+    // A Strict Open XML part is read as Transitional (core's strict.ts).
+    if (TEXT_PART.test(entry.name)) {
+      const text = data.toString("utf8");
+      const normalized = normalizeStrictXml(text);
+      if (normalized !== text) return Buffer.from(normalized, "utf8");
+    }
     return data;
   }
 
-  /** Inflate an entry into a file, checking its size and CRC. */
+  /** Inflate an entry into a file, checking its size and CRC; an XML part is written as Transitional. */
   async extract(entry: ZipEntry, dest: string): Promise<void> {
     const start = this.dataOffset(entry);
     let size = 0;
@@ -103,7 +110,8 @@ export class ZipReader {
     });
     // createReadStream's `end` is inclusive, and a zero-length range must not read byte `start`.
     const source = entry.compressedSize > 0 ? createReadStream(this.path, { start, end: start + entry.compressedSize - 1 }) : emptyStream();
-    await pipeline(source, entry.method === 8 ? createInflateRaw() : new PassThrough(), check, createWriteStream(dest));
+    const rewrite = TEXT_PART.test(entry.name) ? strictRewriteStream() : new PassThrough();
+    await pipeline(source, entry.method === 8 ? createInflateRaw() : new PassThrough(), check, rewrite, createWriteStream(dest));
     if (size !== entry.size || crc !== entry.crc) throw new CompareError("damaged", `${this.path}: ${entry.name} is corrupt`);
   }
 
@@ -206,6 +214,27 @@ function emptyStream(): PassThrough {
   const stream = new PassThrough();
   stream.end();
   return stream;
+}
+
+/** The parts rewritten to Transitional when they are Strict Open XML. */
+const TEXT_PART = /\.(xml|rels)$/i;
+
+/** A part's bytes rewritten to Transitional as they pass, when its root tag is Strict (core's strict.ts). */
+function strictRewriteStream(): Transform {
+  const rewriter = new StrictRewriter();
+  const pass = (stream: Transform, bytes: Uint8Array): void => {
+    if (bytes.length > 0) stream.push(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength));
+  };
+  return new Transform({
+    transform(chunk: Buffer, _encoding, done) {
+      pass(this, rewriter.push(chunk));
+      done();
+    },
+    flush(done) {
+      pass(this, rewriter.end());
+      done();
+    },
+  });
 }
 
 /** 2020-01-01 00:00, as DOS date and time: what core's save() stamps on every entry. */
