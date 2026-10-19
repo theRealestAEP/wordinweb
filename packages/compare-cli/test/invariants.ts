@@ -519,9 +519,11 @@ function orderProblem(el: XmlElement, expected: string[]): string | null {
 // Invariant 4: the PDF
 // ---------------------------------------------------------------------------
 
-/** Letters and digits only, lowercased: what survives layout, reflow and pdftotext. */
+/** Letters and digits only, lowercased, decomposed (NFKD: a precomposed
+ * Hebrew letter with its point is the letter, as a reader of the PDF gives
+ * it when a font composes the two): what survives layout, reflow and pdftotext. */
 function normalize(s: string): string {
-  return s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  return s.normalize("NFKD").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
 }
 
 /**

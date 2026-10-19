@@ -728,10 +728,17 @@ export class FontSet {
       const cps = [...shown.slice(cluster, end)];
       if (group.some((g) => g.gid === 0) && shown.slice(cluster, end).trim()) for (const cp of cps) this.missingCodePoints.add(cp.codePointAt(0) as number);
       // The text each glyph stands for: its own code point when it is the
-      // cmap's glyph for one (a mark a decomposition made, a reordered
-      // vowel sign); the cluster's other code points shared out over the
-      // rest, in order, the last of them taking what remains (a ligature).
-      const own = group.map((g) => (g.gid ? face.codePointOf(g.gid) : undefined));
+      // cmap's glyph for one of the cluster's, or of their decomposition
+      // (a reordered vowel sign; the two marks Thai sara am becomes) and
+      // not a glyph two letters share (Arial's heh and heh doachashmee);
+      // the cluster's other code points shared out over the rest, in
+      // order, the last of them taking what remains (a ligature, a
+      // precomposed letter a font composes from its parts).
+      const expanded = new Set([...cps.join("").normalize("NFKD")].map((ch) => ch.codePointAt(0) as number));
+      const own = group.map((g) => {
+        const cp = g.gid ? face.codePointOf(g.gid) : undefined;
+        return cp !== undefined && expanded.has(cp) ? cp : undefined;
+      });
       const claimed = new Set(own.filter((cp): cp is number => cp !== undefined));
       const rest = cps.filter((ch) => !claimed.has(ch.codePointAt(0) as number));
       const free = own.filter((cp) => cp === undefined).length;
