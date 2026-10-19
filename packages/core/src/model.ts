@@ -1135,6 +1135,14 @@ export interface DocComment {
   resolved?: boolean;
 }
 
+/** A reviewer from word/people.xml (w15:person): the display name, and the
+ * identity the presence provider knows them by (w15:presenceInfo). */
+export interface DocPerson {
+  author: string;
+  providerId?: string;
+  userId?: string;
+}
+
 // ---------- headers / footers ----------
 
 export interface HeaderFooter {

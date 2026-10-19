@@ -45,13 +45,25 @@ function commentsOf(docx) {
   }
   const decode = (s) => s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n))).replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16))).replace(/&amp;/g, "&");
   const replyParas = new Set([...xml("word/commentsExtended.xml").matchAll(/<w15:commentEx\b([^>]*)>/g)].filter((m) => /paraIdParent=/.test(m[1])).map((m) => /w15:paraId="([^"]*)"/.exec(m[1])?.[1]));
+  // The card names an author as people.xml does (see comments.ts).
+  const names = new Map();
+  for (const m of xml("word/people.xml").matchAll(/<w15:person\b([^>]*)>([\s\S]*?)<\/w15:person>/g)) {
+    const author = decode(/w15:author="([^"]*)"/.exec(m[1])?.[1] ?? "");
+    const userId = decode(/w15:userId="([^"]*)"/.exec(m[2])?.[1] ?? "");
+    if (!author) continue;
+    names.set(author, author);
+    if (userId) names.set(userId, author);
+    const address = /^S::([^:]+)::/.exec(userId)?.[1];
+    if (address) names.set(address, author);
+  }
   const out = [];
   for (const m of xml("word/comments.xml").matchAll(/<w:comment\b([^>]*)>([\s\S]*?)<\/w:comment>/g)) {
     const attrs = m[1];
     const body = m[2];
     const id = /w:id="([^"]*)"/.exec(attrs)?.[1] ?? "";
     if (!marked.has(id)) continue;
-    const author = decode(/w:author="([^"]*)"/.exec(attrs)?.[1] ?? "");
+    const carried = decode(/w:author="([^"]*)"/.exec(attrs)?.[1] ?? "");
+    const author = names.get(carried) ?? carried;
     const text = [...body.matchAll(/<w:t\b[^>]*>([^<]*)<\/w:t>|<w:t\b[^>]*\/>/g)].map((t) => decode(t[1] ?? "")).join("");
     const paraIds = [...body.matchAll(/w14:paraId="([^"]*)"/g)].map((p) => p[1]);
     out.push({ id, author, text, reply: paraIds.some((p) => replyParas.has(p)) });

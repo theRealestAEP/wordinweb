@@ -164,6 +164,17 @@ export class CommentColumn {
       if (list) list.push(comment);
       else this.replies.set(comment.parentId, [comment]);
     }
+    // A card names its author as people.xml does: the person's name, found
+    // by the name the comment carries or by the identity its presence
+    // provider knows (the userId, or the address in an "S::address::id" one).
+    for (const person of doc.people) {
+      if (!person.author) continue;
+      this.names.set(person.author, person.author);
+      if (!person.userId) continue;
+      this.names.set(person.userId, person.author);
+      const address = /^S::([^:]+)::/.exec(person.userId)?.[1];
+      if (address) this.names.set(address, person.author);
+    }
     // A comment the body never marks may be marked in a header, footer or
     // note; one marked nowhere is not in the document (Word shows none).
     const mark = (el: XmlElement): void => {
@@ -179,6 +190,7 @@ export class CommentColumn {
   }
 
   private readonly markedElsewhere = new Set<string>();
+  private readonly names = new Map<string, string>();
 
   /** Draw the page's highlights and its rail into `drawer`; on the last
    * page, the cards of the comments no page placed go after its own. */
@@ -355,8 +367,9 @@ export class CommentColumn {
     return out;
   }
 
-  /** The lines of a comment's balloon: its head, text, and replies. A
-   * tracked change's balloon takes its author's revision color. */
+  /** The lines of a comment's balloon: its head, text, and its thread, each
+   * reply under the comment it answers, stepped in by its depth. A tracked
+   * change's balloon takes its author's revision color. */
   private balloon(comment: DocComment, color = avatarColor(comment.author)): Balloon {
     const lines: Line[] = [{ height: PAD_Y, paint: () => undefined }];
     const inner = CARD_WIDTH - 2 * PAD_X;
@@ -365,15 +378,16 @@ export class CommentColumn {
     const push = (indent: number, source: DocComment): void => {
       const left = PAD_X + indent;
       const width = inner - indent;
+      const name = this.names.get(source.author) ?? source.author;
       lines.push({
         height: AVATAR + 6,
         paint: (drawer, x, y) => {
           drawer.ops.push(`q ${rgb(source === comment ? color : avatarColor(source.author))} rg ${circle(drawer, x + left + AVATAR / 2, y + AVATAR / 2, AVATAR / 2)} f Q`);
-          const initials = initialsOf(source.author, source.initials);
+          const initials = initialsOf(name, source.initials);
           const initialsFont: FontSpec = { family: UI_FONT, size: 10, bold: true, italic: false };
           const iw = this.measurer.width(initials, initialsFont);
           this.text(drawer, initials, initialsFont, "#ffffff", x + left + AVATAR / 2 - iw / 2, y + AVATAR / 2 + 3.5);
-          const author = source.author || (indent ? "Reply" : "Comment");
+          const author = name || (indent ? "Reply" : "Comment");
           const authorFont: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: true, italic: false };
           const date = source.date ? new Date(source.date) : null;
           const dateText = date && !Number.isNaN(date.getTime()) ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : "";
@@ -388,25 +402,34 @@ export class CommentColumn {
       }
     };
     push(0, comment);
-    for (const reply of this.replies.get(comment.id) ?? []) {
-      // The reply block: a rule above, a bar down its left side.
-      lines.push({
-        height: 8 + 8,
-        paint: (drawer, x, y) => {
-          drawer.ops.push(`q 0.945 0.953 0.957 rg ${drawer.rect(x + PAD_X, y + 8, inner, 1)} f Q`);
-        },
-      });
-      const start = lines.length;
-      push(10, reply);
-      const bar = lines.slice(start);
-      for (const line of bar) {
-        const paint = line.paint;
-        line.paint = (drawer, x, y) => {
-          drawer.ops.push(`q 0.91 0.918 0.929 rg ${drawer.rect(x + PAD_X, y, 2, line.height)} f Q`);
-          paint(drawer, x, y);
-        };
+    const seen = new Set<string>();
+    const thread = (parent: DocComment, indent: number): void => {
+      for (const reply of this.replies.get(parent.id) ?? []) {
+        // A malformed thread may answer itself.
+        if (seen.has(reply.id)) continue;
+        seen.add(reply.id);
+        // The reply block: a rule above, a bar down its left side, both at
+        // the depth of the comment it answers.
+        const bar = PAD_X + indent - 10;
+        lines.push({
+          height: 8 + 8,
+          paint: (drawer, x, y) => {
+            drawer.ops.push(`q 0.945 0.953 0.957 rg ${drawer.rect(x + bar, y + 8, inner - (bar - PAD_X), 1)} f Q`);
+          },
+        });
+        const start = lines.length;
+        push(indent, reply);
+        for (const line of lines.slice(start)) {
+          const paint = line.paint;
+          line.paint = (drawer, x, y) => {
+            drawer.ops.push(`q 0.91 0.918 0.929 rg ${drawer.rect(x + bar, y, 2, line.height)} f Q`);
+            paint(drawer, x, y);
+          };
+        }
+        thread(reply, Math.min(indent + 10, 30));
       }
-    }
+    };
+    thread(comment, 10);
     lines.push({ height: PAD_Y, paint: () => undefined });
     return { id: comment.id, color, lines };
   }

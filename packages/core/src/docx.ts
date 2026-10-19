@@ -5,6 +5,7 @@ import { pxToTwips, twipsToPx } from "./units.js";
 import {
   Block,
   DocComment,
+  DocPerson,
   HeaderFooter,
   Numbering,
   ParaProps,
@@ -268,6 +269,8 @@ export class DocxDocument {
   /** Review comments from word/comments.xml (empty when the part is absent).
    * Re-derived from the retained comments XML on every refresh(). */
   comments: DocComment[] = [];
+  /** The reviewers word/people.xml names (empty when the part is absent). */
+  readonly people: DocPerson[] = [];
   /** Retained comments.xml tree (editing + save round-trip), when present. */
   private commentsPart: string | null = null;
   private commentsRoot: XmlElement | null = null;
@@ -491,6 +494,11 @@ export class DocxDocument {
     if (commentsExtRoot) {
       this.commentsExtPart = docDir + "commentsExtended.xml";
       this.commentsExtRoot = commentsExtRoot;
+    }
+    for (const person of this.readXmlOptional(docDir + "people.xml")?.children ?? []) {
+      if (localName(person.name) !== "person") continue;
+      const presence = child(person, "presenceInfo");
+      this.people.push({ author: attr(person, "author") ?? "", providerId: attr(presence, "providerId"), userId: attr(presence, "userId") });
     }
 
     // PENDING MEDIA ROUND-TRIP (plan doc 16 §6): an image relationship whose

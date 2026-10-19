@@ -187,6 +187,42 @@ describe("renderDocxToPdf with comments", () => {
     expect(content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(2);
   });
 
+  it.skipIf(!hasPdftotext)("prints the whole thread under its first comment, replies to replies stepped in, each author by the name people.xml gives", async () => {
+    const comment = (id: number, author: string, text: string): string =>
+      `<w:comment w:id="${id}" w:author="${author}" w:date="2026-06-0${id + 1}T10:00:00Z"><w:p w14:paraId="0000100${id}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:comment>`;
+    const body =
+      `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Discussed text.</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="${LETTER.w}" w:h="${LETTER.h}"/><w:pgMar w:top="${LETTER.margin}" w:bottom="${LETTER.margin}" w:left="${LETTER.margin}" w:right="${LETTER.margin}"/></w:sectPr>`;
+    const docx = makeDocx({
+      "word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${W_NS}><w:body>${body}</w:body></w:document>`,
+      "word/comments.xml":
+        `<?xml version="1.0"?>\n<w:comments ${W_NS} ${W14}>${comment(0, "Ada Reviewer", "Thread root")}${comment(1, "bob@example.com", "Reply one")}` +
+        `${comment(2, "S::carol@example.com::1234", "Reply to reply one")}${comment(3, "Ada Reviewer", "Reply two")}</w:comments>`,
+      "word/commentsExtended.xml":
+        `<?xml version="1.0"?>\n<w15:commentsEx ${W15}><w15:commentEx w15:paraId="00001001" w15:paraIdParent="00001000"/>` +
+        `<w15:commentEx w15:paraId="00001002" w15:paraIdParent="00001001"/><w15:commentEx w15:paraId="00001003" w15:paraIdParent="00001000"/></w15:commentsEx>`,
+      "word/people.xml":
+        `<?xml version="1.0"?>\n<w15:people ${W15}><w15:person w15:author="Bob Editor"><w15:presenceInfo w15:providerId="AD" w15:userId="bob@example.com"/></w15:person>` +
+        `<w15:person w15:author="Carol Deep"><w15:presenceInfo w15:providerId="AD" w15:userId="S::carol@example.com::1234"/></w15:person></w15:people>`,
+    });
+    const { bytes, pages } = await render(docx, true);
+    expect(pages).toBe(1);
+    const text = pdfText(bytes);
+    const at = (s: string): number => {
+      expect(text).toContain(s);
+      return text.indexOf(s);
+    };
+    expect(at("Thread root")).toBeLessThan(at("Reply one"));
+    expect(at("Reply one")).toBeLessThan(at("Reply to reply one"));
+    expect(at("Reply to reply one")).toBeLessThan(at("Reply two"));
+    for (const name of ["Ada Reviewer", "Bob Editor", "Carol Deep", "6/3/2026"]) at(name);
+    expect(text).not.toContain("example.com");
+    // Each reply's bar stands at its own depth: a reply to a reply 10 px further in.
+    const bars = [...contentStreams(bytes).matchAll(/0\.91 0\.918 0\.929 rg ([\d.]+) [\d.]+ 1\.5 [\d.]+ re f/g)].map((m) => Number(m[1]));
+    expect(new Set(bars).size).toBe(2);
+    expect(Math.max(...bars) - Math.min(...bars)).toBeCloseTo(7.5, 1);
+  });
+
   it("draws a dashed leader from each card's text to the card", async () => {
     const { docx } = commentedDocx(1, 3);
     const { bytes } = await render(docx, true);
