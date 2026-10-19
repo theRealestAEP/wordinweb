@@ -5,7 +5,7 @@ import { clearBreakCache } from "../layout/inline.js";
 import { LaidOutPage } from "../layout/types.js";
 import { Block } from "../model.js";
 import { StreamingDocument, openStreamingDocument } from "../stream/body.js";
-import { XmlElement, localName } from "../xml.js";
+import { XmlElement, attr, localName } from "../xml.js";
 import { ByteSource } from "../stream/source.js";
 import { CommentColumn, RAIL_WIDTH } from "./comments.js";
 import { IMAGE_PLACEHOLDER } from "./canvas.js";
@@ -108,9 +108,12 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
 async function render(source: string | ByteSource, out: Writable, options: RenderPdfOptions): Promise<RenderPdfResult> {
   const fonts = new FontSet([...(options.extraFontDirs ?? []), ...(options.fontDirs ?? defaultFontDirs())]);
   const measurer = new NodeMeasurer(fonts);
-  // Text this renderer cannot shape is refused before any layout, as the
-  // body's blocks are first parsed; the held parts (headers, footers,
-  // notes) and the comments to be printed are checked once it is open.
+  // Text this renderer cannot shape is refused before any layout, naming
+  // where it is: the body's blocks as they are first parsed (with markup,
+  // the deleted text and the change authors the balloons name too); the
+  // held parts (headers, footers, notes) and the comments to be printed
+  // once the document is open. FontSet.shape refuses whatever else reaches
+  // the page (a numbering label, a balloon's words).
   let hasChanges = false;
   const opened = await openStreamingDocument(typeof source === "string" ? fileSource(source) : source, {
     markup: options.markup,
@@ -123,15 +126,17 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   // The body root here is the document's outline: its own section
   // properties, whose w:sectPrChange is a change too.
   for (const root of opened.doc.revisionRoots()) {
-    const found = unsupportedInXml(root);
+    const found = unsupportedInXml(root, !!options.markup);
     if (found) throw unsupported(found.script, `in a header, footer or note, "${found.sample}"`);
     hasChanges ||= xmlHasChanges(root);
   }
   const printComments = (options.comments || options.markup) && opened.doc.comments.length > 0;
   if (printComments) {
     for (const comment of opened.doc.comments) {
-      const script = unsupportedScript(comment.text);
-      if (script) throw unsupported(script, `in a comment by ${comment.author || "an unnamed author"}`);
+      for (const text of [comment.text, comment.author, comment.initials ?? ""]) {
+        const script = unsupportedScript(text);
+        if (script) throw unsupported(script, `in a comment by ${comment.author || "an unnamed author"}, "${sample(text)}"`);
+      }
     }
   }
   const final = await countPages(opened, measurer);
@@ -245,7 +250,8 @@ function sample(text: string): string {
   return trimmed.length > 40 ? `${trimmed.slice(0, 40)}…` : trimmed;
 }
 
-/** The first unsupported script in a block's text, with a sample of the text. */
+/** The first unsupported script in a block's text, or in the authors of
+ * its tracked changes (the balloons name them), with a sample of the text. */
 function unsupportedInBlock(block: Block): { script: string; sample: string } | undefined {
   if (block.type !== "paragraph") {
     for (const row of block.rows) for (const cell of row.cells) for (const nested of cell.blocks) {
@@ -254,14 +260,17 @@ function unsupportedInBlock(block: Block): { script: string; sample: string } | 
     }
     return undefined;
   }
+  const texts: string[] = [];
   for (const child of block.children) {
     for (const run of child.type === "run" ? [child] : child.runs) {
-      for (const content of run.content) {
-        if (content.kind !== "text") continue;
-        const script = unsupportedScript(content.text);
-        if (script) return { script, sample: sample(content.text) };
-      }
+      for (const content of run.content) if (content.kind === "text") texts.push(content.text);
+      for (const change of run.changes ?? []) texts.push(change.author);
     }
+  }
+  for (const change of block.markChanges ?? []) texts.push(change.author);
+  for (const text of texts) {
+    const script = unsupportedScript(text);
+    if (script) return { script, sample: sample(text) };
   }
   return undefined;
 }
@@ -279,14 +288,21 @@ function xmlHasChanges(el: XmlElement): boolean {
   return CHANGE_ELEMENTS.has(localName(el.name)) || el.children.some(xmlHasChanges);
 }
 
-/** The first unsupported script in a part's w:t elements. */
-function unsupportedInXml(el: XmlElement): { script: string; sample: string } | undefined {
-  if (localName(el.name) === "t") {
+/** The first unsupported script in a part's w:t elements; with markup, in
+ * its w:delText elements and in the authors of its changes (w:author) too. */
+function unsupportedInXml(el: XmlElement, markup: boolean): { script: string; sample: string } | undefined {
+  const name = localName(el.name);
+  if (name === "t" || (markup && name === "delText")) {
     const script = unsupportedScript(el.text);
     return script ? { script, sample: sample(el.text) } : undefined;
   }
+  const author = markup ? attr(el, "author") : undefined;
+  if (author) {
+    const script = unsupportedScript(author);
+    if (script) return { script, sample: sample(author) };
+  }
   for (const child of el.children) {
-    const found = unsupportedInXml(child);
+    const found = unsupportedInXml(child, markup);
     if (found) return found;
   }
   return undefined;

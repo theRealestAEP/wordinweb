@@ -5,6 +5,7 @@ import { dirname, extname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fontWidthScale, normalizeFamily, substituteFamily } from "../layout/measure.js";
 import { FontSpec } from "../layout/types.js";
+import { PdfRenderError, unsupportedScript } from "./errors.js";
 import { Face, FaceInfo, scanFaces } from "./sfnt.js";
 
 /**
@@ -448,8 +449,14 @@ export class FontSet {
    * The glyphs of `text` in `font`, each code point from the first face of
    * the stack that has it, in runs per face. Pair kerning applies when the
    * run asked for it (FontSpec.kerning). A soft hyphen takes no glyph.
+   *
+   * Every string the renderer measures or draws comes through here, so
+   * this is where text in a script with no shaper is refused for good:
+   * render.ts refuses the document's text first, naming where it is.
    */
   shape(text: string, font: FontSpec): GlyphRun[] {
+    const script = unsupportedScript(text);
+    if (script) throw new PdfRenderError("unsupported_script", `${script} text "${text.trim().slice(0, 40)}" needs a shaper this renderer does not have`);
     const stack = this.resolve(font);
     const scale = font.size * fontWidthScale(font);
     const runs: GlyphRun[] = [];

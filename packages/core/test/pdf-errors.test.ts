@@ -1,6 +1,7 @@
 import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { PdfRenderError, unsupportedScript } from "../src/pdf/errors.js";
+import { FontSet, defaultFontDirs } from "../src/pdf/fonts.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
 import { W_NS, makeDocx, p, wrapDocument } from "./helpers.js";
@@ -13,7 +14,7 @@ class Collect extends Writable {
   }
 }
 
-async function failure(docx: Uint8Array, options: { comments?: boolean } = {}): Promise<{ error: PdfRenderError; bytes: number }> {
+async function failure(docx: Uint8Array, options: { comments?: boolean; markup?: boolean } = {}): Promise<{ error: PdfRenderError; bytes: number }> {
   const out = new Collect();
   try {
     await renderDocxToPdf(bytesSource(docx), out, options);
@@ -74,6 +75,69 @@ describe("renderDocxToPdf errors", () => {
     const out = new Collect();
     await renderDocxToPdf(bytesSource(docx), out);
     expect(out.bytes).toBeGreaterThan(0);
+  });
+
+  it("refuses Arabic deleted text in a footer only when the markup prints it", async () => {
+    const footer = `<?xml version="1.0"?>\n<w:ftr ${W_NS}><w:p><w:r><w:t>Latin</w:t></w:r><w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>مرحبا</w:delText></w:r></w:del></w:p></w:ftr>`;
+    const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`;
+    const body = p("Latin") + `<w:sectPr><w:footerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdF"/></w:sectPr>`;
+    const docx = makeDocx({ "word/document.xml": wrapDocument(body), "word/footer1.xml": footer, "word/_rels/document.xml.rels": rels });
+    const { error, bytes } = await failure(docx, { markup: true });
+    expect(error.code).toBe("unsupported_script");
+    expect(error.message).toContain("Arabic");
+    expect(error.message).toContain("footer");
+    expect(bytes).toBe(0);
+    const out = new Collect();
+    await renderDocxToPdf(bytesSource(docx), out);
+    expect(out.bytes).toBeGreaterThan(0);
+  });
+
+  it("refuses an Arabic change author, in the body and in a header, when the markup names them", async () => {
+    const change = (author: string): string => `<w:p><w:ins w:id="1" w:author="${author}" w:date="2026-01-01T00:00:00Z"><w:r><w:t>Latin</w:t></w:r></w:ins></w:p>`;
+    const inBody = makeDocx({ "word/document.xml": wrapDocument(change("محمد")) });
+    const { error, bytes } = await failure(inBody, { markup: true });
+    expect(error.code).toBe("unsupported_script");
+    expect(error.message).toContain("paragraph 1");
+    expect(error.message).toContain("محمد");
+    expect(bytes).toBe(0);
+    const out = new Collect();
+    await renderDocxToPdf(bytesSource(inBody), out);
+    expect(out.bytes).toBeGreaterThan(0);
+
+    const header = `<?xml version="1.0"?>\n<w:hdr ${W_NS}>${change("สมชาย")}</w:hdr>`;
+    const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`;
+    const body = p("Latin") + `<w:sectPr><w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdH"/></w:sectPr>`;
+    const inHeader = makeDocx({ "word/document.xml": wrapDocument(body), "word/header1.xml": header, "word/_rels/document.xml.rels": rels });
+    const found = await failure(inHeader, { markup: true });
+    expect(found.error.code).toBe("unsupported_script");
+    expect(found.error.message).toContain("Thai");
+    expect(found.error.message).toContain("header");
+  });
+
+  it("refuses an Arabic comment author or initials when the comments are printed", async () => {
+    const body = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Latin</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
+    for (const who of ['w:author="فاطمة" w:initials="F"', 'w:author="Fatima" w:initials="ف"']) {
+      const comments = `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" ${who}><w:p><w:r><w:t>Latin note</w:t></w:r></w:p></w:comment></w:comments>`;
+      const docx = makeDocx({ "word/document.xml": wrapDocument(body), "word/comments.xml": comments });
+      const { error, bytes } = await failure(docx, { comments: true });
+      expect(error.code).toBe("unsupported_script");
+      expect(error.message).toContain("Arabic");
+      expect(error.message).toContain("comment");
+      expect(bytes).toBe(0);
+    }
+  });
+
+  it("refuses, in the shaper, any string that reaches the page in an unsupported script", () => {
+    const fonts = new FontSet(defaultFontDirs());
+    const font = { family: "Arial", size: 12, bold: false, italic: false };
+    expect(fonts.shape("Latin only", font).length).toBeGreaterThan(0);
+    expect(() => fonts.shape("Label मराठी", font)).toThrow(PdfRenderError);
+    try {
+      fonts.shape("مرحبا", font);
+    } catch (error) {
+      expect((error as PdfRenderError).code).toBe("unsupported_script");
+      expect((error as PdfRenderError).message).toContain("Arabic");
+    }
   });
 
   it("says not_docx for bytes that are no zip, and damaged for a zip entry that is corrupt", async () => {
