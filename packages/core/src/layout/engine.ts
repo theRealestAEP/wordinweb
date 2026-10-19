@@ -6479,6 +6479,13 @@ class Engine {
     // avoidance: staging-anchors2's locked, no-overlap z=30 box slides right
     // past the z=10/z=20 boxes instead of sitting on top of them).
     const placedRects: { x0: number; x1: number; y0: number; y1: number }[] = [];
+    // Printed markup: a changed shape's box framed in its author's color, a
+    // rule across its middle when it is deleted or moved away.
+    const revisionFrame = (shape: Shape, x: number, y: number, width: number, height: number, rotate?: { deg: number; ox: number; oy: number }): void => {
+      if (!shape.revision) return;
+      const d = `M0 0 H${width} V${height} H0 Z${shape.revision.struck ? ` M0 ${height / 2} H${width}` : ""}`;
+      page.items.push({ kind: "path", x, y, width, height, d, viewW: width, viewH: height, stroke: { color: shape.revision.color, width: 1.5 }, ...(rotate ? { rotate } : {}), front: true, z: shape.z });
+    };
 
     for (const shape of shapes) {
       if (shape.type === "image") {
@@ -6522,6 +6529,7 @@ class Engine {
           webVideo: shape.webVideo,
           embeddedObject: shape.embeddedObject,
         });
+        revisionFrame(shape, x - fx, y - fy, shape.width, shape.height, shape.rotation ? { deg: shape.rotation, ox: shape.width / 2, oy: shape.height / 2 } : undefined);
         // Frames (physIndex -1, e.g. table cells) register floats too so the
         // frame's own text wraps; layoutFrame clears the entry when done.
         if (shape.wrap !== "none") {
@@ -6592,6 +6600,7 @@ class Engine {
         for (const ts of shape.texts ?? []) {
           this.emitDrawingText(ts, ox - fx, oy - fy, page, fields, !shape.behind, rotate, shape.z);
         }
+        revisionFrame(shape, ox - fx, oy - fy, shape.width, shape.height, rotate?.(ox - fx, oy - fy));
         // FRAME stories only: a wrapped art shape excludes its band like a
         // text box does. probe-headeranchor2 (Word-exported twice, byte
         // identical): a wrapTopAndBottom bar in a header puts the body top
@@ -6646,6 +6655,7 @@ class Engine {
             z: shape.z,
           });
         }
+        revisionFrame(shape, Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
       } else {
         // Word's built-in header/footer designs size and place their shapes
         // with percent-of-page/margin geometry plus alignment keywords, and
@@ -6688,6 +6698,7 @@ class Engine {
             noFit: shape.noFit,
             src: shape.src,
           });
+          revisionFrame(shape, ox - fx, oy - fy, w, h);
           continue;
         }
 
@@ -6734,6 +6745,7 @@ class Engine {
         const rotate = shape.rotation
           ? (itemX: number, itemY: number) => ({ deg: shape.rotation!, ox: cxc - itemX, oy: cyc - itemY })
           : undefined;
+        revisionFrame(shape, ox - fx, oy - fy, width, height, rotate?.(ox - fx, oy - fy));
         const behind = shape.behind;
         // Word layers anchored shapes ABOVE the body text unless behindDoc
         // (staging-anchors2: the wrapNone z-stack covers the paragraph text

@@ -3529,6 +3529,10 @@ function buildAtoms(
         case "anchor":
           anchors.push(content.shape);
           atoms.push({ kind: "anchorPoint", shape: content.shape });
+          // Printed markup: an empty text item at the anchor carries the
+          // run's tracked changes, so the line holding the anchor gets the
+          // change bar and the balloon, as Word bars that line.
+          if (run.changes) atoms.push({ kind: "frag", text: "", props, font, width: 0, href, src: { run, t: null, offset: 0 } });
           break;
         case "drawing":
           atoms.push({ kind: "drawing", props, font, drawing: content, changes: run.changes });

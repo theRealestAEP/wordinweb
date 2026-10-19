@@ -599,6 +599,11 @@ export interface ShapeImage {
 export type Shape = (ShapeLine | ShapeTextbox | ShapeImage | ShapeArt | ShapeWordArt) & {
   /** wp:anchor relativeHeight, used for object stacking order. */
   z?: number;
+  /** Print with markup only: the shape's run is a tracked change, so the
+   * layout frames the shape's box in the author's color, struck through
+   * when the change is a deletion or a move away. The balloon and the
+   * change bar come from the run's changes, at the anchor's line. */
+  revision?: { color: string; struck: boolean };
 };
 
 /**

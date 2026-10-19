@@ -664,7 +664,11 @@ function parseParaChildren(
             color,
             ...(isInsert ? { underline: double ? "double" : "single" } : double ? { doubleStrike: true } : { strike: true }),
           };
-          if (change) r.changes = [...(r.changes ?? []), change];
+          if (change) {
+            r.changes = [...(r.changes ?? []), change];
+            // A floating picture, shape or text box in the run is marked on the page too.
+            for (const content of r.content) if (content.kind === "anchor") content.shape.revision = { color, struck: !isInsert };
+          }
         };
         for (const c of inner) {
           if (c.type === "run") style(c);

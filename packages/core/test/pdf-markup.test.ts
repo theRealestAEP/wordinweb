@@ -216,6 +216,57 @@ describe("renderDocxToPdf with markup", () => {
     expect(ops.match(/\/Im\d+ Do/g)?.length).toBe(3);
   });
 
+  it.skipIf(!hasPdftotext)("marks a deleted or inserted floating picture or text box: a frame (and strike) on the shape, a balloon, and a change bar beside the anchor's line", async () => {
+    const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
+    const A = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+    const anchor = (id: number, x: number, y: number, cx: number, cy: number, graphic: string): string =>
+      `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="${id}" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+      `<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>${x}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>${y}</wp:posOffset></wp:positionV>` +
+      `<wp:extent cx="${cx}" cy="${cy}"/><wp:wrapNone/><wp:docPr id="${id}" name="Shape${id}"/>${graphic}</wp:anchor></w:drawing></w:r>`;
+    const picture = (cx: number, cy: number): string =>
+      `<a:graphic ${A}><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip r:embed="rIdImg" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm></pic:spPr></pic:pic></a:graphicData></a:graphic>`;
+    const textbox = (cx: number, cy: number): string =>
+      `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr/><wps:spPr>` +
+      `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="DDEEFF"/></a:solidFill></wps:spPr>` +
+      `<wps:txbx><w:txbxContent><w:p><w:r><w:t>Box text</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic>`;
+    const vmlBox =
+      `<w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" id="VmlBox" style="position:absolute;margin-left:288pt;margin-top:0;width:72pt;height:36pt" fillcolor="#eeeedd" stroked="f">` +
+      `<v:textbox><w:txbxContent><w:p><w:r><w:t>VML text</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>`;
+    // 96 x 48 px shapes, right of the text, each anchored in its own paragraph.
+    const body =
+      p(t("Deleted floating picture (Bob)."), `<w:del w:id="1" ${BOB}>${anchor(1, 3657600, 0, 914400, 457200, picture(914400, 457200))}</w:del>`) +
+      p(t("Inserted floating text box (Ada)."), `<w:ins w:id="2" ${ADA}>${anchor(2, 3657600, 0, 914400, 457200, textbox(914400, 457200))}</w:ins>`) +
+      p(t("Deleted VML text box (Ada)."), `<w:del w:id="3" ${ADA}>${vmlBox}</w:del>`) +
+      p(t("Kept floating text box."), anchor(4, 3657600, 0, 914400, 457200, textbox(914400, 457200)));
+    const bytes = makeDocxWithMedia(
+      {
+        "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}${SECT}</w:body></w:document>`,
+        "word/_rels/document.xml.rels": `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>`,
+      },
+      { "word/media/image1.png": solidPng(8, [40, 120, 200, 255]) },
+    );
+    const { pdf, pages, ops } = await render(bytes, true);
+    expect(pages).toBe(1);
+    const text = pdfText(pdf);
+    expect(text).toContain("Bob Editor 8/13/2026 UTC Deleted");
+    expect(text).toContain("Ada Reviewer 8/12/2026 UTC Inserted");
+    expect(text).toContain("Box text");
+    expect(text).toContain("VML text");
+    // The frames: stroked paths in the authors' colors (Bob red, Ada blue), 72 x 36 pt; a deleted shape also struck across its middle.
+    const frames = [...ops.matchAll(/^q 1\.125 w (\S+ \S+ \S+) RG ([\d.]+) ([\d.]+) m ([\d.]+) [\d.]+ l [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l h( [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l)? S Q$/gm)].map((m) => ({ color: m[1], width: Number(m[4]) - Number(m[2]), struck: !!m[5] }));
+    // (Paint order follows the shapes' z, so the frames are compared as a set.)
+    expect(new Set(frames.map((f) => JSON.stringify(f)))).toEqual(
+      new Set([{ color: "1 0 0", width: 72, struck: true }, { color: "0 0 1", width: 72, struck: false }, { color: "0 0 1", width: 72, struck: true }].map((f) => JSON.stringify(f))),
+    );
+    expect(frames).toHaveLength(3);
+    // A change bar beside each anchor paragraph's line (one text line tall), none beside the kept one.
+    const bars = rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3);
+    expect(bars).toHaveLength(3);
+    for (const bar of bars) expect(bar.h).toBeLessThan(20);
+    expect(new Set(bars.map((b) => b.y)).size).toBe(3);
+  });
+
   it.skipIf(!hasPdftotext)("balloons an inserted or deleted paragraph mark with its author, and bars its line", async () => {
     const marks =
       `<w:p><w:pPr><w:rPr><w:ins w:id="1" ${ADA}/></w:rPr></w:pPr>${t("Split here by Ada.")}</w:p>` +
