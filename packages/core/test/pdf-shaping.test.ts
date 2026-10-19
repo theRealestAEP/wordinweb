@@ -127,7 +127,7 @@ describe("PageDrawer with shaped runs", () => {
     const ops = drawerOps(textItem(text, arial, { rtl: true, props: { letterSpacing: 3 } }));
     // The Tc the item sets is off while the shaped run shows, and back after it.
     expect(ops).toMatch(/Tc\n\/F\d+ [\d.]+ Tf\n0 Tc\n/);
-    expect(ops).toMatch(/TJ\n[\d.]+ Tc\nET/);
+    expect(ops).toMatch(/T[Jj]\n[\d.]+ Tc\nET/);
     // The mark (shadda over fatha, one glyph here) sits above the baseline: a Tm of its own, higher than the letter's.
     const ys = [...ops.matchAll(/1 0 0 1 [\d.]+ ([\d.]+) Tm/g)].map((m) => Number(m[1]));
     expect(ys.length).toBeGreaterThanOrEqual(2);

@@ -180,6 +180,23 @@ export class Face implements FaceInfo {
     return this.glyphId(codePoint) !== 0;
   }
 
+  private reverseCmap: Map<number, number> | null = null;
+
+  /** The code point a glyph is the cmap's glyph for (the lowest, when
+   * several share it), or undefined for a glyph only a substitution
+   * reaches. A presentation form or private-use code point does not
+   * count: the text a shaped glyph stands for is its letters. */
+  codePointOf(gid: number): number | undefined {
+    if (!this.reverseCmap) {
+      this.reverseCmap = new Map();
+      for (const [cp, id] of this.cmap) {
+        if ((cp >= 0xe000 && cp <= 0xf8ff) || (cp >= 0xfb00 && cp <= 0xfeff) || (cp >= 0xf0000)) continue;
+        if (!this.reverseCmap.has(id)) this.reverseCmap.set(id, cp);
+      }
+    }
+    return this.reverseCmap.get(gid);
+  }
+
   /** The scripts each of GSUB and GPOS lists, by its OpenType tag. */
   private otScripts: Map<string, Set<string>> | null = null;
 

@@ -699,30 +699,61 @@ export class FontSet {
     starts.forEach((start, i) => ends.set(start, i + 1 < starts.length ? starts[i + 1] : shown.length));
     const run: GlyphRun = { face: chosen, gids: [], advances: [], codePoints: [], shaped: { text: shown, rtl: script.rtl, unicode: [], xOffsets: [], yOffsets: [], units: [], tatweelAfter: [] } };
     const shaped = run.shaped!;
-    // A cluster's glyphs sit together; in a right-to-left run they stand
-    // in reverse of its code points (the marks before their base).
+    // A cluster's glyphs sit together. In a right-to-left run HarfBuzz
+    // gives them in reverse of the text (the marks before their base);
+    // they are drawn base first, each where it was, so that a reader of
+    // the PDF (pdftotext) finds a base and its marks together, as it does
+    // in Word's PDFs.
     for (let i = 0; i < glyphs.length; ) {
       const cluster = glyphs[i].cluster;
       let j = i;
       while (j < glyphs.length && glyphs[j].cluster === cluster) j++;
+      const group = glyphs.slice(i, j);
+      if (script.rtl && group.length > 1) {
+        let pen = 0;
+        const at = group.map((g) => {
+          const x = pen + g.xOffset;
+          pen += g.advance;
+          return x;
+        });
+        group.reverse();
+        at.reverse();
+        pen = 0;
+        group.forEach((g, k) => {
+          g.xOffset = at[k] - pen;
+          pen += g.advance;
+        });
+      }
       const end = ends.get(cluster)!;
       const cps = [...shown.slice(cluster, end)];
-      if (glyphs.slice(i, j).some((g) => g.gid === 0) && shown.slice(cluster, end).trim()) for (const cp of cps) this.missingCodePoints.add(cp.codePointAt(0) as number);
-      const elongate = glyphs.slice(i, j).some((g) => g.tatweel);
-      for (let k = i; k < j; k++) {
-        const g = glyphs[k];
-        // The glyph's place in the cluster's reading order: a code point each, the last taking what remains.
-        const place = script.rtl ? j - 1 - k : k - i;
-        const unicode = place === j - i - 1 ? cps.slice(place).join("") : (cps[place] ?? "");
+      if (group.some((g) => g.gid === 0) && shown.slice(cluster, end).trim()) for (const cp of cps) this.missingCodePoints.add(cp.codePointAt(0) as number);
+      // The text each glyph stands for: its own code point when it is the
+      // cmap's glyph for one (a mark a decomposition made, a reordered
+      // vowel sign); the cluster's other code points shared out over the
+      // rest, in order, the last of them taking what remains (a ligature).
+      const own = group.map((g) => (g.gid ? face.codePointOf(g.gid) : undefined));
+      const claimed = new Set(own.filter((cp): cp is number => cp !== undefined));
+      const rest = cps.filter((ch) => !claimed.has(ch.codePointAt(0) as number));
+      const free = own.filter((cp) => cp === undefined).length;
+      let taken = 0;
+      group.forEach((g, k) => {
+        let unicode: string;
+        if (own[k] !== undefined) unicode = String.fromCodePoint(own[k]);
+        else {
+          unicode = taken === free - 1 ? rest.slice(taken).join("") : (rest[taken] ?? "");
+          taken++;
+          // A reader reverses what it reads of a right-to-left script letter by letter: a ligature's letters are stored reversed so they come out in order.
+          if (script.rtl && unicode.length > 1) unicode = [...unicode].reverse().join("");
+        }
         run.gids.push(g.gid);
         run.advances.push(g.advance * unit);
         run.codePoints.push(unicode ? (unicode.codePointAt(0) as number) : 0);
         shaped.unicode.push(unicode);
         shaped.xOffsets.push(g.xOffset * unit);
         shaped.yOffsets.push(g.yOffset * yUnit);
-        shaped.units.push(k === j - 1 ? end - cluster : 0);
-        shaped.tatweelAfter.push(k === j - 1 && elongate);
-      }
+        shaped.units.push(k === group.length - 1 ? end - cluster : 0);
+        shaped.tatweelAfter.push(k === group.length - 1 && group.some((h) => h.tatweel));
+      });
       i = j;
     }
     return run;
