@@ -119,8 +119,9 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       hasChanges ||= blockHasChanges(block);
     },
   });
+  // The body root here is the document's outline: its own section
+  // properties, whose w:sectPrChange is a change too.
   for (const root of opened.doc.revisionRoots()) {
-    if (root === opened.doc.docRoot) continue;
     const found = unsupportedInXml(root);
     if (found) throw unsupported(found.script, `in a header, footer or note, "${found.sample}"`);
     hasChanges ||= xmlHasChanges(root);
@@ -267,7 +268,7 @@ function unsupportedInBlock(block: Block): { script: string; sample: string } | 
 /** Whether a block holds a tracked change parsed for print (see Revision). */
 function blockHasChanges(block: Block): boolean {
   if (block.type !== "paragraph") return block.rows.some((row) => row.cells.some((cell) => cell.blocks.some(blockHasChanges)));
-  return block.children.some((child) => (child.type === "run" ? [child] : child.runs).some((run) => run.changes?.length));
+  return !!block.markChanges?.length || block.children.some((child) => (child.type === "run" ? [child] : child.runs).some((run) => run.changes?.length));
 }
 
 const CHANGE_ELEMENTS = new Set(["ins", "del", "moveTo", "moveFrom", "rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "tblGridChange"]);

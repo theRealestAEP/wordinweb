@@ -229,8 +229,13 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
     const markRPr = child(pPr, "rPr");
     const mark = child(markRPr, "del") ?? child(markRPr, "ins");
     if (mark) {
-      para.markRevision = localName(mark.name) === "del" ? "del" : "ins";
-      if (ctx.revisionColor) para.markRevisionColor = ctx.revisionColor(attr(mark, "author") ?? "");
+      const deleted = localName(mark.name) === "del";
+      para.markRevision = deleted ? "del" : "ins";
+      if (ctx.revisionColor) {
+        const author = attr(mark, "author") ?? "";
+        para.markRevisionColor = ctx.revisionColor(author);
+        para.markChanges = [{ id: `mark-${para.markRevision}:${attr(mark, "id") ?? ""}`, kind: para.markRevision, author, date: attr(mark, "date"), label: deleted ? "Deleted paragraph mark" : "Inserted paragraph mark" }];
+      }
     }
   }
   // Printed markup: a paragraph's format change, and its section's, get a
@@ -248,7 +253,7 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
 const MOVE_COLOR = "#008000";
 
 /** A format change's balloon, from its w:*Change element and Word's words for what changed. */
-function formatChange(el: XmlElement, what: string): Revision {
+export function formatChange(el: XmlElement, what: string): Revision {
   return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: attr(el, "author") ?? "", date: attr(el, "date"), label: `Formatted: ${what}` };
 }
 

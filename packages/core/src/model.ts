@@ -904,6 +904,11 @@ export interface Paragraph {
   markRevision?: "ins" | "del";
   /** The mark's pilcrow color when the markup is printed with author colors. */
   markRevisionColor?: string;
+  /** Print with markup only: the tracked changes anchored at the paragraph
+   * mark, which the layout's mark run carries so they get a balloon and a
+   * change bar — the mark's own insertion or deletion, and the body's final
+   * section change (w:sectPrChange) on the last paragraph. */
+  markChanges?: Revision[];
   /** Source w:p element. */
   src?: XmlElement;
 }

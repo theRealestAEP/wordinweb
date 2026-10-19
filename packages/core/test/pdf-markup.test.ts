@@ -63,11 +63,15 @@ try {
   hasPdftotext = false;
 }
 
-function pdfText(bytes: Buffer): string {
+/** The PDF's text, whitespace folded: the whole, or a string per sheet. */
+function pdfText(bytes: Buffer): string;
+function pdfText(bytes: Buffer, perSheet: true): string[];
+function pdfText(bytes: Buffer, perSheet = false): string | string[] {
   const dir = mkdtempSync(join(tmpdir(), "wordinweb-pdf-"));
   const path = join(dir, "doc.pdf");
   writeFileSync(path, bytes);
-  return execFileSync("pdftotext", [path, "-"], { encoding: "utf8" }).replace(/\s+/g, " ");
+  const text = execFileSync("pdftotext", [path, "-"], { encoding: "utf8" });
+  return perSheet ? text.split("\f").map((sheet) => sheet.replace(/\s+/g, " ")) : text.replace(/\s+/g, " ");
 }
 
 /** The text groups (q … Q with glyphs) of one fill color, with whether an underline rule follows the text. */
@@ -158,6 +162,34 @@ describe("renderDocxToPdf with markup", () => {
       .join("\n");
     expect(all).toMatch(/1 0\.784 0\.353 rg [\d. ]+ re f Q/);
     expect(rules(ops, "1 0 0").length).toBeGreaterThan(0);
+  });
+
+  it.skipIf(!hasPdftotext)("balloons an inserted or deleted paragraph mark with its author, and bars its line", async () => {
+    const marks =
+      `<w:p><w:pPr><w:rPr><w:ins w:id="1" ${ADA}/></w:rPr></w:pPr>${t("Split here by Ada.")}</w:p>` +
+      `<w:p><w:pPr><w:rPr><w:del w:id="2" ${BOB}/></w:rPr></w:pPr>${t("Joined to the next by Bob.")}</w:p>` +
+      p(t("The next."));
+    const { pdf, ops } = await render(docx(marks), true);
+    const text = pdfText(pdf);
+    expect(text).toContain("Ada Reviewer 8/12/2026 UTC Inserted paragraph mark");
+    expect(text).toContain("Bob Editor 8/13/2026 UTC Deleted paragraph mark");
+    // The pilcrows take the authors' colors; the two marked lines get a change bar, the third none.
+    expect(groups(ops, "1 0 0").filter((g) => g.underlined)).toHaveLength(1);
+    expect(rules(ops, "0 0 1")).toHaveLength(1);
+    expect(rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3)).toHaveLength(2);
+  });
+
+  it.skipIf(!hasPdftotext)("balloons the body's final section change beside the last paragraph, on the last page", async () => {
+    const changed = SECT.replace("</w:sectPr>", `<w:sectPrChange w:id="9" ${BOB}><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:sectPrChange></w:sectPr>`);
+    for (const last of [p(t("The last paragraph.")), "<w:p/>"]) {
+      const bytes = makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${p(t("First."))}<w:p><w:r><w:br w:type="page"/></w:r></w:p>${last}${changed}</w:body></w:document>` });
+      const { pdf, pages, ops } = await render(bytes, true);
+      expect(pages).toBe(2);
+      const sheets = pdfText(pdf, true);
+      expect(sheets[0]).not.toContain("Bob Editor");
+      expect(sheets[1]).toContain("Bob Editor 8/13/2026 UTC Formatted: Section");
+      expect(rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3)).toHaveLength(1);
+    }
   });
 
   it.skipIf(!hasPdftotext)("ends on a page shorter than a change's balloon, which goes on sheets after the page a line at a time", async () => {

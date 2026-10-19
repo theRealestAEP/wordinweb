@@ -1,8 +1,8 @@
 import { Inflate, deflateSync, inflateSync, strFromU8 } from "fflate";
 import { DocxDocument } from "../docx.js";
 import { Prescan, bodyHasPageTotal } from "../layout/engine.js";
-import { Block, FieldContent, Section, SectionProps } from "../model.js";
-import { DocParseContext, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
+import { Block, FieldContent, Revision, Section, SectionProps } from "../model.js";
+import { DocParseContext, formatChange, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
 import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
@@ -101,10 +101,15 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
     from = body.count;
     prescan.endSection();
   };
+  // Printed markup: the body's own section change is anchored at the last
+  // paragraph's mark, as Word balloons it.
+  let finalSection: { index: number; change: Revision } | null = null;
   for (let candidate = 0; candidate < body.candidates; candidate++) {
     const el = body.element(candidate);
     if (body.kind(candidate) === "sectPr") {
       endSection(parseSectionProps(el));
+      const sectPrChange = ctx.revisionColor ? child(el, "sectPrChange") : undefined;
+      if (sectPrChange) finalSection = { index: body.count - 1, change: formatChange(sectPrChange, "Section") };
       continue;
     }
     const block = parseBlock(el, ctx);
@@ -125,7 +130,9 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   const later: DocParseContext = { ...ctx, refBookmarks: undefined };
   body.parser = (el, index) => {
     comments?.again(el, index);
-    return parseBlock(el, later) as Block;
+    const block = parseBlock(el, later) as Block;
+    if (finalSection && index === finalSection.index && block.type === "paragraph") block.markChanges = [...(block.markChanges ?? []), finalSection.change];
+    return block;
   };
   doc.sections = sections.map((section): Section => ({ props: section.props, blocks: body.blocks(section.from, section.to) }));
   inheritHeaderFooterRefs(doc.sections);

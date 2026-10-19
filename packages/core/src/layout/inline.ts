@@ -4108,19 +4108,24 @@ function buildAtoms(
   }
   // A tracked paragraph mark shows as a pilcrow in the revision's colors: a
   // suggested line break is otherwise only text that moved down. It has no
-  // source element, so it is never hit-tested, saved or edited.
-  if (para.markRevision) {
+  // source element, so it is never hit-tested, saved or edited. Printed
+  // markup anchors the mark's changes (markChanges) on this run, a space
+  // when the mark itself is unchanged, so they get a balloon and a bar.
+  if (para.markRevision || para.markChanges) {
     const last = para.children.at(-1);
     const lastRun = last?.type === "hyperlink" ? last.runs.at(-1) : last;
     const deleted = para.markRevision === "del";
     pushRun({
       type: "run",
-      props: {
-        ...(lastRun?.props ?? {}),
-        color: para.markRevisionColor ?? (deleted ? "#D93025" : "#188038"),
-        ...(deleted ? { strike: true } : { underline: "single" }),
-      },
-      content: [{ kind: "text", text: "\u00B6" }],
+      props: para.markRevision
+        ? {
+            ...(lastRun?.props ?? {}),
+            color: para.markRevisionColor ?? (deleted ? "#D93025" : "#188038"),
+            ...(deleted ? { strike: true } : { underline: "single" }),
+          }
+        : {},
+      content: [{ kind: "text", text: para.markRevision ? "\u00B6" : " " }],
+      changes: para.markChanges,
     });
   }
   // East Asian punctuation compression: Word gives a fullwidth comma/period
