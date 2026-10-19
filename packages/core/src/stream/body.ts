@@ -59,7 +59,10 @@ export interface OpenStreamingOptions {
 }
 
 export async function openStreamingDocument(source: ByteSource, options: OpenStreamingOptions = {}): Promise<StreamingDocument> {
+  await refuseOtherFormat(source);
   const zip = await ZipIndex.open(source);
+  const mimetype = zip.entries.has("mimetype") ? await zip.text("mimetype") : undefined;
+  if (mimetype?.startsWith("application/vnd.oasis.opendocument")) throw new Error("unsupported format: an OpenDocument file");
   const docPart = documentPart(await zip.text("_rels/.rels"));
   const docEntry = zip.entries.get(docPart);
   if (!docEntry) throw new Error(`missing ${docPart}`);
@@ -223,6 +226,28 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
     return table.rows.length > 0 ? table : null;
   }
   return null;
+}
+
+/**
+ * A file that is another format altogether is refused from its first bytes,
+ * before the zip directory is looked for: an OLE compound file (a Word
+ * 97-2003 .doc, or a password-protected .docx, whose package is a stream
+ * inside one), an RTF file, a PDF.
+ */
+async function refuseOtherFormat(source: ByteSource): Promise<void> {
+  const size = await source.size();
+  const head = await source.read(0, Math.min(size, 8));
+  const ascii = String.fromCharCode(...head);
+  if (ascii.startsWith("{\\rtf")) throw new Error("unsupported format: an RTF file");
+  if (ascii.startsWith("%PDF")) throw new Error("unsupported format: a PDF file");
+  if (head.length === 8 && [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1].every((byte, i) => head[i] === byte)) {
+    // An encrypted package names its EncryptionInfo stream in the directory,
+    // which is within the first sectors of any file Word writes.
+    const front = await source.read(0, Math.min(size, 64 << 10));
+    const names = String.fromCharCode(...front.filter((_, i) => i % 2 === 0));
+    const encrypted = names.includes("EncryptionInfo") || names.includes("EncryptedPackage");
+    throw new Error(`unsupported format: ${encrypted ? "a password-protected document (its package is encrypted)" : "an OLE compound file (a Word 97-2003 .doc)"}`);
+  }
 }
 
 /** The main document part, as the package relationships name it. */

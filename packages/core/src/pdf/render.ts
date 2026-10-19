@@ -18,6 +18,12 @@ import { NodeMeasurer } from "./measure.js";
 import { Resources } from "./resources.js";
 import { PdfWriter, pdfString } from "./writer.js";
 
+// The package's "./pdf" entry is this module: everything a caller needs is here.
+export { PdfRenderError } from "./errors.js";
+export type { PdfRenderErrorCode } from "./errors.js";
+export { bytesSource } from "../stream/source.js";
+export type { ByteSource } from "../stream/source.js";
+
 export interface RenderPdfOptions {
   /** Directories scanned for fonts; the system directories and the
    * @fontsource Carlito and Caladea packages by default (see fonts.ts). */

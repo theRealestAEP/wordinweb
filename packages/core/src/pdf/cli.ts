@@ -14,9 +14,10 @@ Options:
   -h, --help    show this help
 
 Exit codes: 0 done; 1 failed; 2 usage; 3 unsupported_script (text in a script
-the renderer cannot shape); 4 not_docx; 5 damaged.`;
+the renderer cannot shape); 4 not_docx; 5 damaged; 6 unsupported_format (a
+.doc, a password-protected document, an RTF, PDF or OpenDocument file).`;
 
-const EXIT: Record<PdfRenderErrorCode, number> = { failed: 1, unsupported_script: 3, not_docx: 4, damaged: 5 };
+const EXIT: Record<PdfRenderErrorCode, number> = { failed: 1, unsupported_script: 3, not_docx: 4, damaged: 5, unsupported_format: 6 };
 
 const args = process.argv.slice(2);
 if (args.includes("-h") || args.includes("--help")) {

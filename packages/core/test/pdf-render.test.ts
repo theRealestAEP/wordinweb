@@ -10,6 +10,7 @@ import { layoutDocument } from "../src/layout/engine.js";
 import type { TextItem } from "../src/layout/types.js";
 import { FontSet } from "../src/pdf/fonts.js";
 import { NodeMeasurer } from "../src/pdf/measure.js";
+import { PdfRenderError } from "../src/pdf/errors.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
 import { W_NS, makeDocx } from "./helpers.js";
@@ -290,6 +291,46 @@ describe("renderDocxToPdf", () => {
         expect(perLine[i][0].x + perLine[i][0].w).toBeCloseTo(lines[i].x1, 1);
       }
     });
+  });
+
+  it("renders the macro-enabled and template variants of the main part", async () => {
+    // .docm, .dotx and .dotm name the main part with their own content types; the package relationships find it the same way.
+    const parts = { "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body><w:p><w:r><w:t>Variant body.</w:t></w:r></w:p></w:body></w:document>` };
+    for (const type of ["application/vnd.ms-word.document.macroEnabled.main+xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml", "application/vnd.ms-word.template.macroEnabledTemplate.main+xml"]) {
+      const contentTypes = `<?xml version="1.0"?>\n<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="${type}"/></Types>`;
+      const { pages } = await render(makeDocx({ ...parts, "[Content_Types].xml": contentTypes }));
+      expect(pages, type).toBe(1);
+    }
+  });
+
+  it("refuses other formats from their first bytes, with unsupported_format and the format's name", async () => {
+    const ole = new Uint8Array(4096);
+    ole.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+    const encrypted = new Uint8Array(ole);
+    for (const [i, ch] of [..."EncryptionInfo"].entries()) encrypted[1024 + i * 2] = ch.charCodeAt(0);
+    const odt = makeDocx({ mimetype: "application/vnd.oasis.opendocument.text", "content.xml": "<office:document-content/>" });
+    const cases: [string, Uint8Array, RegExp][] = [
+      ["doc", ole, /Word 97-2003/],
+      ["encrypted", encrypted, /password-protected/],
+      ["rtf", new TextEncoder().encode("{\\rtf1\\ansi Hello.\\par }"), /RTF/],
+      ["pdf", new TextEncoder().encode("%PDF-1.4\n%%EOF\n"), /PDF/],
+      ["odt", odt, /OpenDocument/],
+    ];
+    for (const [name, bytes, expected] of cases) {
+      let error: unknown;
+      try {
+        await renderDocxToPdf(bytesSource(bytes), new HeldWritable(Infinity));
+      } catch (e) {
+        error = e;
+      }
+      expect(error, name).toBeInstanceOf(PdfRenderError);
+      expect((error as PdfRenderError).code, name).toBe("unsupported_format");
+      expect((error as PdfRenderError).message, name).toMatch(expected);
+    }
+    // A zip with no Word document, and bytes that are no file at all, stay not_docx.
+    for (const bytes of [makeDocx({ "hello.txt": "hi" }), new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])]) {
+      await expect(renderDocxToPdf(bytesSource(bytes), new HeldWritable(Infinity))).rejects.toMatchObject({ code: "not_docx" });
+    }
   });
 
   it("reports fonts no directory holds and characters no font has", async () => {
