@@ -4117,7 +4117,7 @@ function buildAtoms(
       type: "run",
       props: {
         ...(lastRun?.props ?? {}),
-        color: deleted ? "#D93025" : "#188038",
+        color: para.markRevisionColor ?? (deleted ? "#D93025" : "#188038"),
         ...(deleted ? { strike: true } : { underline: "single" }),
       },
       content: [{ kind: "text", text: "\u00B6" }],

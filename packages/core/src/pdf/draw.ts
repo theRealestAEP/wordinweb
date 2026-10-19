@@ -125,6 +125,24 @@ export class PageDrawer {
       .sort((a, b) => a.layer - b.layer || a.index - b.index);
     this.collectUnderlines(items.map(({ item }) => item));
     for (const { item } of items) this.drawItem(item, picture);
+    this.drawChangeBars();
+  }
+
+  /**
+   * Printed markup: a bar in the left margin beside each line that holds a
+   * tracked change (Word's "changed lines", at the outside border), one
+   * per line whatever the number of changes on it.
+   */
+  private drawChangeBars(): void {
+    const lines = new Map<number, number>();
+    for (const item of this.page.items) {
+      if (item.kind !== "text" || !item.changed || item.hidden) continue;
+      lines.set(item.lineTop, Math.max(lines.get(item.lineTop) ?? 0, item.lineHeight));
+    }
+    if (lines.size === 0) return;
+    const bodyLeft = Math.min(...this.page.columnBands.flatMap((band) => band.colXs), 96);
+    const x = Math.max(bodyLeft - 20, 4);
+    for (const [top, height] of lines) this.ops.push(`q 0 0 0 rg ${this.rect(x, top, 2, height)} f Q`);
   }
 
   /**

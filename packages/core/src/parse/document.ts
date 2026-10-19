@@ -14,6 +14,7 @@ import {
   ParaChild,
   Paragraph,
   ParaProps,
+  Revision,
   Run,
   RunContent,
   RunProps,
@@ -226,10 +227,98 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   // is drawn as a pilcrow in the revision's colors (see markRevision).
   if (ctx.revisionView === "markup" && pPr) {
     const markRPr = child(pPr, "rPr");
-    if (markRPr && child(markRPr, "del")) para.markRevision = "del";
-    else if (markRPr && child(markRPr, "ins")) para.markRevision = "ins";
+    const mark = child(markRPr, "del") ?? child(markRPr, "ins");
+    if (mark) {
+      para.markRevision = localName(mark.name) === "del" ? "del" : "ins";
+      if (ctx.revisionColor) para.markRevisionColor = ctx.revisionColor(attr(mark, "author") ?? "");
+    }
+  }
+  // Printed markup: a paragraph's format change, and its section's, get a
+  // balloon and a change bar on every line (the change rides on every run).
+  if (ctx.revisionColor && pPr) {
+    const pPrChange = child(pPr, "pPrChange");
+    if (pPrChange) addChange(runsOf(para), formatChange(pPrChange, describeParaChange(parseParaProps(child(pPrChange, "pPr"), ctx), para.props)));
+    const sectPrChange = child(sectPr, "sectPrChange");
+    if (sectPrChange) addChange(runsOf(para), formatChange(sectPrChange, "Section"));
   }
   return para;
+}
+
+/** Word's default color for moved text. */
+const MOVE_COLOR = "#008000";
+
+/** A format change's balloon, from its w:*Change element and Word's words for what changed. */
+function formatChange(el: XmlElement, what: string): Revision {
+  return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: attr(el, "author") ?? "", date: attr(el, "date"), label: `Formatted: ${what}` };
+}
+
+function addChange(runs: Run[], change: Revision): void {
+  for (const run of runs) run.changes = [...(run.changes ?? []), change];
+}
+
+/** A paragraph's runs, hyperlinks' included. */
+function runsOf(para: Paragraph): Run[] {
+  return para.children.flatMap((c) => (c.type === "run" ? [c] : c.runs));
+}
+
+/** Every run under blocks, nested tables included. */
+function runsOfBlocks(blocks: Block[]): Run[] {
+  return blocks.flatMap((block) => (block.type === "paragraph" ? runsOf(block) : block.rows.flatMap((row) => row.cells.flatMap((cell) => runsOfBlocks(cell.blocks)))));
+}
+
+/**
+ * What a run's format change changed, in the words of Word's balloons
+ * ("Font: Bold, Not Italic, 12 pt"): the properties the run now sets
+ * against the ones its w:rPrChange recorded. "Formatted" when the two read
+ * the same (a change in a property this model does not keep).
+ */
+function describeRunChange(before: RunProps, after: RunProps): string {
+  const parts: string[] = [];
+  const flag = (key: "bold" | "italic" | "strike" | "doubleStrike" | "caps" | "smallCaps", name: string): void => {
+    if (!!before[key] === !!after[key]) return;
+    parts.push(after[key] ? name : `Not ${name}`);
+  };
+  flag("bold", "Bold");
+  flag("italic", "Italic");
+  if (after.font !== before.font && after.font) parts.push(after.font);
+  if (after.size !== before.size && after.size !== undefined) parts.push(`${Math.round(after.size * 0.75 * 2) / 2} pt`);
+  const font = parts.length ? [`Font: ${parts.join(", ")}`] : [];
+  const underlined = (p: RunProps) => !!p.underline && p.underline !== "none";
+  if (underlined(before) !== underlined(after)) font.push(underlined(after) ? "Underline" : "No underline");
+  parts.length = 0;
+  flag("strike", "Strikethrough");
+  flag("doubleStrike", "Double strikethrough");
+  flag("caps", "All caps");
+  flag("smallCaps", "Small caps");
+  font.push(...parts);
+  if ((after.color ?? "") !== (before.color ?? "") && after.color) font.push(`Font color: ${after.color === "auto" ? "Auto" : after.color}`);
+  if ((after.highlight ?? "") !== (before.highlight ?? "")) font.push(after.highlight ? "Highlight" : "Not Highlight");
+  if ((after.verticalAlign ?? "baseline") !== (before.verticalAlign ?? "baseline")) font.push(after.verticalAlign === "superscript" ? "Superscript" : after.verticalAlign === "subscript" ? "Subscript" : "Not Superscript/ Subscript");
+  return font.length ? font.join(", ") : "Formatted";
+}
+
+/** What a paragraph's format change changed, in Word's words ("Centered", "Indent: Left: 0.5\"", "Space Before: 12 pt"). */
+function describeParaChange(before: ParaProps, after: ParaProps): string {
+  const parts: string[] = [];
+  if (after.styleId !== before.styleId && after.styleId) parts.push(after.styleId);
+  if (after.alignment !== before.alignment && after.alignment) parts.push({ left: "Left", center: "Centered", right: "Right", justify: "Justified" }[after.alignment] ?? after.alignment);
+  const inches = (px: number) => `${Math.round((px / 96) * 100) / 100}"`;
+  const indent: string[] = [];
+  if (after.indentLeft !== before.indentLeft && after.indentLeft !== undefined) indent.push(`Left: ${inches(after.indentLeft)}`);
+  if (after.indentRight !== before.indentRight && after.indentRight !== undefined) indent.push(`Right: ${inches(after.indentRight)}`);
+  if (after.indentFirstLine !== before.indentFirstLine && after.indentFirstLine !== undefined) indent.push(`First line: ${inches(after.indentFirstLine)}`);
+  if (after.indentHanging !== before.indentHanging && after.indentHanging !== undefined) indent.push(`Hanging: ${inches(after.indentHanging)}`);
+  if (indent.length) parts.push(`Indent: ${indent.join(", ")}`);
+  const points = (px: number) => `${Math.round(px * 0.75 * 2) / 2} pt`;
+  if (after.spacingBefore !== before.spacingBefore && after.spacingBefore !== undefined) parts.push(`Space Before: ${points(after.spacingBefore)}`);
+  if (after.spacingAfter !== before.spacingAfter && after.spacingAfter !== undefined) parts.push(`Space After: ${points(after.spacingAfter)}`);
+  const ls = after.lineSpacing;
+  if (ls && (ls.rule !== before.lineSpacing?.rule || ls.value !== before.lineSpacing?.value)) {
+    parts.push(
+      `Line spacing: ${ls.rule === "exact" ? `Exactly ${points(ls.value)}` : ls.rule === "atLeast" ? `At least ${points(ls.value)}` : ls.value === 1 ? "single" : ls.value === 1.5 ? "1.5 lines" : ls.value === 2 ? "Double" : `Multiple ${ls.value} li`}`,
+    );
+  }
+  return parts.length ? parts.join(", ") : "Formatted";
 }
 
 /** Any run content that would render (text, image, math, field, break…). */
@@ -554,12 +643,23 @@ function parseParaChildren(
       const inner: ParaChild[] = [];
       parseParaChildren(el, ctx, inner, field, bookmarks);
       if (markup) {
+        // Printed with author colors, a change takes its author's color and
+        // is recorded on its runs; a move is Word's default green, double
+        // underlined at its destination and double struck at its origin.
+        const move = ln === "moveTo" || ln === "moveFrom";
+        const author = attr(el, "author") ?? "";
+        const color = ctx.revisionColor ? (move ? MOVE_COLOR : ctx.revisionColor(author)) : isInsert ? "#188038" : "#D93025";
+        const double = move && !!ctx.revisionColor;
+        const change: Revision | undefined = ctx.revisionColor
+          ? { id: `${ln}:${attr(el, "id") ?? ""}`, kind: ln, author, date: attr(el, "date"), label: move ? (isInsert ? "Moved to" : "Moved from") : isInsert ? "Inserted" : "Deleted" }
+          : undefined;
         const style = (r: Run) => {
           r.props = {
             ...r.props,
-            color: isInsert ? "#188038" : "#D93025",
-            ...(isInsert ? { underline: "single" } : { strike: true }),
+            color,
+            ...(isInsert ? { underline: double ? "double" : "single" } : double ? { doubleStrike: true } : { strike: true }),
           };
+          if (change) r.changes = [...(r.changes ?? []), change];
         };
         for (const c of inner) {
           if (c.type === "run") style(c);
@@ -771,6 +871,9 @@ function parseRun(
     content: [],
     src: r,
   };
+  // Printed markup: the run's format change gets a balloon and a change bar.
+  const rPrChange = ctx.revisionColor ? child(child(r, "rPr"), "rPrChange") : undefined;
+  if (rPrChange) run.changes = [formatChange(rPrChange, describeRunChange(parseRunProps(child(rPrChange, "rPr"), ctx), run.props))];
 
   // A w:sym glyph is set in the font the SYM declares, not the run's rFonts,
   // and that font's metrics govern the line: us-courts-answer's Symbol-font
@@ -2590,7 +2693,38 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     // deletion — Word removes it entirely (real.docx: a fully-deleted caption
     // table otherwise leaves a 200px border/grip skeleton with no text).
     if (ctx.revisionView !== "markup" && child(child(tr, "trPr"), "del")) continue;
-    rows.push(parseRow(tr, ctx));
+    const row = parseRow(tr, ctx);
+    rows.push(row);
+    if (!ctx.revisionColor) continue;
+    // Printed markup: a tracked row insertion or deletion marks the row's
+    // text in its author's color and gets a balloon; a row's or cell's
+    // format change a balloon and change bars.
+    const trPr = child(tr, "trPr");
+    const rowChange = child(trPr, "ins") ?? child(trPr, "del");
+    if (rowChange) {
+      const inserted = localName(rowChange.name) === "ins";
+      const author = attr(rowChange, "author") ?? "";
+      const change: Revision = { id: `row-${localName(rowChange.name)}:${attr(rowChange, "id") ?? ""}`, kind: inserted ? "ins" : "del", author, date: attr(rowChange, "date"), label: inserted ? "Inserted row" : "Deleted row" };
+      const color = ctx.revisionColor(author);
+      for (const run of runsOfBlocks(row.cells.flatMap((cell) => cell.blocks))) {
+        run.props = { ...run.props, color, ...(inserted ? { underline: "single" } : { strike: true }) };
+        // The row's balloon stands for the cells' content, which Word
+        // writes as inserted or deleted with the row.
+        run.changes = [...(run.changes ?? []).filter((c) => c.kind !== change.kind), change];
+      }
+    }
+    const trPrChange = child(trPr, "trPrChange");
+    if (trPrChange) addChange(runsOfBlocks(row.cells.flatMap((cell) => cell.blocks)), formatChange(trPrChange, "Row"));
+    children(tr, "tc").forEach((tc, i) => {
+      const tcPrChange = child(child(tc, "tcPr"), "tcPrChange");
+      if (tcPrChange && row.cells[i]) addChange(runsOfBlocks(row.cells[i].blocks), formatChange(tcPrChange, "Cell"));
+    });
+  }
+  // Printed markup: the table's own format change (its properties or its grid) on its first paragraph.
+  if (ctx.revisionColor) {
+    const tblChange = child(child(tbl, "tblPr"), "tblPrChange") ?? child(child(tbl, "tblGrid"), "tblGridChange");
+    const first = rows[0]?.cells[0]?.blocks.find((block) => block.type === "paragraph");
+    if (tblChange && first?.type === "paragraph") addChange(runsOf(first), formatChange(tblChange, "Table"));
   }
 
   // Tag each cell's own paragraphs with this table's style so its pPr layers

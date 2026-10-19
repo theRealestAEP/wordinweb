@@ -56,6 +56,10 @@ export interface OpenStreamingOptions {
    * block's position in the body. A caller refuses a document here before
    * any layout. */
   onBlock?: (block: Block, index: number) => void;
+  /** Parse the tracked changes for print: every part in the markup view,
+   * each author's changes in Word's color for the author (see
+   * FromFilesOptions.revisionColors). */
+  markup?: boolean;
 }
 
 export async function openStreamingDocument(source: ByteSource, options: OpenStreamingOptions = {}): Promise<StreamingDocument> {
@@ -78,7 +82,7 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   const files: Record<string, Uint8Array> = {};
   for (const entry of held) files[entry.name] = await zip.read(entry);
   files[docPart] = outline;
-  const doc = DocxDocument.fromFiles(files);
+  const doc = DocxDocument.fromFiles(files, options.markup ? { revisionView: "markup", revisionColors: true } : {});
   body.hydrate = (el) => doc.hydrateControls(el);
 
   // Every block once, in order: which candidates are blocks at all, where

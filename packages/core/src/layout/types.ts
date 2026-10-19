@@ -102,6 +102,9 @@ export interface TextItem {
    * anything that draws from item geometry — selection, comment highlights —
    * must skip it or it paints a block where there is no text. */
   hidden?: true;
+  /** The text is part of a tracked change, or its paragraph's format was
+   * changed: a printed markup page bars the line in the margin. */
+  changed?: true;
   /** Source drawing when this text belongs to an independently editable
    * text-box story. */
   textboxStory?: XmlElement;

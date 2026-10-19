@@ -844,12 +844,33 @@ export type RunContent =
   | NoteRefContent
   | RubyContent;
 
+/**
+ * A tracked change a printed markup page shows beside its text (see
+ * pdf/comments.ts): what it is, in Word's words, and who made it when.
+ * Set only when the document is parsed for print with author colors.
+ */
+export interface Revision {
+  /** Unique over the document: the element's kind and w:id. */
+  id: string;
+  kind: "ins" | "del" | "moveTo" | "moveFrom" | "format";
+  author: string;
+  /** ISO timestamp from w:date, verbatim. */
+  date?: string;
+  /** The balloon's text: "Inserted", "Deleted", "Moved from", "Moved to",
+   * "Inserted row", "Deleted row", "Formatted: Font: Bold", ... */
+  label: string;
+}
+
 export interface Run {
   type: "run";
   props: RunProps;
   content: RunContent[];
   /** Source w:r element. */
   src?: XmlElement;
+  /** The tracked changes this run is part of, or whose balloon anchors at
+   * it (a paragraph's, row's or table's format change is put on each of its
+   * runs). Print with markup only. */
+  changes?: Revision[];
   /** Element whose children array contains src (w:p, w:hyperlink, …). */
   srcParent?: XmlElement;
 }
@@ -881,6 +902,8 @@ export interface Paragraph {
    * as a pilcrow in the revision's colors after the paragraph's content; it is
    * not text, so find, word count and the like never see it. */
   markRevision?: "ins" | "del";
+  /** The mark's pilcrow color when the markup is printed with author colors. */
+  markRevisionColor?: string;
   /** Source w:p element. */
   src?: XmlElement;
 }

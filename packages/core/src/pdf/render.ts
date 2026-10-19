@@ -34,6 +34,18 @@ export interface RenderPdfOptions {
    * column at its right (see comments.ts), every sheet the size of the
    * largest page plus the column. */
   comments?: boolean;
+  /**
+   * Print the document's own tracked changes as Word's "All Markup" shows
+   * them, instead of the final text: insertions underlined and deletions
+   * struck through in their author's color (Word's "by author" colors, in
+   * the order the authors first appear: red, blue, green, violet, dark red,
+   * teal, dark yellow, gray), moved text double underlined or struck in
+   * green, a bar in the left margin beside every changed line, and, in the
+   * margin column with the comments (which this prints too), a balloon per
+   * change with its author, date and what it is ("Inserted", "Deleted",
+   * "Moved from", "Inserted row", "Formatted: Font: Bold", ...).
+   */
+  markup?: boolean;
 }
 
 export interface RenderPdfResult {
@@ -93,18 +105,23 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   // Text this renderer cannot shape is refused before any layout, as the
   // body's blocks are first parsed; the held parts (headers, footers,
   // notes) and the comments to be printed are checked once it is open.
+  let hasChanges = false;
   const opened = await openStreamingDocument(typeof source === "string" ? fileSource(source) : source, {
+    markup: options.markup,
     onBlock: (block, index) => {
       const found = unsupportedInBlock(block);
       if (found) throw unsupported(found.script, `in paragraph ${index + 1}, "${found.sample}"`);
+      hasChanges ||= blockHasChanges(block);
     },
   });
   for (const root of opened.doc.revisionRoots()) {
     if (root === opened.doc.docRoot) continue;
     const found = unsupportedInXml(root);
     if (found) throw unsupported(found.script, `in a header, footer or note, "${found.sample}"`);
+    hasChanges ||= xmlHasChanges(root);
   }
-  if (options.comments) {
+  const printComments = (options.comments || options.markup) && opened.doc.comments.length > 0;
+  if (printComments) {
     for (const comment of opened.doc.comments) {
       const script = unsupportedScript(comment.text);
       if (script) throw unsupported(script, `in a comment by ${comment.author || "an unnamed author"}`);
@@ -146,7 +163,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     return image ? { picture: { name: `Im${image.objNum}` }, xobjects: [`/Im${image.objNum} ${image.objNum} 0 R`] } : null;
   };
 
-  const column = options.comments && opened.doc.comments.length > 0 ? new CommentColumn(opened.doc, measurer, resources, opened.commentIds) : null;
+  const column = printComments || (options.markup && hasChanges) ? new CommentColumn(opened.doc, measurer, resources, opened.commentIds) : null;
   const sheet = column ? { width: final.maxWidth + RAIL_WIDTH, height: final.maxHeight } : null;
 
   const writePage = async (drawer: PageDrawer, width: number, height: number, xobjects: string[]): Promise<void> => {
@@ -236,6 +253,19 @@ function unsupportedInBlock(block: Block): { script: string; sample: string } | 
     }
   }
   return undefined;
+}
+
+/** Whether a block holds a tracked change parsed for print (see Revision). */
+function blockHasChanges(block: Block): boolean {
+  if (block.type !== "paragraph") return block.rows.some((row) => row.cells.some((cell) => cell.blocks.some(blockHasChanges)));
+  return block.children.some((child) => (child.type === "run" ? [child] : child.runs).some((run) => run.changes?.length));
+}
+
+const CHANGE_ELEMENTS = new Set(["ins", "del", "moveTo", "moveFrom", "rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "tblGridChange"]);
+
+/** Whether a part holds a tracked change. */
+function xmlHasChanges(el: XmlElement): boolean {
+  return CHANGE_ELEMENTS.has(localName(el.name)) || el.children.some(xmlHasChanges);
 }
 
 /** The first unsupported script in a part's w:t elements. */

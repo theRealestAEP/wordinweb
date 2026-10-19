@@ -5910,6 +5910,7 @@ class Engine {
         pageRef: span.pageRef,
         href: span.href,
         src: span.src,
+        changed: span.src?.run.changes?.length ? true : undefined,
         rtl: span.rtl,
         caretClampX: span.caretClampX === undefined ? undefined : originX + span.caretClampX,
         hanging: span.hanging,

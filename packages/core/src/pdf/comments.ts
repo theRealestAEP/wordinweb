@@ -1,5 +1,5 @@
 import { DocxDocument } from "../docx.js";
-import { DocComment } from "../model.js";
+import { DocComment, Revision } from "../model.js";
 import { FontSpec, LaidOutPage, TextItem } from "../layout/types.js";
 import { XmlElement } from "../xml.js";
 import { PageDrawer, parseColor } from "./draw.js";
@@ -65,6 +65,11 @@ export class CommentColumn {
     private readonly resources: Resources,
     private readonly commentIds: (t: XmlElement) => string[] | undefined,
   ) {
+    // The column prints the review comments; with markup, the tracked
+    // changes too: a balloon per change (Run.changes) with its author,
+    // date and what it is, in the author's revision color, beside the
+    // change's first line. The inline marks say where the change is, so
+    // no highlight is drawn for it.
     for (const comment of doc.comments) {
       this.byId.set(comment.id, comment);
       if (!comment.parentId) continue;
@@ -90,8 +95,20 @@ export class CommentColumn {
         else items.set(id, [item]);
       }
     }
+    // Each tracked change's first text item on this page, in paint order,
+    // and where the change ends on that line.
+    const changes = new Map<string, { change: Revision; item: TextItem; x1: number }>();
+    for (const item of page.items) {
+      if (item.kind !== "text" || item.hidden) continue;
+      for (const change of item.src?.run.changes ?? []) {
+        const first = changes.get(change.id);
+        if (!first) changes.set(change.id, { change, item, x1: item.x + item.width });
+        else if (item.lineTop === first.item.lineTop) first.x1 = Math.max(first.x1, item.x + item.width);
+      }
+    }
     // The end of each comment's first highlighted line, where its leader starts.
     const firstLine = new Map<string, { x: number; y: number; top: number; bottom: number }>();
+    for (const [id, { item, x1 }] of changes) firstLine.set(`rev:${id}`, { x: x1, y: item.lineTop + item.lineHeight / 2, top: item.lineTop, bottom: item.lineTop + item.lineHeight });
     for (const [id, list] of items) {
       const resolved = this.byId.get(id)?.resolved;
       // One continuous rect per line, as word-granular spans would gap at spaces.
@@ -123,6 +140,12 @@ export class CommentColumn {
       if (this.placed.has(id)) continue;
       this.placed.add(id);
       balloons.push({ top: list[0].lineTop, balloon: this.balloon(this.byId.get(id) as DocComment) });
+    }
+    for (const [id, { change, item }] of changes) {
+      if (this.placed.has(`rev:${id}`)) continue;
+      this.placed.add(`rev:${id}`);
+      const card: DocComment = { id: `rev:${id}`, author: change.author, date: change.date, text: change.label };
+      balloons.push({ top: item.lineTop, balloon: this.balloon(card, this.doc.revisionColor(change.author)) });
     }
     balloons.sort((a, b) => a.top - b.top);
 
@@ -195,8 +218,9 @@ export class CommentColumn {
     return this.carried.length > 0;
   }
 
-  /** The lines of a comment's balloon: its head, text, and replies. */
-  private balloon(comment: DocComment): Balloon {
+  /** The lines of a comment's balloon: its head, text, and replies. A
+   * tracked change's balloon takes its author's revision color. */
+  private balloon(comment: DocComment, color = avatarColor(comment.author)): Balloon {
     const lines: Line[] = [{ height: PAD_Y, paint: () => undefined }];
     const inner = CARD_WIDTH - 2 * PAD_X;
     const resolved = !!comment.resolved;
@@ -207,7 +231,7 @@ export class CommentColumn {
       lines.push({
         height: AVATAR + 6,
         paint: (drawer, x, y) => {
-          drawer.ops.push(`q ${rgb(avatarColor(source.author))} rg ${circle(drawer, x + left + AVATAR / 2, y + AVATAR / 2, AVATAR / 2)} f Q`);
+          drawer.ops.push(`q ${rgb(source === comment ? color : avatarColor(source.author))} rg ${circle(drawer, x + left + AVATAR / 2, y + AVATAR / 2, AVATAR / 2)} f Q`);
           const initials = initialsOf(source.author, source.initials);
           const initialsFont: FontSpec = { family: UI_FONT, size: 10, bold: true, italic: false };
           const iw = this.measurer.width(initials, initialsFont);
@@ -247,7 +271,7 @@ export class CommentColumn {
       }
     }
     lines.push({ height: PAD_Y, paint: () => undefined });
-    return { id: comment.id, color: avatarColor(comment.author), lines };
+    return { id: comment.id, color, lines };
   }
 
   private text(drawer: PageDrawer, text: string, font: FontSpec, color: string, x: number, baseline: number): void {

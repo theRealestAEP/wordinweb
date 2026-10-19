@@ -26,6 +26,11 @@ export interface ParseContext {
   /** Tracked-changes display: "final" hides deletions and shows insertions
    * plain (default); "markup" colors both. */
   revisionView?: "final" | "markup";
+  /** Markup printed with Word's author colors: each author's color, in the
+   * order the authors first appear; a run in a change records the change
+   * (Run.changes). Absent, the markup view colors insertions green and
+   * deletions red for every author, as the editor shows them. */
+  revisionColor?: (author: string) => string;
 }
 
 // ---------- colors ----------

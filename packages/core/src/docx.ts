@@ -176,7 +176,16 @@ function xmlFingerprint(xml: string): string {
 export interface FromFilesOptions {
   /** Build the header and footer block models (`headers`, `footers`). Default true. */
   headerFooterBlocks?: boolean;
+  /** Tracked-changes display from the start, so the parts parsed at load
+   * (headers, footers, notes) follow it too. Default "final". */
+  revisionView?: "final" | "markup";
+  /** Print markup: each author's changes in Word's color for that author,
+   * and every change recorded on its runs (see Revision). */
+  revisionColors?: boolean;
 }
+
+/** Word's "by author" revision colors, in the order it gives them out. */
+const REVISION_COLORS = ["#FF0000", "#0000FF", "#008000", "#800080", "#800000", "#008080", "#808000", "#808080"];
 
 export class DocxDocument {
   /** Changes whenever refresh() rebuilds the parsed model. Plain in-place text
@@ -329,9 +338,11 @@ export class DocxDocument {
     rels: Relationships;
     relsRoot: XmlElement | null;
   }[] = [];
-  private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup" };
+  private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup"; revisionColor?: (author: string) => string };
   /** Tracked-changes display mode; refresh() re-derives after changes. */
   revisionView: "final" | "markup" = "final";
+  /** The revision authors in the order they first appeared, for revisionColor. */
+  private readonly revisionAuthors: string[] = [];
   private readonly relsPath: string;
   private relsRoot: XmlElement | null = null;
   private contentTypesRoot: XmlElement | null = null;
@@ -370,7 +381,9 @@ export class DocxDocument {
     const themeXml = this.readXmlOptional(docDir + "theme/theme1.xml");
     this.theme = parseTheme(themeXml, bidiThemeLanguage);
     this.ctxBase = { theme: this.theme };
+    if (options.revisionView) this.revisionView = options.revisionView;
     this.ctxBase.revisionView = this.revisionView;
+    if (options.revisionColors) this.ctxBase.revisionColor = (author) => this.revisionColor(author);
 
     this.stylesPart = docDir + "styles.xml";
     this.stylesRoot = this.readXmlOptional(this.stylesPart) ?? null;
@@ -727,6 +740,19 @@ export class DocxDocument {
    * Re-derive the document model from the retained XML trees. Called after
    * edit commands mutate the XML.
    */
+  /** An author's revision color: Word's "by author" palette, given out in
+   * the order the authors first appear (the parts parsed at load, headers,
+   * footers and notes, before the body), the ninth author taking the first
+   * color again. */
+  revisionColor(author: string): string {
+    let index = this.revisionAuthors.indexOf(author);
+    if (index === -1) {
+      index = this.revisionAuthors.length;
+      this.revisionAuthors.push(author);
+    }
+    return REVISION_COLORS[index % REVISION_COLORS.length];
+  }
+
   /** Switch tracked-changes display and re-derive the model. */
   setRevisionView(view: "final" | "markup"): void {
     this.revisionView = view;

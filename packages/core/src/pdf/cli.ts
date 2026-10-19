@@ -4,13 +4,16 @@ import { createWriteStream, rmSync } from "node:fs";
 import { PdfRenderError, PdfRenderErrorCode } from "./errors.js";
 import { renderDocxToPdf } from "./render.js";
 
-const USAGE = `Usage: docx-pdf IN.docx OUT.pdf [--comments]
+const USAGE = `Usage: docx-pdf IN.docx OUT.pdf [--comments] [--markup]
 
 Write OUT.pdf: IN.docx laid out and drawn as Word prints it, with the
 fonts embedded, no browser involved. Prints one JSON line about the run.
 
 Options:
   --comments    print the review comments beside each page, as Word's markup
+  --markup      print the tracked changes as Word's All Markup: insertions
+                underlined and deletions struck in each author's color, a
+                balloon per change beside the page (with the comments)
   -h, --help    show this help
 
 Exit codes: 0 done; 1 failed; 2 usage; 3 unsupported_script (text in a script
@@ -25,7 +28,8 @@ if (args.includes("-h") || args.includes("--help")) {
   process.exit(0);
 }
 const comments = args.includes("--comments");
-const files = args.filter((arg) => arg !== "--comments");
+const markup = args.includes("--markup");
+const files = args.filter((arg) => arg !== "--comments" && arg !== "--markup");
 const unknown = files.find((arg) => arg.startsWith("-"));
 const [input, output, extra] = files;
 if (unknown || !input || !output || extra) {
@@ -34,7 +38,7 @@ if (unknown || !input || !output || extra) {
 }
 const t0 = performance.now();
 try {
-  const result = await renderDocxToPdf(input, createWriteStream(output), { comments });
+  const result = await renderDocxToPdf(input, createWriteStream(output), { comments, markup });
   const ms = Math.round(performance.now() - t0);
   const rss = Math.round(process.resourceUsage().maxRSS / 1024);
   console.log(JSON.stringify({ input, output, pages: result.pages, ms, maxRssMB: rss, fonts: result.fonts, missingFonts: result.missingFonts, missingCharacters: result.missingCharacters, unsupportedImages: result.unsupportedImages }));
