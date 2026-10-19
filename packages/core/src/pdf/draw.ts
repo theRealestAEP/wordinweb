@@ -452,6 +452,8 @@ export class PageDrawer {
     }
     this.withRotation(item.rotate, item.x, item.lineTop, () => {
       const ops = ["q"];
+      // A line an exact-height row clips shows only inside the row box.
+      if (item.clip) ops.push(`${this.rect(0, item.clip.top, this.page.width, item.clip.bottom - item.clip.top)} W n`);
       const alpha = item.opacity !== undefined && item.opacity < 1 ? item.opacity : color.a < 1 ? color.a : 1;
       if (alpha < 1) ops.push(`/${this.resources.alpha(alpha)} gs`);
       // Emboss and imprint are a gray copy offset down-right or up-left;

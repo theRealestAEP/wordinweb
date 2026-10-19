@@ -2411,6 +2411,11 @@ function renderText(item: TextItem, interactive: boolean): HTMLElement {
   el.style.top = `${item.glyphTop ?? item.lineTop}px`;
   const boxH = item.glyphBoxH ?? item.lineHeight;
   el.style.height = `${boxH}px`;
+  if (item.clip) {
+    // A line an exact-height row clips shows only inside the row box.
+    const top = item.glyphTop ?? item.lineTop;
+    el.style.clipPath = `inset(${Math.max(0, item.clip.top - top)}px 0 ${Math.max(0, top + boxH - item.clip.bottom)}px 0)`;
+  }
   if (item.mathScaleY || item.mathScaleX) {
     // Tall delimiter / wide brace approximation: stretch the natural glyph
     // vertically around the math axis and/or horizontally around its center

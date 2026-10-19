@@ -102,6 +102,10 @@ export interface TextItem {
    * anything that draws from item geometry — selection, comment highlights —
    * must skip it or it paints a block where there is no text. */
   hidden?: true;
+  /** The box an exact-height table row clips this line to (page px): the
+   * line starts inside the row but crosses its bottom edge, and only the
+   * part inside the box is drawn, as Word draws it. */
+  clip?: { top: number; bottom: number };
   /** The text is part of a tracked change, or its paragraph's format was
    * changed: a printed markup page bars the line in the margin. */
   changed?: true;

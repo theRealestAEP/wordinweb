@@ -9534,9 +9534,11 @@ class Engine {
 
       // Exact-height rows CLIP overflowing content (Word: content past the
       // fixed row height is hidden, not spilled onto the page - e.g. the
-      // For Sale flyer's full-page fixed cell). Drop items whose top starts
-      // below the row bottom. A vertical-merge restart clips at the end of
-      // its full merged cell, not at the end of its first source row.
+      // For Sale flyer's full-page fixed cell). A line that starts inside
+      // the row but crosses its bottom is drawn clipped to the row box
+      // (TextItem.clip); items whose top starts below the row bottom are
+      // dropped. A vertical-merge restart clips at the end of its full
+      // merged cell, not at the end of its first source row.
       //
       // probe-exactoverflow sweeps 1..160 paragraphs in a 260tw exact row, plus
       // a TOC field, w:cantSplit, and the row at the page foot. Word's export
@@ -9551,8 +9553,8 @@ class Engine {
       const rowBottom = y + (cell.props.vMerge === "restart" ? cellH : rowHeight);
       for (const it of cellLay.items) {
         offsetItem(it, cx, y + dy);
-        if (clip && it.kind === "text" && it.lineTop !== undefined && it.lineTop >= rowBottom - 0.5) continue;
-        if (clip && it.kind === "text" && it.baseline > rowBottom + 1) continue;
+        if (clip && it.kind === "text" && it.lineTop >= rowBottom - 0.01) continue;
+        if (clip && it.kind === "text" && it.lineTop + it.lineHeight > rowBottom + 0.01) it.clip = { top: y, bottom: rowBottom };
         // Cell footnotes bind to the page painting this partition (split
         // rows carry their references to the continuation page).
         if (it.kind === "text" && it.noteId !== undefined) this.registerFootnote(it.noteId, page);

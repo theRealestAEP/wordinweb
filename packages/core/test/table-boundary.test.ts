@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
+import type { TextItem } from "../src/layout/types.js";
 import { makeDocx, p, wrapDocument } from "./helpers.js";
 
 describe("table boundary geometry", () => {
@@ -318,15 +319,25 @@ describe("an exact row clips its overflow to the row box", () => {
       const item = items.find((candidate) => candidate.kind === "text" && candidate.text === want);
       return item?.kind === "text" ? item : undefined;
     };
-    const lines = items.filter((it) => it.kind === "text" && /^L\d{3}$/.test(it.text ?? ""));
-    return { lines: lines.length, markGap: text("MARK")!.lineTop - text("TOP")!.lineTop };
+    const lines = items.filter((it): it is TextItem => it.kind === "text" && /^L\d{3}$/.test(it.text ?? ""));
+    return {
+      lines: lines.filter((it) => !it.clip).length,
+      clipped: lines.filter((it) => it.clip).map((it) => ({ text: it.text, clip: it.clip! })),
+      markGap: text("MARK")!.lineTop - text("TOP")!.lineTop,
+    };
   }
 
-  it("paints the one line the box holds, whatever the authored amount", () => {
+  it("paints the one line the box holds, whatever the authored amount, and the next clipped to the box", () => {
     // A8, A64 and A160: Word's raster is the same five bands for all three.
-    expect(painted(numbered(8)).lines).toBe(1);
-    expect(painted(numbered(64)).lines).toBe(1);
-    expect(painted(numbered(160)).lines).toBe(1);
+    // The second line starts inside the box and crosses its bottom: Word's
+    // PDF emits it inside the row's clip rectangle, so it is kept with the
+    // box as its clip; the lines below the box are dropped.
+    for (const n of [8, 64, 160]) {
+      const { lines, clipped } = painted(numbered(n));
+      expect(lines).toBe(1);
+      expect(clipped.map((it) => it.text)).toEqual(["L002"]);
+      expect(clipped[0].clip.bottom - clipped[0].clip.top).toBeCloseTo(260 / 15, 1);
+    }
   });
 
   it("keeps the row's flow contribution at its authored height", () => {
