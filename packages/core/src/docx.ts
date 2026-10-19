@@ -1,4 +1,5 @@
 import { Package, FIXED_ZIP_MTIME, relativePartPath, resolvePartPath } from "./zip.js";
+import { normalizeStrictPackage } from "./strict.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
 import { strFromU8, strToU8, zip, zipSync } from "fflate";
 import { pxToTwips, twipsToPx } from "./units.js";
@@ -3133,8 +3134,11 @@ export class DocxDocument {
     return { dataRelId, layoutRelId, styleRelId, colorsRelId, drawingRelId };
   }
 
+  /** A document from a .docx's bytes; a Strict Open XML package is read as Transitional (strict.ts). */
   static load(data: ArrayBuffer | Uint8Array): DocxDocument {
-    return new DocxDocument(Package.from(data));
+    const pkg = Package.from(data);
+    normalizeStrictPackage(pkg.raw());
+    return new DocxDocument(pkg);
   }
 
   /** A document over parts already unzipped (stream/body.ts's shell). */

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { inflateSync } from "node:zlib";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
@@ -97,6 +98,19 @@ function contentStreams(bytes: Buffer): string {
 }
 
 describe("renderDocxToPdf with comments", () => {
+  it("adds no column when comments.xml lists comments that nothing anchors, as Word shows none", async () => {
+    const { docx } = commentedDocx(2, 2);
+    const files = unzipSync(docx);
+    const xml = strFromU8(files["word/document.xml"]).replace(/<w:commentRange(?:Start|End)\b[^>]*\/>|<w:r>(?:<w:rPr>(?:(?!<\/w:rPr>).)*<\/w:rPr>)?<w:commentReference\b[^>]*\/><\/w:r>/g, "");
+    expect(xml).not.toMatch(/comment(?:RangeStart|Reference)/);
+    files["word/document.xml"] = strToU8(xml);
+    const { bytes, pages } = await render(zipSync(files), true);
+    expect(pages).toBe(2);
+    const pdf = bytes.toString("latin1");
+    expect(pdf).toContain("/MediaBox [0 0 612 792]");
+    expect(pdf).not.toContain("/MediaBox [0 0 804 792]");
+  });
+
   it("is off by default: no column, pages keep their size", async () => {
     const { docx } = commentedDocx(2, 2);
     const { bytes, pages } = await render(docx, false);

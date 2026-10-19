@@ -148,12 +148,19 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   }
   // The body root here is the document's outline: its own section
   // properties, whose w:sectPrChange is a change too.
+  // The comments some part marks (a range start or a reference): a comment
+  // comments.xml lists but nothing anchors is not shown, as in Word, and a
+  // document with no other gets no column.
+  const marked = new Set<string>();
   for (const root of opened.doc.revisionRoots()) {
     const found = unsupportedInXml(root, !!options.markup);
     if (found) throw unsupported(found.script, `in a header, footer or note, "${found.sample}"`);
     hasChanges ||= xmlHasChanges(root);
+    commentMarkers(root, marked);
   }
-  const printComments = (options.comments || options.markup) && opened.doc.comments.length > 0;
+  const printComments =
+    (options.comments || options.markup) &&
+    opened.doc.comments.some((c) => !c.parentId && (marked.has(c.id) || opened.commentAnchor(c.id) !== undefined));
   if (printComments) {
     for (const comment of opened.doc.comments) {
       for (const text of [comment.text, comment.author, comment.initials ?? ""]) {
@@ -344,6 +351,16 @@ function blockHasChanges(block: Block): boolean {
 const CHANGE_ELEMENTS = new Set(["ins", "del", "moveTo", "moveFrom", "rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "tblGridChange"]);
 
 /** Whether a part holds a tracked change. */
+/** The ids of the comments `el` marks with a range start or a reference, onto `out`. */
+function commentMarkers(el: XmlElement, out: Set<string>): void {
+  const name = localName(el.name);
+  if (name === "commentRangeStart" || name === "commentReference") {
+    const id = attr(el, "id");
+    if (id !== undefined) out.add(id);
+  }
+  for (const child of el.children) commentMarkers(child, out);
+}
+
 function xmlHasChanges(el: XmlElement): boolean {
   return CHANGE_ELEMENTS.has(localName(el.name)) || el.children.some(xmlHasChanges);
 }
