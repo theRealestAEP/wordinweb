@@ -7,7 +7,7 @@ import { Block } from "../model.js";
 import { StreamingDocument, openStreamingDocument } from "../stream/body.js";
 import { XmlElement, attr, localName } from "../xml.js";
 import { ByteSource } from "../stream/source.js";
-import { CommentColumn, RAIL_WIDTH } from "./comments.js";
+import { CommentColumn, RAIL_WIDTH, UndrawnComments } from "./comments.js";
 import { IMAGE_PLACEHOLDER } from "./canvas.js";
 import { PageDrawer, Picture } from "./draw.js";
 import { PdfRenderError, asPdfRenderError, unsupportedScript } from "./errors.js";
@@ -139,7 +139,8 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       }
     }
   }
-  const final = await countPages(opened, measurer);
+  const undrawn = printComments ? new UndrawnComments(opened.doc, opened) : null;
+  const final = await countPages(opened, measurer, undrawn);
 
   const writer = new PdfWriter(out);
   await writer.header();
@@ -175,7 +176,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     return image ? { picture: { name: `Im${image.objNum}` }, xobjects: [`/Im${image.objNum} ${image.objNum} 0 R`] } : null;
   };
 
-  const column = printComments || (options.markup && hasChanges) ? new CommentColumn(opened.doc, measurer, resources, opened.commentIds) : null;
+  const column = printComments || (options.markup && hasChanges) ? new CommentColumn(opened.doc, measurer, resources, opened, undrawn?.anchors() ?? new Map()) : null;
   const sheet = column ? { width: final.maxWidth + RAIL_WIDTH, height: final.maxHeight } : null;
 
   const writePage = async (drawer: PageDrawer, width: number, height: number, xobjects: string[]): Promise<void> => {
@@ -207,7 +208,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     }
     const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, sheet?.height ?? page.height);
     drawer.drawPage((part) => shown.get(part) ?? null);
-    if (column && sheet) column.draw(page, drawer, sheet.height);
+    if (column && sheet) column.draw(page, drawer, sheet.height, printComments && page.index === final.result.totalPages);
     await writePage(drawer, sheet?.width ?? page.width, sheet?.height ?? page.height, xobjects);
     if (page.index % 25 === 0) clearBreakCache(measurer);
   };
@@ -217,6 +218,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   // Balloons past the last page go on sheets of their own. Each such sheet
   // must take some of the waiting lines: one that takes none would be
   // followed by another just like it, without end.
+  if (printComments) column?.placeRemaining();
   while (column && sheet && column.carriedLines() > 0) {
     const waiting = column.carriedLines();
     const blank: LaidOutPage = { width: final.maxWidth, height: final.maxHeight, index: 0, number: 0, items: [], bodyTop: 0, bodyBottom: 0, hfStart: 0, columnBands: [] };
@@ -316,12 +318,14 @@ interface Count {
   maxHeight: number;
 }
 
-/** The counting pass, and the NUMPAGES convergence passes layoutDocument runs. */
-async function countPages(opened: StreamingDocument, measurer: NodeMeasurer): Promise<Count> {
+/** The counting pass, and the NUMPAGES convergence passes layoutDocument
+ * runs; `undrawn` sees the pages of each, so it ends with the last's. */
+async function countPages(opened: StreamingDocument, measurer: NodeMeasurer, undrawn: UndrawnComments | null): Promise<Count> {
   let maxWidth = 0;
   let maxHeight = 0;
   const count = (total: number | undefined): Promise<StreamLayoutResult> => {
     clearBreakCache(measurer);
+    undrawn?.reset();
     return layoutDocumentStream(opened.doc, {
       measurer,
       prescan: opened.prescan,
@@ -329,6 +333,7 @@ async function countPages(opened: StreamingDocument, measurer: NodeMeasurer): Pr
       onPage: (page) => {
         maxWidth = Math.max(maxWidth, page.width);
         maxHeight = Math.max(maxHeight, page.height);
+        undrawn?.visit(page);
         if (page.index % 25 === 0) clearBreakCache(measurer);
       },
     });

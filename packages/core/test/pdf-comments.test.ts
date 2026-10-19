@@ -89,6 +89,13 @@ function pdfText(bytes: Buffer): string {
   return execFileSync("pdftotext", [path, "-"], { encoding: "utf8" }).replace(/\s+/g, " ");
 }
 
+/** The PDF's content streams, inflated and joined. */
+function contentStreams(bytes: Buffer): string {
+  const text = bytes.toString("latin1");
+  const streams = [...text.matchAll(/\/Length (\d+) >>\nstream\n/g)];
+  return streams.map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1")).join("\n");
+}
+
 describe("renderDocxToPdf with comments", () => {
   it("is off by default: no column, pages keep their size", async () => {
     const { docx } = commentedDocx(2, 2);
@@ -151,12 +158,39 @@ describe("renderDocxToPdf with comments", () => {
     expect(pages).toBeLessThan(20);
   });
 
+  it.skipIf(!hasPdftotext)("prints a card for every comment: in an equation, in text an exact row clips, at no text at all", async () => {
+    const M = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"';
+    const comment = (id: number, text: string, parent?: number): string =>
+      `<w:comment w:id="${id}" w:author="Ada Reviewer" w:initials="AR" w:date="2026-06-01T10:00:00Z"><w:p w14:paraId="0000100${id}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:comment>`;
+    const rows = Array.from({ length: 6 }, (_, i) => `<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr>${i === 5 ? '<w:commentRangeStart w:id="1"/><w:commentRangeStart w:id="3"/>' : ""}<w:r><w:t>Line ${i + 1} of the row</w:t></w:r>${i === 5 ? '<w:commentRangeEnd w:id="1"/><w:r><w:commentReference w:id="1"/></w:r><w:commentRangeEnd w:id="3"/><w:r><w:commentReference w:id="3"/></w:r>' : ""}</w:p>`).join("");
+    const body =
+      // A comment on an equation: its markers are among the equation's runs.
+      `<w:p><w:r><w:t xml:space="preserve">The equation </w:t></w:r><m:oMath ${M}><w:commentRangeStart w:id="0"/><m:r><m:t>x+1</m:t></m:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></m:oMath><w:r><w:t xml:space="preserve"> is commented.</w:t></w:r></w:p>` +
+      // An exact row of one line's height holding six: the sixth, commented, is clipped.
+      `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:hRule="exact" w:val="260"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="9360" w:type="dxa"/></w:tcPr>${rows}</w:tc></w:tr></w:tbl>` +
+      // A comment referenced in an empty paragraph: no text anywhere near it.
+      `<w:p><w:r><w:commentReference w:id="2"/></w:r></w:p>` +
+      `<w:p><w:r><w:t>The last paragraph.</w:t></w:r></w:p>` +
+      `<w:sectPr><w:pgSz w:w="${LETTER.w}" w:h="${LETTER.h}"/><w:pgMar w:top="${LETTER.margin}" w:bottom="${LETTER.margin}" w:left="${LETTER.margin}" w:right="${LETTER.margin}"/></w:sectPr>`;
+    const docx = makeDocx({
+      "word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${W_NS} ${M}><w:body>${body}</w:body></w:document>`,
+      "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS} ${W14}>${comment(0, "Equation note")}${comment(1, "Clipped line note")}${comment(2, "Note at no text")}${comment(3, "Reply under the clipped note")}</w:comments>`,
+      "word/commentsExtended.xml": `<?xml version="1.0"?>\n<w15:commentsEx ${W15}><w15:commentEx w15:paraId="00001003" w15:paraIdParent="00001001" w15:done="0"/></w15:commentsEx>`,
+    });
+    const { bytes, pages } = await render(docx, true);
+    expect(pages).toBe(1);
+    const text = pdfText(bytes);
+    expect(text).not.toContain("Line 6 of the row");
+    for (const t of ["Equation note", "Clipped line note", "Reply under the clipped note", "Note at no text"]) expect(text).toContain(t);
+    // The equation's card and the clipped line's card (beside the row's visible line) have leaders; the card at no text has none.
+    const content = contentStreams(bytes);
+    expect(content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(2);
+  });
+
   it("draws a dashed leader from each card's text to the card", async () => {
     const { docx } = commentedDocx(1, 3);
     const { bytes } = await render(docx, true);
-    const text = bytes.toString("latin1");
-    const streams = [...text.matchAll(/\/Length (\d+) >>\nstream\n/g)];
-    const content = streams.map((m) => inflateSync(bytes.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1")).join("\n");
+    const content = contentStreams(bytes);
     // A tick at each highlight's end, and a dashed line from the text area's right edge to the rail and the card.
     expect(content.match(/1\.5 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l S/g)?.length).toBe(3);
     const leaders = content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG ([\d.]+) [\d.]+ m ([\d.]+) [\d.]+ l [\d.]+ [\d.]+ l S/g) ?? [];

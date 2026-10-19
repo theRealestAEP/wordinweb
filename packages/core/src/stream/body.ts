@@ -28,9 +28,23 @@ export interface StreamingDocument {
   /** A binary part's size in bytes, from the zip directory; undefined when missing. */
   mediaSize(part: string): number | undefined;
   /** The ids of the comments whose ranges cover a body w:t or w:delText (the element a
-   * TextItem's src.t is), as DocxDocument.commentAnchors gives them for a
+   * TextItem's src.t is) or an equation (the m:oMath or m:oMathPara a
+   * TextItem's mathSrc is), as DocxDocument.commentAnchors gives them for a
    * document loaded whole; undefined when none does. */
   commentIds(t: XmlElement): string[] | undefined;
+  /** Where a body w:t, w:delText or equation is: its block's index and its
+   * place among the block's texts, so the nearest drawn text to one that is
+   * not drawn can be found. */
+  textPosition(t: XmlElement): TextPosition | undefined;
+  /** Where a comment is anchored: its first marker (range start or
+   * reference) in the body, halfway between the texts before and after it;
+   * undefined for a comment the body never marks. */
+  commentAnchor(id: string): TextPosition | undefined;
+}
+
+export interface TextPosition {
+  block: number;
+  ordinal: number;
 }
 
 /** Parts the shell holds whole; every other part stays in the file. */
@@ -160,6 +174,12 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
     commentIds(t) {
       return comments?.ids.get(t);
     },
+    textPosition(t) {
+      return comments?.positions.get(t);
+    },
+    commentAnchor(id) {
+      return comments?.anchors.get(id);
+    },
   };
 }
 
@@ -170,35 +190,58 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
  * tags the w:t and w:delText elements it made. A point comment (a reference with no
  * range) anchors to the nearest w:t before it in its block, else the first
  * after, as commentAnchors anchors it to the one before it in the document.
+ *
+ * A text inside an equation (m:t) tags the equation too: the layout's items
+ * for an equation name the m:oMath or m:oMathPara, not its texts. Every
+ * text is also given its position (block and ordinal), and each comment
+ * the position of its first marker, so the card of a comment whose text is
+ * never drawn can go beside the nearest text that is.
  */
 class CommentRanges {
   readonly ids = new WeakMap<XmlElement, string[]>();
+  readonly positions = new WeakMap<XmlElement, TextPosition>();
+  readonly anchors = new Map<string, TextPosition>();
   private readonly openAtStart = new Map<number, string[]>();
   private readonly open = new Set<string>();
 
   first(el: XmlElement, index: number): void {
     if (this.open.size > 0) this.openAtStart.set(index, [...this.open]);
-    this.walk(el, this.open);
+    this.walk(el, index, this.open, true);
   }
 
   again(el: XmlElement, index: number): void {
-    this.walk(el, new Set(this.openAtStart.get(index)));
+    this.walk(el, index, new Set(this.openAtStart.get(index)), false);
   }
 
-  private walk(block: XmlElement, open: Set<string>): void {
+  private walk(block: XmlElement, index: number, open: Set<string>, first: boolean): void {
     let lastT: XmlElement | null = null;
+    let lastMath: XmlElement | null = null;
     let firstT: XmlElement | null = null;
+    let firstMath: XmlElement | null = null;
+    /** The equation being walked, when one is. */
+    let math: XmlElement | null = null;
+    let ordinal = 0;
     const pointIds: string[] = [];
-    const tag = (t: XmlElement, id: string): void => {
-      const list = this.ids.get(t);
-      if (list) list.push(id);
-      else this.ids.set(t, [id]);
+    const tag = (el: XmlElement, id: string): void => {
+      const list = this.ids.get(el);
+      if (!list) this.ids.set(el, [id]);
+      else if (!list.includes(id)) list.push(id);
+    };
+    const tagText = (t: XmlElement, equation: XmlElement | null, id: string): void => {
+      tag(t, id);
+      if (equation) tag(equation, id);
+    };
+    /** A comment's anchor: its first marker, between the texts before and after it. */
+    const anchor = (id: string): void => {
+      if (first && !this.anchors.has(id)) this.anchors.set(id, { block: index, ordinal: ordinal - 0.5 });
     };
     const visit = (el: XmlElement): void => {
       const ln = localName(el.name);
       if (ln === "commentRangeStart") {
         const id = attr(el, "id");
-        if (id !== undefined) open.add(id);
+        if (id === undefined) return;
+        open.add(id);
+        anchor(id);
         return;
       }
       if (ln === "commentRangeEnd") {
@@ -209,21 +252,35 @@ class CommentRanges {
       if (ln === "commentReference") {
         const id = attr(el, "id");
         if (id === undefined) return;
-        if (lastT) tag(lastT, id);
+        anchor(id);
+        if (lastT) tagText(lastT, lastMath, id);
         else pointIds.push(id);
         return;
       }
       // Deleted text (w:delText) prints in the markup view, its comments with it.
       if (ln === "t" || ln === "delText") {
+        const position = { block: index, ordinal: ordinal++ };
+        this.positions.set(el, position);
+        if (math && !this.positions.has(math)) this.positions.set(math, position);
         lastT = el;
-        firstT ??= el;
-        for (const id of open) tag(el, id);
+        lastMath = math;
+        if (!firstT) {
+          firstT = el;
+          firstMath = math;
+        }
+        for (const id of open) tagText(el, math, id);
+        return;
+      }
+      if ((ln === "oMath" || ln === "oMathPara") && !math) {
+        math = el;
+        for (const c of el.children) visit(c);
+        math = null;
         return;
       }
       for (const c of el.children) visit(c);
     };
     visit(block);
-    if (firstT) for (const id of pointIds) tag(firstT, id);
+    if (firstT) for (const id of pointIds) tagText(firstT, firstMath, id);
   }
 }
 

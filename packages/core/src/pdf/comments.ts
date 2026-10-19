@@ -1,7 +1,8 @@
 import { DocxDocument } from "../docx.js";
 import { DocComment, Revision } from "../model.js";
 import { FontSpec, LaidOutPage, TextItem } from "../layout/types.js";
-import { XmlElement } from "../xml.js";
+import { StreamingDocument } from "../stream/body.js";
+import { XmlElement, attr, localName } from "../xml.js";
 import { PageDrawer, parseColor } from "./draw.js";
 import { NodeMeasurer } from "./measure.js";
 import { Resources } from "./resources.js";
@@ -27,6 +28,13 @@ import { num } from "./writer.js";
  *
  * A page needs only its own comments: the column keeps the ids already
  * given a balloon and the lines carried to the next sheet, nothing else.
+ *
+ * Every comment the document marks gets its card. One whose text is never
+ * drawn (clipped by an exact-height row, hidden past a text box's bottom)
+ * goes beside the nearest drawn text of its block, where the counting pass
+ * found it (UndrawnComments); one with no drawn text near it at all
+ * (marked at no body text, or in a header or footer) goes after the last
+ * page's own cards, on that sheet or the ones after it.
  */
 export const RAIL_WIDTH = 256;
 const CARD_WIDTH = 220;
@@ -52,6 +60,83 @@ interface Balloon {
   lines: Line[];
 }
 
+/** The line a card goes beside: its page, and where its leader starts. */
+export interface LineAnchor {
+  page: number;
+  x: number;
+  top: number;
+  bottom: number;
+}
+
+/** What the column asks of the streamed document about its comments. */
+export type CommentSource = Pick<StreamingDocument, "commentIds" | "textPosition" | "commentAnchor">;
+
+/** The body w:t, w:delText or equation a text item draws, when it draws one. */
+function textOf(item: TextItem): XmlElement | undefined {
+  return item.src?.t ?? item.mathSrc;
+}
+
+/**
+ * The counting pass's look for the comments none of whose text is drawn:
+ * it sees every page, so it knows which comments no page shows and, for
+ * each, the drawn text nearest its anchor in the same block (the row's
+ * visible lines, the paragraph's), by the texts' order; the one before the
+ * anchor wins a tie. The rendering pass puts the card beside that line.
+ */
+export class UndrawnComments {
+  private drawn = new Set<string>();
+  private nearest = new Map<string, { distance: number; anchor: LineAnchor }>();
+  /** The top-level comments anchored in each block. */
+  private readonly byBlock = new Map<number, string[]>();
+
+  constructor(
+    doc: DocxDocument,
+    private readonly source: CommentSource,
+  ) {
+    for (const comment of doc.comments) {
+      if (comment.parentId) continue;
+      const at = source.commentAnchor(comment.id);
+      if (!at) continue;
+      const list = this.byBlock.get(at.block);
+      if (list) list.push(comment.id);
+      else this.byBlock.set(at.block, [comment.id]);
+    }
+  }
+
+  /** Forget the pages seen: a pass starts. */
+  reset(): void {
+    this.drawn = new Set();
+    this.nearest = new Map();
+  }
+
+  visit(page: LaidOutPage): void {
+    for (const item of page.items) {
+      if (item.kind !== "text" || item.hidden) continue;
+      const t = textOf(item);
+      if (!t) continue;
+      for (const id of this.source.commentIds(t) ?? []) this.drawn.add(id);
+      const position = this.source.textPosition(t);
+      const ids = position && this.byBlock.get(position.block);
+      if (!ids) continue;
+      for (const id of ids) {
+        if (this.drawn.has(id)) continue;
+        const anchor = this.source.commentAnchor(id) as { ordinal: number };
+        const distance = Math.abs(anchor.ordinal - position.ordinal) * 2 + (position.ordinal > anchor.ordinal ? 1 : 0);
+        const best = this.nearest.get(id);
+        if (best && best.distance <= distance) continue;
+        this.nearest.set(id, { distance, anchor: { page: page.index, x: item.x + item.width, top: item.lineTop, bottom: item.lineTop + item.lineHeight } });
+      }
+    }
+  }
+
+  /** After the pass: where each comment no page drew goes. */
+  anchors(): Map<string, LineAnchor> {
+    const out = new Map<string, LineAnchor>();
+    for (const [id, { anchor }] of this.nearest) if (!this.drawn.has(id)) out.set(id, anchor);
+    return out;
+  }
+}
+
 export class CommentColumn {
   private readonly placed = new Set<string>();
   /** Lines of balloons that did not fit the sheet before. */
@@ -63,7 +148,9 @@ export class CommentColumn {
     private readonly doc: DocxDocument,
     private readonly measurer: NodeMeasurer,
     private readonly resources: Resources,
-    private readonly commentIds: (t: XmlElement) => string[] | undefined,
+    private readonly source: CommentSource,
+    /** The cards of the comments no page draws the text of (UndrawnComments.anchors). */
+    private readonly undrawn: Map<string, LineAnchor>,
   ) {
     // The column prints the review comments; with markup, the tracked
     // changes too: a balloon per change (Run.changes) with its author,
@@ -77,15 +164,31 @@ export class CommentColumn {
       if (list) list.push(comment);
       else this.replies.set(comment.parentId, [comment]);
     }
+    // A comment the body never marks may be marked in a header, footer or
+    // note; one marked nowhere is not in the document (Word shows none).
+    const mark = (el: XmlElement): void => {
+      const name = localName(el.name);
+      if (name === "commentRangeStart" || name === "commentReference") {
+        const id = attr(el, "id");
+        if (id !== undefined) this.markedElsewhere.add(id);
+        return;
+      }
+      for (const child of el.children) mark(child);
+    };
+    for (const root of doc.revisionRoots()) mark(root);
   }
 
-  /** Draw the page's highlights and its rail into `drawer`. */
-  draw(page: LaidOutPage, drawer: PageDrawer, sheetHeight: number): void {
+  private readonly markedElsewhere = new Set<string>();
+
+  /** Draw the page's highlights and its rail into `drawer`; on the last
+   * page, the cards of the comments no page placed go after its own. */
+  draw(page: LaidOutPage, drawer: PageDrawer, sheetHeight: number, last = false): void {
     // Each top-level comment's text items on this page, in paint order.
     const items = new Map<string, TextItem[]>();
     for (const item of page.items) {
-      if (item.kind !== "text" || item.hidden || !item.src?.t) continue;
-      const ids = this.commentIds(item.src.t);
+      if (item.kind !== "text" || item.hidden) continue;
+      const t = textOf(item);
+      const ids = t && this.source.commentIds(t);
       if (!ids) continue;
       for (const id of ids) {
         const comment = this.byId.get(id);
@@ -150,7 +253,16 @@ export class CommentColumn {
       const card: DocComment = { id: `rev:${id}`, author: change.author, date: change.date, text: change.label };
       balloons.push({ top, balloon: this.balloon(card, this.doc.revisionColor(change.author)) });
     }
+    // The comments whose text is not drawn, beside the nearest text that is.
+    for (const [id, at] of this.undrawn) {
+      const comment = this.byId.get(id);
+      if (at.page !== page.index || !comment || this.placed.has(id)) continue;
+      this.placed.add(id);
+      firstLine.set(id, { x: at.x, y: (at.top + at.bottom) / 2, top: at.top, bottom: at.bottom });
+      balloons.push({ top: at.top, balloon: this.balloon(comment) });
+    }
     balloons.sort((a, b) => a.top - b.top);
+    if (last) balloons.push(...this.remaining().map((balloon) => ({ top: 0, balloon })));
 
     const cardX = page.width + CARD_GAP;
     const bottom = sheetHeight - RAIL_PAD;
@@ -223,6 +335,24 @@ export class CommentColumn {
   /** How many balloon lines wait for another sheet after the last page. */
   carriedLines(): number {
     return this.carried.reduce((sum, balloon) => sum + balloon.lines.length, 0);
+  }
+
+  /** After the last page: the balloons of the comments no page placed (none
+   * is anchored at drawn text, or at any body text) wait for the sheets after it. */
+  placeRemaining(): void {
+    this.carried.push(...this.remaining());
+  }
+
+  /** The balloons of the comments the document marks that are not yet placed, in comments.xml order. */
+  private remaining(): Balloon[] {
+    const out: Balloon[] = [];
+    for (const comment of this.doc.comments) {
+      if (comment.parentId || this.placed.has(comment.id)) continue;
+      if (!this.source.commentAnchor(comment.id) && !this.markedElsewhere.has(comment.id)) continue;
+      this.placed.add(comment.id);
+      out.push(this.balloon(comment));
+    }
+    return out;
   }
 
   /** The lines of a comment's balloon: its head, text, and replies. A
