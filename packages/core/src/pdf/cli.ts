@@ -8,6 +8,7 @@ const USAGE = `Usage: docx-pdf IN.docx OUT.pdf [--comments] [--markup] [--fonts 
 
 Write OUT.pdf: IN.docx laid out and drawn as Word prints it, with the
 fonts embedded, no browser involved. Prints one JSON line about the run.
+A Strict Open XML Document (ISO/IEC 29500 Strict) is read as Transitional.
 
 Options:
   --comments    print the review comments beside each page, as Word's markup

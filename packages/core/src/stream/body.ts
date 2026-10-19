@@ -1,5 +1,6 @@
-import { Inflate, deflateSync, inflateSync, strFromU8 } from "fflate";
+import { Inflate, deflateSync, inflateSync, strFromU8, strToU8 } from "fflate";
 import { DocxDocument } from "../docx.js";
+import { StrictRewriter, normalizeStrictXml } from "../strict.js";
 import { Prescan, bodyHasPageTotal } from "../layout/engine.js";
 import { Block, FieldContent, Paragraph, Revision, Section, SectionProps } from "../model.js";
 import { DocParseContext, formatChange, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
@@ -85,7 +86,9 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   const docEntry = zip.entries.get(docPart);
   if (!docEntry) throw new Error(`missing ${docPart}`);
   const body = new BodyStore();
-  const outline = body.scan(docEntry.method, await zip.raw(docEntry));
+  // A Strict Open XML body is rewritten to Transitional as it is scanned (strict.ts).
+  const rewriter = new StrictRewriter();
+  const outline = body.scan(rewriter.through(inflatePull(docEntry.method, await zip.raw(docEntry))));
 
   // The shell: every text part, and document.xml with only the body's own
   // section properties. Their sizes, from the directory, are held to what
@@ -94,7 +97,10 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   const heldBytes = held.reduce((total, entry) => total + entry.size, 0);
   if (heldBytes > DEFAULT_ZIP_LIMITS.maxTotalUncompressed) throw new Error(`the parts held in memory come to ${heldBytes} bytes, over ${DEFAULT_ZIP_LIMITS.maxTotalUncompressed}`);
   const files: Record<string, Uint8Array> = {};
-  for (const entry of held) files[entry.name] = await zip.read(entry);
+  for (const entry of held) {
+    const bytes = await zip.read(entry);
+    files[entry.name] = rewriter.strict ? strToU8(normalizeStrictXml(strFromU8(bytes))) : bytes;
+  }
   files[docPart] = outline;
   const doc = DocxDocument.fromFiles(files, options.markup ? { revisionView: "markup", revisionColors: true } : {});
   body.hydrate = (el) => doc.hydrateControls(el);
@@ -384,8 +390,8 @@ class BodyStore {
     return this.kept.length;
   }
 
-  /** Scan the document part's compressed bytes; returns the part without the body's children. */
-  scan(method: number, raw: Uint8Array): Uint8Array {
+  /** Scan the document part, pulled a piece at a time; returns the part without the body's children. */
+  scan(pull: () => Uint8Array | null): Uint8Array {
     let piece: Uint8Array[] = [];
     let pieceBytes = 0;
     let total = 0;
@@ -402,7 +408,7 @@ class BodyStore {
       pieceBytes = 0;
     };
     const outline = scanBody(
-      inflatePull(method, raw),
+      pull,
       (child) => {
         const ln = localName(child.name);
         // A sectPr counts at the body's own level only, as parseBody walks it.

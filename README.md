@@ -309,6 +309,8 @@ when a host needs a narrowly scoped style override.
 
 WordInWeb never converts the document to flowing HTML. It parses the OOXML into a typed model, runs a layout engine that breaks lines with real canvas metrics and paginates like Word, and renders each primitive as one absolutely-positioned element, so the browser does zero reflow. Editing mutates the retained XML tree and re-serializes only the parts it models, leaving everything else byte-for-byte intact.
 
+A Strict Open XML Document (ISO/IEC 29500 Strict, Word's "Strict Open XML Document") is read as Transitional: its namespaces, relationship types, unit-carrying measures ("72pt", "2.54cm", "63%") and renamed values are rewritten once, as the package is read (`packages/core/src/strict.ts`), so the viewer, the PDF renderer and the compare see the same document as its Transitional twin. A saved or compared Strict document is written as Transitional.
+
 ## Collaboration
 
 Real-time collaboration ships as a separate entry (`wordinweb/collab`). It
