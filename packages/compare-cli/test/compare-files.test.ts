@@ -673,8 +673,9 @@ describe("the pdf option", () => {
     expect(error).toBeInstanceOf(CompareError);
     expect((error as CompareError).code).toBe("failed");
     expect((error as CompareError).message).toContain(pdf);
-    // A render that fails after the PDF was opened takes the partial file with it.
-    writeFileSync(revised, docx(para("مرحبا بالعالم")));
+    // A render that fails after the PDF was opened takes the partial file
+    // with it (Mongolian is the script the renderer still cannot shape).
+    writeFileSync(revised, docx(para("ᠮᠣᠩᠭᠣᠯ ᠬᠡᠯᠡ")));
     const scriptPdf = join(dir, "pdf-err-script.pdf");
     const refused = await compareFiles(original, revised, join(dir, "pdf-err-out2.docx"), { author: AUTHOR, date: DATE, pdf: { path: scriptPdf } }).catch((e: unknown) => e);
     expect((refused as CompareError).code).toBe("unsupported_script");
@@ -682,14 +683,25 @@ describe("the pdf option", () => {
   });
 
   it("reports a script the PDF renderer cannot shape as unsupported_script", async () => {
+    const original = join(dir, "pdf-mongolian-o.docx");
+    const revised = join(dir, "pdf-mongolian-r.docx");
+    writeFileSync(original, docx(para("ᠮᠣᠩᠭᠣᠯ")));
+    writeFileSync(revised, docx(para("ᠮᠣᠩᠭᠣᠯ ᠬᠡᠯᠡ")));
+    const error = await compareFiles(original, revised, join(dir, "pdf-mongolian-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: join(dir, "pdf-mongolian.pdf") } }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CompareError);
+    expect((error as CompareError).code).toBe("unsupported_script");
+    expect((error as CompareError).message).toContain("Mongolian");
+  });
+
+  it("renders Arabic to the PDF now that the renderer shapes it", async () => {
     const original = join(dir, "pdf-arabic-o.docx");
     const revised = join(dir, "pdf-arabic-r.docx");
     writeFileSync(original, docx(para("مرحبا")));
     writeFileSync(revised, docx(para("مرحبا بالعالم")));
-    const error = await compareFiles(original, revised, join(dir, "pdf-arabic-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: join(dir, "pdf-arabic.pdf") } }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(CompareError);
-    expect((error as CompareError).code).toBe("unsupported_script");
-    expect((error as CompareError).message).toContain("Arabic");
+    const pdf = join(dir, "pdf-arabic.pdf");
+    const { pdfPages } = await compareFiles(original, revised, join(dir, "pdf-arabic-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: pdf } });
+    expect(pdfPages).toBe(1);
+    expect(existsSync(pdf)).toBe(true);
   });
 });
 

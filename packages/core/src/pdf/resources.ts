@@ -12,14 +12,16 @@ export class EmbeddedFont {
   /** The glyph each CID stands for; CID 0 is .notdef. */
   private readonly gids: number[] = [0];
   private readonly cidOf = new Map<number, number>([[0, 0]]);
-  /** The code point a CID shows, for the ToUnicode map. */
-  private readonly unicode = new Map<number, number>();
+  /** The text a CID shows (a code point, or a shaped glyph's cluster text), for the ToUnicode map. */
+  private readonly unicode = new Map<number, string>();
 
   constructor(readonly face: Face, readonly name: string, readonly objNum: number, private readonly tag: string) {}
 
-  cid(gid: number, codePoint: number): number {
+  /** The CID of a glyph that shows `unicode`: a code point (0 for none) or the text a shaped glyph stands for. */
+  cid(gid: number, unicode: number | string): number {
+    const text = typeof unicode === "number" ? (unicode > 0 ? String.fromCodePoint(unicode) : "") : unicode;
     if (this.face.cff) {
-      if (!this.unicode.has(gid)) this.unicode.set(gid, codePoint);
+      if (!this.unicode.has(gid)) this.unicode.set(gid, text);
       return gid;
     }
     let cid = this.cidOf.get(gid);
@@ -32,7 +34,7 @@ export class EmbeddedFont {
     }
     // A glyph first pulled in as a component learns its code point when
     // text shows it, so the ToUnicode map covers it.
-    if (codePoint > 0 && !this.unicode.get(cid)) this.unicode.set(cid, codePoint);
+    if (text && !this.unicode.get(cid)) this.unicode.set(cid, text);
     return cid;
   }
 
@@ -68,7 +70,7 @@ export class EmbeddedFont {
         `/Ascent ${num(face.ascent * scale)} /Descent ${num(face.descent * scale)} /CapHeight ${num(face.capHeight * scale)} /StemV 80 ` +
         `/${face.cff ? "FontFile3" : "FontFile2"} ${file} 0 R >>`,
     );
-    if (face.cff) await writer.deflatedStream(file, "/Subtype /OpenType", face.sfnt);
+    if (face.cff) await writer.deflatedStream(file, "/Subtype /OpenType", face.standalone());
     else {
       const subset = face.subset(this.gids);
       await writer.deflatedStream(file, `/Length1 ${subset.length}`, subset);
@@ -77,8 +79,8 @@ export class EmbeddedFont {
   }
 }
 
-function toUnicodeCMap(unicode: Map<number, number>): string {
-  const entries = [...unicode].filter(([, cp]) => cp > 0);
+function toUnicodeCMap(unicode: Map<number, string>): string {
+  const entries = [...unicode].filter(([, text]) => text.length > 0);
   const lines = [
     "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n",
     "/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n",
@@ -88,16 +90,18 @@ function toUnicodeCMap(unicode: Map<number, number>): string {
   for (let at = 0; at < entries.length; at += 100) {
     const block = entries.slice(at, at + 100);
     lines.push(`${block.length} beginbfchar\n`);
-    for (const [cid, cp] of block) {
-      const utf16 = cp > 0xffff ? String.fromCodePoint(cp) : String.fromCharCode(cp);
-      let hex = "";
-      for (let i = 0; i < utf16.length; i++) hex += utf16.charCodeAt(i).toString(16).padStart(4, "0");
-      lines.push(`<${cid.toString(16).padStart(4, "0")}> <${hex}>\n`);
-    }
+    for (const [cid, text] of block) lines.push(`<${cid.toString(16).padStart(4, "0")}> <${utf16Hex(text)}>\n`);
     lines.push("endbfchar\n");
   }
   lines.push("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
   return lines.join("");
+}
+
+/** A string as UTF-16BE hex digits, as a ToUnicode map and an ActualText string carry it. */
+export function utf16Hex(text: string): string {
+  let hex = "";
+  for (let i = 0; i < text.length; i++) hex += text.charCodeAt(i).toString(16).padStart(4, "0");
+  return hex;
 }
 
 /**

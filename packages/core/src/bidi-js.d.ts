@@ -8,6 +8,8 @@ declare module "bidi-js" {
     getEmbeddingLevels(text: string, direction?: "ltr" | "rtl"): EmbeddingLevels;
     getReorderedString(text: string, levels: EmbeddingLevels, start?: number, end?: number): string;
     getMirroredCharactersMap(text: string, levels: EmbeddingLevels, start?: number, end?: number): Map<number, string>;
+    /** The mirrored form of a character (a bracket), or null when it has none. */
+    getMirroredCharacter(char: string): string | null;
   }
 
   function bidiFactory(): Bidi;

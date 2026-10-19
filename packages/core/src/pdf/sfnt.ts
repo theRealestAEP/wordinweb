@@ -50,6 +50,11 @@ export class Face implements FaceInfo {
   /** A (3,0) symbol cmap maps U+F0xx; a bare xx looks the glyph up there. */
   private readonly symbolCmap: boolean;
   private readonly advances: Uint16Array;
+  /** Each glyph's left side bearing, font units: a subset must keep it,
+   * since a TrueType rasterizer shifts an outline by its bearing less its
+   * xMin (a mark drawn left of its origin moves a letter's width right
+   * under a bearing of 0). */
+  private readonly leftBearings: Int16Array;
   private readonly kernPairs: Map<number, number> | null;
   private readonly gpos: PairLookup[] | null;
   private readonly loca: Uint32Array | null;
@@ -97,10 +102,15 @@ export class Face implements FaceInfo {
     const numberOfHMetrics = hhea.getUint16(34);
     const hmtx = view(this.table("hmtx"));
     this.advances = new Uint16Array(this.numGlyphs);
+    this.leftBearings = new Int16Array(this.numGlyphs);
     let last = 0;
     for (let gid = 0; gid < this.numGlyphs; gid++) {
-      if (gid < numberOfHMetrics && gid * 4 + 2 <= hmtx.byteLength) last = hmtx.getUint16(gid * 4);
+      // The glyphs past numberOfHMetrics share the last advance and have bearings of their own after the pairs.
+      const at = gid < numberOfHMetrics ? gid * 4 : numberOfHMetrics * 4 + (gid - numberOfHMetrics) * 2;
+      if (gid < numberOfHMetrics && at + 4 <= hmtx.byteLength) last = hmtx.getUint16(at);
       this.advances[gid] = last;
+      const bearingAt = gid < numberOfHMetrics ? at + 2 : at;
+      if (bearingAt + 2 <= hmtx.byteLength) this.leftBearings[gid] = hmtx.getInt16(bearingAt);
     }
 
     const cmap = readCmap(this.table("cmap"));
@@ -127,6 +137,13 @@ export class Face implements FaceInfo {
     const bytes = this.tables.get(tag);
     if (!bytes) throw new Error(`${this.path}: no ${tag.trim()} table`);
     return bytes;
+  }
+
+  /** The face as a font file of its own: the file itself, or, from a
+   * collection, the face's tables in an sfnt of their own (a PDF embeds
+   * one face, not a collection). */
+  standalone(): Uint8Array {
+    return view(this.sfnt).getUint32(0) === 0x74746366 ? buildSfnt([...this.tables]) : this.sfnt;
   }
 
   /**
@@ -163,9 +180,40 @@ export class Face implements FaceInfo {
     return this.glyphId(codePoint) !== 0;
   }
 
+  /** The scripts each of GSUB and GPOS lists, by its OpenType tag. */
+  private otScripts: Map<string, Set<string>> | null = null;
+
+  /** How well the face's rule tables cover a script: for each of GSUB and
+   * GPOS, 2 when it lists the script's first (preferred) OpenType tag, 1
+   * when another of its tags, 0 when none; 0 to 4 in all. */
+  scriptRules(otTags: string[]): number {
+    if (!this.otScripts) {
+      this.otScripts = new Map();
+      for (const tag of ["GSUB", "GPOS"]) {
+        const scripts = new Set<string>();
+        this.otScripts.set(tag, scripts);
+        const table = this.tables.get(tag);
+        if (!table || table.length < 10) continue;
+        const v = view(table);
+        const scriptList = v.getUint16(4);
+        if (scriptList + 2 > table.length) continue;
+        const count = v.getUint16(scriptList);
+        for (let i = 0; i < count && scriptList + 2 + i * 6 + 4 <= table.length; i++) scripts.add(tagName(table, scriptList + 2 + i * 6).trim());
+      }
+    }
+    let rules = 0;
+    for (const scripts of this.otScripts.values()) rules += scripts.has(otTags[0]) ? 2 : otTags.some((tag) => scripts.has(tag)) ? 1 : 0;
+    return rules;
+  }
+
   /** Advance width in font units. */
   advance(gid: number): number {
     return this.advances[gid] ?? 0;
+  }
+
+  /** Left side bearing in font units. */
+  leftBearing(gid: number): number {
+    return this.leftBearings[gid] ?? 0;
   }
 
   /** Pair kerning in font units (negative tightens), from GPOS when the face
@@ -269,7 +317,10 @@ export class Face implements FaceInfo {
 
     const hmtx = new Uint8Array(gids.length * 4);
     const hmtxView = view(hmtx);
-    gids.forEach((gid, i) => hmtxView.setUint16(i * 4, this.advances[gid]));
+    gids.forEach((gid, i) => {
+      hmtxView.setUint16(i * 4, this.advances[gid]);
+      hmtxView.setInt16(i * 4 + 2, this.leftBearings[gid]);
+    });
 
     const head = this.table("head").slice();
     view(head).setUint32(8, 0);
@@ -391,11 +442,13 @@ function readNames(name: Uint8Array): Map<number, string> {
     const length = v.getUint16(at + 8);
     const offset = stringsAt + v.getUint16(at + 10);
     if (offset + length > name.length) continue;
-    // Windows English first, then any Windows or Unicode name, then Mac Roman.
+    // Windows English or the Unicode platform's first language (English in
+    // the Apple faces, which carry their other names after it) first, then
+    // any Windows or Unicode name, then Mac Roman.
     let score: number;
     let text: string;
     if (platform === 3 || platform === 0) {
-      score = platform === 3 && (language === 0x409 || language === 0) ? 3 : 2;
+      score = (platform === 3 && (language === 0x409 || language === 0)) || (platform === 0 && language === 0) ? 3 : 2;
       let s = "";
       for (let k = 0; k + 1 < length; k += 2) s += String.fromCharCode((name[offset + k] << 8) | name[offset + k + 1]);
       text = s;

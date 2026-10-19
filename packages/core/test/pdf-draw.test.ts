@@ -1,16 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { visualOrder } from "../src/pdf/bidi.js";
+import { embeddingLevels, mirrored } from "../src/pdf/bidi.js";
 import { parseColor } from "../src/pdf/draw.js";
+import { FontSet, defaultFontDirs } from "../src/pdf/fonts.js";
 import { pathToPdf } from "../src/pdf/path.js";
 
-describe("visualOrder", () => {
-  it("reverses a Hebrew run and mirrors its brackets", () => {
-    expect(visualOrder("אב")).toBe("בא");
-    expect(visualOrder("(אב)")).toBe("(בא)");
+describe("the order FontSet.shape draws a right-to-left run in", () => {
+  const fonts = new FontSet(defaultFontDirs());
+  const font = { family: "Arial", size: 12, bold: false, italic: false };
+  /** The code points of `text`'s glyphs, left to right, as an RTL item draws them. */
+  const drawn = (text: string): string => fonts.shape(text, font, true).flatMap((run) => run.codePoints).map((cp) => String.fromCodePoint(cp)).join("");
+  const hasHebrew = fonts.shape("א", font).every((run) => !run.gids.includes(0));
+
+  it("resolves the levels of a mixed run and mirrors a bracket", () => {
+    expect([...embeddingLevels("אב abc", true)]).toEqual([1, 1, 1, 2, 2, 2]);
+    expect(mirrored("(")).toBe(")");
+    expect(mirrored("a")).toBeNull();
   });
 
-  it("keeps a Latin word inside an RTL run readable left to right", () => {
-    const out = visualOrder("אב abc גד");
+  it.skipIf(!hasHebrew)("reverses a Hebrew run and mirrors its brackets", () => {
+    expect(drawn("אב")).toBe("בא");
+    expect(drawn("(אב)")).toBe("(בא)");
+  });
+
+  it.skipIf(!hasHebrew)("keeps a Latin word inside an RTL run readable left to right", () => {
+    const out = drawn("אב abc גד");
     expect(out.indexOf("abc")).toBeGreaterThan(-1);
     expect(out.startsWith("דג")).toBe(true);
     expect(out.endsWith("בא")).toBe(true);

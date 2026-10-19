@@ -3,10 +3,9 @@ import { drawChart } from "./chart.js";
 import { drawWarpText } from "./warp.js";
 import { fontWidthScale } from "../layout/measure.js";
 import { FontSpec, ImageItem, LaidOutPage, LineEdgeItem, PageItem, PathItem, RectItem, TextItem } from "../layout/types.js";
-import { FontSet, GlyphRun } from "./fonts.js";
-import { Resources } from "./resources.js";
+import { FontSet, GlyphRun, ShapedRun } from "./fonts.js";
+import { EmbeddedFont, Resources, utf16Hex } from "./resources.js";
 import { num } from "./writer.js";
-import { visualOrder } from "./bidi.js";
 import { pathToPdf } from "./path.js";
 
 /** CSS px to PDF points. */
@@ -210,7 +209,7 @@ export class PageDrawer {
     // The span's largest font among its base-text items (a superscript's own, when it stands alone).
     const unshifted = items.filter((item) => !baselineShifted(item));
     const lead = (unshifted.length ? unshifted : items).reduce((a, b) => (b.font.size > a.font.size ? b : a));
-    const runs = this.fonts.shape(lead.rtl ? visualOrder(lead.text) : lead.text, lead.font);
+    const runs = this.fonts.shape(lead.text, lead.font);
     if (runs.length === 0) return [];
     const face = runs[0].face.face;
     const size = lead.font.size;
@@ -436,17 +435,20 @@ export class PageDrawer {
     const font = item.font;
     const size = font.size;
     // The glyphs in the order they are drawn, left to right.
-    const text = item.rtl ? visualOrder(item.text) : item.text;
-    const runs = this.fonts.shape(text, font);
+    const runs = this.fonts.shape(item.text, font, item.rtl);
     // A soft hyphen alone shapes to nothing: no glyph to draw, no face to
     // size an underline by.
     if (runs.length === 0) return;
-    const letterSpacing = props.paintLetterSpacing ?? props.letterSpacing ?? 0;
+    // A shaped run (Arabic, Indic, ...) spreads the laid letter spacing
+    // itself, between its clusters or as kashida; paint-only spacing is
+    // Latin tracking.
+    const shapedItem = runs.some((run) => run.shaped);
+    const letterSpacing = shapedItem ? (props.letterSpacing ?? 0) : (props.paintLetterSpacing ?? props.letterSpacing ?? 0);
     // Horizontal scale: w:w character scaling (the advances are already
     // scaled, the glyphs follow), a substitute's width correction, and the
     // stretch that makes paint-only letter spacing fill the laid width.
     let hscale = (props.textScale && !item.mathScaleY ? props.textScale : 1) * fontWidthScale(font);
-    if (props.paintLetterSpacing !== undefined && props.letterSpacing !== undefined && item.text.trim()) {
+    if (!shapedItem && props.paintLetterSpacing !== undefined && props.letterSpacing !== undefined && item.text.trim()) {
       const paintWidth = item.width - (props.letterSpacing - props.paintLetterSpacing) * item.text.length;
       if (paintWidth > 0.1) hscale *= item.width / paintWidth;
     }
@@ -519,13 +521,20 @@ export class PageDrawer {
     ops.push("BT");
     if (mode) ops.push(`${mode} Tr ${num(lineWidth * PT)} w`);
     if (hscale !== 1 || sx !== 1) ops.push(`${num(hscale * sx * 100)} Tz`);
-    if (letterSpacing) ops.push(`${num((letterSpacing / widthScale) * PT)} Tc`);
+    const tc = letterSpacing ? `${num((letterSpacing / widthScale) * PT)} Tc` : "";
+    if (tc) ops.push(tc);
     let x = x0;
     for (const run of runs) {
       const font = this.resources.font(run.face.face);
       const skew = run.face.fakeItalic ? 0.2 : 0;
       const unit = size / run.face.face.unitsPerEm;
       ops.push(`/${font.name} ${num(size * sy * PT)} Tf`);
+      if (run.shaped) {
+        if (tc) ops.push("0 Tc");
+        x = this.showShaped(ops, run, run.shaped, font, size, sy, letterSpacing / widthScale, hscale * sx, widthScale, skew, x, this.y(baseline + (item.font.paintDY ?? 0)));
+        if (tc) ops.push(tc);
+        continue;
+      }
       ops.push(`1 0 ${num(skew)} 1 ${num(this.x(x))} ${num(this.y(baseline + (item.font.paintDY ?? 0)))} Tm`);
       const parts: string[] = [];
       let hex = "";
@@ -547,6 +556,79 @@ export class PageDrawer {
       ops.push(`[${parts.join(" ")}] TJ`);
     }
     ops.push("ET");
+  }
+
+  /**
+   * Text-showing operators for one shaped run, from page x `x` on the
+   * baseline at PDF y `y0`; returns the x after it. Distances inside are
+   * in unscaled px (the Tz set by the caller, `stretch`, scales them to
+   * the page): each glyph shows at its pen position plus its offset, by a
+   * TJ shift on the baseline or its own Tm when raised (a mark). The laid
+   * letter spacing (`spacing` per UTF-16 unit) goes after each cluster, or,
+   * when HarfBuzz marked places for them, as kashida: tatweel glyphs
+   * stretched to share the spacing out, as Word elongates the joins. A
+   * left-to-right run's logical text is its ActualText, so the PDF's text
+   * extracts in reading order whatever the glyphs' order and number
+   * (Indic reordering, ligatures). A right-to-left run has none: a text
+   * extractor reverses what it reads of an RTL script itself (as it must
+   * for Word's PDFs), and the glyphs' own ToUnicode entries, visual order
+   * and all, are what it reverses right.
+   */
+  private showShaped(ops: string[], run: GlyphRun, shaped: ShapedRun, font: EmbeddedFont, size: number, sy: number, spacing: number, stretch: number, widthScale: number, skew: number, x: number, y0: number): number {
+    const face = run.face.face;
+    const unit = size / face.unitsPerEm;
+    const tm = (pen: number, yOffset: number): string => `1 0 ${num(skew)} 1 ${num(this.x(x + pen * stretch))} ${num(y0 + yOffset * sy * PT)} Tm`;
+    const places = shaped.tatweelAfter.filter(Boolean).length;
+    const tatweel = spacing > 0 && places > 0 ? face.glyphId(0x0640) : 0;
+    const tatweelWidth = tatweel ? face.advance(tatweel) * unit : 0;
+    const kashida = tatweelWidth > 0 ? (spacing * shaped.text.length) / places : 0;
+    if (!shaped.rtl) ops.push(`/Span << /ActualText <feff${utf16Hex(shaped.text)}> >> BDC`);
+    let pen = 0;
+    /** Where the next glyph shows unless shifted, while a TJ is open. */
+    let at = 0;
+    let open = false;
+    let parts: string[] = [];
+    let hex = "";
+    const flush = (): void => {
+      if (hex) parts.push(`<${hex}>`);
+      hex = "";
+      if (parts.length) ops.push(`[${parts.join(" ")}] TJ`);
+      parts = [];
+      open = false;
+    };
+    for (let i = 0; i < run.gids.length; i++) {
+      const gid = run.gids[i];
+      const cid = font.cid(gid, shaped.unicode[i]).toString(16).padStart(4, "0");
+      const xOffset = shaped.xOffsets[i] / widthScale;
+      const yOffset = shaped.yOffsets[i];
+      if (yOffset !== 0) {
+        flush();
+        ops.push(tm(pen + xOffset, yOffset), `<${cid}> Tj`);
+      } else {
+        if (!open) {
+          ops.push(tm(pen + xOffset, 0));
+          at = pen + xOffset;
+          open = true;
+        }
+        const shift = pen + xOffset - at;
+        if (Math.abs(shift) > 0.001) {
+          if (hex) parts.push(`<${hex}>`);
+          hex = "";
+          parts.push(num((-shift / size) * 1000));
+        }
+        hex += cid;
+        at = pen + xOffset + face.advance(gid) * unit;
+      }
+      pen += run.advances[i] / widthScale;
+      if (kashida && shaped.tatweelAfter[i]) {
+        flush();
+        ops.push(`${num(stretch * 100 * (kashida / tatweelWidth))} Tz`, tm(pen, 0), `<${font.cid(tatweel, 0x0640).toString(16).padStart(4, "0")}> Tj`, `${num(stretch * 100)} Tz`);
+        pen += kashida;
+      } else if (!kashida) pen += spacing * shaped.units[i];
+    }
+    flush();
+    if (!shaped.rtl) ops.push("EMC");
+    return x + pen * stretch;
   }
 
   private drawWordArt(item: { x: number; y: number; width: number; height: number; text: string; fontFamily: string; bold?: boolean; italic?: boolean; fill: string; opacity: number; rotation: number; noFit?: boolean }): void {

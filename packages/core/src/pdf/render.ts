@@ -17,6 +17,7 @@ import { bookmarkTops, linkAction, linkBoxes, pdfName } from "./links.js";
 import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
 import { Resources } from "./resources.js";
+import { loadShaper } from "./shaper.js";
 import { PdfWriter, num, pdfString } from "./writer.js";
 
 // The package's "./pdf" entry is this module: everything a caller needs is here.
@@ -114,6 +115,8 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
 }
 
 async function render(source: string | ByteSource, out: Writable, options: RenderPdfOptions): Promise<RenderPdfResult> {
+  // The shaper first (once per process): the scripts it is there for are refused only without it.
+  await loadShaper();
   const fonts = new FontSet([...(options.extraFontDirs ?? []), ...(options.fontDirs ?? defaultFontDirs())]);
   const measurer = new NodeMeasurer(fonts);
   // Text this renderer cannot shape is refused before any layout, naming

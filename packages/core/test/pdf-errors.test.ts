@@ -1,10 +1,18 @@
 import { Writable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { PdfRenderError, unsupportedScript } from "../src/pdf/errors.js";
 import { FontSet, defaultFontDirs } from "../src/pdf/fonts.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
+import { loadShaper, shaperLoaded } from "../src/pdf/shaper.js";
 import { bytesSource } from "../src/stream/source.js";
 import { W_NS, makeDocx, p, wrapDocument } from "./helpers.js";
+
+// Mongolian is the one script still refused with the shaper present: its
+// lines run top to bottom. Without the harfbuzzjs package, the scripts
+// the shaper is for are refused too (pdf-shaping.test.ts covers them).
+const MONGOLIAN = "ᠮᠣᠩᠭᠣᠯ ᠬᠡᠯᠡ";
+
+beforeAll(() => loadShaper());
 
 class Collect extends Writable {
   bytes = 0;
@@ -26,65 +34,61 @@ async function failure(docx: Uint8Array, options: { comments?: boolean; markup?:
 }
 
 describe("unsupportedScript", () => {
-  it("names the scripts a shaper is needed for, and lets the others through", () => {
+  it("names Mongolian, and lets every other script through once the shaper is loaded", () => {
     expect(unsupportedScript("Hello, world")).toBeUndefined();
     expect(unsupportedScript("שלום עליכם פֿונעם")).toBeUndefined();
     expect(unsupportedScript("Привет мир")).toBeUndefined();
     expect(unsupportedScript("漢字かな")).toBeUndefined();
-    expect(unsupportedScript("مرحبا")).toBe("Arabic");
-    expect(unsupportedScript("ﻣﺮﺣﺒﺎ")).toBe("Arabic");
-    expect(unsupportedScript("नमस्ते")).toBe("Devanagari");
-    expect(unsupportedScript("สวัสดี")).toBe("Thai");
-    expect(unsupportedScript("ສະບາຍດີ")).toBe("Lao");
-    expect(unsupportedScript("မင်္ဂလာပါ")).toBe("Myanmar");
     expect(unsupportedScript("ᠮᠣᠩᠭᠣᠯ")).toBe("Mongolian");
-    expect(unsupportedScript("ߒߞߏ")).toBe("N'Ko");
+    const shaped = ["مرحبا", "ﻣﺮﺣﺒﺎ", "नमस्ते", "สวัสดี", "ສະບາຍດີ", "မင်္ဂလာပါ", "ߒߞߏ"];
+    if (shaperLoaded()) for (const text of shaped) expect(unsupportedScript(text)).toBeUndefined();
+    else expect(shaped.map(unsupportedScript)).toEqual(["Arabic", "Arabic", "Devanagari", "Thai", "Lao", "Myanmar", "N'Ko"]);
   });
 });
 
 describe("renderDocxToPdf errors", () => {
-  it("refuses Arabic text with unsupported_script before any byte is written, naming the paragraph", async () => {
-    const docx = makeDocx({ "word/document.xml": wrapDocument(p("Latin first page") + `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` + p("ثم العربية هنا")) });
+  it("refuses Mongolian text with unsupported_script before any byte is written, naming the paragraph", async () => {
+    const docx = makeDocx({ "word/document.xml": wrapDocument(p("Latin first page") + `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` + p(`then ${MONGOLIAN}`)) });
     const { error, bytes } = await failure(docx);
     expect(error.code).toBe("unsupported_script");
-    expect(error.message).toContain("Arabic");
+    expect(error.message).toContain("Mongolian");
     expect(error.message).toContain("paragraph 3");
-    expect(error.message).toContain("العربية");
+    expect(error.message).toContain(MONGOLIAN);
     expect(bytes).toBe(0);
   });
 
-  it("refuses Thai text in a footer", async () => {
-    const footer = `<?xml version="1.0"?>\n<w:ftr ${W_NS}><w:p><w:r><w:t>สวัสดี</w:t></w:r></w:p></w:ftr>`;
+  it("refuses Mongolian text in a footer", async () => {
+    const footer = `<?xml version="1.0"?>\n<w:ftr ${W_NS}><w:p><w:r><w:t>${MONGOLIAN}</w:t></w:r></w:p></w:ftr>`;
     const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`;
     const body = p("Latin") + `<w:sectPr><w:footerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdF"/></w:sectPr>`;
     const docx = makeDocx({ "word/document.xml": wrapDocument(body), "word/footer1.xml": footer, "word/_rels/document.xml.rels": rels });
     const { error } = await failure(docx);
     expect(error.code).toBe("unsupported_script");
-    expect(error.message).toContain("Thai");
+    expect(error.message).toContain("Mongolian");
     expect(error.message).toContain("footer");
   });
 
-  it("refuses an Indic comment only when comments are printed", async () => {
-    const comments = `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>नमस्ते</w:t></w:r></w:p></w:comment></w:comments>`;
+  it("refuses a Mongolian comment only when comments are printed", async () => {
+    const comments = `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" w:author="A"><w:p><w:r><w:t>${MONGOLIAN}</w:t></w:r></w:p></w:comment></w:comments>`;
     const body = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Latin</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
     const docx = makeDocx({ "word/document.xml": wrapDocument(body), "word/comments.xml": comments });
     const { error, bytes } = await failure(docx, { comments: true });
     expect(error.code).toBe("unsupported_script");
-    expect(error.message).toContain("Devanagari");
+    expect(error.message).toContain("Mongolian");
     expect(bytes).toBe(0);
     const out = new Collect();
     await renderDocxToPdf(bytesSource(docx), out);
     expect(out.bytes).toBeGreaterThan(0);
   });
 
-  it("refuses Arabic deleted text in a footer only when the markup prints it", async () => {
-    const footer = `<?xml version="1.0"?>\n<w:ftr ${W_NS}><w:p><w:r><w:t>Latin</w:t></w:r><w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>مرحبا</w:delText></w:r></w:del></w:p></w:ftr>`;
+  it("refuses Mongolian deleted text in a footer only when the markup prints it", async () => {
+    const footer = `<?xml version="1.0"?>\n<w:ftr ${W_NS}><w:p><w:r><w:t>Latin</w:t></w:r><w:del w:id="1" w:author="A" w:date="2026-01-01T00:00:00Z"><w:r><w:delText>${MONGOLIAN}</w:delText></w:r></w:del></w:p></w:ftr>`;
     const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`;
     const body = p("Latin") + `<w:sectPr><w:footerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdF"/></w:sectPr>`;
     const docx = makeDocx({ "word/document.xml": wrapDocument(body), "word/footer1.xml": footer, "word/_rels/document.xml.rels": rels });
     const { error, bytes } = await failure(docx, { markup: true });
     expect(error.code).toBe("unsupported_script");
-    expect(error.message).toContain("Arabic");
+    expect(error.message).toContain("Mongolian");
     expect(error.message).toContain("footer");
     expect(bytes).toBe(0);
     const out = new Collect();
@@ -92,36 +96,36 @@ describe("renderDocxToPdf errors", () => {
     expect(out.bytes).toBeGreaterThan(0);
   });
 
-  it("refuses an Arabic change author, in the body and in a header, when the markup names them", async () => {
+  it("refuses a Mongolian change author, in the body and in a header, when the markup names them", async () => {
     const change = (author: string): string => `<w:p><w:ins w:id="1" w:author="${author}" w:date="2026-01-01T00:00:00Z"><w:r><w:t>Latin</w:t></w:r></w:ins></w:p>`;
-    const inBody = makeDocx({ "word/document.xml": wrapDocument(change("محمد")) });
+    const inBody = makeDocx({ "word/document.xml": wrapDocument(change(MONGOLIAN)) });
     const { error, bytes } = await failure(inBody, { markup: true });
     expect(error.code).toBe("unsupported_script");
     expect(error.message).toContain("paragraph 1");
-    expect(error.message).toContain("محمد");
+    expect(error.message).toContain(MONGOLIAN);
     expect(bytes).toBe(0);
     const out = new Collect();
     await renderDocxToPdf(bytesSource(inBody), out);
     expect(out.bytes).toBeGreaterThan(0);
 
-    const header = `<?xml version="1.0"?>\n<w:hdr ${W_NS}>${change("สมชาย")}</w:hdr>`;
+    const header = `<?xml version="1.0"?>\n<w:hdr ${W_NS}>${change(MONGOLIAN)}</w:hdr>`;
     const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`;
     const body = p("Latin") + `<w:sectPr><w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdH"/></w:sectPr>`;
     const inHeader = makeDocx({ "word/document.xml": wrapDocument(body), "word/header1.xml": header, "word/_rels/document.xml.rels": rels });
     const found = await failure(inHeader, { markup: true });
     expect(found.error.code).toBe("unsupported_script");
-    expect(found.error.message).toContain("Thai");
+    expect(found.error.message).toContain("Mongolian");
     expect(found.error.message).toContain("header");
   });
 
-  it("refuses an Arabic comment author or initials when the comments are printed", async () => {
+  it("refuses a Mongolian comment author or initials when the comments are printed", async () => {
     const body = `<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>Latin</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`;
-    for (const who of ['w:author="فاطمة" w:initials="F"', 'w:author="Fatima" w:initials="ف"']) {
+    for (const who of [`w:author="${MONGOLIAN}" w:initials="F"`, 'w:author="Fatima" w:initials="ᠮ"']) {
       const comments = `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" ${who}><w:p><w:r><w:t>Latin note</w:t></w:r></w:p></w:comment></w:comments>`;
       const docx = makeDocx({ "word/document.xml": wrapDocument(body), "word/comments.xml": comments });
       const { error, bytes } = await failure(docx, { comments: true });
       expect(error.code).toBe("unsupported_script");
-      expect(error.message).toContain("Arabic");
+      expect(error.message).toContain("Mongolian");
       expect(error.message).toContain("comment");
       expect(bytes).toBe(0);
     }
@@ -131,12 +135,12 @@ describe("renderDocxToPdf errors", () => {
     const fonts = new FontSet(defaultFontDirs());
     const font = { family: "Arial", size: 12, bold: false, italic: false };
     expect(fonts.shape("Latin only", font).length).toBeGreaterThan(0);
-    expect(() => fonts.shape("Label मराठी", font)).toThrow(PdfRenderError);
+    expect(() => fonts.shape(`Label ${MONGOLIAN}`, font)).toThrow(PdfRenderError);
     try {
-      fonts.shape("مرحبا", font);
+      fonts.shape(MONGOLIAN, font);
     } catch (error) {
       expect((error as PdfRenderError).code).toBe("unsupported_script");
-      expect((error as PdfRenderError).message).toContain("Arabic");
+      expect((error as PdfRenderError).message).toContain("Mongolian");
     }
   });
 

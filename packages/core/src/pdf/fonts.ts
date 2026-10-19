@@ -5,7 +5,10 @@ import { dirname, extname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fontWidthScale, normalizeFamily, substituteFamily } from "../layout/measure.js";
 import { FontSpec } from "../layout/types.js";
+import { embeddingLevels, mirrored } from "./bidi.js";
 import { PdfRenderError, unsupportedScript } from "./errors.js";
+import { ShapedScript, isHebrewMark, needsShaping, plainText, shapedScriptOf } from "./scripts.js";
+import { shapeText } from "./shaper.js";
 import { Face, FaceInfo, scanFaces } from "./sfnt.js";
 
 /**
@@ -33,6 +36,13 @@ import { Face, FaceInfo, scanFaces } from "./sfnt.js";
  *   7. When none of those is installed either, the first family scanned.
  *
  * A family is missing (FontSet.missing) when only steps 6 and 7 drew it.
+ *
+ * Text in a script that needs shaping (Arabic, Indic, Thai, ...; see
+ * scripts.ts) takes one face for the whole run (FontSet.shape): the asked
+ * family when it has the script's glyphs; else, among the fallbacks,
+ * fontconfig's face for the script's language ("Calibri:lang=ar") and the
+ * SCRIPT_FALLBACK_FAMILIES, the first with the glyphs that also has
+ * shaping rules for the script, else the first with the glyphs.
  *
  * A face the document embeds (FontSet.embed) comes before every rule: in
  * the asked style it is the family's face; when the document embeds the
@@ -66,6 +76,63 @@ const FALLBACK_FAMILIES = [
   "Hiragino Sans GB",
   "Apple Symbols",
   "Symbol",
+];
+
+/**
+ * Families tried for a shaped script none of the stack's faces and no
+ * fontconfig answer covers, in this order, by the glyphs they have: the
+ * macOS system faces for those scripts (Geeza Pro, Kohinoor, the Sangam
+ * MN faces, Thonburi, Kokonor), then the Noto faces macOS ships in
+ * Supplemental and fonts-noto-core installs on Linux.
+ */
+const SCRIPT_FALLBACK_FAMILIES = [
+  "Geeza Pro",
+  "Kohinoor Devanagari",
+  "Kohinoor Bangla",
+  "Kohinoor Gujarati",
+  "Kohinoor Telugu",
+  "Gurmukhi Sangam MN",
+  "Oriya Sangam MN",
+  "Tamil Sangam MN",
+  "Kannada Sangam MN",
+  "Malayalam Sangam MN",
+  "Sinhala Sangam MN",
+  "Thonburi",
+  "Lao Sangam MN",
+  "Khmer Sangam MN",
+  "Myanmar Sangam MN",
+  "Kokonor",
+  "Noto Sans Arabic",
+  "Noto Sans Hebrew",
+  "Noto Sans Syriac",
+  "Noto Sans Thaana",
+  "Noto Sans NKo",
+  "Noto Sans Devanagari",
+  "Noto Sans Bengali",
+  "Noto Sans Gurmukhi",
+  "Noto Sans Gujarati",
+  "Noto Sans Oriya",
+  "Noto Sans Tamil",
+  "Noto Sans Telugu",
+  "Noto Sans Kannada",
+  "Noto Sans Malayalam",
+  "Noto Sans Sinhala",
+  "Noto Sans Thai",
+  "Noto Sans Lao",
+  "Noto Sans Tibetan",
+  "Noto Sans Myanmar",
+  "Noto Sans Khmer",
+  "Noto Sans Limbu",
+  "Noto Sans Tai Le",
+  "Noto Sans New Tai Lue",
+  "Noto Sans Buginese",
+  "Noto Sans Tai Tham",
+  "Noto Sans Balinese",
+  "Noto Sans Sundanese",
+  "Noto Sans Batak",
+  "Noto Sans Lepcha",
+  "Noto Sans Javanese",
+  "Noto Sans Tai Viet",
 ];
 
 const FONT_EXTENSIONS = new Set([".ttf", ".otf", ".ttc", ".woff"]);
@@ -230,10 +297,25 @@ export interface StackFace {
 /** The faces a FontSpec resolves to, first the primary. */
 export interface FontStack {
   faces: StackFace[];
+  /** How many of `faces`, from the first, are the asked family's own (or
+   * its substitute's); the rest are the fallback list's. */
+  primary: number;
   /** The family that resolved (after substitution), for reports. */
   family: string;
   /** The East Asian language and style the asked family stands for, when it does. */
   eastAsian?: EastAsian;
+  /** The faces tried for each shaped script, by its tag (see FontSet.scriptFace). */
+  scriptFaces: Map<string, ScriptCandidate[]>;
+}
+
+interface ScriptCandidate extends StackFace {
+  /** One of the stack's primary faces. */
+  primary: boolean;
+  /** How well the face's rule tables cover the script (Face.scriptRules,
+   * 0 to 4). HarfBuzz places a mark by GPOS alone here (this build has no
+   * fallback positioning), so a face with both tables draws the script
+   * whole, and one with the script's modern tags draws it best. */
+  rules: number;
 }
 
 interface EastAsian {
@@ -323,7 +405,13 @@ export class Fontconfig {
 
   /** fontconfig's serif or sans face for an East Asian language and style. */
   matchLang(eastAsian: EastAsian, bold: boolean, italic: boolean): FaceInfo | null {
-    const key = `${eastAsian.serif ? "serif" : "sans-serif"}:lang=${eastAsian.lang}:weight=${bold ? 200 : 80}:slant=${italic ? 100 : 0}`;
+    return this.matchScript(eastAsian.serif ? "serif" : "sans-serif", eastAsian.lang, bold, italic);
+  }
+
+  /** fontconfig's face for a family in a language ("Calibri:lang=ar"): the
+   * family itself when it covers the language, else its best face for it. */
+  matchScript(family: string, lang: string, bold: boolean, italic: boolean): FaceInfo | null {
+    const key = `${escape(family)}:lang=${lang}:weight=${bold ? 200 : 80}:slant=${italic ? 100 : 0}`;
     let answer = this.answers.get(key);
     if (answer === undefined) {
       answer = this.ask(key);
@@ -375,7 +463,7 @@ function escape(family: string): string {
 /** The process's one fontconfig, so each question is asked once. */
 export const fontconfig = new Fontconfig();
 
-/** Glyphs of one face in a row, as the drawing layer shows them. */
+/** Glyphs of one face in a row, as the drawing layer shows them, left to right. */
 export interface GlyphRun {
   face: StackFace;
   gids: number[];
@@ -383,6 +471,41 @@ export interface GlyphRun {
   advances: number[];
   /** The code point each glyph came from, for the ToUnicode map. */
   codePoints: number[];
+  /** Present when HarfBuzz shaped the run: its glyphs are placed, not only advanced. */
+  shaped?: ShapedRun;
+}
+
+/** What a shaped run carries beyond its glyphs and advances. */
+export interface ShapedRun {
+  /** The run's text in logical order, for the PDF's ActualText. */
+  text: string;
+  /** The run reads right to left: its glyphs stand in reverse of its text. */
+  rtl: boolean;
+  /** The text each glyph stands for, for the ToUnicode map ("" for none). */
+  unicode: string[];
+  /** Each glyph's offset from its pen position, px: x carries the width scale as the advances do, y is up. */
+  xOffsets: number[];
+  yOffsets: number[];
+  /** The UTF-16 units of `text` each glyph closes (the last glyph of a
+   * cluster closes the cluster's units): letter spacing goes after a glyph
+   * per unit it closes, so a mark stays on its base. */
+  units: number[];
+  /** After which glyphs an Arabic elongation (kashida) may be drawn. */
+  tatweelAfter: boolean[];
+}
+
+/** A stretch of text with one embedding level, shaped as one script or none. */
+interface Segment {
+  start: number;
+  end: number;
+  level: number;
+  script: ShapedScript | null;
+}
+
+/** Whether a code point takes the script of the letters around it: spaces,
+ * digits, punctuation, combining marks, joiners and format characters. */
+function isCommon(cp: number): boolean {
+  return cp <= 0x40 || (cp >= 0x5b && cp <= 0x60) || (cp >= 0x7b && cp <= 0xbf) || (cp >= 0x0300 && cp <= 0x036f) || (cp >= 0x2000 && cp <= 0x206f) || (cp >= 0xfe00 && cp <= 0xfe0f);
 }
 
 /**
@@ -443,6 +566,7 @@ export class FontSet {
     const primaryCount = candidates.length;
     for (const family of FALLBACK_FAMILIES) add(family);
     const faces: StackFace[] = [];
+    let primary = 0;
     let resolved = "";
     // The document's own faces lead the stack: in the asked style ahead of
     // every directory; in another style only ahead of the fallbacks.
@@ -451,16 +575,19 @@ export class FontSet {
     if (own && own.found.faces[0].bold === n.bold && own.found.faces[0].italic === n.italic) {
       resolved = own.family;
       faces.push(...ownFaces);
+      primary += ownFaces.length;
     }
     candidates.forEach((family, i) => {
       const found = this.registry.faces(family, n.bold, n.italic);
       if (!found) return;
       if (!resolved && i < primaryCount) resolved = family;
+      if (i < primaryCount) primary += found.faces.length;
       for (const info of found.faces) faces.push({ face: this.load(info), fakeBold: found.fakeBold, fakeItalic: found.fakeItalic });
     });
     if (own && !resolved) {
       resolved = own.family;
       faces.unshift(...ownFaces);
+      primary += ownFaces.length;
     }
     const eastAsian = eastAsianOf(font.paintFamily) ?? eastAsianOf(n.family);
     if (!resolved) {
@@ -473,6 +600,7 @@ export class FontSet {
       if (found) {
         resolved = found.family;
         faces.unshift({ face: this.load(found), fakeBold: n.bold && !found.bold, fakeItalic: n.italic && !found.italic });
+        primary++;
       }
     }
     if (!resolved) this.missing.add(n.family);
@@ -482,7 +610,7 @@ export class FontSet {
       if (!any) throw new Error(`no fonts in ${this.registry.dirs.join(", ")}`);
       for (const info of any) faces.push({ face: this.load(info), fakeBold: n.bold && !info.bold, fakeItalic: n.italic && !info.italic });
     }
-    stack = { faces, family: resolved || faces[0].face.family, eastAsian };
+    stack = { faces, primary, family: resolved || faces[0].face.family, eastAsian, scriptFaces: new Map() };
     this.stacks.set(key, stack);
     return stack;
   }
@@ -514,23 +642,141 @@ export class FontSet {
   }
 
   /**
-   * The glyphs of `text` in `font`, each code point from the first face of
-   * the stack that has it, in runs per face. Pair kerning applies when the
-   * run asked for it (FontSpec.kerning). A soft hyphen takes no glyph.
+   * The glyphs of `text` in `font`, in the order they are drawn from left
+   * to right, in runs per face. Plain text (Latin, Greek, Cyrillic, East
+   * Asian, ...) takes a glyph per code point from the first face of the
+   * stack that has it; pair kerning applies when the run asked for it
+   * (FontSpec.kerning); a soft hyphen takes no glyph. Text with a
+   * right-to-left or shaped script in it is split into its embedding
+   * levels (the bidi algorithm, base direction `rtl` or not) and, within a
+   * level, into script runs: a shaped script's run goes to HarfBuzz with
+   * one face (scriptFace), a plain run at an odd level is drawn reversed
+   * with its brackets mirrored. The runs are then placed in visual order.
+   * Advances do not depend on the order, so a measurement (no `rtl`: the
+   * order is not asked for) leaves text with nothing to shape on the plain
+   * path, and is the width of what is drawn either way.
    *
    * Every string the renderer measures or draws comes through here, so
    * this is where text in a script with no shaper is refused for good:
    * render.ts refuses the document's text first, naming where it is.
    */
-  shape(text: string, font: FontSpec): GlyphRun[] {
+  shape(text: string, font: FontSpec, rtl?: boolean): GlyphRun[] {
     const script = unsupportedScript(text);
     if (script) throw new PdfRenderError("unsupported_script", `${script} text "${text.trim().slice(0, 40)}" needs a shaper this renderer does not have`);
     const stack = this.resolve(font);
     const scale = font.size * fontWidthScale(font);
     const runs: GlyphRun[] = [];
+    if (rtl === undefined ? !needsShaping(text) : !rtl && plainText(text)) {
+      this.plainGlyphs(text, false, stack, scale, font, runs);
+      return runs;
+    }
+    const levels = embeddingLevels(text, !!rtl);
+    const segments = segmentsOf(text, levels);
+    for (const segment of visualOrder(segments)) {
+      const slice = text.slice(segment.start, segment.end);
+      if (segment.script) runs.push(this.shapedGlyphs(slice, segment.script, stack, scale, font));
+      else this.plainGlyphs(slice, segment.level % 2 === 1, stack, scale, font, runs);
+    }
+    return runs;
+  }
+
+  /**
+   * A shaped run: HarfBuzz's glyphs for `text` (one script) with the face
+   * scriptFace picks, their advances and offsets in px. Tabs and line
+   * breaks show as spaces, as in the plain path. A cluster no glyph could
+   * draw (gid 0) reports its code points as missing.
+   */
+  private shapedGlyphs(text: string, script: ShapedScript, stack: FontStack, scale: number, font: FontSpec): GlyphRun {
+    const shown = text.replace(/[\t\n\r]/g, " ");
+    const chosen = this.scriptFace(stack, script, shown, font);
+    const face = chosen.face;
+    const glyphs = shapeText(face, shown, script, font.lang, !!font.kerning);
+    const unit = scale / face.unitsPerEm;
+    const yUnit = font.size / face.unitsPerEm;
+    // Each cluster's extent in the text: from its start to the next cluster's.
+    const starts = [...new Set(glyphs.map((g) => g.cluster))].sort((a, b) => a - b);
+    const ends = new Map<number, number>();
+    starts.forEach((start, i) => ends.set(start, i + 1 < starts.length ? starts[i + 1] : shown.length));
+    const run: GlyphRun = { face: chosen, gids: [], advances: [], codePoints: [], shaped: { text: shown, rtl: script.rtl, unicode: [], xOffsets: [], yOffsets: [], units: [], tatweelAfter: [] } };
+    const shaped = run.shaped!;
+    // A cluster's glyphs sit together; in a right-to-left run they stand
+    // in reverse of its code points (the marks before their base).
+    for (let i = 0; i < glyphs.length; ) {
+      const cluster = glyphs[i].cluster;
+      let j = i;
+      while (j < glyphs.length && glyphs[j].cluster === cluster) j++;
+      const end = ends.get(cluster)!;
+      const cps = [...shown.slice(cluster, end)];
+      if (glyphs.slice(i, j).some((g) => g.gid === 0) && shown.slice(cluster, end).trim()) for (const cp of cps) this.missingCodePoints.add(cp.codePointAt(0) as number);
+      const elongate = glyphs.slice(i, j).some((g) => g.tatweel);
+      for (let k = i; k < j; k++) {
+        const g = glyphs[k];
+        // The glyph's place in the cluster's reading order: a code point each, the last taking what remains.
+        const place = script.rtl ? j - 1 - k : k - i;
+        const unicode = place === j - i - 1 ? cps.slice(place).join("") : (cps[place] ?? "");
+        run.gids.push(g.gid);
+        run.advances.push(g.advance * unit);
+        run.codePoints.push(unicode ? (unicode.codePointAt(0) as number) : 0);
+        shaped.unicode.push(unicode);
+        shaped.xOffsets.push(g.xOffset * unit);
+        shaped.yOffsets.push(g.yOffset * yUnit);
+        shaped.units.push(k === j - 1 ? end - cluster : 0);
+        shaped.tatweelAfter.push(k === j - 1 && elongate);
+      }
+      i = j;
+    }
+    return run;
+  }
+
+  /**
+   * The face a shaped script's run draws with: the first of the stack's
+   * primary faces with glyphs for the run's letters; else, among the
+   * fallbacks (the stack's, fontconfig's face for the script's language,
+   * then SCRIPT_FALLBACK_FAMILIES), the first with the glyphs among those
+   * with the best rules for the script (Face.scriptRules); else the first
+   * face with any of the glyphs, and the rest draw as .notdef.
+   */
+  private scriptFace(stack: FontStack, script: ShapedScript, text: string, font: FontSpec): StackFace {
+    let candidates = stack.scriptFaces.get(script.tag);
+    if (!candidates) {
+      candidates = stack.faces.map((f, i) => ({ ...f, primary: i < stack.primary, rules: f.face.scriptRules(script.otTags) }));
+      const seen = new Set(candidates.map((c) => c.face));
+      const add = (info: FaceInfo | null | undefined, fakeBold: boolean, fakeItalic: boolean): void => {
+        if (!info) return;
+        const face = this.load(info);
+        if (seen.has(face)) return;
+        seen.add(face);
+        candidates!.push({ face, fakeBold, fakeItalic, primary: false, rules: face.scriptRules(script.otTags) });
+      };
+      const found = fontconfig.matchScript(stack.family, script.lang, !!font.bold, !!font.italic);
+      add(found, !!font.bold && !found?.bold, !!font.italic && !found?.italic);
+      for (const family of SCRIPT_FALLBACK_FAMILIES) {
+        const styled = this.registry.faces(family, !!font.bold, !!font.italic);
+        if (styled) for (const info of styled.faces) add(info, styled.fakeBold, styled.fakeItalic);
+      }
+      stack.scriptFaces.set(script.tag, candidates);
+    }
+    const letters: number[] = [];
+    for (const ch of text) {
+      const cp = ch.codePointAt(0) as number;
+      if (shapedScriptOf(cp) === script) letters.push(cp);
+    }
+    const covers = (c: ScriptCandidate): boolean => letters.every((cp) => c.face.hasGlyph(cp));
+    const primary = candidates.find((c) => c.primary && covers(c));
+    if (primary) return primary;
+    const covering = candidates.filter(covers);
+    const best = Math.max(0, ...covering.map((c) => c.rules));
+    return covering.find((c) => c.rules === best) ?? candidates.find((c) => letters.some((cp) => c.face.hasGlyph(cp))) ?? candidates[0];
+  }
+
+  /** Glyphs for plain text, a code point at a time, appended to `runs`;
+   * `reversed` draws the text right to left with its brackets mirrored. */
+  private plainGlyphs(text: string, reversed: boolean, stack: FontStack, scale: number, font: FontSpec, runs: GlyphRun[]): void {
+    let chars = [...text];
+    if (reversed) chars = chars.reverse().map((ch) => mirrored(ch) ?? ch);
     let run: GlyphRun | null = null;
     let previous = -1;
-    for (const ch of text) {
+    for (const ch of chars) {
       const cp = ch.codePointAt(0) as number;
       if (cp === 0xad) continue;
       // Tabs and line breaks have no glyph; the layout sizes them itself.
@@ -568,6 +814,63 @@ export class FontSet {
       run.codePoints.push(cp);
       previous = gid;
     }
-    return runs;
   }
+}
+
+/**
+ * The segments of `text` by embedding level and script: a level's stretch
+ * splits where a shaped script begins or ends; spaces, digits, punctuation
+ * and marks (isCommon) go with the letters before them, or after them at
+ * a stretch's start. Hebrew counts as a shaped script only when the text
+ * has Hebrew points; its letters alone are plain.
+ */
+function segmentsOf(text: string, levels: Uint8Array): Segment[] {
+  let hebrew = false;
+  for (const ch of text) if (isHebrewMark(ch.codePointAt(0) as number)) hebrew = true;
+  const segments: Segment[] = [];
+  let current: Segment | null = null;
+  let undetermined = false;
+  let at = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) as number;
+    const level = levels[at];
+    const common = isCommon(cp);
+    let script = common ? null : (shapedScriptOf(cp) ?? null);
+    if (script?.tag === "Hebr" && !hebrew) script = null;
+    if (current && current.level === level && (common || undetermined || current.script === script)) {
+      if (!common && undetermined) {
+        current.script = script;
+        undetermined = false;
+      }
+      current.end = at + ch.length;
+    } else {
+      current = { start: at, end: at + ch.length, level, script };
+      undetermined = common;
+      segments.push(current);
+    }
+    at += ch.length;
+  }
+  return segments;
+}
+
+/** The segments in the order they are drawn from left to right: the bidi
+ * algorithm's rule L2 over segments, each a stretch of one level. */
+function visualOrder(segments: Segment[]): Segment[] {
+  const out = [...segments];
+  let max = 0;
+  for (const s of out) max = Math.max(max, s.level);
+  for (let level = max; level >= 1; level--) {
+    let i = 0;
+    while (i < out.length) {
+      if (out[i].level < level) {
+        i++;
+        continue;
+      }
+      let j = i;
+      while (j < out.length && out[j].level >= level) j++;
+      for (let a = i, b = j - 1; a < b; a++, b--) [out[a], out[b]] = [out[b], out[a]];
+      i = j;
+    }
+  }
+  return out;
 }
