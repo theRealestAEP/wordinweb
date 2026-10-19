@@ -77,7 +77,7 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
    * when `printable` is not asked for), with its review comments beside the
    * pages when `comments` is set.
    */
-  pdf?: { path: string; comments?: boolean };
+  pdf?: { path: string; comments?: boolean; extraFontDirs?: string[] };
   /**
    * Called (and awaited) once the result and the printable copy are written,
    * before the PDF is rendered: a caller that keeps the redline somewhere
@@ -213,7 +213,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
       // Opened here, so a path that cannot be written fails as a CompareError
       // (a stream's open error would be an uncaught event); a partial PDF goes.
       pdf = createWriteStream(options.pdf.path, { fd: openSync(options.pdf.path, "w") });
-      const rendered = await renderDocxToPdf(printableSpec.path, pdf, { comments: options.pdf.comments });
+      const rendered = await renderDocxToPdf(printableSpec.path, pdf, { comments: options.pdf.comments, extraFontDirs: options.pdf.extraFontDirs });
       pdf = null;
       return { revisions, pdfPages: rendered.pages, missingFonts: rendered.missingFonts, missingCharacters: rendered.missingCharacters, unsupportedImages: rendered.unsupportedImages };
     }

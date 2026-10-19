@@ -64,9 +64,21 @@ const FALLBACK_FAMILIES = [
 
 const FONT_EXTENSIONS = new Set([".ttf", ".otf", ".ttc", ".woff"]);
 
-/** The directories scanned when a renderer names none. */
+/**
+ * The directories a deployment adds to every render: the WORDINWEB_FONT_DIRS
+ * environment variable, a list of paths separated as PATH is (":" here, ";"
+ * on Windows). They are scanned ahead of the defaults, so a font file put
+ * in one wins over the substitutes for its family.
+ */
+export function environmentFontDirs(): string[] {
+  const value = process.env.WORDINWEB_FONT_DIRS ?? "";
+  return value.split(process.platform === "win32" ? ";" : ":").map((dir) => dir.trim()).filter((dir) => dir && existsSync(dir));
+}
+
+/** The directories scanned when a renderer names none: the environment's, then the system's. */
 export function defaultFontDirs(): string[] {
   const dirs = [
+    ...environmentFontDirs(),
     "/System/Library/Fonts",
     "/Library/Fonts",
     join(homedir(), "Library/Fonts"),

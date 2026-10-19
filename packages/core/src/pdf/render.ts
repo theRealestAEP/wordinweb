@@ -11,7 +11,7 @@ import { CommentColumn, RAIL_WIDTH } from "./comments.js";
 import { IMAGE_PLACEHOLDER } from "./canvas.js";
 import { PageDrawer, Picture } from "./draw.js";
 import { PdfRenderError, asPdfRenderError, unsupportedScript } from "./errors.js";
-import { FontSet } from "./fonts.js";
+import { FontSet, defaultFontDirs } from "./fonts.js";
 import { writeImage, writeSamples } from "./images.js";
 import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
@@ -25,9 +25,14 @@ export { bytesSource } from "../stream/source.js";
 export type { ByteSource } from "../stream/source.js";
 
 export interface RenderPdfOptions {
-  /** Directories scanned for fonts; the system directories and the
-   * @fontsource Carlito and Caladea packages by default (see fonts.ts). */
+  /** Directories scanned for fonts INSTEAD of the defaults (the system
+   * directories, the @fontsource Carlito and Caladea packages, and the
+   * WORDINWEB_FONT_DIRS environment variable's; see fonts.ts). */
   fontDirs?: string[];
+  /** Directories scanned for fonts ahead of the defaults (or of
+   * `fontDirs`): a font file in one wins over the substitutes for its
+   * family. WORDINWEB_FONT_DIRS adds such directories to every render. */
+  extraFontDirs?: string[];
   /** The PDF's Title entry. */
   title?: string;
   /** Print the review comments: each sheet is the page with a comment
@@ -100,7 +105,7 @@ export async function renderDocxToPdf(source: string | ByteSource, out: Writable
 }
 
 async function render(source: string | ByteSource, out: Writable, options: RenderPdfOptions): Promise<RenderPdfResult> {
-  const fonts = new FontSet(options.fontDirs);
+  const fonts = new FontSet([...(options.extraFontDirs ?? []), ...(options.fontDirs ?? defaultFontDirs())]);
   const measurer = new NodeMeasurer(fonts);
   // Text this renderer cannot shape is refused before any layout, as the
   // body's blocks are first parsed; the held parts (headers, footers,

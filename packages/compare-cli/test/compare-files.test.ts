@@ -7,6 +7,7 @@ import { crc32, deflateSync, inflateSync } from "node:zlib";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
+import { Face } from "../../core/src/pdf/sfnt.js";
 import { XmlElement, child, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { CompareNote, compareDocuments } from "../../core/src/edit/compare/index.js";
 import { acceptAllRevisions, collectRevisions, rejectAllRevisions } from "../../core/src/edit/suggest.js";
@@ -573,6 +574,28 @@ describe("the pdf option", () => {
     const bytes = readFileSync(pdf);
     expect(bytes.subarray(0, 5).toString("latin1")).toBe("%PDF-");
     expect(bytes.toString("latin1").trimEnd().endsWith("%%EOF")).toBe(true);
+  });
+
+  it("scans pdf.extraFontDirs ahead of the default font directories", async () => {
+    // A copy of Carlito renamed "Zorbaq7" in its name table, in a directory of its own: no default directory holds the family.
+    const fontDir = mkdtempSync(join(tmpdir(), "compare-fonts-"));
+    const carlito = fileURLToPath(new URL("../../../node_modules/@fontsource/carlito/files/carlito-latin-400-normal.woff", import.meta.url));
+    const sfnt = Buffer.from(new Face(carlito).sfnt);
+    for (const [from, to] of [[Buffer.from("Carlito", "latin1"), Buffer.from("Zorbaq7", "latin1")], [Buffer.from("Carlito", "utf16le").swap16(), Buffer.from("Zorbaq7", "utf16le").swap16()]]) {
+      for (let at = sfnt.indexOf(from); at !== -1; at = sfnt.indexOf(from, at + from.length)) to.copy(sfnt, at);
+    }
+    writeFileSync(join(fontDir, "zorbaq7.ttf"), sfnt);
+    const run = (text: string) => `<w:p><w:r><w:rPr><w:rFonts w:ascii="Zorbaq7" w:hAnsi="Zorbaq7"/></w:rPr><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+    const original = join(dir, "pdf-fonts-o.docx");
+    const revised = join(dir, "pdf-fonts-r.docx");
+    writeFileSync(original, docx(run("The quick brown fox.")));
+    writeFileSync(revised, docx(run("The quick red fox.")));
+    const pdf = join(dir, "pdf-fonts.pdf");
+    await compareFiles(original, revised, join(dir, "pdf-fonts-out.docx"), { author: AUTHOR, date: DATE, pdf: { path: pdf, extraFontDirs: [fontDir] } });
+    expect(readFileSync(pdf).toString("latin1")).toMatch(/\/BaseFont \/\w+\+Zorbaq7/);
+    const without = join(dir, "pdf-fonts-without.pdf");
+    await compareFiles(original, revised, join(dir, "pdf-fonts-out2.docx"), { author: AUTHOR, date: DATE, pdf: { path: without } });
+    expect(readFileSync(without).toString("latin1")).not.toContain("Zorbaq7");
   });
 
   it("ends the printable copy with a summary built from the counts, and returns the PDF's pages", async () => {
