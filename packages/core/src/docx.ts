@@ -5,6 +5,7 @@ import { pxToTwips, twipsToPx } from "./units.js";
 import {
   Block,
   DocComment,
+  DocEmbeddedFont,
   DocPerson,
   HeaderFooter,
   Numbering,
@@ -271,6 +272,8 @@ export class DocxDocument {
   comments: DocComment[] = [];
   /** The reviewers word/people.xml names (empty when the part is absent). */
   readonly people: DocPerson[] = [];
+  /** The font files the package embeds, as fontTable.xml lists them (empty when it embeds none). */
+  readonly embeddedFonts: DocEmbeddedFont[] = [];
   /** Retained comments.xml tree (editing + save round-trip), when present. */
   private commentsPart: string | null = null;
   private commentsRoot: XmlElement | null = null;
@@ -499,6 +502,27 @@ export class DocxDocument {
       if (localName(person.name) !== "person") continue;
       const presence = child(person, "presenceInfo");
       this.people.push({ author: attr(person, "author") ?? "", providerId: attr(presence, "providerId"), userId: attr(presence, "userId") });
+    }
+    const fontTablePart = docDir + "fontTable.xml";
+    const fontTableRoot = this.readXmlOptional(fontTablePart);
+    if (fontTableRoot) {
+      const fontRels = parseRelationships(this.readXmlOptional(relsPathFor(fontTablePart)), fontTablePart);
+      const EMBED_STYLES: Record<string, { bold: boolean; italic: boolean }> = {
+        embedRegular: { bold: false, italic: false },
+        embedBold: { bold: true, italic: false },
+        embedItalic: { bold: false, italic: true },
+        embedBoldItalic: { bold: true, italic: true },
+      };
+      for (const font of children(fontTableRoot, "font")) {
+        const family = attr(font, "name");
+        if (!family) continue;
+        for (const embed of font.children) {
+          const style = EMBED_STYLES[localName(embed.name)];
+          const rel = fontRels.get(attr(embed, "id") ?? "");
+          if (!style || !rel || rel.external) continue;
+          this.embeddedFonts.push({ family, ...style, part: rel.target, key: attr(embed, "fontKey") });
+        }
+      }
     }
 
     // PENDING MEDIA ROUND-TRIP (plan doc 16 §6): an image relationship whose

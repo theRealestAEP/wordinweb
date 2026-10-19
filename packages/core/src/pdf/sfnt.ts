@@ -54,10 +54,12 @@ export class Face implements FaceInfo {
   private readonly gpos: PairLookup[] | null;
   private readonly loca: Uint32Array | null;
 
-  constructor(path: string, index = 0) {
+  /** The face at `index` in the file at `path`, or in `bytes` when given (a
+   * font the document embeds: `path` then only names it). */
+  constructor(path: string, index = 0, bytes: Uint8Array = new Uint8Array(readFileSync(path))) {
     this.path = path;
     this.index = index;
-    const { sfnt, tables } = openSfnt(new Uint8Array(readFileSync(path)), index);
+    const { sfnt, tables } = openSfnt(bytes, index);
     this.sfnt = sfnt;
     this.tables = tables;
     const head = view(this.table("head"));

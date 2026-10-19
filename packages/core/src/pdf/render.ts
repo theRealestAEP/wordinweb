@@ -11,7 +11,7 @@ import { CommentColumn, RAIL_WIDTH, UndrawnComments } from "./comments.js";
 import { IMAGE_PLACEHOLDER } from "./canvas.js";
 import { PageDrawer, Picture } from "./draw.js";
 import { PdfRenderError, asPdfRenderError, unsupportedScript } from "./errors.js";
-import { FontSet, defaultFontDirs } from "./fonts.js";
+import { FontSet, defaultFontDirs, deobfuscateFont } from "./fonts.js";
 import { writeImage, writeSamples } from "./images.js";
 import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
@@ -123,6 +123,18 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       hasChanges ||= blockHasChanges(block);
     },
   });
+  // The fonts the document embeds, before any text is measured: the layout
+  // breaks lines by the faces the PDF embeds.
+  for (const font of opened.doc.embeddedFonts) {
+    const bytes = await opened.media(font.part);
+    if (!bytes) continue;
+    try {
+      fonts.embed(font.family, font.bold, font.italic, font.key ? deobfuscateFont(bytes, font.key) : bytes, font.part);
+    } catch {
+      // Not a font file this renderer opens (broken, or a format sfnt.ts
+      // does not read): the family resolves as if it were not embedded.
+    }
+  }
   // The body root here is the document's outline: its own section
   // properties, whose w:sectPrChange is a change too.
   for (const root of opened.doc.revisionRoots()) {

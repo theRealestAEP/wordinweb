@@ -34,6 +34,11 @@ import { Face, FaceInfo, scanFaces } from "./sfnt.js";
  *
  * A family is missing (FontSet.missing) when only steps 6 and 7 drew it.
  *
+ * A face the document embeds (FontSet.embed) comes before every rule: in
+ * the asked style it is the family's face; when the document embeds the
+ * family in other styles only, a directory's face in the asked style wins
+ * and the embedded nearest face comes before the fallbacks.
+ *
  * Within a family, the face with the asked bold and italic; when the family
  * lacks it, the nearest face and the missing style is synthesized (a fake
  * bold strokes the glyphs, a fake italic skews them). A glyph none of the
@@ -170,17 +175,44 @@ export class FontRegistry {
    * exact style (a family split into Unicode subsets has several), else the
    * same slant, else the uprights, else whatever the family has.
    */
-  faces(family: string, bold: boolean, italic: boolean): { faces: FaceInfo[]; fakeBold: boolean; fakeItalic: boolean } | undefined {
+  faces(family: string, bold: boolean, italic: boolean): StyledFaces | undefined {
     const all = this.byFamily.get(family.toLowerCase());
-    if (!all) return undefined;
-    const exact = all.filter((face) => face.bold === bold && face.italic === italic);
-    if (exact.length > 0) return { faces: exact, fakeBold: false, fakeItalic: false };
-    const slant = all.filter((face) => face.italic === italic && !face.bold);
-    if (slant.length > 0) return { faces: slant, fakeBold: bold, fakeItalic: false };
-    const upright = all.filter((face) => !face.italic && !face.bold);
-    if (upright.length > 0) return { faces: upright, fakeBold: bold, fakeItalic: italic };
-    return { faces: all, fakeBold: bold && !all[0].bold, fakeItalic: italic && !all[0].italic };
+    return all && nearestStyle(all, bold, italic);
   }
+}
+
+/** The faces of a family nearest a style, and the styles they must fake. */
+export interface StyledFaces {
+  faces: FaceInfo[];
+  fakeBold: boolean;
+  fakeItalic: boolean;
+}
+
+/** A family's faces nearest the asked style (see FontRegistry.faces). */
+function nearestStyle(all: FaceInfo[], bold: boolean, italic: boolean): StyledFaces {
+  const exact = all.filter((face) => face.bold === bold && face.italic === italic);
+  if (exact.length > 0) return { faces: exact, fakeBold: false, fakeItalic: false };
+  const slant = all.filter((face) => face.italic === italic && !face.bold);
+  if (slant.length > 0) return { faces: slant, fakeBold: bold, fakeItalic: false };
+  const upright = all.filter((face) => !face.italic && !face.bold);
+  if (upright.length > 0) return { faces: upright, fakeBold: bold, fakeItalic: italic };
+  return { faces: all, fakeBold: bold && !all[0].bold, fakeItalic: italic && !all[0].italic };
+}
+
+/**
+ * The font file a document embeds, deobfuscated: ECMA-376 (Part 1 §17.8.1)
+ * XORs the file's first 32 bytes with the w:fontKey GUID's 16 bytes, the
+ * GUID's hex pairs as written but in reverse order (the last pair against
+ * the first byte), the 16 repeated for the second 16 bytes. The rest of the
+ * file is untouched.
+ */
+export function deobfuscateFont(bytes: Uint8Array, fontKey: string): Uint8Array {
+  const hex = fontKey.replace(/[{}-]/g, "");
+  if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`malformed font key ${fontKey}`);
+  const key = Buffer.from(hex, "hex");
+  const out = bytes.slice();
+  for (let i = 0; i < Math.min(32, out.length); i++) out[i] ^= key[15 - (i % 16)];
+  return out;
 }
 
 function subsetRank(path: string): number {
@@ -362,6 +394,8 @@ export class FontSet {
   private readonly registry: FontRegistry;
   private readonly loaded = new Map<string, Face>();
   private readonly stacks = new Map<string, FontStack>();
+  /** The faces the document embeds, by the family it names (lower case). */
+  private readonly embedded = new Map<string, FaceInfo[]>();
   /** Families the documents asked for that no directory holds. */
   readonly missing = new Set<string>();
   /** Code points no face in their stack has: each drew as an empty box. */
@@ -369,6 +403,28 @@ export class FontSet {
 
   constructor(dirs: string[] = defaultFontDirs()) {
     this.registry = FontRegistry.for(dirs);
+  }
+
+  /** Add a face the document embeds for `family` in a style, `bytes` its
+   * plain sfnt (deobfuscateFont for an obfuscated one) and `part` the
+   * package part it came from. Before any text is measured. */
+  embed(family: string, bold: boolean, italic: boolean, bytes: Uint8Array, part: string): void {
+    const face = new Face(part, 0, bytes);
+    this.loaded.set(`${part}#0`, face);
+    const info: FaceInfo = { path: part, index: 0, family, subfamily: face.subfamily, postscriptName: face.postscriptName, bold, italic };
+    const key = family.toLowerCase();
+    const list = this.embedded.get(key);
+    if (list) list.push(info);
+    else this.embedded.set(key, [info]);
+  }
+
+  /** The embedded faces nearest the style for the first of `families` the document embeds. */
+  private embeddedFaces(families: string[], bold: boolean, italic: boolean): { family: string; found: StyledFaces } | undefined {
+    for (const family of families) {
+      const own = this.embedded.get(family.toLowerCase());
+      if (own) return { family, found: nearestStyle(own, bold, italic) };
+    }
+    return undefined;
   }
 
   resolve(font: FontSpec): FontStack {
@@ -388,12 +444,24 @@ export class FontSet {
     for (const family of FALLBACK_FAMILIES) add(family);
     const faces: StackFace[] = [];
     let resolved = "";
+    // The document's own faces lead the stack: in the asked style ahead of
+    // every directory; in another style only ahead of the fallbacks.
+    const own = this.embeddedFaces(candidates.slice(0, primaryCount), n.bold, n.italic);
+    const ownFaces = own ? own.found.faces.map((info): StackFace => ({ face: this.load(info), fakeBold: own.found.fakeBold, fakeItalic: own.found.fakeItalic })) : [];
+    if (own && own.found.faces[0].bold === n.bold && own.found.faces[0].italic === n.italic) {
+      resolved = own.family;
+      faces.push(...ownFaces);
+    }
     candidates.forEach((family, i) => {
       const found = this.registry.faces(family, n.bold, n.italic);
       if (!found) return;
       if (!resolved && i < primaryCount) resolved = family;
       for (const info of found.faces) faces.push({ face: this.load(info), fakeBold: found.fakeBold, fakeItalic: found.fakeItalic });
     });
+    if (own && !resolved) {
+      resolved = own.family;
+      faces.unshift(...ownFaces);
+    }
     const eastAsian = eastAsianOf(font.paintFamily) ?? eastAsianOf(n.family);
     if (!resolved) {
       // The rules found none of the asked families: fontconfig's substitute

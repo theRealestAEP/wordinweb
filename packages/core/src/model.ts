@@ -1143,6 +1143,20 @@ export interface DocPerson {
   userId?: string;
 }
 
+/** A font file the package embeds (word/fonts/*.odttf), from fontTable.xml:
+ * a w:font's w:embedRegular, w:embedBold, w:embedItalic or w:embedBoldItalic. */
+export interface DocEmbeddedFont {
+  /** The family the document names (w:font w:name). */
+  family: string;
+  bold: boolean;
+  italic: boolean;
+  /** The package part that holds the file. */
+  part: string;
+  /** The w:fontKey GUID the file is obfuscated with (ECMA-376 Part 1
+   * §17.8.1); absent when the file is a plain font. */
+  key?: string;
+}
+
 // ---------- headers / footers ----------
 
 export interface HeaderFooter {
