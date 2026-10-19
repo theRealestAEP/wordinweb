@@ -284,7 +284,18 @@ describe("renderDocxToPdf with markup", () => {
 
   it.skipIf(!hasPdftotext)("balloons the body's final section change beside the last paragraph, on the last page", async () => {
     const changed = SECT.replace("</w:sectPr>", `<w:sectPrChange w:id="9" ${BOB}><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:sectPrChange></w:sectPr>`);
-    for (const last of [p(t("The last paragraph.")), "<w:p/>"]) {
+    const table = (cell: string): string => `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid><w:tr><w:tc>${p(t("Cell one"))}</w:tc><w:tc>${cell}</w:tc></w:tr></w:tbl>`;
+    // The last block: a paragraph, an empty paragraph, a table (the card goes
+    // in its last cell's last paragraph, a nested table's included), and a
+    // block content control around a table.
+    const lasts = [
+      p(t("The last paragraph.")),
+      "<w:p/>",
+      table(p(t("The last cell."))),
+      table(p(t("Before the nested table.")) + table(p(t("The nested last cell.")))),
+      `<w:sdt><w:sdtPr><w:tag w:val="x"/></w:sdtPr><w:sdtContent>${table(p(t("The controlled last cell.")))}</w:sdtContent></w:sdt>`,
+    ];
+    for (const last of lasts) {
       const bytes = makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${p(t("First."))}<w:p><w:r><w:br w:type="page"/></w:r></w:p>${last}${changed}</w:body></w:document>` });
       const { pdf, pages, ops } = await render(bytes, true);
       expect(pages).toBe(2);
@@ -293,6 +304,13 @@ describe("renderDocxToPdf with markup", () => {
       expect(sheets[1]).toContain("Bob Editor 8/13/2026 UTC Formatted: Section");
       expect(rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3)).toHaveLength(1);
     }
+  });
+
+  it.skipIf(!hasPdftotext)("balloons a format change on a paragraph with no text", async () => {
+    const empty = `<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="8" ${BOB}><w:pPr/></w:pPrChange></w:pPr></w:p>` + p(t("Text after."));
+    const { pdf, ops } = await render(docx(empty), true);
+    expect(pdfText(pdf)).toContain("Bob Editor 8/13/2026 UTC Formatted: Centered");
+    expect(rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3)).toHaveLength(1);
   });
 
   it.skipIf(!hasPdftotext)("ends on a page shorter than a change's balloon, which goes on sheets after the page a line at a time", async () => {

@@ -1,7 +1,7 @@
 import { Inflate, deflateSync, inflateSync, strFromU8 } from "fflate";
 import { DocxDocument } from "../docx.js";
 import { Prescan, bodyHasPageTotal } from "../layout/engine.js";
-import { Block, FieldContent, Revision, Section, SectionProps } from "../model.js";
+import { Block, FieldContent, Paragraph, Revision, Section, SectionProps } from "../model.js";
 import { DocParseContext, formatChange, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
 import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
@@ -131,7 +131,10 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   body.parser = (el, index) => {
     comments?.again(el, index);
     const block = parseBlock(el, later) as Block;
-    if (finalSection && index === finalSection.index && block.type === "paragraph") block.markChanges = [...(block.markChanges ?? []), finalSection.change];
+    if (finalSection && index === finalSection.index) {
+      const last = lastParagraph(block);
+      if (last) last.markChanges = [...(last.markChanges ?? []), finalSection.change];
+    }
     return block;
   };
   doc.sections = sections.map((section): Section => ({ props: section.props, blocks: body.blocks(section.from, section.to) }));
@@ -222,6 +225,18 @@ class CommentRanges {
     visit(block);
     if (firstT) for (const id of pointIds) tag(firstT, id);
   }
+}
+
+/** The last paragraph in a block: the block itself, or the last one in a
+ * table's last cell (a nested table's included); null when there is none. */
+function lastParagraph(block: Block): Paragraph | null {
+  if (block.type === "paragraph") return block;
+  const cells = block.rows.at(-1)?.cells ?? [];
+  for (const nested of [...(cells.at(-1)?.blocks ?? [])].reverse()) {
+    const found = lastParagraph(nested);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** A body's block as parse/document.ts's parseBody makes it: null when the
