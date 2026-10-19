@@ -27,7 +27,7 @@ export interface StreamingDocument {
   mediaPieces(part: string, onPiece: (piece: Uint8Array) => void | Promise<void>): Promise<boolean>;
   /** A binary part's size in bytes, from the zip directory; undefined when missing. */
   mediaSize(part: string): number | undefined;
-  /** The ids of the comments whose ranges cover a body w:t (the element a
+  /** The ids of the comments whose ranges cover a body w:t or w:delText (the element a
    * TextItem's src.t is), as DocxDocument.commentAnchors gives them for a
    * document loaded whole; undefined when none does. */
   commentIds(t: XmlElement): string[] | undefined;
@@ -157,7 +157,7 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
  * Which comments cover each w:t of a streamed body. The first pass walks
  * the blocks in order and records the comments open at each block's start;
  * every later parse of a block replays its markers from that state and
- * tags the w:t elements it made. A point comment (a reference with no
+ * tags the w:t and w:delText elements it made. A point comment (a reference with no
  * range) anchors to the nearest w:t before it in its block, else the first
  * after, as commentAnchors anchors it to the one before it in the document.
  */
@@ -203,7 +203,8 @@ class CommentRanges {
         else pointIds.push(id);
         return;
       }
-      if (ln === "t") {
+      // Deleted text (w:delText) prints in the markup view, its comments with it.
+      if (ln === "t" || ln === "delText") {
         lastT = el;
         firstT ??= el;
         for (const id of open) tag(el, id);

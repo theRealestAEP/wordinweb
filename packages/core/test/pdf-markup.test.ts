@@ -138,6 +138,28 @@ describe("renderDocxToPdf with markup", () => {
     expect(sheets[2]).toContain("Inserted row");
   });
 
+  it.skipIf(!hasPdftotext)("prints a comment anchored on deleted text, highlighted on the struck text", async () => {
+    const W14 = 'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"';
+    const commented = p(t("Kept, then "), `<w:del w:id="1" ${BOB}><w:commentRangeStart w:id="0"/><w:r><w:delText xml:space="preserve">gone for good</w:delText></w:r><w:commentRangeEnd w:id="0"/></w:del>`, `<w:r><w:commentReference w:id="0"/></w:r>`, t(" and on."));
+    const bytes = makeDocx({
+      "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${commented}${SECT}</w:body></w:document>`,
+      "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS} ${W14}><w:comment w:id="0" w:author="Cy Commenter" w:initials="CC" w:date="2026-08-14T09:00:00Z"><w:p><w:r><w:t>Why delete this?</w:t></w:r></w:p></w:comment></w:comments>`,
+    });
+    const { pdf, pages, ops } = await render(bytes, true);
+    expect(pages).toBe(1);
+    const text = pdfText(pdf);
+    expect(text).toContain("gone for good");
+    expect(text).toContain("Cy Commenter");
+    expect(text).toContain("Why delete this?");
+    expect(text).toContain("Bob Editor");
+    // The comment's highlight (Word's yellow) sits on the struck text.
+    const all = [...pdf.toString("latin1").matchAll(/\/Length (\d+) >>\nstream\n/g)]
+      .map((m) => inflateSync(pdf.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1"))
+      .join("\n");
+    expect(all).toMatch(/1 0\.784 0\.353 rg [\d. ]+ re f Q/);
+    expect(rules(ops, "1 0 0").length).toBeGreaterThan(0);
+  });
+
   it.skipIf(!hasPdftotext)("ends on a page shorter than a change's balloon, which goes on sheets after the page a line at a time", async () => {
     // A 2 x 0.3 in page: the rail is shorter than the balloon's head line.
     const tiny = `<w:sectPr><w:pgSz w:w="2880" w:h="400"/><w:pgMar w:top="30" w:right="30" w:bottom="30" w:left="30" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>`;
