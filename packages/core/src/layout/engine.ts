@@ -3946,6 +3946,18 @@ class Engine {
     return !!a && !!b && sameFrame(a, b);
   }
 
+  /** The frame that `block` starts when it is a page- or margin-anchored
+   * frame that wraps text and is not placed yet: Word flows the content
+   * before such a frame around it (staging-frames p1). */
+  private pageFrameAhead(block: Block | undefined, prev: Block | undefined): ResolvedFrame | undefined {
+    if (block?.type !== "paragraph" || this.consumedFrames.has(block)) return undefined;
+    if (this.continuesFrame(prev, block)) return undefined;
+    const fr = this.blockFrame(block);
+    if (!fr || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
+    if (fr.wrap === "notBeside" && fr.w !== undefined && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return undefined;
+    return fr;
+  }
+
   /** The blocks of the frame that starts at `siblings[index]`. */
   private frameGroup(first: Block, siblings: Block[] | undefined, index: number | undefined): Block[] {
     const group = [first];
@@ -4256,10 +4268,8 @@ class Engine {
     };
     const retractParaAnchors = (): void => {
       if (lookMark) {
-        if (lookFrame) {
-          this.consumedFrames.delete(lookFrame);
-          lookFrame = null;
-        }
+        for (const f of lookFrames) this.consumedFrames.delete(f);
+        lookFrames = [];
         // Lookahead floats retract with the paragraph; the anchor paragraph
         // emits them normally on the new page/column instead.
         lookMark.page.items.length = Math.min(lookMark.page.items.length, lookMark.items);
@@ -4397,7 +4407,7 @@ class Engine {
     // contributes no height — measured: body resumes exactly one heading
     // height below the displaced heading).
     let lookMark: { page: InternalPage; items: number; floats: number; shapes: Shape[] } | null = null;
-    let lookFrame: object | null = null;
+    let lookFrames: object[] = [];
     const linesH = broken.lines.reduce((a, l) => a + l.height, 0);
     // Predict from the COLLAPSED paragraph top (paraTopEstimate carries the
     // raw spacing-before; the real placement subtracts the previous
@@ -4517,30 +4527,16 @@ class Engine {
       // its position is ABSOLUTE (no prediction needed), and Word flows the
       // preceding content around it (staging-frames p1: a page-anchored box
       // over the opening heading — the heading wraps beside/below the frame).
-      if (!lookMark && !this.consumedFrames.has(next)) {
-        const nextProps = this.doc.effectiveParaProps(next);
-        if (nextProps.frame && !nextProps.dropCap) {
-          const fr = this.resolveFrame(nextProps.frame);
-          if (
-            fr.w !== undefined &&
-            fr.wrap !== "none" &&
-            (fr.vAnchor === "page" || fr.vAnchor === "margin") &&
-            !(fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1)
-          ) {
-            const top = fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y;
-            const paraBottom = effTop + linesH;
-            if (top <= paraBottom + 0.25) {
-              lookMark = {
-                page: this.cur,
-                items: this.cur.items.length,
-                floats: (this.floats.get(this.cur) ?? []).length,
-                shapes: [],
-              };
-              this.placeFrame(this.frameGroup(next, siblings, index === undefined ? undefined : index + 1), fr);
-              this.consumedFrames.add(next);
-              lookFrame = next;
-              broken = breakNow(paraTopEstimate);
-            }
+      if (!lookMark) {
+        const fr = this.pageFrameAhead(next, para);
+        if (fr) {
+          const top = fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y;
+          if (top <= paraBottom + 0.25) {
+            ensureLookMark();
+            this.placeFrame(this.frameGroup(next, siblings, index === undefined ? undefined : index + 1), fr);
+            this.consumedFrames.add(next);
+            lookFrames.push(next);
+            broken = breakNow(paraTopEstimate);
           }
         }
       }
@@ -4553,10 +4549,20 @@ class Engine {
     // into wrapped lines although it is anchored five paragraphs later).
     if (broken.lines.length > 0 && siblings && index !== undefined) {
       const farHits: Shape[] = [];
+      // Page/margin-anchored frames further down reflow this paragraph the
+      // same way (word95-check-b frame-notbeside-margin: a notBeside frame at
+      // the margin top, anchored after three body paragraphs, pushes all
+      // three below it). The next paragraph's frame was handled above.
+      const farFrames: { block: Paragraph; idx: number; fr: ResolvedFrame }[] = [];
       let lastIdx = index;
       for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
         const blk = siblings[idx];
         if (blk.type !== "paragraph") break;
+        const fr = idx > index + 1 ? this.pageFrameAhead(blk, siblings[idx - 1]) : undefined;
+        if (fr && (fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y) <= paraBottom + 0.25) {
+          farFrames.push({ block: blk, idx, fr });
+          lastIdx = idx;
+        }
         for (const s of this.collectAnchors(blk)) {
           if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
           if ("behind" in s && s.behind) continue;
@@ -4572,7 +4578,7 @@ class Engine {
           }
         }
       }
-      if (farHits.length > 0) {
+      if (farHits.length > 0 || farFrames.length > 0) {
         // Pre-emit only when the anchor paragraph itself still lands on this
         // page: estimate the intervening flow height (spacing collapse + line
         // heights, no float narrowing). Snapshot numbering counters (and the
@@ -4599,6 +4605,11 @@ class Engine {
           lookMark!.shapes.push(...farHits);
           this.emitAnchors(farHits, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
           for (const s of farHits) this.consumedAnchors.add(s);
+          for (const f of farFrames) {
+            this.placeFrame(this.frameGroup(f.block, siblings, f.idx), f.fr);
+            this.consumedFrames.add(f.block);
+            lookFrames.push(f.block);
+          }
           broken = breakNow(paraTopEstimate);
         }
       }

@@ -160,6 +160,46 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     expect(body.x).toBeCloseTo(widest.x + widest.width + 187 * TW, 0);
   });
 
+  it("stacks a page-anchored frame at its page position (word95-check-b frame-three-paragraphs)", () => {
+    const page = `<w:framePr w:w="2381" w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="1475" w:y="2298"/>`;
+    const items = layoutBody(framed("SideOne", page) + framed("SideTwo", page) + framed("SideThree", page) + BODY.repeat(2) + SECTION);
+    const lines = ["SideOne", "SideTwo", "SideThree"].map((t) => line(items, t));
+    expect(lines[0].lineTop).toBeCloseTo(2298 * TW, 0);
+    for (let k = 1; k < lines.length; k++) {
+      expect(lines[k].lineTop).toBeGreaterThanOrEqual(lines[k - 1].lineTop + lines[k - 1].lineHeight - 0.01);
+      expect(lines[k].x).toBeCloseTo(1475 * TW, 1);
+    }
+  });
+
+  it("keeps body text off the sides of a notBeside frame at the margin (word95-check-b frame-notbeside-margin)", () => {
+    // The frame is anchored after three body paragraphs but sits at the
+    // margin top: Word moves those paragraphs below it, and nothing beside it.
+    const nb = `<w:framePr w:wrap="notBeside" w:vAnchor="margin" w:hAnchor="margin" w:x="1" w:y="1"/>`;
+    const words = "Body words here. ".repeat(12);
+    const para = (t: string) => `<w:p><w:r><w:t xml:space="preserve">${t}</w:t></w:r></w:p>`;
+    const frameLines = ["NbOne", "NbTwo", "NbThree", "NbFour", "NbFive"];
+    const items = layoutBody(
+      para(`First. ${words}`) +
+        para(`Second. ${words}`) +
+        para(`Third. ${words}`) +
+        frameLines.map((t) => framed(t, nb)).join("") +
+        para(`After. ${words}`) +
+        SECTION,
+    );
+    const frame = frameLines.map((t) => line(items, t));
+    for (let k = 1; k < frame.length; k++) {
+      expect(frame[k].lineTop).toBeGreaterThanOrEqual(frame[k - 1].lineTop + frame[k - 1].lineHeight - 0.01);
+    }
+    expect(frame[0].lineTop).toBeCloseTo(1440 * TW + 1 * TW, 0);
+    const frameBottom = frame[4].lineTop + frame[4].lineHeight;
+    const body = texts(items).filter((i) => !frameLines.includes(i.text));
+    expect(body.length).toBeGreaterThan(0);
+    for (const i of body) expect(i.lineTop).toBeGreaterThanOrEqual(frameBottom - 0.01);
+    // The source order of the body is kept below the frame.
+    expect(line(items, "First.").lineTop).toBeLessThan(line(items, "Second.").lineTop);
+    expect(line(items, "Third.").lineTop).toBeLessThan(line(items, "After.").lineTop);
+  });
+
   it("leaves a drop cap as it is", () => {
     const drop =
       `<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/></w:pPr>` +
