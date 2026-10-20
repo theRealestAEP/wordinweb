@@ -19,6 +19,10 @@
  * over the window extent as they stand where the pen is made, the mapping
  * emf-converter applies to coordinates (it keeps no extents across
  * SaveDC/RestoreDC, and neither does this).
+ *
+ * An EMF that also carries EMF+ records is left as it is: emf-converter
+ * draws its GDI records as well, without their world transform, so drawn
+ * right they would land over the EMF+ picture at the wrong scale.
  */
 
 const EMR_HEADER = 1;
@@ -29,6 +33,8 @@ const EMR_EOF = 14;
 const EMR_SCALEVIEWPORTEXTEX = 31;
 const EMR_SCALEWINDOWEXTEX = 32;
 const EMR_CREATEPEN = 38;
+const EMR_COMMENT = 70;
+const EMFPLUS = 0x2b464d45;
 const EMR_BEGINPATH = 59;
 const EMR_ENDPATH = 60;
 const EMR_FILLPATH = 62;
@@ -69,10 +75,23 @@ function createPen(index: number, style: number, width: number, color: number): 
   return pen.bytes;
 }
 
+/** Whether an EMR_COMMENT carries EMF+ records ([MS-EMFPLUS] 2.3.3: identifier "EMF+"). */
+function hasEmfPlus(view: DataView): boolean {
+  let offset = 0;
+  while (offset + 16 <= view.byteLength) {
+    const type = view.getUint32(offset, true);
+    const size = view.getUint32(offset + 4, true);
+    if (type === EMR_COMMENT && view.getUint32(offset + 12, true) === EMFPLUS) return true;
+    if (size < 8 || type === EMR_EOF) return false;
+    offset += size;
+  }
+  return false;
+}
+
 /** The EMF with the records above rewritten; the same bytes when it has none. */
 export function prepareEmf(bytes: Uint8Array): Uint8Array {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.length < 88 || view.getUint32(0, true) !== EMR_HEADER) return bytes;
+  if (bytes.length < 88 || view.getUint32(0, true) !== EMR_HEADER || hasEmfPlus(view)) return bytes;
   // emf-converter starts both extents at the bounds' width: one unit, one pixel.
   let windowExt = view.getInt32(16, true) - view.getInt32(8, true);
   let viewportExt = windowExt;
