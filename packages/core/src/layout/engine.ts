@@ -1219,16 +1219,30 @@ class Engine {
       // band must have ended in its first column - Word balances columns
       // before a continuous break, which we approximate by falling back to a
       // page break when content sits in a later column.)
+      //
+      // An empty page that the previous section opened is shared too. That
+      // section's only paragraph is its empty break mark, which takes no
+      // height, but the page is still that section's first page, and Word
+      // takes a page's headers and footers from the section at its top
+      // (govdocs 068399: an empty titlePg section 1 holds the FCC letterhead
+      // in its first-page header; the continuous section 2 has wider margins
+      // and its text starts on page 1 under that letterhead, in LibreOffice
+      // too). Nothing sits on the page yet, so the margins may differ.
+      const openedEmpty =
+        this.pages.length > 0 &&
+        this.pageIsEmptyAtCursor() &&
+        this.cur.physIndex === this.sectionFirstPagePhys;
       const canContinue =
         sp.type === "continuous" &&
         prevSp !== null &&
         this.pages.length > 0 &&
         (this.col === 0 || this.prevBandBalanced) &&
-        !this.pageIsEmptyAtCursor() &&
+        (openedEmpty ||
+          (!this.pageIsEmptyAtCursor() &&
+            sp.marginLeft === prevSp.marginLeft &&
+            sp.marginRight === prevSp.marginRight)) &&
         sp.pageWidth === prevSp.pageWidth &&
         sp.pageHeight === prevSp.pageHeight &&
-        sp.marginLeft === prevSp.marginLeft &&
-        sp.marginRight === prevSp.marginRight &&
         // A continuous break that changes the page-number FORMAT can't stay on
         // the shared page - two different formats (e.g. decimal vs roman) can't
         // coexist on one sheet, so Word promotes it to a page break (wild-gatech:
@@ -1310,7 +1324,14 @@ class Engine {
         // This leading break will start a page. Create it before restoring the
         // carried after so placeParagraph does not clear the carry itself.
         if (keepEmptyAfter) this.newPage(false);
-        else this.newBand();
+        else if (openedEmpty) {
+          // The new band takes this section's columns and margins, but the
+          // page keeps the props of the section that opened it: its header
+          // and footer are laid out against them.
+          const pageSp = this.cur.sp;
+          this.newBand();
+          this.cur.sp = pageSp;
+        } else this.newBand();
       } else this.newPage(true);
       if (prevSp !== null) {
         if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
@@ -2476,11 +2497,15 @@ class Engine {
     // followed by an empty section-break paragraph must not insert a blank
     // page; wild-multicolumn: a hard page break before a continuous multi-col
     // section starts that section on the fresh page). Parity breaks (odd/even
-    // page) still force their own page.
+    // page) still force their own page. A page that a section break opened
+    // stays: it holds that section's break mark, so it prints with that
+    // section's header and footer (an empty first section before a next-page
+    // section leaves a blank page 1, as in LibreOffice).
     if (
       sectionStart &&
       this.pages.length > 0 &&
       this.cur &&
+      this.cur.physIndex !== this.sectionFirstPagePhys &&
       this.cur.items.length === 0 &&
       this.pageIsEmptyAtCursor() &&
       (baseSp.type === undefined || baseSp.type === "nextPage" || baseSp.type === "continuous")
