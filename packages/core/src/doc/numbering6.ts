@@ -27,11 +27,13 @@ interface Level {
 const UNDERLINE = ["none", "single", "words", "double", "dotted"];
 
 export class Word6Lists {
-  /** The abstractNum (and num) XML of each list, numId 1 first. */
-  private readonly lists: string[] = [];
+  /** Each list's levels (an abstractNum and its num), numId 1 first. */
+  private readonly lists: { levels: (Level | undefined)[]; type: string }[] = [];
   /** The lists of the run of autonumbered paragraphs being read, by level and ANLD. */
   private readonly open = new Map<string, number>();
   private readonly headingLists = new Map<string, number>();
+  /** The heading numbers of the sections with no OLST: each level as its first paragraph's ANLD says. */
+  private headingAnlds: number | undefined;
 
   constructor(private readonly fonts: Font[], private readonly mac: boolean, private readonly ctx: XmlContext) {}
 
@@ -64,6 +66,16 @@ export class Word6Lists {
       this.open.clear();
       return;
     }
+    if (nLvlAnm >= 1 && nLvlAnm <= 9 && anld && anld.length >= 20) {
+      // A heading level in a section with no OLST: its own ANLD (or its style's) gives the level's format.
+      if (this.headingAnlds === undefined) this.headingAnlds = this.add([], "multilevel");
+      const levels = this.lists[this.headingAnlds - 1].levels;
+      levels[nLvlAnm - 1] ??= this.level(anld, anld.subarray(20));
+      p.ilfo = this.headingAnlds;
+      p.ilvl = nLvlAnm - 1;
+      this.open.clear();
+      return;
+    }
     // 12 skips numbering: the paragraph has no number but stays in the lists.
     if (nLvlAnm === 12) return;
     if ((nLvlAnm !== 10 && nLvlAnm !== 11) || !anld || anld.length < 20) {
@@ -85,24 +97,15 @@ export class Word6Lists {
   /** numbering.xml, or undefined when no paragraph is numbered. */
   xml(): string | undefined {
     if (this.lists.length === 0) return undefined;
+    const abstracts = this.lists.map((list, i) => abstractNumXml(i, list.levels, list.type));
     const nums = this.lists.map((_, i) => `<w:num w:numId="${i + 1}"><w:abstractNumId w:val="${i}"/></w:num>`);
-    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${this.lists.join("")}${nums.join("")}</w:numbering>`;
+    return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${abstracts.join("")}${nums.join("")}</w:numbering>`;
   }
 
+  /** A new list; its numId. */
   private add(levels: Level[], type: string): number {
-    const id = this.lists.length;
-    let s = `<w:abstractNum w:abstractNumId="${id}"><w:multiLevelType w:val="${type}"/>`;
-    levels.forEach((level, ilvl) => {
-      let number = `%${ilvl + 1}`;
-      if (level.prev) for (let k = ilvl; k > 0; k--) number = `%${k}.${number}`;
-      const text = level.nfc === 23 ? level.before + level.after : level.before + number + level.after;
-      s += `<w:lvl w:ilvl="${ilvl}"><w:start w:val="${level.startAt}"/><w:numFmt w:val="${level.nfc === 23 ? "bullet" : numFormat(level.nfc)}"/>`;
-      s += `<w:lvlText w:val="${escapeAttr(text)}"/><w:lvlJc w:val="${["left", "center", "right", "left"][level.jc]}"/>`;
-      if (level.rPr) s += `<w:rPr>${level.rPr}</w:rPr>`;
-      s += "</w:lvl>";
-    });
-    this.lists.push(s + "</w:abstractNum>");
-    return id + 1;
+    this.lists.push({ levels, type });
+    return this.lists.length;
   }
 
   /** A level from an ANLV (`v`) and the text it takes from `rgch`: its text before the number, then after it. */
@@ -145,6 +148,21 @@ export class Word6Lists {
       rPr: rPr.join(""),
     };
   }
+}
+
+function abstractNumXml(id: number, levels: (Level | undefined)[], type: string): string {
+  let s = `<w:abstractNum w:abstractNumId="${id}"><w:multiLevelType w:val="${type}"/>`;
+  levels.forEach((level, ilvl) => {
+    if (!level) return;
+    let number = `%${ilvl + 1}`;
+    if (level.prev) for (let k = ilvl; k > 0; k--) number = `%${k}.${number}`;
+    const text = level.nfc === 23 ? level.before + level.after : level.before + number + level.after;
+    s += `<w:lvl w:ilvl="${ilvl}"><w:start w:val="${level.startAt}"/><w:numFmt w:val="${level.nfc === 23 ? "bullet" : numFormat(level.nfc)}"/>`;
+    s += `<w:lvlText w:val="${escapeAttr(text)}"/><w:lvlJc w:val="${["left", "center", "right", "left"][level.jc]}"/>`;
+    if (level.rPr) s += `<w:rPr>${level.rPr}</w:rPr>`;
+    s += "</w:lvl>";
+  });
+  return s + "</w:abstractNum>";
 }
 
 function hex(bytes: Uint8Array): string {
