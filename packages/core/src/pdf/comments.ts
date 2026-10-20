@@ -211,22 +211,45 @@ export class CommentColumn {
       }
     }
     // Each tracked change's first line on this page, in paint order (a
-    // changed picture's box counts as a line), and where the change ends on it.
-    const changes = new Map<string, { change: Revision; top: number; bottom: number; x1: number }>();
+    // changed picture's box counts as a line), and where the change ends on
+    // it: its last item, its last item that is more than spaces (ink), and
+    // the middle of the clear space the layout keeps after a change that
+    // ends inside a word (gap, TextItem.changeGap).
+    type ChangeLine = { top: number; bottom: number; x1: number; ink?: number; gap?: number };
+    const changes = new Map<string, ChangeLine & { change: Revision }>();
     for (const item of page.items) {
-      let line: { list: Revision[] | undefined; top: number; bottom: number; x1: number };
-      if (item.kind === "text" && !item.hidden) line = { list: item.src?.run.changes, top: item.lineTop, bottom: item.lineTop + item.lineHeight, x1: item.x + item.width };
-      else if (item.kind === "image") line = { list: item.changes, top: item.y, bottom: item.y + item.height, x1: item.x + item.width };
-      else continue;
-      for (const change of line.list ?? []) {
+      let list: Revision[] | undefined;
+      let line: ChangeLine;
+      if (item.kind === "text" && !item.hidden) {
+        list = item.src?.run.changes;
+        line = { top: item.lineTop, bottom: item.lineTop + item.lineHeight, x1: item.x + item.width };
+        if (item.changeGap) line.gap = item.x + item.width / 2;
+        else if (item.text.trim()) line.ink = item.x + item.width;
+      } else if (item.kind === "image") {
+        list = item.changes;
+        line = { top: item.y, bottom: item.y + item.height, x1: item.x + item.width, ink: item.x + item.width };
+      } else continue;
+      for (const change of list ?? []) {
         const first = changes.get(change.id);
-        if (!first) changes.set(change.id, { change, top: line.top, bottom: line.bottom, x1: line.x1 });
-        else if (line.top === first.top) first.x1 = Math.max(first.x1, line.x1);
+        if (!first) changes.set(change.id, { change, ...line });
+        else if (line.top === first.top) {
+          first.x1 = Math.max(first.x1, line.x1);
+          if (line.ink !== undefined) first.ink = Math.max(first.ink ?? line.ink, line.ink);
+          if (line.gap !== undefined) first.gap = line.gap;
+        }
       }
     }
-    // The end of each comment's first highlighted line, where its leader starts.
+    // The end of each comment's first highlighted line, where its leader
+    // starts. A change's bar goes in the clear space after it when it ends
+    // inside a word, else just past its last letter, in the space or the
+    // margin after it.
     const firstLine = new Map<string, { x: number; y: number; top: number; bottom: number }>();
-    for (const [id, { top, bottom, x1 }] of changes) firstLine.set(`rev:${id}`, { x: x1, y: (top + bottom) / 2, top, bottom });
+    for (const [id, { top, bottom, x1, ink, gap }] of changes) {
+      let x = x1;
+      if (gap !== undefined && gap > (ink ?? -Infinity)) x = gap;
+      else if (ink !== undefined) x = ink + 1;
+      firstLine.set(`rev:${id}`, { x, y: (top + bottom) / 2, top, bottom });
+    }
     for (const [id, list] of items) {
       const resolved = this.byId.get(id)?.resolved;
       // One continuous rect per line, as word-granular spans would gap at spaces.
@@ -236,7 +259,7 @@ export class CommentColumn {
           drawer.ops.push(
             `q /${this.resources.alpha(resolved ? 0.22 : 0.38)} gs ${resolved ? "0.627 0.627 0.627" : "1 0.784 0.353"} rg ${drawer.rect(run.x0, run.top, run.x1 - run.x0, run.height)} f Q`,
           );
-          if (!firstLine.has(id)) firstLine.set(id, { x: run.x1, y: run.top + run.height / 2, top: run.top, bottom: run.top + run.height });
+          if (!firstLine.has(id)) firstLine.set(id, { x: run.x1 - 1, y: run.top + run.height / 2, top: run.top, bottom: run.top + run.height });
         }
         run = null;
       };
@@ -270,7 +293,7 @@ export class CommentColumn {
       const comment = this.byId.get(id);
       if (at.page !== page.index || !comment || this.placed.has(id)) continue;
       this.placed.add(id);
-      firstLine.set(id, { x: at.x, y: (at.top + at.bottom) / 2, top: at.top, bottom: at.bottom });
+      firstLine.set(id, { x: at.x - 1, y: (at.top + at.bottom) / 2, top: at.top, bottom: at.bottom });
       balloons.push({ top: at.top, balloon: this.balloon(comment) });
     }
     balloons.sort((a, b) => a.top - b.top);
@@ -288,14 +311,15 @@ export class CommentColumn {
     for (const band of page.columnBands) band.colXs.forEach((x, i) => (textRight = Math.max(textRight, x + band.colWidths[i])));
     for (const item of page.items) if (item.kind === "text" && !item.hidden) textRight = Math.max(textRight, item.x + item.width);
     textRight = Math.min(textRight + 6, page.width - 2);
-    /** Mark the highlight's end with a short tick in the author's color,
-     * and draw the dashed leader from the text area's right edge across the
-     * margin to the rail, and on to a card at `cardTop` when it is on this
-     * sheet. No segment crosses or underlines text. */
+    /** Mark the highlight's or the change's end with a hairline bar in the
+     * author's color (a heavier bar hid the letters beside it), and draw
+     * the dashed leader from the text area's right edge across the margin
+     * to the rail, and on to a card at `cardTop` when it is on this sheet.
+     * No segment crosses or underlines text. */
     const leader = (balloon: Balloon, cardTop: number | null): void => {
       const from = firstLine.get(balloon.id);
       if (!from) return;
-      drawer.ops.push(`q 1.5 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x - 1))} ${num(drawer.y(from.top + 2))} m ${num(drawer.x(from.x - 1))} ${num(drawer.y(from.bottom - 2))} l S Q`);
+      drawer.ops.push(`q 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.top + 2))} m ${num(drawer.x(from.x))} ${num(drawer.y(from.bottom - 2))} l S Q`);
       const ops = [
         `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(textRight))} ${num(drawer.y(from.y))} m ${num(drawer.x(page.width))} ${num(drawer.y(from.y))} l`,
       ];
