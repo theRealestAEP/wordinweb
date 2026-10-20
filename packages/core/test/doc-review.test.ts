@@ -144,6 +144,11 @@ describe("doc review: joinRevisionWrappers", () => {
       `<w:ins w:id="1" ${A}><w:del w:id="2" ${B}>xy</w:del></w:ins>`,
     );
   });
+  it("takes the bookmark and comment range marks between two wrappers inside", () => {
+    expect(joinRevisionWrappers(`<w:del w:id="1" ${A}>x</w:del><w:bookmarkStart w:id="7" w:name="b"/><w:commentRangeEnd w:id="2"/><w:del w:id="2" ${A}>y</w:del>`)).toBe(
+      `<w:del w:id="1" ${A}>x<w:bookmarkStart w:id="7" w:name="b"/><w:commentRangeEnd w:id="2"/>y</w:del>`,
+    );
+  });
   it("keeps wrappers apart across other content, another author or a mark's revision", () => {
     const apart = `<w:del w:id="1" ${A}>x</w:del><w:r/><w:del w:id="2" ${A}>y</w:del><w:del w:id="3" ${B}>z</w:del>`;
     expect(joinRevisionWrappers(apart)).toBe(apart);
