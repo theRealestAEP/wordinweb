@@ -488,7 +488,11 @@ export abstract class Word2Reader {
           case 0x78: props.dxaColumns = this.n16(arg, 0); break;
           case 0x7a: props.nfcPgn = arg[0]; break;
           case 0x7d: props.pgnRestart = arg[0] !== 0; break;
+          case 0x7f: props.lnc = arg[0]; break;
           case 0x80: headerFlags = arg[0]; break;
+          case 0x81: props.nLnnMod = this.n16(arg, 0); break;
+          case 0x82: props.dxaLnn = this.n16(arg, 0); break;
+          case 0x87: props.lnnMin = this.n16(arg, 0); break;
           case 0x83: props.dyaHdrTop = this.n16(arg, 0); break;
           case 0x84: props.dyaHdrBottom = this.n16(arg, 0); break;
           case 0x85: props.lineBetween = arg[0] !== 0; break;
