@@ -138,6 +138,19 @@ export abstract class Word2Reader {
 
   // ---- What each format reads its own way ----------------------------------
 
+  /** The size of an FKP page: 512 bytes, 128 in Word for the Macintosh 3. */
+  protected readonly fkpPageSize: number = 512;
+  /** The bytes of a PAPX before its sprms: the style number and six more (three in all in Word for the Macintosh 3). */
+  protected readonly papxHeader: number = 7;
+  /** A SEPX's sprms, in word2.ts's numbering of the section sprms. */
+  protected sectionSprms(sepx: Uint8Array): Sprm[] {
+    return this.parseSprms(sepx);
+  }
+  /** The name of a standard style by its number. */
+  protected standardStyleName(id: number): string | undefined {
+    return STANDARD_STYLES[id];
+  }
+
   protected abstract readFib(): Fib;
   protected abstract readDocProps(): DocProps;
   /** The operand sizes of the format's sprms: -1 for a size byte first, -2 for a size word that counts one byte more than follows. */
@@ -281,21 +294,24 @@ export abstract class Word2Reader {
       let pn = this.n16(bte, 4 * (n + 1) + 2 * i);
       let expected = this.n32(bte, 4 * i);
       for (let pages = 0; pages < 256; pages++, pn++) {
-        const page = pn * 512;
-        if (page + 512 > this.bytes.length) break;
-        const crun = this.u8(page + 511);
-        if (crun === 0 || 5 * crun + 4 > 511 || this.u32(page) !== expected) break;
+        const size = this.fkpPageSize;
+        const page = pn * size;
+        if (page + size > this.bytes.length) break;
+        const crun = this.u8(page + size - 1);
+        if (crun === 0 || 5 * crun + 4 > size - 1 || this.u32(page) !== expected) break;
         expected = this.u32(page + 4 * crun);
+        // In a 512-byte page, run offsets count words, and so does a PAPX's size; in a 128-byte page (Word for the Macintosh 3), bytes.
+        const unit = size === 512 ? 2 : 1;
         for (let k = 0; k < crun; k++) {
           const fc = this.u32(page + 4 * k);
           const end = this.u32(page + 4 * (k + 1));
-          const offset = this.u8(page + 4 * (crun + 1) + k) * 2;
+          const offset = this.u8(page + 4 * (crun + 1) + k) * unit;
           let data: Uint8Array | undefined;
           if (offset) {
-            const size = this.u8(page + offset);
-            // A PAPX's size counts words after its size byte; a CHPX's, bytes.
-            const length = paragraph ? 2 * size : size;
-            data = this.bytes.subarray(page + offset + 1, Math.min(page + offset + 1 + length, page + 511));
+            const count = this.u8(page + offset);
+            // A CHPX's size counts bytes.
+            const length = paragraph ? unit * count : count;
+            data = this.bytes.subarray(page + offset + 1, Math.min(page + offset + 1 + length, page + size - 1));
           }
           if (end > fc) runs.push({ fc, end, data });
         }
@@ -386,14 +402,14 @@ export abstract class Word2Reader {
       resolving.delete(id);
       if (style?.chpx) this.applyChpx(char, style.chpx);
       // A style's paragraph entry: its own number, six bytes, then its sprms.
-      if (style?.papx && style.papx.length > 7) {
-        const sprms = this.parseSprms(style.papx.subarray(7));
+      if (style?.papx && style.papx.length > this.papxHeader) {
+        const sprms = this.parseSprms(style.papx.subarray(this.papxHeader));
         this.applyParaSprms(para, sprms, false);
         for (const sprm of para.charSprms) this.applyCharSprm(char, sprm, char);
       }
       para.props.istd = 0;
       para.charSprms = [];
-      const name = id === 0 ? "Normal" : style?.name ?? STANDARD_STYLES[id] ?? `Style ${id}`;
+      const name = id === 0 ? "Normal" : style?.name ?? this.standardStyleName(id) ?? `Style ${id}`;
       const entry = { name, para, char, next: style?.next ?? id, index: -1 };
       this.styles.set(id, entry);
       return entry;
@@ -463,7 +479,7 @@ export abstract class Word2Reader {
       const props: SectionProps = { ...structuredClone(this.docProps.page) };
       let headerFlags = 0;
       // A fast-saved file changes a section by the property modifier of the piece that holds its end.
-      const sprms = [...this.parseSprms(limit.sepx ?? new Uint8Array(0)), ...(this.pieceAt(limit.end - 1)?.sprms ?? [])];
+      const sprms = [...this.sectionSprms(limit.sepx ?? new Uint8Array(0)), ...(this.pieceAt(limit.end - 1)?.sprms ?? [])];
       for (const { op, arg } of sprms) {
         switch (op) {
           case 0x75: props.bkc = arg[0]; break;
@@ -566,7 +582,7 @@ export abstract class Word2Reader {
     const para = clonePara(style.para);
     para.props.istd = style.index;
     // A PAPX: the style number, six bytes (the paragraph's line heights), then its sprms.
-    if (papx && papx.length > 7) this.applyParaSprms(para, this.parseSprms(papx.subarray(7)), true);
+    if (papx && papx.length > this.papxHeader) this.applyParaSprms(para, this.parseSprms(papx.subarray(this.papxHeader)), true);
     if (piece?.sprms.length) this.applyParaSprms(para, piece.sprms, true);
     return para;
   }
