@@ -41,8 +41,9 @@ export const DOCUMENT_LIMITS = {
   /** The main document part's elements [558,000]: about 0.5 KB each loaded,
    * and about 1 KB each rendered when they are text runs ... */
   documentElements: 1_000_000,
-  /** ... and its paragraphs and table cells [23,000]. */
-  documentBlocks: 100_000,
+  /** ... and its paragraphs and table cells [23,000]: 250,000 empty ones
+   * load in 470 MB and render in 465 MB. */
+  documentBlocks: 250_000,
   /** One block of the body (a paragraph or table) as the streaming render
    * holds it, in bytes [2.0 MB] ... */
   blockBytes: 8 << 20,

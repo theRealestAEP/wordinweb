@@ -380,8 +380,6 @@ export class DocxDocument {
 
     const docPart = this.findDocumentPart();
     this.docPart = docPart;
-    // What the XML will cost once parsed, from its bytes, before any more is.
-    holdXmlCounts(pkg.raw(), docPart);
     const docDir = docPart.slice(0, docPart.lastIndexOf("/") + 1);
 
     this.settingsPart = docDir + "settings.xml";
@@ -3152,6 +3150,8 @@ export class DocxDocument {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     const pkg = isOleFile(bytes) ? Package.fromFiles(docPackageFiles(bytes)) : Package.from(bytes);
     normalizeStrictPackage(pkg.raw());
+    // What the XML will cost once parsed, from its bytes, before any of it is.
+    holdXmlCounts(pkg.raw(), mainDocumentPart(pkg.binary("_rels/.rels")));
     return new DocxDocument(pkg);
   }
 
