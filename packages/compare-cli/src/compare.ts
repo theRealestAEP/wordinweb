@@ -257,10 +257,10 @@ function openInput(path: string, side: Side, dir: string): ZipReader {
 
 /**
  * The .docx to read for an input: the input itself, or, for a Word
- * 97-2003 .doc, a working file it is converted to (core's doc/convert.ts;
+ * 6.0-2003 .doc, a working file it is converted to (core's doc/convert.ts;
  * the .doc and its .docx are in memory for the conversion). Another format
- * (RTF, PDF, Word 6.0/95, a password-protected document) is refused from
- * its first bytes as unsupported_format.
+ * (RTF, PDF, a password-protected document) is refused from its first
+ * bytes as unsupported_format.
  */
 function docxPathOf(path: string, side: Side, dir: string): string {
   const fd = openSync(path, "r");

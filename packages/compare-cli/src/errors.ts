@@ -5,9 +5,9 @@ export type CompareErrorCode =
   /** An input is not a .docx: not a zip, or a zip with no Word document. */
   | "not_docx"
   /** An input is another format the compare does not read, which the message
-   * names: an RTF, PDF or OpenDocument file, a Word 6.0/95 file, a
-   * password-protected document. (A Word 97-2003 .doc is read: it is
-   * converted to a .docx working file first.) */
+   * names: an RTF, PDF or OpenDocument file, a password-protected
+   * document. (A Word 6.0-2003 .doc is read: it is converted to a .docx
+   * working file first.) */
   | "unsupported_format"
   /** An input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed, a .doc whose tables are corrupt. */
   | "damaged"

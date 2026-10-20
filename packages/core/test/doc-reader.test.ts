@@ -197,6 +197,56 @@ describe("the .doc reader", () => {
   });
 });
 
+// Word 6.0/95 files from GovDocs1 (public domain US government documents):
+// 000114 a full-saved Word 95 file with a table, a header and footers;
+// 025814 a fast-saved one (its text in a piece table); 004072 one with
+// tracked changes; 021219 one with bulleted lists.
+describe("the .doc reader with a Word 6.0/95 file", () => {
+  it("reads the FIB and the 8-bit text of a full-saved file", () => {
+    const reader = openDoc(bytes("word95-000114.doc"));
+    expect(reader.fib.nFib).toBe(0x68);
+    expect(reader.fib.word6?.complex).toBe(false);
+    expect(reader.streams.table).toBe(reader.streams.wordDocument);
+    expect(reader.fonts.map((f) => f.name)).toContain("Times New Roman");
+    expect(reader.styles.id(0)).toBe("Normal");
+    const doc = DocxDocument.load(docToDocx(bytes("word95-000114.doc")));
+    const texts = paragraphTexts(doc);
+    expect(texts[0]).toBe("FIELD PROTOCOLS FOR NRDABiota/Tarball Stranding Documentation");
+    expect(texts).toContain("Objectives");
+    expect(doc.sections[0].blocks.some((block) => block.type === "table")).toBe(true);
+    // The header the section's grpfIhdt names.
+    expect(Object.values(parts(docToDocx(bytes("word95-000114.doc")))).some((xml) => xml.startsWith('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr') && xml.includes(">12/98<"))).toBe(true);
+  });
+
+  it("reads a fast-saved file's pieces as 8-bit text, in order", () => {
+    const reader = openDoc(bytes("word95-025814.doc"));
+    expect(reader.fib.word6?.complex).toBe(true);
+    const texts = paragraphTexts(DocxDocument.load(docToDocx(bytes("word95-025814.doc"))));
+    expect(texts).toContain("STS-84 Crew Debrief Captions");
+    expect(texts).toContain("Center of Tropical Cyclone #01B in the Bay of Bengal.  It later reached landfall near the Burma/ Bangladesh boarder.");
+    // Read as 16-bit, the 8-bit text would turn into CJK characters.
+    expect(texts.join("")).not.toMatch(/[　-￿]/);
+  });
+
+  it("writes the tracked changes with their author and date", () => {
+    const body = parts(docToDocx(bytes("word95-004072.doc")))["word/document.xml"];
+    expect(body).toContain('<w:ins w:id="9" w:author="CAE Department" w:date="1994-07-15T16:02:00Z">');
+    expect(body).toMatch(/<w:del w:id="\d+" w:author="Unknown">/);
+  });
+
+  it("writes the autonumbered paragraphs as lists", () => {
+    const xml = parts(docToDocx(bytes("word95-021219.doc")));
+    expect(xml["word/numbering.xml"]).toMatch(/<w:numFmt w:val="bullet"\/><w:lvlText w:val=""\/>.*<w:rFonts w:ascii="Symbol"/);
+    expect(xml["word/document.xml"]).toContain('<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>');
+  });
+
+  it("renders each file", async () => {
+    for (const name of ["word95-000114.doc", "word95-025814.doc", "word95-004072.doc", "word95-021219.doc"]) {
+      expect(await pages(bytes(name)), name).toBeGreaterThan(0);
+    }
+  });
+});
+
 /** Where the WordDocument stream's bytes start in the file (the FIB's wIdent). */
 function findStream(file: Uint8Array, stream: Uint8Array): number {
   const head = stream.subarray(0, 32);
