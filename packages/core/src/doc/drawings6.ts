@@ -234,10 +234,10 @@ function readFill(dp: Uint8Array, at: number): DocShape["fill"] {
   return { kind: "solid", color: mix.map((c) => c.toString(16).padStart(2, "0")).join("").toUpperCase() };
 }
 
-/** shdwpi and the shadow's offset at `at`: a gray shadow when it is offset. */
+/** shdwpi and the shadow's offset at `at`: a gray shadow when it has an intensity (the offset alone stays from a shadow turned off). */
 function shadow(shape: DocShape, dp: Uint8Array, at: number): void {
-  const dx = i16(dp, at + 2), dy = i16(dp, at + 4);
-  if (at + 6 <= dp.length && (dx || dy)) shape.shadow = { color: "808080", dx: dx * EMU_PER_TWIP, dy: dy * EMU_PER_TWIP };
+  if (at + 6 > dp.length || i16(dp, at) === 0) return;
+  shape.shadow = { color: "808080", dx: i16(dp, at + 2) * EMU_PER_TWIP, dy: i16(dp, at + 4) * EMU_PER_TWIP };
 }
 
 /** A DO as one floating shape: its primitive, or a group of them, placed in its frame with text over or under it. */

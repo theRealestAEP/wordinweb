@@ -52,7 +52,7 @@ const SAME: Record<number, number> = {
   25: 0x2417, 26: 0x8418, 27: 0x8419, 28: 0x841a, 29: 0x261b, 37: 0x2423, 44: 0x242a, 45: 0x442b, 46: 0x442c, 47: 0x442d, 48: 0x842e,
   49: 0x842f, 50: 0x2430, 51: 0x2431, 53: 0x2433, 54: 0x2434, 55: 0x2435, 56: 0x2436, 57: 0x2437, 58: 0x2438,
   // Character.
-  65: 0x0800, 66: 0x0801, 67: 0x0802, 71: 0x0806, 75: 0x080a, 80: 0x4a30, 85: 0x0835, 86: 0x0836, 87: 0x0837, 88: 0x0838, 89: 0x0839,
+  65: 0x0800, 66: 0x0801, 67: 0x0802, 71: 0x0806, 73: 0xea08, 75: 0x080a, 80: 0x4a30, 85: 0x0835, 86: 0x0836, 87: 0x0837, 88: 0x0838, 89: 0x0839,
   90: 0x083a, 91: 0x083b, 92: 0x083c, 94: 0x2a3e, 96: 0x8840, 97: 0x486d, 98: 0x2a42, 99: 0x4a43, 101: 0x4845, 104: 0x2a48, 107: 0x484b,
   117: 0x0855, 118: 0x0856,
   // Section: the Word 97 ispmd is the Word 6 opcode minus 131, then minus 133.
@@ -203,8 +203,9 @@ function defTable(o: Uint8Array, borders: boolean): number[] {
   for (let c = 0; c < count; c++) {
     const at = edgesEnd + c * 10;
     const tc = at + 10 <= o.length ? o.subarray(at, at + 10) : new Uint8Array(10);
-    // rgf: fFirstMerged and fMerged are the TC80's first two bits too; the width is left to the edges.
-    body.push(tc[0] & 3, 0, 0, 0);
+    // rgf: fFirstMerged (1) and fMerged (2) as the TC80's horzMerge, the first of a merged range 2 and the cells merged into it 1; the width is left to the edges.
+    const horzMerge = tc[0] & 2 ? 1 : tc[0] & 1 ? 2 : 0;
+    body.push(horzMerge, 0, 0, 0);
     for (let side = 0; side < 4; side++) body.push(...(borders ? brc80(u16(tc, 2 + side * 2)) : [0, 0, 0, 0]));
   }
   const cb = body.length + 1;

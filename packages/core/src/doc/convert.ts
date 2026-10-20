@@ -493,7 +493,7 @@ class Converter {
     const word6 = this.reader.fib.word6;
     const ftc = props.ftc0 ?? (word6 ? this.reader.styles.font(istdPara, props.istd) : undefined);
     const symbolFont = run.compressed && ftc !== undefined && fonts[ftc]?.charset === 2;
-    const highChars = word6 && highHalf(ftc !== undefined ? fonts[ftc]?.charset ?? 0 : 0, word6.mac);
+    const highChars = word6 && highHalf(ftc !== undefined ? fonts[ftc]?.charset ?? 0 : 0, props.chse !== undefined ? props.chse === 256 : word6.mac);
     const out: string[] = [];
     let text = "";
     let content = "";

@@ -82,6 +82,8 @@ export interface RunProps {
   shading?: Shading;
   /** sprmCSymbol: the font and character of a symbol (the text is U+0028). */
   symbol?: { ftc: number; char: number };
+  /** sprmCChs (Word 6 sprmCChse): the character set of pasted 8-bit text, 256 the Macintosh one, when it is not the document's. */
+  chse?: number;
   /** sprmCPicLocation: the offset in the Data stream of a picture (U+0001) or an OLE object's name (U+0014). */
   picLocation?: number;
   /** sprmCFData: the U+0001 is binary data, not a picture. */
@@ -421,6 +423,7 @@ export function applyRunSprms(grpprl: Uint8Array, p: RunProps): void {
       case 0x6805: p.insDate = u32(o, 0); break;
       case 0x0806: p.fData = o[0] !== 0; break;
       case 0x6a09: p.symbol = { ftc: u16(o, 0), char: u16(o, 2) }; break;
+      case 0xea08: if (o[0]) p.chse = u16(o, 1); else delete p.chse; break;
       case 0x080a: p.fOle2 = o[0] !== 0; break;
       case 0x0856: p.fObj = o[0] !== 0; break;
       case 0x2a0c: p.highlight = o[0]; break;
