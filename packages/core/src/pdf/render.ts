@@ -12,7 +12,7 @@ import { IMAGE_PLACEHOLDER } from "./canvas.js";
 import { PageDrawer, Picture } from "./draw.js";
 import { PdfRenderError, asPdfRenderError, unsupportedScript } from "./errors.js";
 import { FontSet, defaultFontDirs, deobfuscateFont } from "./fonts.js";
-import { writeImage, writeSamples } from "./images.js";
+import { PICTURE_BYTES, writeImage, writeSamples } from "./images.js";
 import { bookmarkTops, linkAction, linkBoxes, pdfName } from "./links.js";
 import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
@@ -76,7 +76,9 @@ export interface RenderPdfResult {
   missingFonts: string[];
   /** Characters no installed font has, as "U+4E2D 中": each drew as an empty box. */
   missingCharacters: string[];
-  /** Picture parts drawn as empty frames: no decoder for their format. */
+  /** Picture parts drawn as empty frames: no decoder for their format, or
+   * cut short or malformed, or over the picture budgets (BITMAP_BYTES,
+   * PICTURE_BYTES in images.ts). */
   unsupportedImages: string[];
 }
 
@@ -202,6 +204,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     if (size === undefined) return null;
     const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
     if (ext === "emf" || ext === "wmf" || ext === "pict") {
+      if (size > PICTURE_BYTES) return null;
       const bytes = await opened.media(part);
       const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources));
       if (!canvas) return null;

@@ -10,13 +10,38 @@ export interface WrittenImage {
 }
 
 /**
- * The most pixels an image is embedded with. A PNG is decoded a row at a
- * time and one over the budget is averaged down by a whole factor as it
- * streams, so its memory is a few rows and the output's alpha plane; a
- * TIFF or GIF, decoded whole, is refused over it (an empty frame, reported
- * as unsupported); a metafile's bitmap is averaged down after the fact.
+ * The most bytes of pixels one picture's decoders hold: width x height x
+ * bytes per pixel, every bitmap of the picture together, taken from a
+ * BitmapBudget before each buffer is allocated. A picture over it is
+ * drawn as an empty frame and listed as unsupported. 64 MB is 16 million
+ * pixels of RGBA; the largest picture part in the test corpora is 1.9 MB.
  */
-export const PIXEL_BUDGET = 16_000_000;
+export const BITMAP_BYTES = 64 << 20;
+/**
+ * The most pixels an image is embedded with: a PNG over it is averaged
+ * down by a whole factor as it streams (its memory is a few rows and the
+ * output's alpha plane), up to STREAMED_PIXELS.
+ */
+export const PIXEL_BUDGET = BITMAP_BYTES / 4;
+/** The most pixels a streamed PNG may have before it is averaged down: a bound on the work, not the memory. */
+const STREAMED_PIXELS = 16 * PIXEL_BUDGET;
+/** The most bytes of a picture part read whole (a metafile, a TIFF, a GIF), checked from the zip's directory before it is read. */
+export const PICTURE_BYTES = 64 << 20;
+
+/** A picture over BITMAP_BYTES. */
+export class PictureTooLarge extends Error {}
+
+/** One picture's BITMAP_BYTES, taken by each bitmap before it is allocated. */
+export class BitmapBudget {
+  private left = BITMAP_BYTES;
+
+  /** Take a bitmap of `width` x `height` x `bytesPerPixel` bytes; throws PictureTooLarge when it does not fit. */
+  take(width: number, height: number, bytesPerPixel = 4): void {
+    const bytes = Math.max(0, width) * Math.max(0, height) * bytesPerPixel;
+    if (!(bytes <= this.left)) throw new PictureTooLarge(`a ${width} x ${height} bitmap is over the ${BITMAP_BYTES} bytes of pixels a picture may hold`);
+    this.left -= bytes;
+  }
+}
 /** Compressed PNG bytes per inflater push (each inflates to a megabyte or so at most). */
 const INFLATE_STEP = 1024;
 
@@ -25,9 +50,9 @@ const INFLATE_STEP = 1024;
  * time: a JPEG passes through as DCTDecode once its frame header gives the
  * size, a PNG streams through the decoder into Flate samples with an SMask
  * for its alpha, a TIFF (render/tiff.ts) and a GIF are decoded and written
- * the same way. Null for a format not read here (BMP, SVG) or an image
- * over the pixel budget, which the page draws as an empty frame; EMF and
- * WMF go through metafile.ts instead.
+ * the same way. Null for a format not read here (BMP, SVG), an image over
+ * the budgets, or one cut short or malformed, which the page draws as an
+ * empty frame; EMF and WMF go through metafile.ts instead.
  */
 export async function writeImage(
   writer: PdfWriter,
@@ -39,6 +64,7 @@ export async function writeImage(
   if (ext === "jpg" || ext === "jpeg" || ext === "jpe") return writeJpeg(writer, size, pieces);
   if (ext === "png") return writePng(writer, pieces);
   if (ext !== "tif" && ext !== "tiff" && ext !== "gif") return null;
+  if (size > PICTURE_BYTES) return null;
   const bytes = new Uint8Array(size);
   let at = 0;
   if (!(await pieces((piece) => {
@@ -49,7 +75,7 @@ export async function writeImage(
     const gif = decodeGif(bytes);
     return gif ? writeSamples(writer, gif) : null;
   }
-  const tiff = decodeTiff(bytes, PIXEL_BUDGET);
+  const tiff = decodeTiff(bytes, BITMAP_BYTES);
   return tiff ? writeSamples(writer, splitRgba(tiff.rgba, tiff.width, tiff.height)) : null;
 }
 
@@ -378,16 +404,23 @@ async function writePng(writer: PdfWriter, pieces: Pieces): Promise<WrittenImage
   const chunks = new PngChunks(
     (h) => {
       if (!h.width || !h.height) throw new Error("PNG has no size");
+      const { channels, gray, hasAlpha, convert } = pngConverter(h);
+      const budget = new BitmapBudget();
       if (h.interlaced) {
-        // Adam7 scatters each pass over the image: decoded whole, within the budget.
-        if (h.width * h.height > PIXEL_BUDGET) throw new Error("interlaced PNG over the pixel budget");
+        // Adam7 scatters each pass over the image: decoded whole, its
+        // inflated rows and its samples and alpha, within the budget.
+        budget.take(h.width, h.height, (channels * h.bitDepth) / 8 + (gray ? 1 : 3) + 1 + 1);
         whole = [];
         return;
       }
-      const { channels, gray, hasAlpha, convert } = pngConverter(h);
+      // Streamed, any size up to STREAMED_PIXELS is averaged down: the rows
+      // it keeps (about 32 bytes a pixel of one row) and the output's alpha plane count.
+      if (h.width * h.height > STREAMED_PIXELS) throw new Error("PNG over the pixels a picture may stream");
+      budget.take(h.width, 1, 32);
       const k = shrinkFactor(h.width, h.height);
       const width = Math.ceil(h.width / k);
       const height = Math.ceil(h.height / k);
+      if (hasAlpha) budget.take(width, height, 1);
       const samples = gray ? 1 : 3;
       const stride = Math.ceil((h.width * channels * h.bitDepth) / 8);
       const bpp = Math.max(1, (channels * h.bitDepth) >> 3);
@@ -483,7 +516,9 @@ async function writePng(writer: PdfWriter, pieces: Pieces): Promise<WrittenImage
     return chain;
   });
   await chain;
-  if (!found || failed || (!out && !whole)) {
+  // A PNG cut short: no IEND, or fewer rows than its header gives.
+  const short = !chunks.done || (out !== null && (out as PngOut).rows < (out as PngOut).height);
+  if (!found || failed || (!out && !whole) || short) {
     const o = current();
     if (o) {
       // The objects were reserved: null objects keep the table whole.
@@ -495,7 +530,14 @@ async function writePng(writer: PdfWriter, pieces: Pieces): Promise<WrittenImage
   }
   if (whole) {
     const h = chunks.header;
-    const image = decodePngRows(h, inflateWhole(concat(whole, wholeBytes)));
+    let raw: Uint8Array;
+    try {
+      raw = inflateWhole(concat(whole, wholeBytes), interlacedBytes(h));
+    } catch {
+      // Data that does not inflate, or inflates past the rows the header gives.
+      return null;
+    }
+    const image = decodePngRows(h, raw);
     return image ? writeSamples(writer, image) : null;
   }
   const o = current() as PngOut;
@@ -510,16 +552,34 @@ async function writePng(writer: PdfWriter, pieces: Pieces): Promise<WrittenImage
   return { objNum: o.objNum, width: o.width, height: o.height };
 }
 
-function inflateWhole(data: Uint8Array): Uint8Array {
+/** Inflate `data` whole: at most `limit` bytes, the rows the header
+ * gives; data that inflates to more is stopped there. */
+function inflateWhole(data: Uint8Array, limit = Infinity): Uint8Array {
   const parts: Uint8Array[] = [];
   let total = 0;
   const inflater = new Unzlib((chunk) => {
-    parts.push(chunk);
     total += chunk.length;
+    if (total > limit) throw new Error("PNG data inflates past its rows");
+    parts.push(chunk);
   });
-  inflater.push(data, true);
+  for (let at = 0; at < data.length; at += INFLATE_STEP) inflater.push(data.subarray(at, at + INFLATE_STEP), at + INFLATE_STEP >= data.length);
   return concat(parts, total);
 }
+
+/** The inflated bytes of an interlaced PNG: each pass's rows, a filter byte before each. */
+function interlacedBytes(h: PngHeader): number {
+  const { channels } = pngConverter(h);
+  let total = 0;
+  for (const [x0, y0, dx, dy] of ADAM7) {
+    const passWidth = Math.ceil((h.width - x0) / dx);
+    const passHeight = Math.ceil((h.height - y0) / dy);
+    if (passWidth > 0 && passHeight > 0) total += passHeight * (1 + Math.ceil((passWidth * channels * h.bitDepth) / 8));
+  }
+  return total;
+}
+
+/** Adam7's passes: first column and row, and the steps between. */
+const ADAM7 = [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]];
 
 /** A PNG decoded whole from its chunks and inflated rows: every color type
  * and bit depth, interlaced or not. For tests, and interlaced images. */
@@ -549,9 +609,7 @@ function decodePngRows(h: PngHeader, raw: Uint8Array): SampleImage | null {
   const alpha = new Uint8Array(width * height);
   alpha.fill(255);
   const bpp = Math.max(1, (channels * bitDepth) >> 3);
-  const passes = h.interlaced
-    ? [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]]
-    : [[0, 0, 1, 1]];
+  const passes = h.interlaced ? ADAM7 : [[0, 0, 1, 1]];
   let offset = 0;
   for (const [x0, y0, dx, dy] of passes) {
     const passWidth = Math.ceil((width - x0) / dx);
@@ -633,7 +691,7 @@ export function decodeGif(bytes: Uint8Array): SampleImage | null {
       at++;
       continue;
     }
-    if (block !== 0x2c) return null;
+    if (block !== 0x2c || at + 9 > bytes.length) return null;
     const left = v.getUint16(at, true);
     const top = v.getUint16(at + 2, true);
     const width = v.getUint16(at + 4, true);
@@ -645,7 +703,18 @@ export function decodeGif(bytes: Uint8Array): SampleImage | null {
       palette = bytes.subarray(at, at + size);
       at += size;
     }
-    if (!palette || !width || !height || width * height > PIXEL_BUDGET) return null;
+    if (!palette || !width || !height) return null;
+    // The frame on the logical screen.
+    const outW = Math.min(screenW || width, left + width);
+    const outH = Math.min(screenH || height, top + height);
+    // Its indices, then its samples and alpha, decoded whole.
+    const budget = new BitmapBudget();
+    try {
+      budget.take(width, height, 1);
+      budget.take(outW, outH, 4);
+    } catch {
+      return null;
+    }
     const minCode = bytes[at++];
     // The LZW data, its sub-blocks joined.
     const parts: Uint8Array[] = [];
@@ -655,11 +724,11 @@ export function decodeGif(bytes: Uint8Array): SampleImage | null {
       total += bytes[at];
       at += bytes[at] + 1;
     }
+    // Sub-blocks that run past the end: the frame is cut short.
+    if (at >= bytes.length) return null;
     const indices = lzwDecode(concat(parts, total), minCode, width * height);
     if (!indices) return null;
-    // The frame on the logical screen, interlaced rows put in their place.
-    const outW = Math.min(screenW || width, left + width);
-    const outH = Math.min(screenH || height, top + height);
+    // Interlaced rows put in their place.
     const samples = new Uint8Array(outW * outH * 3);
     const alpha = new Uint8Array(outW * outH);
     const rowOrder: number[] = [];
@@ -774,5 +843,6 @@ function lzwDecode(data: Uint8Array, minCode: number, pixels: number): Uint8Arra
   } catch {
     return null;
   }
-  return out;
+  // Codes that stop before every pixel is written: the frame is cut short.
+  return written < pixels ? null : out;
 }
