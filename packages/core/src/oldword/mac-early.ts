@@ -3,7 +3,7 @@
 // Word 3 is the Word 4 format mac.ts reads, with a shorter header: fifteen
 // file positions at 0x1E, the text's lengths at 0x7C and the document's
 // properties at 0xAC; FKP pages of 128 bytes; three bytes before a PAPX's
-// sprms; section sprms numbered 0x36-0x45; its own standard style numbers.
+// sprms; section sprms numbered 0x36-0x45.
 //
 // Word 1 is laid out as Windows Write is, big-endian: a header of 128 bytes,
 // the text from 0x80, character and paragraph properties in 128-byte pages
@@ -36,12 +36,6 @@ export function readMacEarly(bytes: Uint8Array): OldDocument {
 
 // ---- Word 3 ------------------------------------------------------------------
 
-/** Word 3's standard styles by number: those Word 3 files show; the others keep a "Style -n" name. */
-const WORD3_STANDARD_STYLES: Record<number, string> = {
-  [-1]: "heading 1", [-2]: "heading 2", [-3]: "heading 3", [-4]: "heading 4", [-5]: "heading 5", [-6]: "heading 6", [-7]: "heading 7",
-  [-8]: "heading 8", [-9]: "heading 9", [-10]: "footnote text", [-11]: "footnote reference", [-12]: "header", [-13]: "footer",
-};
-
 /** Word 3's section sprms (0x36-0x45) by the Word 4 sprm that says the same. */
 const WORD3_SECTION_SPRMS: Record<number, number> = {
   0x36: 0x75, 0x37: 0x76, 0x38: 0x77, 0x39: 0x78, 0x3b: 0x7a, 0x41: 0x80, 0x44: 0x83, 0x45: 0x84,
@@ -63,8 +57,10 @@ class Word3Reader extends MacReader {
   protected readFib(): Fib {
     const e = (i: number): Entry => ({ fc: this.u32(0x1e + 6 * i), cb: this.u16(0x22 + 6 * i) });
     this.dop = this.bytes.subarray(0xac, 0x100);
+    const [ccpText, ccpFtn, ccpHdd] = [this.u32(0x7c), this.u32(0x80), this.u32(0x84)];
+    if (ccpText + ccpFtn + ccpHdd > this.bytes.length) throw new Error("the text is longer than the file");
     return {
-      fcMin: 0x100, ccpText: this.u32(0x7c), ccpFtn: this.u32(0x80), ccpHdd: this.u32(0x84),
+      fcMin: 0x100, ccpText, ccpFtn, ccpHdd,
       stsh: e(1).cb ? e(1) : e(0), fndRef: e(2), fndTxt: e(3), sed: e(4), hdd: e(8), bteChpx: e(9), btePapx: e(10), clx: e(14),
     };
   }
@@ -89,10 +85,6 @@ class Word3Reader extends MacReader {
       else if (word4) out.push({ op: word4, arg });
     }
     return out;
-  }
-
-  protected standardStyleName(id: number): string | undefined {
-    return WORD3_STANDARD_STYLES[id];
   }
 
   /** Word 3's formula character (the backslash its formulas start with), then the Mac's special characters. */
@@ -352,21 +344,24 @@ class Word1Reader {
 
   /**
    * A header or footer's blocks under each kind of page its flags name (odd
-   * pages are the default ones); a kind of page it leaves out gets an empty
-   * one. A later one of the same kind replaces an earlier one.
+   * pages are the default ones), in the place of an earlier one there; a
+   * kind of page it leaves out, and no earlier one names, gets an empty one.
    */
   private addRunning(headers: Section["headers"], flags: number, blocks: Block[]): void {
     const kind: HeaderKind = flags & 0x10 ? "footer" : "header";
-    const set = (type: HeaderType, own: boolean): void => {
+    const absent = (type: HeaderType): boolean => !headers.some((h) => h.kind === kind && h.type === type);
+    const put = (type: HeaderType, own: boolean): void => {
+      if (!own && !absent(type)) return;
       const index = headers.findIndex((h) => h.kind === kind && h.type === type);
       if (index >= 0) headers.splice(index, 1);
       headers.push({ kind, type, blocks: own ? blocks : [] });
     };
     const odd = (flags & 0x20) !== 0;
     const even = (flags & 0x40) !== 0;
-    set("default", odd);
-    if (odd !== even) set("even", even);
-    if (!(flags & 0x80)) set("first", false);
+    put("default", odd);
+    // Odd and even pages alike need no even header, unless an earlier one has one.
+    if (!(odd && even && absent("even"))) put("even", even);
+    put("first", (flags & 0x80) !== 0);
   }
 
   /**
@@ -439,18 +434,20 @@ class Word1Reader {
     const runs: Run[] = [];
     // The text, without its mark.
     const textEnd = this.bytes[end - 1] === 0x0d ? end - 1 : end;
+    // A page break that ends the last paragraph only marks the end of the text.
+    const endMark = last && this.bytes[textEnd - 1] === 0x0c ? textEnd - 1 : -1;
     let cp = start;
     while (cp < textEnd) {
       const chp = this.runAt(this.chpRuns, cp);
       const runEnd = Math.min(textEnd, chp ? chp.end : textEnd);
       const char = this.charAt(cp);
-      runs.push(this.run(cp, Math.max(runEnd, cp + 1), char, noteStart && cp === start, last));
+      runs.push(this.run(cp, Math.max(runEnd, cp + 1), char, noteStart && cp === start, endMark));
       cp = Math.max(runEnd, cp + 1);
     }
     return { type: "paragraph", props, mark: this.runProps(this.charAt(Math.max(start, textEnd))), runs: runs.filter((r) => r.content.length) };
   }
 
-  private run(start: number, end: number, char: Word1Char, noteStart: boolean, last: boolean): Run {
+  private run(start: number, end: number, char: Word1Char, noteStart: boolean, endMark: number): Run {
     const content: Inline[] = [];
     let text = "";
     const flush = (): void => {
@@ -468,8 +465,7 @@ class Word1Reader {
       switch (ch) {
         case 0x09: content.push({ kind: "tab" }); break;
         case 0x0b: content.push({ kind: "break" }); break;
-        // A page break; the one that ends the body's last paragraph only marks the body's end.
-        case 0x0c: if (!(last && at === end - 1)) content.push({ kind: "page" }); break;
+        case 0x0c: if (at !== endMark) content.push({ kind: "page" }); break;
         case 0x1f: content.push({ kind: "softHyphen" }); break;
         case 0x01: if (char.special) content.push({ kind: "field", code: "PAGE", result: "1" }); break;
         case 0x05: {

@@ -238,6 +238,22 @@ describe("early Word for Macintosh", () => {
     expect(await pages(zipSync(oldDocumentFiles(doc)))).toBe(1);
   });
 
+  it("gives a Word 1 running head on the first page only to the first page", () => {
+    const bytes = word1();
+    // The running head's flags (byte 16 of its paragraph record): the first page only.
+    bytes[0x180 + 4 + 0x50 + 1 + 16] = 0x80;
+    const { headers, props } = readMacEarly(bytes).sections[0];
+    expect(props.titlePage).toBe(true);
+    expect(paragraphText(headers.find((h) => h.type === "first")!.blocks[0] as Paragraph)).toBe("Head");
+    expect(headers.find((h) => h.type === "default")!.blocks).toEqual([]);
+  });
+
+  it("refuses a Word 3 file whose text is longer than the file", () => {
+    const bytes = word3();
+    new DataView(bytes.buffer).setUint32(0x7c, 0xf9000000);
+    expect(() => readMacEarly(bytes)).toThrow(/longer than the file/);
+  });
+
   it("reads Word 3 formatting and a header and renders one page", async () => {
     const bytes = word3();
     expect(isMacEarlyFile(bytes)).toBe(true);
