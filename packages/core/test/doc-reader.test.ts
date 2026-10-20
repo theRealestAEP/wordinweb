@@ -151,7 +151,9 @@ describe("the .doc reader", () => {
       CFB.utils.cfb_add(cfb, name, new Uint8Array(64));
       return new Uint8Array(CFB.write(cfb, { type: "array" }) as number[]);
     };
-    expect(() => docToDocx(ole("Workbook"))).toThrow(/unsupported format: an OLE compound file with no Word document/);
+    expect(() => docToDocx(ole("Workbook"))).toThrow(/unsupported format: an Excel 97-2003 workbook/);
+    expect(() => docToDocx(ole("PowerPoint Document"))).toThrow(/unsupported format: a PowerPoint 97-2003 presentation/);
+    expect(() => docToDocx(ole("Contents"))).toThrow(/unsupported format: an OLE compound file with no Word document/);
     expect(() => docToDocx(ole("EncryptedPackage"))).toThrow(/unsupported format: a password-protected document/);
     // A Word 6.0/95 file: its FIB starts with 0xA5DC.
     const word6 = bytes("parity-lists--v00.doc").slice();

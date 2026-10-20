@@ -315,7 +315,11 @@ describe("renderDocxToPdf", () => {
     word6.set([0xdc, 0xa5, 0x65, 0x00]);
     const odt = makeDocx({ mimetype: "application/vnd.oasis.opendocument.text", "content.xml": "<office:document-content/>" });
     const cases: [string, Uint8Array, RegExp][] = [
-      ["xls", ole("Workbook"), /OLE compound file with no Word document/],
+      ["xls", ole("Workbook"), /Excel 97-2003 workbook/],
+      ["wordperfect", new Uint8Array([0xff, 0x57, 0x50, 0x43, 16, 0, 0, 0]), /WordPerfect/],
+      ["mac word 5", new Uint8Array([0xfe, 0x37, 0x00, 0x23, 0, 0, 0, 0]), /Word for Macintosh/],
+      ["html", new TextEncoder().encode("\ufeff\n<!DOCTYPE html><html><body>Hi</body></html>"), /HTML/],
+      ["word 2003 xml", new TextEncoder().encode('<?xml version="1.0"?><?mso-application progid="Word.Document"?><w:wordDocument/>'), /Word 2003 XML/],
       ["encrypted", ole("EncryptionInfo"), /password-protected/],
       ["word6", ole("WordDocument", word6), /Word 6\.0\/95/],
       ["rtf", new TextEncoder().encode("{\\rtf1\\ansi Hello.\\par }"), /RTF/],

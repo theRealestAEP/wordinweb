@@ -10,6 +10,7 @@ import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
 import { DEFAULT_ZIP_LIMITS } from "../zip.js";
 import { docToDocx } from "../doc/hooks.js";
 import { isOleFile } from "../doc/streams.js";
+import { FORMAT_HEAD_BYTES, otherFormat } from "../formats.js";
 import { scanBody } from "./scan.js";
 import { ByteSource, bytesSource } from "./source.js";
 import { ZipIndex } from "./zip.js";
@@ -322,18 +323,17 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
 
 /**
  * The source as a .docx: a Word 97-2003 .doc (an OLE compound file with a
- * WordDocument stream) is read whole and converted (doc/convert.ts); a
- * file that is another format altogether is refused from its first bytes,
- * before the zip directory is looked for: a password-protected .docx (an
- * OLE compound file whose package is an encrypted stream), an RTF file, a
- * PDF, a Word 6.0/95 file.
+ * WordDocument stream) is read whole and converted (doc/hooks.ts); a file
+ * that is another format altogether is refused from its first bytes, before
+ * the zip directory is looked for (formats.ts), and a compound file that
+ * holds something else by the converter: a password-protected .docx, a
+ * Word 6.0/95 document, an Excel or PowerPoint file.
  */
 async function asDocxSource(source: ByteSource): Promise<ByteSource> {
   const size = await source.size();
-  const head = await source.read(0, Math.min(size, 8));
-  const ascii = String.fromCharCode(...head);
-  if (ascii.startsWith("{\\rtf")) throw new Error("unsupported format: an RTF file");
-  if (ascii.startsWith("%PDF")) throw new Error("unsupported format: a PDF file");
+  const head = await source.read(0, Math.min(size, FORMAT_HEAD_BYTES));
+  const other = otherFormat(head);
+  if (other) throw new Error(`unsupported format: ${other}`);
   if (!isOleFile(head)) return source;
   // The whole file: the directory that names its streams can be at its end.
   // docToDocx refuses a compound file that holds no Word 97-2003 document.

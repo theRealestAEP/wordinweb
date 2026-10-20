@@ -59,7 +59,7 @@ describe("compareFiles with a Word 97-2003 .doc", () => {
     const cases: [string, RegExp][] = [
       [join(dir, "text.doc"), /text\.doc: an RTF file/],
       [join(dir, "print.doc"), /print\.doc: a PDF file/],
-      [join(dir, "empty.doc"), /empty\.doc: an OLE compound file with no Word document/],
+      [join(dir, "empty.doc"), /empty\.doc: an Excel 97-2003 workbook/],
     ];
     for (const [path, message] of cases) {
       const error = await errorOf(path, good);

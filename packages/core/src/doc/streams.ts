@@ -44,9 +44,7 @@ export function openDocStreams(bytes: Uint8Array): DocStreams {
   }
   const wordDocument = streamBytes(cfb, "WordDocument");
   if (!wordDocument) {
-    const names = rootStreamNames(cfb);
-    const what = names.includes("EncryptionInfo") || names.includes("EncryptedPackage") ? "a password-protected document (its package is encrypted)" : "an OLE compound file with no Word document";
-    throw new Error(`unsupported format: ${what}`);
+    throw new Error(`unsupported format: ${compoundFileKind(rootStreamNames(cfb))}`);
   }
   if (wordDocument.length < 0x0c) throw new Error("damaged: the WordDocument stream is shorter than the FIB");
   // A Word 6.0/95 file keeps everything in the WordDocument stream and has no Table stream.
@@ -71,6 +69,14 @@ function streamBytes(cfb: CFB.CFB$Container, name: string): Uint8Array | null {
   if (!entry || entry.type !== 2) return null;
   const content = entry.content;
   return content instanceof Uint8Array ? content : Uint8Array.from(content);
+}
+
+/** What a compound file with no WordDocument stream holds, by its streams' names. */
+function compoundFileKind(names: string[]): string {
+  if (names.includes("EncryptionInfo") || names.includes("EncryptedPackage")) return "a password-protected document (its package is encrypted)";
+  if (names.includes("PowerPoint Document")) return "a PowerPoint 97-2003 presentation";
+  if (names.includes("Workbook") || names.includes("Book")) return "an Excel 97-2003 workbook";
+  return "an OLE compound file with no Word document";
 }
 
 /** The names of the streams in the root storage. */
