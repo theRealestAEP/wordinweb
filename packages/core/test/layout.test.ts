@@ -2174,6 +2174,33 @@ describe("layout engine", () => {
     }
   });
 
+  it("numbers a list once around a merged vertical cell laid out again", () => {
+    const numbering =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:numbering ${W_NS}><w:abstractNum w:abstractNumId="1">` +
+      `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>` +
+      `</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
+    const item = (text: string) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const table =
+      `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="600"/><w:gridCol w:w="3000"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:hRule="exact" w:val="240"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge w:val="restart"/><w:textDirection w:val="btLr"/></w:tcPr>${item("rot")}</w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${item("side")}</w:tc></w:tr>` +
+      `<w:tr><w:trPr><w:trHeight w:val="3000"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge/><w:textDirection w:val="btLr"/></w:tcPr><w:p/></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${p("y")}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(table + item("after")),
+      "word/numbering.xml": numbering,
+    });
+    const labels = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+\.$/.test(i.text))
+      .map((i) => (i.kind === "text" ? i.text : ""));
+    expect([...labels].sort()).toEqual(["1.", "2.", "3."]);
+  });
+
   it("autofits columns to content when the grid is a placeholder", () => {
     // Junk grid (100 twips per column, like generator output) + 100% width:
     // Word ignores the grid and sizes columns by content.

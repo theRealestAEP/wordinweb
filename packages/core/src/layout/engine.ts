@@ -828,6 +828,9 @@ class Engine {
   private styleRefSeen = new WeakSet<object>();
   /** List counters per abstractNumId. */
   private counters = new Map<number, number[]>();
+  /** List counters as they stood when each vertically merged rotated cell was
+   * first laid out, so its second layout at the merged height numbers alike. */
+  private mergedRotatedCounters = new WeakMap<object, { counters: Map<number, number[]>; seen: Set<number> }>();
   /** numIds already referenced once (their startOverride restart has fired). */
   private seenNumIds = new Set<number>();
   /** Floating-image exclusion rects per page (page coords). */
@@ -9320,9 +9323,18 @@ class Engine {
       // Vertical text in a merged cell runs along the whole merged height, not
       // the first row's (GovDocs1 039756: a btLr heading over a 12pt first row
       // broke into two-letter lines). Lay the cell out again at that length.
-      const dir = tbl.rows[m.ri].cells[m.ci].props.textDirection;
+      const cell = tbl.rows[m.ri].cells[m.ci];
+      const dir = cell.props.textDirection;
       if (dir === "btLr" || dir === "tbRl") {
+        const { counters, seenNumIds } = this;
+        const start = this.mergedRotatedCounters.get(cell);
+        if (start) {
+          this.counters = new Map(Array.from(start.counters, ([k, v]) => [k, [...v]]));
+          this.seenNumIds = new Set(start.seen);
+        }
         const again = this.layoutRow(tbl, tbl.rows[m.ri], m.ri, widths, fields, new Map([[m.ci, avail]]));
+        this.counters = counters;
+        this.seenNumIds = seenNumIds;
         const cells = laidRows[m.ri].cells;
         cells[cells.findIndex((c) => c.cellIdx === m.ci)] = again.cells[m.ci];
       }
@@ -9336,7 +9348,8 @@ class Engine {
     rowIdx: number,
     widths: number[],
     fields?: FieldContext,
-    /** Full height of a vertically merged rotated cell, by cell index. */
+    /** Full height of a vertically merged rotated cell, by cell index. Only
+     * these cells are laid out. */
     mergedHeights?: Map<number, number>,
   ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number; rotated?: boolean }[]; height: number } {
     const defaults = this.cellMarginsOf(tbl, false);
@@ -9410,7 +9423,7 @@ class Engine {
         cells[ci] = { items: [], height: 0, x, width: w, cellIdx: ci };
         continue;
       }
-      if (cell.props.textDirection) continue;
+      if (cell.props.textDirection || mergedHeights) continue;
       const innerWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
       const { items, height } = this.layoutFrame(
         cell.blocks,
@@ -9432,6 +9445,13 @@ class Engine {
       const cell = row.cells[ci];
       const dir = cell.props.textDirection;
       if ((dir !== "btLr" && dir !== "tbRl") || cell.props.vMerge === "continue") continue;
+      if (mergedHeights && !mergedHeights.has(ci)) continue;
+      if (cell.props.vMerge === "restart" && !mergedHeights) {
+        this.mergedRotatedCounters.set(cell, {
+          counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
+          seen: new Set(this.seenNumIds),
+        });
+      }
       const { x, width: w, margins: m } = geometry[ci];
       const mergedHeight = mergedHeights?.get(ci);
       const frameWidth = Math.max(
