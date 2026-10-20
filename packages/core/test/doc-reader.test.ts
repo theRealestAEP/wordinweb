@@ -120,6 +120,14 @@ describe("the .doc reader", () => {
     expect(refs.length).toBe(2);
   });
 
+  it("gives a header with a picture its own relationships", () => {
+    // GovDocs1 040078.doc: two pictures in the first header.
+    const xml = parts(docToDocx(bytes("040078.doc")));
+    const ids = [...xml["word/header1.xml"].matchAll(/r:embed="([^"]+)"/g)].map((m) => m[1]);
+    expect(ids.length).toBe(2);
+    for (const id of ids) expect(xml["word/_rels/header1.xml.rels"]).toContain(`Id="${id}"`);
+  });
+
   it("writes the sections with their headers and footers", () => {
     const xml = parts(docToDocx(bytes("parity-headerfooter--v07.doc")));
     expect(xml["word/document.xml"]).toMatch(/<w:headerReference w:type="default" r:id="rId\d+"\/>/);
