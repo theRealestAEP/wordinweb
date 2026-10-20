@@ -311,7 +311,17 @@ WordInWeb never converts the document to flowing HTML. It parses the OOXML into 
 
 A Strict Open XML Document (ISO/IEC 29500 Strict, Word's "Strict Open XML Document") is read as Transitional: its namespaces, relationship types, unit-carrying measures ("72pt", "2.54cm", "63%") and renamed values are rewritten once, as the package is read (`packages/core/src/strict.ts`), so the viewer, the PDF renderer and the compare see the same document as its Transitional twin. A saved or compared Strict document is written as Transitional.
 
-A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.load`, `renderDocxToPdf` and the `docx-pdf` CLI convert it to a .docx in memory, and `docx-compare` (`compareFiles`) converts it to a working .docx in its temp directory, so a .doc can be compared with a .docx. The file's bytes decide, not its name. The converter (`packages/core/src/doc/`, exported as `docToDocx`) reads the text, formatting, styles, lists, sections, headers and footers, notes, tables, fields and form fields, bookmarks, comments and tracked changes, pictures, shapes and text boxes from the binary structures ([MS-DOC], [MS-ODRAW]). Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95 and older Word files, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
+A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.load`, `renderDocxToPdf` and the `docx-pdf` CLI convert it to a .docx in memory, and `docx-compare` (`compareFiles`) converts it to a working .docx in its temp directory, so a .doc can be compared with a .docx. The file's bytes decide, not its name. The converter (`packages/core/src/doc/`, exported as `docToDocx`) reads the text, formatting, styles, lists, sections, headers and footers, notes, tables, fields and form fields, bookmarks, comments and tracked changes, pictures, shapes and text boxes from the binary structures ([MS-DOC], [MS-ODRAW]).
+
+The oldest Word formats, which are not OLE compound files, are read the same way (`packages/core/src/oldword/`):
+
+| Format | What is read |
+|---|---|
+| Word for the Macintosh 4.0 and 5.x | Text in the Mac OS Roman code page (fast-saved files too), character and paragraph formatting, styles, sections and page setup, tables, headers and footers, footnotes, fields, PICT pictures |
+| Word for the Macintosh 1.x and 3.0 | Text, character and paragraph formatting, styles, sections, headers and footers, footnotes |
+| Word for Windows 1.x and 2.0 | Text in the Windows ANSI code page (fast-saved files too), character and paragraph formatting, styles, sections and page setup, tables, headers and footers, footnotes, fields, metafile and bitmap pictures |
+
+Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95, Word for DOS and Windows Write, the pre-release builds of Word for Windows 1.0, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
 
 `renderDocxToPdf` throws a `PdfRenderError` and `compareFiles` throws a `CompareError`. Each error has a `code` for the caller to act on, and a message that names the cause:
 
