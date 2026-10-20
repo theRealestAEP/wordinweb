@@ -36,12 +36,13 @@ function resources(): { resources: Resources; out: Collect; writer: PdfWriter } 
   return { resources: new Resources(writer), out, writer };
 }
 
-/** A WMF with a window of 100 x 50 and one polyline. */
-function polylineWmf(): Uint8Array {
+/** A WMF with a window of 100 x 50, one polyline and the `extra` records. */
+function polylineWmf(extra: number[][] = []): Uint8Array {
   const records: number[][] = [
     [0x020b, 0, 0], // SETWINDOWORG y x
     [0x020c, 50, 100], // SETWINDOWEXT y x
     [0x0325, 3, 10, 10, 90, 10, 90, 40], // POLYLINE count, points
+    ...extra,
     [0x0000], // EOF
   ];
   const words = records.map((r) => [3 + r.length - 1, 0, r[0], ...r.slice(1)]);
@@ -184,6 +185,20 @@ describe("convertMetafile", () => {
     expect(canvas!.width).toBe(100);
     expect(canvas!.height).toBe(50);
     expect(canvas!.ops.join("\n")).toMatch(/10 10 m 90 10 l 90 40 l S/);
+  });
+
+  it("keeps the WMF parser's notes about records it skips out of stdout", async () => {
+    const { resources: r } = resources();
+    const logged: unknown[] = [];
+    const log = console.log;
+    console.log = (...args: unknown[]) => logged.push(args);
+    try {
+      const canvas = await convertMetafile("wmf", polylineWmf([[0x0035]]), fonts, r); // REALIZEPALETTE
+      expect(canvas).not.toBeNull();
+    } finally {
+      console.log = log;
+    }
+    expect(logged).toEqual([]);
   });
 
   it("closes the saves an EMF leaves open and keeps what it drew", async () => {
