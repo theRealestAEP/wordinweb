@@ -5,7 +5,8 @@
 // level numbered as its section's OLST (sprmSOlstAnm) says. In a run of
 // autonumbered paragraphs, those with the same level and ANLD are one list
 // (a numbered list runs on past the bullets and skipped paragraphs in it),
-// and a paragraph without autonumbering ends the run; heading numbers run
+// and a paragraph without autonumbering ends the run, unless it is in a
+// table (a numbered column runs through its rows); heading numbers run
 // through the document. Each list becomes a num with its own abstractNum.
 import { u16 } from "./bytes.js";
 import { ParaProps, XmlContext, escapeAttr, icoColor, numFormat } from "./sprm.js";
@@ -79,7 +80,8 @@ export class Word6Lists {
     // 12 skips numbering: the paragraph has no number but stays in the lists.
     if (nLvlAnm === 12) return;
     if ((nLvlAnm !== 10 && nLvlAnm !== 11) || !anld || anld.length < 20) {
-      this.open.clear();
+      // In a table the other cells' paragraphs and the row marks do not end a list that numbers a column's cells.
+      if (!p.inTable) this.open.clear();
       return;
     }
     const key = `${nLvlAnm}:${hex(anld)}`;
