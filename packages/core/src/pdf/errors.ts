@@ -19,8 +19,9 @@ export type PdfRenderErrorCode =
   | "damaged"
   /** The document holds content Word prints that this renderer does not
    * read, which the message names: a w:altChunk (a part in another
-   * format, such as HTML, that Word imports on open). The document is
-   * refused rather than printed without it. */
+   * format, such as HTML, that Word imports on open) or a w:subDoc (a
+   * subdocument Word reads from another file). The document is refused
+   * rather than printed without it. */
   | "unsupported_content"
   /** Anything else. The message and `cause` say what. */
   | "failed";

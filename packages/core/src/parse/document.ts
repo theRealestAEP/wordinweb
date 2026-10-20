@@ -72,6 +72,37 @@ export function altChunkError(el: XmlElement, rels: Relationships): Error {
   return unsupportedContent(`the document embeds an alternative-format chunk (w:altChunk${part ? `, ${part}` : ""}) that Word imports on open`);
 }
 
+/** A w:subDoc: a subdocument of a master document, whose content Word
+ * reads from another file. */
+export function subDocError(el: XmlElement, rels: Relationships): Error {
+  const target = rels.get(attr(el, "id") ?? "")?.target;
+  return unsupportedContent(`the document includes a subdocument (w:subDoc${target ? `, ${target}` : ""}) that Word reads from another file`);
+}
+
+/**
+ * The element whose children take `el`'s place, for an element that only
+ * wraps content: a content control's w:sdtContent; a custom XML element,
+ * smart tag, bidirectional embedding (w:dir) or override (w:bdo) itself (its
+ * properties child is ignored like any unknown element); and the branch of
+ * an mc:AlternateContent this parser reads, its first mc:Choice, else its
+ * mc:Fallback. Undefined for any other element.
+ */
+export function wrappedContent(el: XmlElement): XmlElement | undefined {
+  switch (localName(el.name)) {
+    case "sdt":
+      return child(el, "sdtContent");
+    case "customXml":
+    case "smartTag":
+    case "dir":
+    case "bdo":
+      return el;
+    case "AlternateContent":
+      return child(el, "Choice") ?? child(el, "Fallback");
+    default:
+      return undefined;
+  }
+}
+
 /** Parse w:body into sections (the body's trailing sectPr closes the last one). */
 export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
   const sections: Section[] = [];
@@ -80,7 +111,8 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
   // Block-level SDTs (content controls) may nest arbitrarily deep — a form
   // section wraps a repeating group which wraps each field. Walk into every
   // sdtContent so nested content controls (SharePoint/RFP forms) aren't
-  // dropped; section breaks inside an SDT still close a section.
+  // dropped; section breaks inside an SDT still close a section. A custom
+  // XML element or an mc:AlternateContent is walked into the same way.
   const walk = (children: XmlElement[]): void => {
     for (const el of children) {
       const ln = localName(el.name);
@@ -103,11 +135,11 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
       } else if (ln === "sectPr") {
         sections.push({ props: parseSectionProps(el), blocks });
         blocks = [];
-      } else if (ln === "sdt") {
-        const content = child(el, "sdtContent");
-        if (content) walk(content.children);
       } else if (ln === "altChunk") {
         throw altChunkError(el, ctx.rels);
+      } else {
+        const content = wrappedContent(el);
+        if (content) walk(content.children);
       }
       // bookmarkStart/End, proofErr, etc. — ignored
     }
@@ -159,10 +191,11 @@ export function parseBlocks(container: XmlElement, ctx: DocParseContext): Block[
       const t = parseTable(el, ctx);
       if (t.rows.length > 0) blocks.push(t); // all rows revision-deleted
     }
-    else if (ln === "sdt") {
-      const content = child(el, "sdtContent");
+    else if (ln === "altChunk") throw altChunkError(el, ctx.rels);
+    else {
+      const content = wrappedContent(el);
       if (content) blocks.push(...parseBlocks(content, ctx));
-    } else if (ln === "altChunk") throw altChunkError(el, ctx.rels);
+    }
   }
   return blocks;
 }
@@ -784,8 +817,12 @@ function parseParaChildren(
       const link = hyperlinkTarget(instruction);
       out.push(link ? { type: "hyperlink", ...link, runs: [fieldRun] } : fieldRun);
       captureRefBookmarkRun(ctx, fieldRun);
-    } else if (ln === "smartTag" || ln === "sdt") {
-      const content = ln === "sdt" ? child(el, "sdtContent") : el;
+    } else if (ln === "subDoc") {
+      throw subDocError(el, ctx.rels);
+    } else if (wrappedContent(el)) {
+      // A content control, smart tag, custom XML element, w:dir or w:bdo
+      // (its direction is not applied), or an mc:AlternateContent's branch.
+      const content = wrappedContent(el);
       // Modern checkbox content control: the checked state lives in
       // sdtPr/w14:checkbox and the displayed glyph is a plain w:t inside
       // sdtContent. Tag that glyph's text content with the w14:checkbox element
@@ -1077,9 +1114,17 @@ function parseRun(
         // field result after the separator.
         if (field.mode !== "instr") run.content.push(...parseVmlPict(el, ctx));
         break;
-      case "object":
-        if (!suppressedObjects.has(el)) run.content.push(...parseVmlPict(el, ctx));
+      case "object": {
+        if (suppressedObjects.has(el)) break;
+        // An object Word 2010 and later writes draws as a w:drawing, not VML.
+        const drawing = child(el, "drawing");
+        const img = drawing ? parseDrawing(drawing, ctx) : null;
+        if (img) {
+          tagDrawingSource(img, drawing!);
+          run.content.push(img);
+        } else run.content.push(...parseVmlPict(el, ctx));
         break;
+      }
       case "AlternateContent": {
         // Prefer the DrawingML choice when it's a plain picture. For choices
         // we can't render (wpg groups etc.), producers ship a Fallback that
@@ -1099,7 +1144,13 @@ function parseRun(
             run.content.push(fbImg);
           } else {
             const pictEl = fallback ? child(fallback, "pict") : undefined;
+            const branch = choice ?? fallback;
             if (pictEl) run.content.push(...parseVmlPict(pictEl, ctx));
+            else if (branch) {
+              // Run content in the branch (text, a symbol) is read as the run's own.
+              const inner = parseRun({ ...r, children: [...children(r, "rPr"), ...branch.children] }, ctx, field, suppressedObjects);
+              if (inner) run.content.push(...inner.content);
+            }
           }
         }
         break;
@@ -1158,14 +1209,17 @@ function parseRun(
         });
         break;
       case "ruby": {
-        const rtEl = child(el, "rt");
-        const baseEl = child(el, "rubyBase");
-        const rtRun = rtEl ? child(rtEl, "r") : undefined;
-        const baseRun = baseEl ? child(baseEl, "r") : undefined;
-        if (!rtRun || !baseRun) break;
+        // The guide text and the base text: each part's runs as one run, in
+        // its first run's formatting.
         const fresh = (): FieldState => ({ mode: null, instruction: "", cachedResult: "", carrier: null });
-        const base = parseRun(baseRun, ctx, fresh(), suppressedObjects);
-        const rt = parseRun(rtRun, ctx, fresh(), suppressedObjects);
+        const joined = (part: XmlElement | undefined): Run | null => {
+          const runs = part ? children(part, "r").map((r) => parseRun(r, ctx, fresh(), suppressedObjects)) : [];
+          if (!runs[0]) return null;
+          for (const more of runs.slice(1)) if (more) runs[0].content.push(...more.content);
+          return runs[0];
+        };
+        const base = joined(child(el, "rubyBase"));
+        const rt = joined(child(el, "rt"));
         if (!base || !rt) break;
         const rubyPr = child(el, "rubyPr");
         const alignRaw = rubyPr ? attr(child(rubyPr, "rubyAlign"), "val") : undefined;
@@ -2635,14 +2689,15 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
  * A repeating-section control (w15:repeatingSection) wraps its data rows in an
  * outer w:sdt, and each row in its own w15:repeatingSectionItem w:sdt, so the
  * w:tr elements are grandchildren of the table rather than direct children. */
-function collectTableRows(el: XmlElement): XmlElement[] {
+/** The `name` children of `el` (w:tr in a table, w:tc in a row), found
+ * through any content control or custom XML element around them. */
+function collectWrapped(el: XmlElement, name: string): XmlElement[] {
   const out: XmlElement[] = [];
   for (const c of el.children) {
-    const ln = localName(c.name);
-    if (ln === "tr") out.push(c);
-    else if (ln === "sdt") {
-      const content = child(c, "sdtContent");
-      if (content) out.push(...collectTableRows(content));
+    if (localName(c.name) === name) out.push(c);
+    else {
+      const content = wrappedContent(c);
+      if (content) out.push(...collectWrapped(content, name));
     }
   }
   return out;
@@ -2754,7 +2809,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   }
 
   const rows: TableRow[] = [];
-  for (const tr of collectTableRows(tbl)) {
+  for (const tr of collectWrapped(tbl, "tr")) {
     // Final revision view: a row whose trPr carries w:del is a tracked row
     // deletion — Word removes it entirely (real.docx: a fully-deleted caption
     // table otherwise leaves a 200px border/grip skeleton with no text).
@@ -2781,7 +2836,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     }
     const trPrChange = child(trPr, "trPrChange");
     if (trPrChange) addChange(runsOfBlocks(row.cells.flatMap((cell) => cell.blocks)), formatChange(trPrChange, "Row"));
-    children(tr, "tc").forEach((tc, i) => {
+    collectWrapped(tr, "tc").forEach((tc, i) => {
       const tcPrChange = child(child(tc, "tcPr"), "tcPrChange");
       if (tcPrChange && row.cells[i]) addChange(runsOfBlocks(row.cells[i].blocks), formatChange(tcPrChange, "Cell"));
     });
@@ -2859,7 +2914,7 @@ function parseRow(tr: XmlElement, ctx: DocParseContext): TableRow {
     props.tblHeader = onOff(child(trPr, "tblHeader"));
   }
   const cells: TableCell[] = [];
-  for (const tc of children(tr, "tc")) {
+  for (const tc of collectWrapped(tr, "tc")) {
     cells.push(parseCell(tc, ctx));
   }
   return { props, cells };

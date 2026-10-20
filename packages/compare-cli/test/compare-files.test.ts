@@ -522,6 +522,16 @@ describe("compareFiles errors", () => {
     }
   });
 
+  it("refuses a w:subDoc with unsupported_content", async () => {
+    const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdS" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/subDocument" Target="file:///C:/part.docx" TargetMode="External"/></Relationships>`;
+    const body = `${para("One.")}<w:p><w:subDoc xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdS"/></w:p>`;
+    const path = join(dir, "subdoc.docx");
+    writeFileSync(path, makeDocx({ "word/document.xml": wrapDocument(body), "word/_rels/document.xml.rels": rels }));
+    const error = await errorOf(path, good, join(dir, "x.docx"));
+    expect([error.code, error.file]).toEqual(["unsupported_content", "original"]);
+    expect(error.message).toBe(`${path}: the document includes a subdocument (w:subDoc, file:///C:/part.docx) that Word reads from another file`);
+  });
+
   it("refuses two outputs on one path, naming them", async () => {
     const options = { author: AUTHOR, date: DATE };
     const out = join(dir, "collide.docx");

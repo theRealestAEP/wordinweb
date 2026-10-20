@@ -34,7 +34,9 @@ const SLASH = 0x2f;
  * Find each block-level child of a document part's w:body, in order, reading
  * the part a chunk at a time: the body's own children and, through any w:sdt
  * among them, the children of its w:sdtContent (nested as deep as they go, as
- * parse/document.ts walks them). The browser twin of compare-cli's scanner,
+ * parse/document.ts walks them). A w:customXml is walked into too, and so is
+ * an mc:AlternateContent, through its first branch only (parse/document.ts's
+ * wrappedContent). The browser twin of compare-cli's scanner,
  * over a pull of inflated chunks instead of a file. Comments, processing
  * instructions and CDATA are skipped; a document type declaration, an
  * unterminated construct or a missing body is an error.
@@ -65,6 +67,10 @@ class Scanner {
     let head: Uint8Array | null = null;
     // Depths whose children are blocks: the body's, then each open sdtContent's.
     const containers: number[] = [];
+    // Each open mc:AlternateContent container, by depth: whether a branch
+    // has been walked into. The branches after it are children, which the
+    // caller passes over.
+    const alternates = new Map<number, boolean>();
     // Each open block-level w:sdt: its level, where it starts, and its id
     // once its sdtContent has opened.
     const sdts: { level: number; at: number; id: number }[] = [];
@@ -113,7 +119,10 @@ class Scanner {
             onChild({ name: childName, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(childStart - this.base, end - this.base) });
             childStart = -1;
           } else if (sdts.length > 0 && depth === sdts[sdts.length - 1].level - 1) sdts.pop();
-          else if (depth === top && containers.length > 1) containers.pop();
+          else if (depth === top && containers.length > 1) {
+            containers.pop();
+            alternates.delete(top);
+          }
         }
       } else {
         end = this.tagEnd(lt + 1);
@@ -133,7 +142,13 @@ class Scanner {
             const ln = localName(name);
             if (ln === "body") throw new Error("a w:body inside the body");
             if (ln === "sdt" && !selfClosing) sdts.push({ level: depth + 1, at, id: -1 });
-            else if (selfClosing) onChild({ name, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(lt, end - this.base) });
+            else if ((ln === "customXml" || ln === "AlternateContent") && !selfClosing) {
+              containers.push(depth);
+              if (ln === "AlternateContent") alternates.set(depth, false);
+            } else if ((ln === "Choice" || ln === "Fallback") && !selfClosing && alternates.get(top) === false) {
+              alternates.set(top, true);
+              containers.push(depth);
+            } else if (selfClosing) onChild({ name, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(lt, end - this.base) });
             else {
               childStart = at;
               childName = name;

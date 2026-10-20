@@ -13,7 +13,8 @@ export type CompareErrorCode =
   | "damaged"
   /** An input holds content Word prints that the compare does not read,
    * which the message names: a w:altChunk (a part in another format, such
-   * as HTML, that Word imports on open). */
+   * as HTML, that Word imports on open) or a w:subDoc (a subdocument Word
+   * reads from another file). */
   | "unsupported_content"
   /** An input holds more outside its body than the compare keeps in memory (MAX_HELD_BYTES). */
   | "too_large"

@@ -320,7 +320,7 @@ A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.loa
 | `not_docx` | The input is not a .docx: not a zip, or a zip with no Word document. | 4 |
 | `unsupported_format` | The input is another format, such as RTF, PDF, OpenDocument, Word 6.0/95, or a password-protected document. | 6 |
 | `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. | 5 |
-| `unsupported_content` | The document holds content that Word prints and that is not read here, such as a `w:altChunk` (an HTML or RTF part that Word imports when it opens the file). The document is refused rather than printed without that content. | 7 |
+| `unsupported_content` | The document holds content that Word prints and that is not read here, such as a `w:altChunk` (an HTML or RTF part that Word imports when it opens the file) or a `w:subDoc` (a subdocument that Word reads from another file). The document is refused rather than printed without that content. | 7 |
 | `unsupported_script` | The text is in a script the PDF renderer cannot shape, such as Mongolian. | 3 |
 | `too_large` | `compareFiles` only: the parts outside the body are more than the compare holds in memory. | — |
 | `failed` | Anything else. | 1 |
