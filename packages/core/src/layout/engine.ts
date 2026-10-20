@@ -7262,36 +7262,45 @@ class Engine {
     const footer = this.doc.footers.get(page.footerRel ?? "");
     if (footer && footer.blocks.length > 0) {
       const overlayPageFrame = this.pageFieldFrameOverlay(footer);
-      // Two passes: the frame's page position depends on its own height,
-      // which anchored-shape resolution needs up front.
-      let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-      let seenSnapshot = new Set(this.seenNumIds);
-      const measured = this.layoutFrame(footer.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
-      this.counters = snapshot;
-      this.seenNumIds = seenSnapshot;
-      const legacyPageFrame =
+      const place = (blocks: Block[], x: number, y: number, width: number) => {
+        const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        const seenSnapshot = new Set(this.seenNumIds);
+        this.hfMarginVTop = page.bodyTop;
+        const { items } = this.layoutFrame(blocks, width, fields, { x, y }, false, overlayPageFrame);
+        this.hfMarginVTop = null;
+        this.counters = snapshot;
+        this.seenNumIds = seenSnapshot;
+        for (const it of items) offsetItem(it, x, y);
+        page.items.push(...items);
+      };
+      // Before compatibility mode 15, a footer paragraph framed to the page
+      // (w:framePr vAnchor="page") sits at its frame's page Y, and the rest of
+      // the footer stacks up from the footer distance without it. us-courts-
+      // answer's 'Page N of M' frame lands on Word's 763.9pt; GovDocs 030685
+      // (a framed logo, then five address lines) printed the address lines
+      // below the page when the whole footer hung down from the frame.
+      const legacyPageFrame = (block: Block) =>
         this.doc.compatibilityMode < 15 &&
-        footer.blocks.some(
-          (block) =>
-            block.type === "paragraph" &&
-            this.doc.effectiveParaProps(block).frame?.vAnchor === "page",
-        );
-      const top =
-        sp.pageHeight -
-        sp.footerDistance -
-        (legacyPageFrame ? 0 : measured.height);
-      snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-      seenSnapshot = new Set(this.seenNumIds);
-      this.hfMarginVTop = page.bodyTop;
-      const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
-        x: hfOriginX,
-        y: top,
-      }, false, overlayPageFrame);
-      this.hfMarginVTop = null;
-      this.counters = snapshot;
-      this.seenNumIds = seenSnapshot;
-      for (const it of items) offsetItem(it, hfOriginX, top);
-      page.items.push(...items);
+        block.type === "paragraph" &&
+        this.doc.effectiveParaProps(block).frame?.vAnchor === "page";
+      const flow = footer.blocks.filter((block) => !legacyPageFrame(block));
+      if (flow.length > 0) {
+        // Two passes: the flow's top depends on its own height, which
+        // anchored-shape resolution needs up front.
+        const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+        const seenSnapshot = new Set(this.seenNumIds);
+        const measured = this.layoutFrame(flow, contentWidth, fields, undefined, false, overlayPageFrame);
+        this.counters = snapshot;
+        this.seenNumIds = seenSnapshot;
+        place(flow, hfOriginX, sp.pageHeight - sp.footerDistance - measured.height, contentWidth);
+      }
+      for (const block of footer.blocks) {
+        if (block.type === "paragraph" && legacyPageFrame(block)) {
+          const fr = this.resolveFrame(this.doc.effectiveParaProps(block).frame!);
+          const x = fr.hAnchor === "page" ? fr.x : fr.hAnchor === "margin" ? sp.marginLeft + fr.x : hfOriginX + fr.x;
+          place([block], x, fr.y, fr.w ?? contentWidth);
+        }
+      }
     }
   }
 

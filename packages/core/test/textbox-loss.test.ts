@@ -152,3 +152,57 @@ describe("a linked chain of three or more text boxes (GovDocs 032370, 027984)", 
     expect(words.filter((w) => w === "THIRD")).toHaveLength(1);
   });
 });
+
+describe("a compatibility-mode 11 footer that starts with a page-anchored frame (GovDocs 030685)", () => {
+  // The first-page footer is a framed logo at a page position, then centred
+  // address lines. The whole footer hung down from the footer distance, so
+  // the address lines were drawn below the page.
+  const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const footer =
+    `<?xml version="1.0"?><w:ftr ${W}>` +
+    `<w:p><w:pPr><w:framePr w:w="540" w:h="360" w:hRule="exact" w:vAnchor="page" w:hAnchor="page" w:x="5945" w:y="13537"/></w:pPr><w:r><w:t>L</w:t></w:r></w:p>` +
+    `<w:p/><w:p><w:r><w:t>ADDRESS</w:t></w:r></w:p><w:p><w:r><w:t>EMPLOYER</w:t></w:r></w:p></w:ftr>`;
+  const settings =
+    `<?xml version="1.0"?><w:settings ${W}><w:compat><w:compatSetting w:name="compatibilityMode" ` +
+    `w:uri="http://schemas.microsoft.com/office/word" w:val="11"/></w:compat></w:settings>`;
+  const load = () =>
+    DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:footerReference ${R} w:type="default" r:id="rIdF"/>` +
+            `<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="432"/></w:sectPr>`,
+        ),
+        "word/_rels/document.xml.rels":
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`,
+        "word/footer1.xml": footer,
+        "word/settings.xml": settings,
+      }),
+    );
+
+  it("stacks the footer's lines up from the footer distance and puts the frame at its page position", () => {
+    const doc = load();
+    expect(doc.compatibilityMode).toBe(11);
+    const page = texts(layoutDocument(doc, { measurer }).pages[0].items);
+    const at = (word: string) => page.find((t) => t.text === word)!;
+    // Page 1056px, footer distance 432tw = 28.8px.
+    const employer = at("EMPLOYER");
+    expect(employer.lineTop + employer.lineHeight).toBeCloseTo(1056 - 28.8, 0);
+    expect(at("ADDRESS").lineTop).toBeLessThan(employer.lineTop);
+    const logo = at("L");
+    expect(logo.lineTop).toBeCloseTo(13537 / 15, 0);
+    expect(logo.x).toBeCloseTo(5945 / 15, 0);
+  });
+
+  it("draws the footer lines inside the page in the DOM renderer", () => {
+    const doc = load();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const rendered = renderToDom(doc, layoutDocument(doc, { measurer }), container);
+    const el = rendered.root.querySelectorAll<HTMLElement>("*");
+    const employer = [...el].find((e) => e.children.length === 0 && e.textContent === "EMPLOYER");
+    expect(employer).toBeDefined();
+    expect(parseFloat(employer!.style.top)).toBeLessThan(1056 - 28.8);
+  });
+});
