@@ -67,9 +67,29 @@ export interface XmlParseLimits {
 }
 export const DEFAULT_XML_LIMITS: XmlParseLimits = {
   maxLength: 64 * 1024 * 1024, // 64 MB of XML text
-  maxNodes: 4_000_000,
+  maxNodes: 2_000_000,
   maxDepth: 512,
 };
+
+/** The elements an XML part's bytes hold, and how many of them are
+ * paragraphs or table cells (local name p or tc), counted without parsing.
+ * A start tag inside a comment or CDATA section counts too. */
+export function countElements(bytes: Uint8Array): { elements: number; blocks: number } {
+  let elements = 0;
+  let blocks = 0;
+  for (let i = bytes.indexOf(0x3c); i !== -1; i = bytes.indexOf(0x3c, i + 1)) {
+    const c = bytes[i + 1];
+    if (c === 0x2f /* / */ || c === 0x21 /* ! */ || c === 0x3f /* ? */) continue;
+    elements++;
+    // The local name: after a colon in the name, if there is one.
+    let j = i + 1;
+    let local = j;
+    while (j < bytes.length && !isNameEnd(bytes[j])) if (bytes[j++] === 0x3a /* : */) local = j;
+    const length = j - local;
+    if ((length === 1 && bytes[local] === 0x70) /* p */ || (length === 2 && bytes[local] === 0x74 && bytes[local + 1] === 0x63) /* tc */) blocks++;
+  }
+  return { elements, blocks };
+}
 
 /**
  * A copy of `s` that does not point into the string it was cut from. V8

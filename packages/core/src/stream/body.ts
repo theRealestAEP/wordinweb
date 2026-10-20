@@ -6,8 +6,8 @@ import { Block, FieldContent, Paragraph, Revision, Section, SectionProps } from 
 import { DocParseContext, formatChange, refuseAltChunk, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
 import { Relationships, parseRelationships, relsPathFor } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
-import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
-import { XML_PART, ZipBudget } from "../zip.js";
+import { XmlElement, attr, child, countElements, localName, parseXml } from "../xml.js";
+import { DOCUMENT_LIMITS, XML_PART, ZipBudget, mainDocumentPart } from "../zip.js";
 import { docToDocx } from "../doc/hooks.js";
 import { isOleFile } from "../doc/streams.js";
 import { FORMAT_HEAD_BYTES, otherFormat } from "../formats.js";
@@ -56,8 +56,14 @@ const PIECE_BYTES = 1 << 20;
 
 /** Parsed blocks kept behind the furthest one read, for the engine's lookback. */
 const KEEP_BEHIND = 64;
-/** The parsed-block cache is trimmed once it holds this many. */
+/** The parsed-block cache is trimmed once it holds this many ... */
 const KEEP_MAX = 512;
+/** ... or once its blocks come to this many bytes of XML: a block of text
+ * runs costs the render about 100 times its XML once parsed and laid out,
+ * so 512 long paragraphs held over a gigabyte. Over it, only the last
+ * KEEP_NEAR blocks stay; any other is parsed again when it is read. */
+const KEEP_BYTES = 2 << 20;
+const KEEP_NEAR = 8;
 
 /**
  * Open a .docx for layout without its body in memory. The file's small parts
@@ -85,22 +91,27 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   const zip = await ZipIndex.open(source);
   const mimetype = zip.entries.has("mimetype") ? await zip.text("mimetype") : undefined;
   if (mimetype?.startsWith("application/vnd.oasis.opendocument")) throw new Error("unsupported format: an OpenDocument file");
-  const docPart = documentPart(await zip.text("_rels/.rels"));
+  // Every XML part's size, from the directory, is held to what Package
+  // allows a document loaded whole, before any of them is inflated.
+  const xmlEntries = [...zip.entries.values()].filter((entry) => !entry.name.endsWith("/") && XML_PART.test(entry.name));
+  const budget = new ZipBudget();
+  for (const entry of xmlEntries) budget.add(entry.name, entry.size);
+  const packageRels = zip.entries.get("_rels/.rels");
+  const docPart = mainDocumentPart(packageRels ? await zip.read(packageRels, DOCUMENT_LIMITS.heldBytes) : undefined);
+  budget.holdParts(docPart);
   const docEntry = zip.entries.get(docPart);
   if (!docEntry) throw new Error(`missing ${docPart}`);
-  // The shell: every XML part, and document.xml with only the body's own
-  // section properties. Their sizes, from the directory, are held to what
-  // Package allows a document loaded whole, before any of them is inflated.
-  const held = [...zip.entries.values()].filter((entry) => entry.name !== docPart && !entry.name.endsWith("/") && XML_PART.test(entry.name));
-  const budget = new ZipBudget();
-  for (const entry of held) budget.add(entry.name, entry.size);
+  // The shell: every other XML part, and document.xml with only the body's own section properties.
+  const held = xmlEntries.filter((entry) => entry.name !== docPart);
 
   const body = new BodyStore();
   // A Strict Open XML body is rewritten to Transitional as it is scanned (strict.ts).
   const rewriter = new StrictRewriter();
   // The document's relationships name the part a w:altChunk the scan finds holds.
-  const relsXml = await zip.text(relsPathFor(docPart));
-  const rels = (): Relationships => parseRelationships(relsXml === undefined ? undefined : parseXml(relsXml), docPart);
+  const docRels = zip.entries.get(relsPathFor(docPart));
+  const relsBytes = docRels ? await zip.read(docRels) : undefined;
+  const rels = (): Relationships =>
+    parseRelationships(relsBytes && countElements(relsBytes).elements <= DOCUMENT_LIMITS.heldElements ? parseXml(strFromU8(relsBytes)) : undefined, docPart);
   const outline = body.scan(rewriter.through(inflatePull(docEntry, await zip.raw(docEntry))), rels);
 
   const files: Record<string, Uint8Array> = {};
@@ -344,16 +355,6 @@ async function asDocxSource(source: ByteSource): Promise<ByteSource> {
   return bytesSource(docToDocx(await source.read(0, size)));
 }
 
-/** The main document part, as the package relationships name it. */
-function documentPart(rels: string | undefined): string {
-  if (rels) {
-    for (const rel of parseRelationships(parseXml(rels), "").values()) {
-      if (rel.type.endsWith("/officeDocument")) return rel.target;
-    }
-  }
-  return "word/document.xml";
-}
-
 /**
  * The body's blocks, held deflated and parsed on demand. A scan first finds
  * every candidate block element (w:p, w:tbl, the body's w:sectPr) and writes
@@ -374,8 +375,9 @@ class BodyStore {
   private readonly starts: number[] = [];
   /** Each block's candidate index. */
   private readonly kept: number[] = [];
-  /** Parsed blocks, by block index, around the engine's cursor. */
+  /** Parsed blocks, by block index, around the engine's cursor, and the bytes of their XML. */
   private parsed = new Map<number, Block>();
+  private parsedBytes = 0;
   private furthest = -1;
   /** The piece inflated last. */
   private inflated: { index: number; bytes: Uint8Array } | null = null;
@@ -482,6 +484,7 @@ class BodyStore {
   keep(candidate: number, block: Block): void {
     this.parsed.set(this.kept.length, block);
     this.kept.push(candidate);
+    this.parsedBytes += this.bytesOf(this.kept.length - 1);
     keyFields(block, this.kept.length - 1, this.fieldKeys);
     this.trim(this.kept.length - 1);
   }
@@ -489,6 +492,7 @@ class BodyStore {
   /** Drop the parsed blocks, after the first pass over them. */
   forget(): void {
     this.parsed = new Map();
+    this.parsedBytes = 0;
     this.furthest = -1;
   }
 
@@ -514,17 +518,29 @@ class BodyStore {
     if (block) return block;
     block = (this.parser as (el: XmlElement, index: number) => Block)(this.element(this.kept[index]), index);
     this.parsed.set(index, block);
+    this.parsedBytes += this.bytesOf(index);
     keyFields(block, index, this.fieldKeys);
     this.trim(index);
     return block;
+  }
+
+  /** The bytes of block `index`'s XML. */
+  private bytesOf(index: number): number {
+    const candidate = this.kept[index];
+    return this.ranges[2 * candidate + 1] - this.ranges[2 * candidate];
   }
 
   /** Keep the parsed blocks near the furthest one read: the engine looks a
    * bounded number of blocks ahead and behind its cursor. */
   private trim(index: number): void {
     if (index > this.furthest) this.furthest = index;
-    if (this.parsed.size < KEEP_MAX) return;
-    for (const key of this.parsed.keys()) if (key < this.furthest - KEEP_BEHIND) this.parsed.delete(key);
+    if (this.parsed.size < KEEP_MAX && this.parsedBytes < KEEP_BYTES) return;
+    for (const key of this.parsed.keys()) {
+      if (key < this.furthest - KEEP_BEHIND || (this.parsedBytes > KEEP_BYTES && key < this.furthest - KEEP_NEAR)) {
+        this.parsed.delete(key);
+        this.parsedBytes -= this.bytesOf(key);
+      }
+    }
   }
 }
 

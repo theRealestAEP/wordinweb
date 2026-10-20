@@ -1,4 +1,4 @@
-import { Package, FIXED_ZIP_MTIME, relativePartPath, resolvePartPath } from "./zip.js";
+import { Package, FIXED_ZIP_MTIME, holdXmlCounts, mainDocumentPart, relativePartPath, resolvePartPath } from "./zip.js";
 import { normalizeStrictPackage } from "./strict.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
 import { strFromU8, strToU8, zip, zipSync } from "fflate";
@@ -46,8 +46,6 @@ import {
   buildSmartArtLayoutXml,
   buildSmartArtStyleXml,
 } from "./edit/smartart.js";
-
-const REL_TYPE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
 /**
  * A fresh footnotes.xml / endnotes.xml root carrying the two stock notes Word
@@ -382,6 +380,8 @@ export class DocxDocument {
 
     const docPart = this.findDocumentPart();
     this.docPart = docPart;
+    // What the XML will cost once parsed, from its bytes, before any more is.
+    holdXmlCounts(pkg.raw(), docPart);
     const docDir = docPart.slice(0, docPart.lastIndexOf("/") + 1);
 
     this.settingsPart = docDir + "settings.xml";
@@ -3452,11 +3452,8 @@ export class DocxDocument {
   }
 
   private findDocumentPart(): string {
-    const rootRels = parseRelationships(this.readXmlOptional("_rels/.rels"), "");
-    for (const rel of rootRels.values()) {
-      if (rel.type === REL_TYPE_DOCUMENT) return rel.target;
-    }
-    if (this.pkg.has("word/document.xml")) return "word/document.xml";
+    const part = mainDocumentPart(this.pkg.binary("_rels/.rels"));
+    if (this.pkg.has(part)) return part;
     throw new Error("Not a WordprocessingML package: no main document part");
   }
 
