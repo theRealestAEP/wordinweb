@@ -3,8 +3,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
+import { compareDocuments } from "../../core/src/edit/compare/index.js";
 import { collectRevisions } from "../../core/src/edit/suggest.js";
 import { AUTHOR, DATE } from "../../core/test/compare-helpers.js";
 import { compareFiles } from "../src/compare.js";
@@ -68,5 +70,31 @@ describe("compareFiles with a Word 97-2003 .doc", () => {
     }
     const revised = await errorOf(good, join(dir, "text.doc"));
     expect([revised.code, revised.file]).toEqual(["unsupported_format", "revised"]);
+  });
+});
+
+describe("comments numbered otherwise", () => {
+  // The same document with every comment id raised by 100, as a .doc and the
+  // .docx Word makes of it differ, and with a page break Word last rendered.
+  const renumbered = (): Uint8Array => {
+    const files = unzipSync(new Uint8Array(readFileSync(join(fixtures, "parity-columns--v03.docx"))));
+    const raise = (name: string): void => {
+      const xml = strFromU8(files[name]).replace(/(<w:(?:comment|commentRangeStart|commentRangeEnd|commentReference)\b[^>]*?\bw:id=")(\d+)"/g, (_, head: string, id: string) => `${head}${Number(id) + 100}"`);
+      files[name] = strToU8(xml);
+    };
+    raise("word/document.xml");
+    raise("word/comments.xml");
+    files["word/document.xml"] = strToU8(strFromU8(files["word/document.xml"]).replace("<w:r>", "<w:r><w:lastRenderedPageBreak/></w:r><w:r>"));
+    return zipSync(files);
+  };
+
+  it("gives no change for a comment that is the same in both documents", async () => {
+    const original = join(fixtures, "parity-columns--v03.docx");
+    const revised = join(dir, "renumbered.docx");
+    writeFileSync(revised, renumbered());
+    const { revisions } = await compareFiles(original, revised, join(dir, "renumbered-result.docx"), options);
+    expect(Object.values(revisions).reduce((a, b) => a + b, 0)).toBe(0);
+    const result = compareDocuments(DocxDocument.load(new Uint8Array(readFileSync(original))), DocxDocument.load(renumbered()), options);
+    expect(collectRevisions(result).length).toBe(0);
   });
 });

@@ -172,7 +172,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
         note({ code: "existing-revisions-accepted", detail: `the ${input.side} document held tracked changes; it was compared as if they were accepted` });
       }
     }
-    const ctx = compareContext(O.shell, R.shell, options);
+    const ctx = compareContext(O.shell, R.shell, options, undefined, { original: O.commentRefs, revised: R.commentRefs });
     reportUncomparedParts(O.shell, R.shell, ctx);
     const headerFooterPairs = pairHeadersFooters(O.shell, R.shell, { original: O.sectPrs, merged: R.sectPrs });
     // Notes first: struck body text carries the ORIGINAL's note references,
