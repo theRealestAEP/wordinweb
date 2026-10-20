@@ -92,7 +92,7 @@ export interface DocPropertyRevision {
   date?: string;
   /** The grpprl before the wall sprm: the state before the change, to
    * apply over the style the way direct formatting is (applyRunSprms,
-   * applyParaSprms). Empty when the file keeps no old state. */
+   * applyParaSprms). Without a wall sprm, the current sprms, as Word reads it. */
   old: Uint8Array;
   /** The paragraph's style index: what the old properties apply over
    * (pPrChange: the old pPr starts from it; rPrChange: its toggles resolve
@@ -126,10 +126,10 @@ const SPRM = {
 /** A ToggleOperand: 0x01 on, 0x81 the opposite of the style's (which has no revision), else off. */
 const toggleOn = (v: number | undefined): boolean => v === 0x01 || v === 0x81;
 
-const EMPTY = new Uint8Array(0);
-
 /** The grpprl before the last wall sprm whose operand is 1, keeping the
- * sprms of the given sgc (1 paragraph, 2 character, 5 table); empty without a wall. */
+ * sprms of the given sgc (1 paragraph, 2 character, 5 table). Without a
+ * wall the file keeps no old state, and Word takes the current sprms as
+ * the old ones (its own .docx conversion writes them so). */
 function oldGrpprl(grpprl: Uint8Array, wall: number, sgc: number): Uint8Array {
   let at = -1;
   let i = 0;
@@ -143,8 +143,7 @@ function oldGrpprl(grpprl: Uint8Array, wall: number, sgc: number): Uint8Array {
     }
     if (((sprm >> 10) & 7) === sgc) kept.push(grpprl.subarray(start, i));
   }
-  if (at < 0) return EMPTY;
-  const parts = kept.slice(0, at);
+  const parts = at < 0 ? kept : kept.slice(0, at);
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
   for (const p of parts) {

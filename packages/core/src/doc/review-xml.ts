@@ -40,8 +40,7 @@ export function reviewHooks(reader: DocReader, review: DocReview = readDocReview
       if (cp >= reader.parts.comments && cp < reader.parts.endnotes) return `<w:r>${rPrXml}<w:annotationRef/></w:r>`;
       const commentId = referenceAt.get(cp);
       if (commentId === undefined) return undefined;
-      const run = `<w:r>${rPrXml}<w:commentReference w:id="${commentId}"/></w:r>`;
-      return wrapRunRevisions(run, revisionsAt(review, cp), id);
+      return `<w:r>${rPrXml}<w:commentReference w:id="${commentId}"/></w:r>`;
     },
     runExtra: (cp) => change("rPrChange", cp) || undefined,
     wrapRun: (cp, _end, _props, runXml) => wrapRunRevisions(runXml, revisionsAt(review, cp), id),

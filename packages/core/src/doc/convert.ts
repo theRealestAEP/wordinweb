@@ -80,7 +80,7 @@ export interface ConvertHooks {
   special?: (ch: number, cp: number, props: RunProps, rPr: string) => string | undefined;
   /** Extra XML at the end of a run's rPr (an rPrChange) for the text at [cp, end). */
   runExtra?: (cp: number, end: number, props: RunProps) => string | undefined;
-  /** A finished run's XML, wrapped (w:ins, w:del) as its properties say. */
+  /** A finished run's XML (a special character's run too), wrapped (w:ins, w:del) as its properties say. */
   wrapRun?: (cp: number, end: number, props: RunProps, runXml: string) => string;
   /**
    * Extra XML for a paragraph mark at `cp`: `rPr` goes at the end of the
@@ -507,7 +507,7 @@ class Converter {
           }
           flushRun(cp);
           const xml = this.hooks.special?.(ch, cp, props, rPrFull);
-          if (xml) out.push(xml);
+          if (xml) out.push(this.hooks.wrapRun ? this.hooks.wrapRun(cp, cp + 1, props, xml) : xml);
           runStart = cp + 1;
           break;
         }
