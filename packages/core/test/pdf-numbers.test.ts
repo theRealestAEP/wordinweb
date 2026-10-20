@@ -11,7 +11,7 @@ import { FontSet } from "../src/pdf/fonts.js";
 import { convertMetafile } from "../src/pdf/metafile.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { Resources } from "../src/pdf/resources.js";
-import { PdfWriter, num } from "../src/pdf/writer.js";
+import { PdfWriter, finiteOps, num } from "../src/pdf/writer.js";
 import { bytesSource } from "../src/stream/source.js";
 import { emf, emfPlus, emfPlusDriverString, emfPlusFont, pictureDocx } from "./pictures.js";
 
@@ -57,6 +57,23 @@ describe("num", () => {
 
   it("never gives exponent form", () => {
     for (const value of [1e20, 1e21, 2.6e25, -1e30, 1e300, 1e-5, -3.3e-10, 7e-21]) expect(num(value)).toMatch(/^-?\d+(\.\d+)?$/);
+  });
+});
+
+describe("finiteOps", () => {
+  it("leaves out each entry with a NaN or an infinity, all but its q, Q, BT and ET", () => {
+    const ops = ["q 0 0 1 rg 10 10 m 20 NaN l S Q", "q", "1 0 0 1 Infinity 5 cm /Im1 Do Q", "BT /F1 12 Tf 1 0 0 1 -Infinity 5 Tm <0001> Tj ET", "q 1 g 0 0 5 5 re f Q"];
+    expect(finiteOps(ops)).toEqual(["q Q", "q", "Q", "BT ET", "q 1 g 0 0 5 5 re f Q"]);
+  });
+
+  it("reads no number in a string", () => {
+    const ops = ["BT /F1 12 Tf (NaN Infinity) Tj ET", "[<4E614E>] TJ"];
+    expect(finiteOps(ops)).toEqual(ops);
+  });
+
+  it("finds what num() writes for NaN and the infinities", () => {
+    expect([num(Number.NaN), num(Infinity), num(-Infinity)]).toEqual(["NaN", "Infinity", "-Infinity"]);
+    expect(finiteOps([`${num(Number.NaN)} 0 m`])).toEqual([""]);
   });
 });
 

@@ -111,6 +111,26 @@ export class PdfWriter {
   }
 }
 
+/** A NaN or an infinity as num() writes it. */
+const NON_FINITE = /(?:^|[\s[\]])-?(?:NaN|Infinity)(?=[\s[\]]|$)/;
+/** A content stream's strings: hex and literal. */
+const STRINGS = /<[0-9A-Fa-f\s]*>|\((?:\\.|[^\\)])*\)/g;
+/** The operators that open and close a graphics state or a text object. */
+const NESTING = /(?<![^\s[\]])(?:q|Q|BT|ET)(?![^\s[\]])/g;
+
+/**
+ * Content-stream operators with each entry that holds a number num() could
+ * not write (NaN or an infinity) left out, all but its q, Q, BT and ET, so
+ * the nesting holds. An entry is one drawing: a path and its paint, a run
+ * of text, a picture.
+ */
+export function finiteOps(ops: string[]): string[] {
+  return ops.map((op) => {
+    const bare = op.replace(STRINGS, " ");
+    return NON_FINITE.test(bare) ? (bare.match(NESTING) ?? []).join(" ") : op;
+  });
+}
+
 /** A PDF literal string, escaped. */
 export function pdfString(text: string): string {
   // Text outside Latin-1 goes as UTF-16BE with a byte order mark.
@@ -126,10 +146,11 @@ export function pdfString(text: string): string {
  * A number for a content stream or dictionary: short, in plain decimal
  * (PDF has no exponent form), to three places. String() and toFixed() write
  * 1e21 and above in exponent form; every number that large is an integer,
- * which BigInt writes in full. A finite value only: the callers keep
- * NaN and the infinities out.
+ * which BigInt writes in full. NaN and the infinities have no PDF form:
+ * they are written as NaN, Infinity and -Infinity, for finiteOps to leave out.
  */
 export function num(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
   if (Number.isInteger(value)) return Math.abs(value) < 1e21 ? String(value) : BigInt(value).toString();
   const fixed = value.toFixed(3).replace(/\.?0+$/, "");
   return fixed === "-0" ? "0" : fixed;
