@@ -7,10 +7,10 @@
 // Written from Microsoft's description of the Word for Windows 2.0 binary
 // format as LibreOffice's Word reader (sw/source/filter/ww8, ww::eWW2)
 // applies it, which was a guide to the structures only.
-import { dibToBmp } from "../doc/officeart.js";
+import { dibToWmf } from "./dibwmf.js";
 import { newSectionProps } from "../doc/sprm.js";
 import { symbolText } from "../pdf/dib.js";
-import { Inline, OldDocument } from "./model.js";
+import { Inline, OldDocument, Picture } from "./model.js";
 import { Char, DocProps, Entry, Fib, Sprm, Word2Reader, popcount } from "./word2.js";
 
 const CP1252 = new TextDecoder("windows-1252");
@@ -66,13 +66,14 @@ class WinWordReader extends Word2Reader {
     };
   }
 
-  /** The font table: its size, then per font a size byte, two bytes, and the name ending in a zero byte. */
+  /** The font table: its size, then per font a size byte, the family byte, (Word 2) the character set, and the name ending in a zero byte. */
   private readFonts(entry: Entry): void {
     const table = this.entry(entry);
+    const nameAt = this.bytes[0] === 0xdb ? 3 : 2;
     let at = 2;
-    while (at + 3 < table.length) {
+    while (at + nameAt < table.length) {
       const size = table[at] + 1;
-      const name = table.subarray(at + 3, Math.min(at + size, table.length));
+      const name = table.subarray(at + nameAt, Math.min(at + size, table.length));
       const end = name.indexOf(0);
       this.fontNames.push(CP1252.decode(end >= 0 ? name.subarray(0, end) : name));
       at += size;
@@ -208,18 +209,18 @@ class WinWordReader extends Word2Reader {
   }
 }
 
-/** A picture's data: a Windows metafile (its records, with no placeable header) or a device-independent bitmap. */
-function pictureData(data: Uint8Array): { data: Uint8Array; ext: "wmf" | "bmp" } | undefined {
+/**
+ * A picture's data: a Windows metafile (its records, with no placeable
+ * header), or a bitmap (a .bmp file or a bare DIB), which goes into a
+ * metafile of one StretchDIB record, as the renderer draws those.
+ */
+function pictureData(data: Uint8Array): Picture | undefined {
   if (data.length < 18) return undefined;
   const v = new DataView(data.buffer, data.byteOffset, data.byteLength);
-  if (data[0] === 0x42 && data[1] === 0x4d) return { data: data.slice(), ext: "bmp" };
   if (v.getUint32(0, true) === 0x9ac6cdd7) return { data: data.slice(), ext: "wmf" };
   const type = v.getUint16(0, true);
   if ((type === 1 || type === 2) && v.getUint16(2, true) === 9) return { data: data.slice(), ext: "wmf" };
-  const header = v.getUint32(0, true);
-  if (header === 40 || header === 12) {
-    const bmp = dibToBmp(data);
-    return bmp ? { data: bmp.data, ext: "bmp" } : undefined;
-  }
-  return undefined;
+  const dib = data[0] === 0x42 && data[1] === 0x4d ? data.subarray(14) : data;
+  const wmf = dibToWmf(dib);
+  return wmf ? { data: wmf, ext: "wmf" } : undefined;
 }

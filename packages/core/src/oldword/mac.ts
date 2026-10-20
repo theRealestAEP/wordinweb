@@ -8,13 +8,13 @@
 import { newSectionProps } from "../doc/sprm.js";
 import { symbolText } from "../pdf/dib.js";
 import { Inline, OldDocument } from "./model.js";
-import { Char, DocProps, Entry, Fib, Sprm, Word2Reader, popcount } from "./word2.js";
+import { Char, DocProps, Entry, Fib, STANDARD_STYLES, Sprm, Word2Reader, popcount } from "./word2.js";
 
 const MAC_ROMAN = new TextDecoder("macintosh");
 const MAC_ROMAN_CHARS: string[] = Array.from({ length: 256 }, (_, i) => MAC_ROMAN.decode(Uint8Array.of(i)));
 
 /** The Mac fonts by their system number, for a Word 4 file (no font table of its own) and a font a Word 5 table leaves out. */
-const MAC_FONTS: Record<number, string> = {
+export const MAC_FONTS: Record<number, string> = {
   0: "Chicago", 1: "Geneva", 2: "New York", 3: "Geneva", 4: "Monaco", 5: "Venice", 6: "London", 7: "Athens", 8: "San Francisco", 9: "Toronto",
   11: "Cairo", 12: "Los Angeles", 13: "Zapf Dingbats", 14: "Bookman", 15: "Helvetica Narrow", 16: "Palatino", 18: "Zapf Chancery", 20: "Times",
   21: "Helvetica", 22: "Courier", 23: "Symbol", 24: "Mobile", 33: "Avant Garde", 34: "New Century Schoolbook",
@@ -26,7 +26,7 @@ const DATE_PICTURES: Record<number, string> = {
 };
 
 /** The operand sizes of the sprms Word for the Macintosh writes (Word for Windows 2.0's numbering, with Word for Windows 2.0's sizes where the Mac files do not show their own). */
-const SPRM_SIZES: Record<number, number> = {
+export const MAC_SPRM_SIZES: Record<number, number> = {
   0x02: 1, 0x03: -1, 0x04: 1, 0x05: 1, 0x06: 1, 0x07: 1, 0x08: 1, 0x09: 1, 0x0a: 1, 0x0b: 1, 0x0c: 1, 0x0d: 1, 0x0e: 1, 0x0f: -1,
   0x10: 2, 0x11: 2, 0x12: 2, 0x13: 2, 0x14: 2, 0x15: 2, 0x16: 2, 0x17: -1, 0x18: 1, 0x19: 1, 0x1a: 2, 0x1b: 2, 0x1c: 2, 0x1d: 1,
   0x1e: 2, 0x1f: 2, 0x20: 2, 0x21: 2, 0x22: 2, 0x23: 2, 0x24: 2, 0x25: 1, 0x26: 2, 0x27: 2, 0x28: 2, 0x29: 2, 0x2a: 2, 0x2b: 2,
@@ -50,10 +50,10 @@ export function readMacWord(bytes: Uint8Array): OldDocument {
   return new MacReader(bytes).read();
 }
 
-class MacReader extends Word2Reader {
-  protected readonly sprmSizes = SPRM_SIZES;
+export class MacReader extends Word2Reader {
+  protected readonly sprmSizes = MAC_SPRM_SIZES;
   private readonly fontNames = new Map<number, string>();
-  private dop: Uint8Array = new Uint8Array(0);
+  protected dop: Uint8Array = new Uint8Array(0);
 
   constructor(bytes: Uint8Array) {
     super(bytes, true);
@@ -164,6 +164,11 @@ class MacReader extends Word2Reader {
       case 0x53: this.applyChpx(c, arg); break;
       default: break;
     }
+  }
+
+  /** Word for the Macintosh numbers the standard styles one after Word for Windows 2.0: its -1 is heading 1, its -12 header. */
+  protected standardStyleName(id: number): string | undefined {
+    return STANDARD_STYLES[id - 1];
   }
 
   protected fontName(id: number): string {

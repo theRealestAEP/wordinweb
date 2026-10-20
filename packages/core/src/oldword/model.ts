@@ -78,8 +78,8 @@ export interface Style {
 
 export interface Picture {
   data: Uint8Array;
-  /** The file extension the renderer knows it by: pict, wmf, bmp. */
-  ext: "pict" | "wmf" | "bmp";
+  /** The file extension the renderer knows it by: pict or wmf. */
+  ext: "pict" | "wmf";
 }
 
 export interface OldDocument {

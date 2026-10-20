@@ -100,7 +100,7 @@ interface StyleEntry {
 }
 
 /** The standard styles by their number (stc - 256), as Word for Windows 2.0 numbers them. */
-const STANDARD_STYLES: Record<number, string> = {
+export const STANDARD_STYLES: Record<number, string> = {
   [-1]: "Normal Indent", [-2]: "heading 1", [-3]: "heading 2", [-4]: "heading 3", [-5]: "heading 4", [-6]: "heading 5", [-7]: "heading 6",
   [-8]: "heading 7", [-9]: "heading 8", [-10]: "heading 9", [-11]: "footnote text", [-12]: "footnote reference", [-13]: "header",
   [-14]: "footer", [-15]: "index heading", [-16]: "line number", [-17]: "index 1", [-18]: "index 2", [-19]: "index 3", [-20]: "index 4",
@@ -137,6 +137,19 @@ export abstract class Word2Reader {
   constructor(protected readonly bytes: Uint8Array, private readonly bigEndian: boolean) {}
 
   // ---- What each format reads its own way ----------------------------------
+
+  /** The size of an FKP page: 512 bytes, 128 in Word for the Macintosh 3. */
+  protected readonly fkpPageSize: number = 512;
+  /** The bytes of a PAPX before its sprms: the style number and six more (three in all in Word for the Macintosh 3). */
+  protected readonly papxHeader: number = 7;
+  /** A SEPX's sprms, in word2.ts's numbering of the section sprms. */
+  protected sectionSprms(sepx: Uint8Array): Sprm[] {
+    return this.parseSprms(sepx);
+  }
+  /** The name of a standard style by its number. */
+  protected standardStyleName(id: number): string | undefined {
+    return STANDARD_STYLES[id];
+  }
 
   protected abstract readFib(): Fib;
   protected abstract readDocProps(): DocProps;
@@ -241,6 +254,8 @@ export abstract class Word2Reader {
     }
     if (this.pieces.length === 0) this.pieces.push({ cp: 0, end: total, fc: fcMin, sprms: [] });
     const length = this.pieces[this.pieces.length - 1].end;
+    // Every character is a byte of the file.
+    if (total > this.bytes.length || length > this.bytes.length) throw new Error("the text is longer than the file");
     this.text = new Uint8Array(length);
     for (const piece of this.pieces) {
       const from = Math.min(piece.fc, this.bytes.length);
@@ -281,21 +296,24 @@ export abstract class Word2Reader {
       let pn = this.n16(bte, 4 * (n + 1) + 2 * i);
       let expected = this.n32(bte, 4 * i);
       for (let pages = 0; pages < 256; pages++, pn++) {
-        const page = pn * 512;
-        if (page + 512 > this.bytes.length) break;
-        const crun = this.u8(page + 511);
-        if (crun === 0 || 5 * crun + 4 > 511 || this.u32(page) !== expected) break;
+        const size = this.fkpPageSize;
+        const page = pn * size;
+        if (page + size > this.bytes.length) break;
+        const crun = this.u8(page + size - 1);
+        if (crun === 0 || 5 * crun + 4 > size - 1 || this.u32(page) !== expected) break;
         expected = this.u32(page + 4 * crun);
+        // In a 512-byte page, run offsets count words, and so does a PAPX's size; in a 128-byte page (Word for the Macintosh 3), bytes.
+        const unit = size === 512 ? 2 : 1;
         for (let k = 0; k < crun; k++) {
           const fc = this.u32(page + 4 * k);
           const end = this.u32(page + 4 * (k + 1));
-          const offset = this.u8(page + 4 * (crun + 1) + k) * 2;
+          const offset = this.u8(page + 4 * (crun + 1) + k) * unit;
           let data: Uint8Array | undefined;
           if (offset) {
-            const size = this.u8(page + offset);
-            // A PAPX's size counts words after its size byte; a CHPX's, bytes.
-            const length = paragraph ? 2 * size : size;
-            data = this.bytes.subarray(page + offset + 1, Math.min(page + offset + 1 + length, page + 511));
+            const count = this.u8(page + offset);
+            // A CHPX's size counts bytes.
+            const length = paragraph ? unit * count : count;
+            data = this.bytes.subarray(page + offset + 1, Math.min(page + offset + 1 + length, page + size - 1));
           }
           if (end > fc) runs.push({ fc, end, data });
         }
@@ -353,7 +371,8 @@ export abstract class Word2Reader {
       const names = entriesOf(zones[0] ?? new Uint8Array(0));
       const chpxs = entriesOf(zones[1] ?? new Uint8Array(0));
       const papxs = entriesOf(zones[2] ?? new Uint8Array(0));
-      const count = at + 2 <= stsh.length ? this.n16(stsh, at) : 0;
+      // The based-on pairs: no more than fit in the style sheet.
+      const count = at + 2 <= stsh.length ? Math.min(this.n16(stsh, at), Math.floor((stsh.length - at - 2) / 2)) : 0;
       for (let i = 0; i < Math.max(names.length, count); i++) {
         const name = names[i];
         if (name === null) continue;
@@ -386,14 +405,14 @@ export abstract class Word2Reader {
       resolving.delete(id);
       if (style?.chpx) this.applyChpx(char, style.chpx);
       // A style's paragraph entry: its own number, six bytes, then its sprms.
-      if (style?.papx && style.papx.length > 7) {
-        const sprms = this.parseSprms(style.papx.subarray(7));
+      if (style?.papx && style.papx.length > this.papxHeader) {
+        const sprms = this.parseSprms(style.papx.subarray(this.papxHeader));
         this.applyParaSprms(para, sprms, false);
         for (const sprm of para.charSprms) this.applyCharSprm(char, sprm, char);
       }
       para.props.istd = 0;
       para.charSprms = [];
-      const name = id === 0 ? "Normal" : style?.name ?? STANDARD_STYLES[id] ?? `Style ${id}`;
+      const name = id === 0 ? "Normal" : style?.name ?? this.standardStyleName(id) ?? `Style ${id}`;
       const entry = { name, para, char, next: style?.next ?? id, index: -1 };
       this.styles.set(id, entry);
       return entry;
@@ -430,8 +449,8 @@ export abstract class Word2Reader {
     for (let at = 0; at + 4 <= txt.length; at += 4) cps.push(this.n32(txt, at));
     const base = this.fib.ccpText;
     for (let i = 0; i < this.noteRefs.size && i + 1 < cps.length; i++) {
-      const start = base + cps[i];
-      const end = Math.min(base + cps[i + 1], base + this.fib.ccpFtn);
+      const start = base + Math.min(cps[i], this.fib.ccpFtn);
+      const end = base + Math.min(cps[i + 1], this.fib.ccpFtn);
       this.footnotes.push(end > start ? this.blocks(start, end, null, true) : []);
     }
   }
@@ -448,7 +467,8 @@ export abstract class Word2Reader {
       const fcSepx = this.n32(sed, 4 * (n + 1) + 6 * i + 2);
       let sepx: Uint8Array | undefined;
       if (fcSepx !== 0xffffffff && fcSepx < this.bytes.length) sepx = this.bytes.subarray(fcSepx + 1, fcSepx + 1 + this.u8(fcSepx));
-      if (end > cp) limits.push({ cp, end, sepx });
+      // Sections follow each other: one that goes back over the last is left out.
+      if (end > cp && cp >= (limits.length ? limits[limits.length - 1].end : 0)) limits.push({ cp, end, sepx });
     }
     if (limits.length === 0) limits.push({ cp: 0, end: mainEnd });
     limits[limits.length - 1].end = mainEnd;
@@ -463,7 +483,7 @@ export abstract class Word2Reader {
       const props: SectionProps = { ...structuredClone(this.docProps.page) };
       let headerFlags = 0;
       // A fast-saved file changes a section by the property modifier of the piece that holds its end.
-      const sprms = [...this.parseSprms(limit.sepx ?? new Uint8Array(0)), ...(this.pieceAt(limit.end - 1)?.sprms ?? [])];
+      const sprms = [...this.sectionSprms(limit.sepx ?? new Uint8Array(0)), ...(this.pieceAt(limit.end - 1)?.sprms ?? [])];
       for (const { op, arg } of sprms) {
         switch (op) {
           case 0x75: props.bkc = arg[0]; break;
@@ -472,7 +492,11 @@ export abstract class Word2Reader {
           case 0x78: props.dxaColumns = this.n16(arg, 0); break;
           case 0x7a: props.nfcPgn = arg[0]; break;
           case 0x7d: props.pgnRestart = arg[0] !== 0; break;
+          case 0x7f: props.lnc = arg[0]; break;
           case 0x80: headerFlags = arg[0]; break;
+          case 0x81: props.nLnnMod = this.n16(arg, 0); break;
+          case 0x82: props.dxaLnn = this.n16(arg, 0); break;
+          case 0x87: props.lnnMin = this.n16(arg, 0); break;
           case 0x83: props.dyaHdrTop = this.n16(arg, 0); break;
           case 0x84: props.dyaHdrBottom = this.n16(arg, 0); break;
           case 0x85: props.lineBetween = arg[0] !== 0; break;
@@ -495,8 +519,8 @@ export abstract class Word2Reader {
       for (let bit = 0; bit < 6; bit++) {
         if (!(headerFlags & (1 << bit))) continue;
         if (story + 2 >= stories.length) break;
-        const start = hddBase + stories[story];
-        const end = hddBase + stories[story + 1];
+        const start = hddBase + Math.min(stories[story], this.fib.ccpHdd);
+        const end = hddBase + Math.min(stories[story + 1], this.fib.ccpHdd);
         story++;
         const [kind, type] = kinds[bit];
         if (this.storyHasText(start, end)) headers.push({ kind, type, blocks: this.blocks(start, end, null, false) });
@@ -566,7 +590,7 @@ export abstract class Word2Reader {
     const para = clonePara(style.para);
     para.props.istd = style.index;
     // A PAPX: the style number, six bytes (the paragraph's line heights), then its sprms.
-    if (papx && papx.length > 7) this.applyParaSprms(para, this.parseSprms(papx.subarray(7)), true);
+    if (papx && papx.length > this.papxHeader) this.applyParaSprms(para, this.parseSprms(papx.subarray(this.papxHeader)), true);
     if (piece?.sprms.length) this.applyParaSprms(para, piece.sprms, true);
     return para;
   }
@@ -610,6 +634,13 @@ export abstract class Word2Reader {
     const decode = this.decoder(char.fontId);
     for (let cp = start; cp < end; cp++) {
       const ch = this.text[cp];
+      const note = ch >= 0x20 ? this.noteRefs.get(cp) : undefined;
+      if (note) {
+        // A footnote reference with a mark of its own: the character at the reference.
+        flush();
+        content.push({ kind: "footnote", id: note, customMark: decode(ch) });
+        continue;
+      }
       if (ch >= 0x20) {
         text += decode(ch);
         continue;
