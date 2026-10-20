@@ -78,10 +78,29 @@ export interface ConvertHooks {
    * the run's rPr body. Undefined drops the character.
    */
   special?: (ch: number, cp: number, props: RunProps, rPr: string) => string | undefined;
+  /** Extra XML at the end of a run's rPr (an rPrChange) for the text at [cp, end). */
+  runExtra?: (cp: number, end: number, props: RunProps) => string | undefined;
   /** A finished run's XML, wrapped (w:ins, w:del) as its properties say. */
   wrapRun?: (cp: number, end: number, props: RunProps, runXml: string) => string;
-  /** Extra package parts (comments.xml, media), with their relationships from document.xml and their content types. */
-  parts?: { files: Record<string, Uint8Array>; documentRels: { id: string; type: string; target: string }[]; contentTypes: { partName: string; contentType: string }[] };
+  /**
+   * Extra XML for a paragraph mark at `cp`: `rPr` goes at the end of the
+   * mark's rPr (w:ins, w:del), `pPr` at the end of the pPr (a pPrChange).
+   */
+  markExtra?: (cp: number, props: ParaProps, mark: RunProps) => { rPr?: string; pPr?: string } | undefined;
+  /** Extra XML at the end of the trPr of the row whose row mark is at `cp` (w:ins, w:del, trPrChange). */
+  rowExtra?: (cp: number, table: TableProps) => string | undefined;
+  /**
+   * Extra package parts (comments.xml, media), with their relationships
+   * from document.xml and their content types. `paragraphs` writes the text
+   * at [cpStart, cpEnd) as formatted w:p elements (a comment's text).
+   */
+  parts?: (paragraphs: (cpStart: number, cpEnd: number) => string) => ExtraParts;
+}
+
+export interface ExtraParts {
+  files: Record<string, Uint8Array>;
+  documentRels: { id: string; type: string; target: string }[];
+  contentTypes: { partName: string; contentType: string }[];
 }
 
 /** The .docx package's parts for a .doc. */
@@ -164,7 +183,7 @@ class Converter {
     this.addPart("word/settings.xml", this.settingsXml(), "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml", `${REL_NS}/settings`);
     // The body last: its sections register their header and footer parts.
     const body = this.bodyXml();
-    const extra = this.hooks.parts;
+    const extra = this.hooks.parts?.((cpStart, cpEnd) => this.storyXml(cpStart, cpEnd, null, null, null));
     if (extra) {
       Object.assign(this.parts, extra.files);
       this.documentRels.push(...extra.documentRels);
@@ -349,7 +368,7 @@ class Converter {
       const lastRight = t.cells.length ? t.cells[t.cells.length - 1].right : left;
       const gridAfter = grid.length - 1 - column(lastRight);
       let tr = `<w:tr>`;
-      const trPr = trPrXml(t, gridBefore, gridAfter);
+      const trPr = trPrXml(t, gridBefore, gridAfter) + (this.hooks.rowExtra?.(row.mark.mark, t) ?? "");
       if (trPr) tr += `<w:trPr>${trPr}</w:trPr>`;
       let prevEdge = left;
       let cellIndex = 0;
@@ -387,10 +406,12 @@ class Converter {
     const markProps = newRunProps();
     if (markRun) applyRunSprms(markRun.grpprl, markProps);
     const ppr = pPrXml(p.props, ctx);
-    const markRPr = rPrXml(markProps, ctx, p.props.istd);
+    const extra = this.hooks.markExtra?.(p.mark, p.props, markProps);
+    const markRPr = rPrXml(markProps, ctx, p.props.istd) + (extra?.rPr ?? "");
     let pPr = ppr.before;
     if (markRPr) pPr += `<w:rPr>${markRPr}</w:rPr>`;
     if (sectPr) pPr += sectPr;
+    if (extra?.pPr) pPr += extra.pPr;
     const out: string[] = [pPr ? `<w:p><w:pPr>${pPr}</w:pPr>` : "<w:p>"];
     const field = { inCode: [] as boolean[] };
     for (const run of runs) {
@@ -414,7 +435,8 @@ class Converter {
       rPr = rPrXml(props, ctx, istdPara);
       this.rPrCache.set(key, rPr);
     }
-    const rPrXmlWrapped = rPr ? `<w:rPr>${rPr}</w:rPr>` : "";
+    const rPrFull = rPr + (this.hooks.runExtra?.(run.cp, end, props) ?? "");
+    const rPrXmlWrapped = rPrFull ? `<w:rPr>${rPrFull}</w:rPr>` : "";
     const special = toggleValue(props, "fSpec", ctx, istdPara) === true;
     const symbolFont = run.compressed && props.ftc0 !== undefined && fonts[props.ftc0]?.charset === 2;
     const out: string[] = [];
@@ -426,12 +448,15 @@ class Converter {
       content += inCode ? `<w:instrText xml:space="preserve">${escapeText(text)}</w:instrText>` : `<w:t xml:space="preserve">${escapeText(text)}</w:t>`;
       text = "";
     };
+    let runStart = run.cp;
     const flushRun = (cpEnd: number): void => {
       flushText();
-      if (!content) return;
-      const xml = `<w:r>${rPrXmlWrapped}${content}</w:r>`;
-      out.push(this.hooks.wrapRun ? this.hooks.wrapRun(run.cp, cpEnd, props, xml) : xml);
-      content = "";
+      if (content) {
+        const xml = `<w:r>${rPrXmlWrapped}${content}</w:r>`;
+        out.push(this.hooks.wrapRun ? this.hooks.wrapRun(runStart, cpEnd, props, xml) : xml);
+        content = "";
+      }
+      runStart = cpEnd;
     };
     for (let cp = run.cp; cp < end; cp++) {
       const markers = this.markersAt(cp);
@@ -481,8 +506,9 @@ class Converter {
             break;
           }
           flushRun(cp);
-          const xml = this.hooks.special?.(ch, cp, props, rPr);
+          const xml = this.hooks.special?.(ch, cp, props, rPrFull);
           if (xml) out.push(xml);
+          runStart = cp + 1;
           break;
         }
         default:
