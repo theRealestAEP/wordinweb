@@ -327,14 +327,18 @@ describe("a break next to a table, a picture or a text box", () => {
     );
     expectClean(pages, ["Before", "A", "twentyfive", "After"], ["Before", "After"]);
   });
+
   // Validator doc97-check-d, minimal file anchor_then_br.docx: the break that
   // follows only an anchored shape was dropped, so "ZZZ" stayed on page 1.
+  // The shape stays on page 1 with the line that holds its anchor: 000677.doc
+  // anchors its cover-page banner this way, 435pt below a heading that opens
+  // with [anchor][page break], and the banner belongs at the cover's foot.
   it("keeps a page break that follows only an anchored shape", () => {
     const pages = layout(
       p("AAA") + `<w:p>${redBox("wrapNone", 0, 914400)}<w:r><w:br w:type="page"/></w:r><w:r><w:t>ZZZ</w:t></w:r></w:p>` + p("BBB"),
     );
     expect(pagesOfWords(pages, ["AAA", "ZZZ", "BBB"])).toEqual([1, 2, 2]);
-    expect(redPages(pages)).toEqual([2]);
+    expect(redPages(pages)).toEqual([1]);
   });
 
   it("keeps a page break that follows an anchored shape and text", () => {

@@ -1079,10 +1079,6 @@ export function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run:
             return undefined; // a line break opens the paragraph
           }
           if (c.kind === "text" && c.text.length === 0) continue;
-          // An anchored shape takes no room on the line. The line breaker
-          // also lets it pass and drops the break as a leading break, so the
-          // paragraph must move to the new page here.
-          if (c.kind === "anchor") continue;
           return undefined; // real content precedes any break
         }
         // After the opening break: any real content confirms break-before.
