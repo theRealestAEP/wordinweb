@@ -97,6 +97,17 @@ describe("RecordingCanvas", () => {
     expect(canvas.dropped).toBe(0);
     expect(canvas.ops).toEqual(["-1000 -1000 m 1000 -1000 l 1000 1000 l -1000 1000 l h W n"]);
   });
+
+  it("leaves out a clip out of reach with a slanted edge, which clamping would move", () => {
+    const canvas = new RecordingCanvas(100, 50, fonts, resources());
+    const ctx = canvas.getContext("2d")!;
+    ctx.moveTo(-2000, 0);
+    ctx.lineTo(2000, 0);
+    ctx.lineTo(0, 50);
+    ctx.clip();
+    expect(canvas.dropped).toBe(1);
+    expect(canvas.ops).toEqual([]);
+  });
 });
 
 describe("a metafile with a text origin out of reach", () => {

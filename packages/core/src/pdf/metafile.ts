@@ -10,7 +10,8 @@ import { convertWmf } from "./wmf.js";
  * An EMF, WMF or PICT picture as recorded operators: emf-converter (as the
  * browser renderer uses it) or the players in wmf.ts and pict.ts replayed onto a
  * RecordingCanvas. Null when the converter rejects the bytes, when the
- * picture is cut short or malformed, when its bitmaps are over one
+ * picture is cut short or malformed, when it holds an EMF+ drawing record
+ * the converter skips, when its bitmaps are over one
  * picture's BitmapBudget, when an EMF+ image it draws does not reach
  * the canvas, or when the canvas left out a paint or text for a point out
  * of reach (RecordingCanvas.dropped): the page draws an empty frame, and
@@ -101,10 +102,14 @@ const EMFPLUS_OBJECT = 0x4008;
 const EMFPLUS_DRAWIMAGE = 0x401a;
 const EMFPLUS_DRAWIMAGEPOINTS = 0x401b;
 const EMFPLUS_IMAGE = 5;
+/** EMF+ records that draw and that emf-converter skips ([MS-EMFPLUS] 2.3.4): Clear, FillRegion,
+ * FillClosedCurve, DrawClosedCurve, DrawCurve, DrawBeziers, StrokeFillPath. */
+const EMFPLUS_UNPLAYED = new Set([0x4009, 0x4013, 0x4016, 0x4017, 0x4018, 0x4019, 0x4037]);
 
 /**
  * Throw for an EMF cut short (a record that runs past the end, or records
- * that stop before EMR_EOF), and take from `budget` each bitmap
+ * that stop before EMR_EOF) or with an EMF+ drawing record emf-converter
+ * skips (an EMF+ Dual file's EMF records are not played either), and take from `budget` each bitmap
  * emf-converter decodes whole, before it runs: the DIB of a BITBLT or a
  * STRETCHDIBITS ([MS-EMF] 2.3.1), and an EMF+ bitmap image object
  * ([MS-EMFPLUS] 2.2.2.2). The converter allocates their pixels from the
@@ -142,6 +147,7 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
         const plusSize = view.getUint32(at + 4, true);
         const dataSize = view.getUint32(at + 8, true);
         if (plusSize < 12) break;
+        if (EMFPLUS_UNPLAYED.has(plusType)) throw new Error("an EMF+ drawing record emf-converter skips");
         if (plusType === EMFPLUS_DRAWIMAGE || plusType === EMFPLUS_DRAWIMAGEPOINTS) images++;
         else if (plusType === EMFPLUS_OBJECT) {
           let data = at + 12;

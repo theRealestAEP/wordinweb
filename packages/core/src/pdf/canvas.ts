@@ -413,12 +413,30 @@ export class RecordingContext {
     if (!this.keep(this.pathFits && this.fits(this.state.lineWidth * scale, this.lineDashOffset * scale, ...this.state.dash.map((v) => v * scale)))) return;
     this.canvas.ops.push(`q ${this.paintOps(false, true)} ${this.path.join(" ")} S Q`);
   }
-  /** A clip out of reach is clamped to it: what is drawn lies within reach,
-   * and a rectangle (a PICT's clip of the whole plane, say) clamped to it
-   * clips that the same. */
+  /** A clip out of reach is clamped to it when its edges are all level or
+   * upright (a PICT's clip of the whole plane, say): what is drawn lies
+   * within reach, and such a clip clamped clips that the same. */
   clip(rule?: string): void {
-    if (this.path.length === 0 || !this.keep(this.pathFinite)) return;
+    if (this.path.length === 0 || !this.keep(this.pathFits || (this.pathFinite && this.rectilinear()))) return;
     this.canvas.ops.push(`${this.path.join(" ")} ${rule === "evenodd" ? "W*" : "W"} n`);
+  }
+  /** Whether the current path is lines only, each level or upright, the
+   * edge that closes each subpath (as a clip closes it) included. */
+  private rectilinear(): boolean {
+    const level = (a: string[], b: string[]) => a[0] === b[0] || a[1] === b[1];
+    let start: string[] | null = null;
+    let last: string[] | null = null;
+    for (const op of this.path) {
+      if (op === "h") continue;
+      const point = op.split(" ");
+      if (point.length !== 3) return false;
+      if (point[2] === "m") {
+        if (start && last && !level(last, start)) return false;
+        start = point;
+      } else if (last && !level(last, point)) return false;
+      last = point;
+    }
+    return !start || !last || level(last, start);
   }
   fillRect(x: number, y: number, w: number, h: number): void {
     this.withRect(x, y, w, h, () => this.fill());

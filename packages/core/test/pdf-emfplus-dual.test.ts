@@ -109,6 +109,13 @@ describe("an EMF+ Dual file", () => {
     expect(recordTypes(prepareEmf(bytes))).toEqual([1, 70, 70, 43, 43, 70, 14]);
   });
 
+  it("gives no picture when an EMF+ record draws what emf-converter skips: its EMF records are not played", async () => {
+    // EmfPlusDrawBeziers: pen 0, four points.
+    const beziers: [number, number, Uint8Array] = [0x4019, 0, new Uint8Array(4 + 4 * 8)];
+    new DataView(beziers[2].buffer).setUint32(0, 4, true);
+    expect(await convertMetafile("emf", emf([emfPlus([beziers], true), [2, 0, 0, 99, 49, 4, 10, 10, 20, 40, 80, 40, 90, 10]]), fonts, resources())).toBeNull();
+  });
+
   it("leaves an EMF+ Only file's EMF records as they are", () => {
     const bytes = emf([emfPlus([]), [43, 0, 0, 10, 10]]);
     expect(prepareEmf(bytes)).toBe(bytes);
