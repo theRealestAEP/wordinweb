@@ -94,7 +94,9 @@ export interface DocPropertyRevision {
    * apply over the style the way direct formatting is (applyRunSprms,
    * applyParaSprms). Empty when the file keeps no old state. */
   old: Uint8Array;
-  /** pPrChange: the paragraph's style index, which the old pPr starts from. */
+  /** The paragraph's style index: what the old properties apply over
+   * (pPrChange: the old pPr starts from it; rPrChange: its toggles resolve
+   * against it). */
   istd?: number;
 }
 
@@ -206,6 +208,7 @@ export function readDocReview(reader: DocReader): DocReview {
   const sectionEnds = new Set<number>();
   for (const cp of parsePlc(tableBlob(fib, table, FC.plcfSed), 12).cps) if (cp > 0 && cp <= fib.ccpText) sectionEnds.add(cp - 1);
   const text = pieces.text(0, end);
+  const marks: { cp: number; istd: number }[] = [];
   let pStart = 0;
   for (let cp = 0; cp < end; cp++) {
     const ch = text.charCodeAt(cp);
@@ -213,10 +216,18 @@ export function readDocReview(reader: DocReader): DocReview {
     const direct = props.paragraphProps(cp);
     const p = newParaProps(direct.istd);
     applyParaSprms(direct.grpprl, p);
+    marks.push({ cp, istd: direct.istd });
     if (p.ttp || p.innerTtp) rowMarks.push(cp);
     if (p.propRevision) pushProp(paraProps, "pPrChange", pStart, cp + 1, p.propRevision, oldGrpprl(direct.grpprl, SPRM.PWall, 1), direct.istd);
     if (p.table?.propRevision && (p.ttp || p.innerTtp)) pushProp(paraProps, "trPrChange", pStart, cp + 1, p.table.propRevision, oldGrpprl(direct.grpprl, SPRM.TWall, 5));
     pStart = cp + 1;
+  }
+
+  // A run's old properties resolve their toggles against its paragraph's style.
+  let m = 0;
+  for (const r of runProps) {
+    while (m < marks.length && marks[m].cp < r.start) m++;
+    r.istd = marks[m]?.istd ?? 0;
   }
 
   const revisions = insOut.concat(delOut).sort((a, b) => a.start - b.start || a.end - b.end);
