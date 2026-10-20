@@ -3567,6 +3567,7 @@ class Engine {
     if (this.cur.physIndex === -1) return false;
     const fr = this.blockFrame(tbl);
     if (!fr) return false;
+    if (this.consumedFrames.has(tbl)) return true; // placed by a paragraph's lookahead
     if (fr.wrap === "notBeside" && fr.w !== undefined && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return false;
     if (this.continuesFrame(siblings[index - 1], tbl)) return true;
     this.flushBannerBand();
@@ -3828,6 +3829,17 @@ class Engine {
         : fr.hRule === "atLeast" && fr.h !== undefined
           ? Math.max(fr.h, laid.height)
           : laid.height;
+    // w:yAlign puts a page- or margin-anchored frame at the top, center or
+    // bottom of that area by its height, in place of w:y (Word 95 file
+    // 165082: an exact-height box at the bottom of the margin printed over
+    // the page's top text).
+    if ((fr.yAlign === "top" || fr.yAlign === "center" || fr.yAlign === "bottom") && (fr.vAnchor === "page" || fr.vAnchor === "margin")) {
+      const top = fr.vAnchor === "page" ? 0 : Math.abs(sp.marginTop);
+      const bottom = fr.vAnchor === "page" ? sp.pageHeight : sp.pageHeight - Math.abs(sp.marginBottom);
+      if (fr.yAlign === "center") oy = (top + bottom - height) / 2;
+      else if (fr.yAlign === "bottom") oy = bottom - height;
+      else oy = top;
+    }
     // Word paints an exact/atLeast frame's paragraph box to the FRAME's height,
     // not the content height: probe2-dropcaps-frames' pull-quote (h=1000tw
     // exact, two lines of text) fills and rules the whole 50pt box, leaving
@@ -3861,9 +3873,13 @@ class Engine {
         }
       }
     }
+    // An exact height clips the frame: Word hides what passes the frame's
+    // bottom (probe2-dropcaps-frames--v05: the 50pt quote frame cuts its
+    // picture and shading off at its bottom edge, above "Body paragraph 2").
+    const clipBottom = fr.hRule === "exact" && fr.h !== undefined ? oy + height : undefined;
     for (const it of laid.items) {
       offsetItem(it, ox, oy);
-      this.cur.items.push(it);
+      if (clipBottom === undefined || clipToBottom(it, oy, clipBottom)) this.cur.items.push(it);
     }
     // wrap=around/auto/tight/through -> body wraps both sides (square);
     // notBeside -> body clears the frame vertically (topAndBottom); none -> no float.
@@ -3950,7 +3966,7 @@ class Engine {
    * frame that wraps text and is not placed yet: Word flows the content
    * before such a frame around it (staging-frames p1). */
   private pageFrameAhead(block: Block | undefined, prev: Block | undefined): ResolvedFrame | undefined {
-    if (block?.type !== "paragraph" || this.consumedFrames.has(block)) return undefined;
+    if (!block || this.consumedFrames.has(block)) return undefined;
     if (this.continuesFrame(prev, block)) return undefined;
     const fr = this.blockFrame(block);
     if (!fr || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
@@ -4553,15 +4569,18 @@ class Engine {
       // same way (word95-check-b frame-notbeside-margin: a notBeside frame at
       // the margin top, anchored after three body paragraphs, pushes all
       // three below it). The next paragraph's frame was handled above.
-      const farFrames: { block: Paragraph; idx: number; fr: ResolvedFrame }[] = [];
+      const farFrames: { block: Block; idx: number; fr: ResolvedFrame }[] = [];
       let lastIdx = index;
       for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
         const blk = siblings[idx];
-        if (blk.type !== "paragraph") break;
-        const fr = idx > index + 1 ? this.pageFrameAhead(blk, siblings[idx - 1]) : undefined;
+        const fr = this.pageFrameAhead(blk, siblings[idx - 1]);
         if (fr && (fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y) <= paraBottom + 0.25) {
           farFrames.push({ block: blk, idx, fr });
-          lastIdx = idx;
+        }
+        // A table inside a frame takes no room in the flow; any other ends the scan.
+        if (blk.type !== "paragraph") {
+          if (this.blockFrame(blk)) continue;
+          break;
         }
         for (const s of this.collectAnchors(blk)) {
           if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
@@ -4586,26 +4605,39 @@ class Engine {
         // measurement only.
         const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
         const seenSnapshot = new Set(this.seenNumIds);
+        // A frame is placed when its own first block lands on this page; it
+        // takes no room in the flow. The shapes go by the last one's anchor.
+        const frameIdx = new Set(farFrames.map((f) => f.idx));
+        const endIdx = Math.max(lastIdx, ...frameIdx);
+        const framesHere = new Set<number>();
         let simY = paraBottom;
+        let shapeY = Number.POSITIVE_INFINITY;
         let prevAfter = props.spacingAfter ?? 0;
-        for (let idx = index + 1; idx <= lastIdx; idx++) {
+        for (let idx = index + 1; idx <= endIdx && simY <= this.bodyBottom + 0.25; idx++) {
           const blk = siblings[idx];
+          if (frameIdx.has(idx)) framesHere.add(idx);
+          if (this.blockFrame(blk)) continue;
           if (blk.type !== "paragraph") break;
           const np = this.doc.effectiveParaProps(blk);
           simY += Math.max(prevAfter, np.spacingBefore ?? 0);
-          if (idx === lastIdx) break; // reached the anchor paragraph's top
+          if (idx === lastIdx) shapeY = simY; // reached the anchor paragraph's top
+          if (idx === endIdx) break;
           const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, lookaheadOpts);
           simY += nb.lines.reduce((a, l) => a + l.height, 0);
           prevAfter = np.spacingAfter ?? 0;
         }
         this.counters = counterSnapshot;
         this.seenNumIds = seenSnapshot;
-        if (simY <= this.bodyBottom + 0.25) {
+        const shapesHere = farHits.length > 0 && shapeY <= this.bodyBottom + 0.25;
+        if (shapesHere || framesHere.size > 0) {
           ensureLookMark();
-          lookMark!.shapes.push(...farHits);
-          this.emitAnchors(farHits, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
-          for (const s of farHits) this.consumedAnchors.add(s);
+          if (shapesHere) {
+            lookMark!.shapes.push(...farHits);
+            this.emitAnchors(farHits, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
+            for (const s of farHits) this.consumedAnchors.add(s);
+          }
           for (const f of farFrames) {
+            if (!framesHere.has(f.idx)) continue;
             this.placeFrame(this.frameGroup(f.block, siblings, f.idx), f.fr);
             this.consumedFrames.add(f.block);
             lookFrames.push(f.block);
@@ -10311,6 +10343,45 @@ function measuredTextWidth(items: PageItem[]): number {
   let widest = 0;
   for (const item of items) if (item.kind === "text") widest = Math.max(widest, item.x + item.width);
   return widest;
+}
+
+/** Clip a positioned item to a box that ends at `bottom` (page px): an
+ * exact-height frame. Returns false for an item that starts below the box.
+ * A text line or picture that crosses the bottom is cut there; shading and
+ * rules are shortened. */
+function clipToBottom(item: PageItem, top: number, bottom: number): boolean {
+  switch (item.kind) {
+    case "text":
+      if (item.lineTop >= bottom - 0.01) return false;
+      if (item.lineTop + item.lineHeight > bottom + 0.01) {
+        item.clip = { top: Math.max(top, item.clip?.top ?? top), bottom: Math.min(bottom, item.clip?.bottom ?? bottom) };
+      }
+      return true;
+    case "image": {
+      if (item.y >= bottom - 0.01) return false;
+      const visible = bottom - item.y;
+      if (visible < item.height - 0.01 && !item.rotation && !item.rotate) {
+        const c = item.crop ?? { l: 0, t: 0, r: 0, b: 0 };
+        const shown = 1 - c.t - c.b;
+        item.crop = { ...c, b: c.b + shown * (1 - visible / item.height) };
+        item.height = visible;
+      }
+      return true;
+    }
+    case "rect":
+      if (item.y >= bottom - 0.01) return false;
+      item.height = Math.min(item.height, bottom - item.y);
+      return true;
+    case "edge":
+      if (Math.min(item.y1, item.y2) > bottom + 0.01) return false;
+      item.y1 = Math.min(item.y1, bottom);
+      item.y2 = Math.min(item.y2, bottom);
+      return true;
+    case "grip":
+      return item.y1 < bottom;
+    default:
+      return item.y < bottom;
+  }
 }
 
 function offsetItem(item: PageItem, dx: number, dy: number): void {

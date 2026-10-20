@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import { DocxDocument } from "../src/docx.js";
 import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
-import type { PageItem, TextItem } from "../src/layout/types.js";
-import { makeDocx, wrapDocument } from "./helpers.js";
+import type { ImageItem, LineEdgeItem, PageItem, RectItem, TextItem } from "../src/layout/types.js";
+import { makeDocx, makeDocxWithMedia, wrapDocument } from "./helpers.js";
+
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 // Adjacent paragraphs with equal w:framePr are ONE frame (ECMA-376
 // 17.3.1.11): Word stacks them one under another inside it. Each paragraph
@@ -200,6 +202,15 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     expect(line(items, "Third.").lineTop).toBeLessThan(line(items, "After.").lineTop);
   });
 
+  it("puts a margin-anchored frame with yAlign=bottom at the bottom of the margin box (Word 95 file 165082)", () => {
+    const bottom = `<w:framePr w:w="9360" w:h="2736" w:hRule="exact" w:wrap="around" w:vAnchor="margin" w:hAnchor="margin" w:xAlign="right" w:yAlign="bottom"/>`;
+    const items = layoutBody(framed("BoxLine", bottom) + BODY + SECTION);
+    const box = line(items, "BoxLine");
+    // Page 15840tw, bottom margin 1440tw: the 2736tw box ends at 14400tw.
+    expect(box.lineTop).toBeCloseTo((15840 - 1440 - 2736) * TW, 0);
+    expect(line(items, "Body").lineTop).toBeLessThan(box.lineTop);
+  });
+
   it("leaves a drop cap as it is", () => {
     const drop =
       `<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/></w:pPr>` +
@@ -227,5 +238,76 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     const one = line(items, "HeaderOne");
     const two = line(items, "HeaderTwo");
     expect(two.lineTop).toBeGreaterThanOrEqual(one.lineTop + one.lineHeight - 0.01);
+  });
+});
+
+describe("an exact-height frame", () => {
+  it("clips its text, picture, shading and rules to its box, and paints nothing over the body", () => {
+    // probe2-dropcaps-frames--v05: a 1000tw exact quote frame holds a picture
+    // taller than the frame. Word cuts the picture and the shading off at the
+    // frame's bottom; the body below must stay clear of the frame's paint.
+    const picture =
+      `<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="1371600" cy="1371600"/><wp:docPr id="1" name="Pic"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:blipFill>` +
+      `<a:blip r:embed="rIdImg" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1371600" cy="1371600"/></a:xfrm></pic:spPr></pic:pic>` +
+      `</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>`;
+    const pPr =
+      `<w:pPr><w:framePr w:w="3000" w:h="1000" w:hRule="exact" w:wrap="around" w:vAnchor="text" w:hAnchor="margin" w:x="3000" w:y="0"/>` +
+      `<w:pBdr>` +
+      ["top", "left", "bottom", "right"].map((s) => `<w:${s} w:val="single" w:sz="6" w:space="4" w:color="BF8F00"/>`).join("") +
+      `</w:pBdr><w:shd w:val="clear" w:color="auto" w:fill="FFF2CC"/><w:spacing w:after="0"/></w:pPr>`;
+    const frame = `<w:p>${pPr}<w:r><w:t>Quote</w:t></w:r></w:p><w:p>${pPr}${picture}</w:p>`;
+    const doc = DocxDocument.load(
+      makeDocxWithMedia(
+        {
+          "word/document.xml": wrapDocument(frame + BODY.repeat(4) + SECTION),
+          "word/_rels/document.xml.rels":
+            `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+            `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>`,
+        },
+        { "word/media/image1.png": PNG },
+      ),
+    );
+    const items = layoutDocument(doc, { measurer }).pages[0].items;
+    const quote = line(items, "Quote");
+    const fills = items.filter((i): i is RectItem => i.kind === "rect" && i.fill.toUpperCase().includes("FFF2CC"));
+    const image = items.find((i): i is ImageItem => i.kind === "image");
+    const rules = items.filter((i): i is LineEdgeItem => i.kind === "edge" && i.border.color.toUpperCase().includes("BF8F00"));
+    expect(fills.length).toBeGreaterThan(0);
+    expect(image).toBeDefined();
+    // The frame's box: its top is the anchor paragraph's top (y=0), 1000tw tall.
+    const top = Math.min(quote.lineTop, ...fills.map((f) => f.y), ...rules.map((r) => Math.min(r.y1, r.y2)));
+    const bottom = top + 1000 * TW;
+    const painted = [
+      ...fills.map((f) => ({ top: f.y, bottom: f.y + f.height, left: f.x, right: f.x + f.width })),
+      { top: image!.y, bottom: image!.y + image!.height, left: image!.x, right: image!.x + image!.width },
+      ...rules.map((r) => ({
+        top: Math.min(r.y1, r.y2),
+        bottom: Math.max(r.y1, r.y2),
+        left: Math.min(r.x1, r.x2),
+        right: Math.max(r.x1, r.x2),
+      })),
+    ];
+    // Every painted item of the frame stays inside the box.
+    for (const r of painted) {
+      expect(r.top).toBeGreaterThanOrEqual(top - 0.01);
+      expect(r.bottom).toBeLessThanOrEqual(bottom + 0.6);
+    }
+    // The 1.5in picture is cut at the frame bottom, not drawn whole.
+    expect(image!.height).toBeLessThan(1000 * TW);
+    expect(image!.crop?.b ?? 0).toBeGreaterThan(0);
+    // No body word sits on any of the frame's paint.
+    const body = texts(items).filter((i) => i.text !== "Quote");
+    expect(body.length).toBeGreaterThan(20);
+    for (const t of body) {
+      for (const r of painted) {
+        const overlaps =
+          t.lineTop < r.bottom && t.lineTop + t.lineHeight > r.top && t.x < r.right && t.x + t.width > r.left;
+        expect(overlaps, `"${t.text}" at ${t.x.toFixed(1)},${t.lineTop.toFixed(1)}`).toBe(false);
+      }
+    }
   });
 });
