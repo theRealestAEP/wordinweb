@@ -1226,18 +1226,14 @@ class Engine {
       // before a continuous break, which we approximate by falling back to a
       // page break when content sits in a later column.)
       //
-      // An empty page that the previous section opened is shared too. That
-      // section's only paragraph is its empty break mark, which takes no
-      // height, but the page is still that section's first page, and Word
-      // takes a page's headers and footers from the section at its top
-      // (govdocs 068399: an empty titlePg section 1 holds the FCC letterhead
-      // in its first-page header; the continuous section 2 has wider margins
-      // and its text starts on page 1 under that letterhead, in LibreOffice
-      // too). Nothing sits on the page yet, so the margins may differ.
-      const openedEmpty =
-        this.pages.length > 0 &&
-        this.pageIsEmptyAtCursor() &&
-        this.cur.physIndex === this.sectionFirstPagePhys;
+      // An empty page that an earlier section opened is shared too (see
+      // pageOpenedEmptyBySection). Word takes a page's headers and footers
+      // from the section at its top (govdocs 068399: an empty titlePg
+      // section 1 holds the FCC letterhead in its first-page header; the
+      // continuous section 2 has wider margins and its text starts on page 1
+      // under that letterhead, in LibreOffice too). Nothing sits on the page
+      // yet, so the margins may differ.
+      const openedEmpty = this.pages.length > 0 && this.pageOpenedEmptyBySection();
       const canContinue =
         sp.type === "continuous" &&
         prevSp !== null &&
@@ -2489,6 +2485,22 @@ class Engine {
 
   // ---------- page management ----------
 
+  /** The current page is empty and a section break opened it: that
+   * section's only paragraph is its empty break mark, which takes no height,
+   * but the page is still that section's first page. A continuous section
+   * after the first opened its page only because it could not share the one
+   * before (the margin, column and number-format fallbacks in enterSection
+   * stand in for Word, which keeps it there), so its page does not count. */
+  private pageOpenedEmptyBySection(): boolean {
+    const page = this.cur;
+    const opener = page.hfSp ?? page.sp;
+    return (
+      this.pageIsEmptyAtCursor() &&
+      page.physIndex === this.sectionFirstPagePhys &&
+      (page.physIndex === 1 || opener.type !== "continuous")
+    );
+  }
+
   private newPage(sectionStart: boolean): void {
     const baseSp = this.sp;
     // Coalesce a section break with a preceding page break: if the previous
@@ -2499,16 +2511,16 @@ class Engine {
     // page; wild-multicolumn: a hard page break before a continuous multi-col
     // section starts that section on the fresh page). Parity breaks (odd/even
     // page) still force their own page. A page that a section break opened
-    // stays: it holds that section's break mark, so it prints with that
-    // section's header and footer (an empty first section before a next-page
-    // section leaves a blank page 1, as in LibreOffice).
+    // stays (pageOpenedEmptyBySection): it prints with that section's header
+    // and footer (an empty first section before a next-page section leaves a
+    // blank page 1, as in LibreOffice; govdocs 000007 matches Word's 32 pages).
     if (
       sectionStart &&
       this.pages.length > 0 &&
       this.cur &&
-      this.cur.physIndex !== this.sectionFirstPagePhys &&
       this.cur.items.length === 0 &&
       this.pageIsEmptyAtCursor() &&
+      !this.pageOpenedEmptyBySection() &&
       (baseSp.type === undefined || baseSp.type === "nextPage" || baseSp.type === "continuous")
     ) {
       this.pages.pop();

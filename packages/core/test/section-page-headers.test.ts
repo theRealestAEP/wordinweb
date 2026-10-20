@@ -165,6 +165,21 @@ describe("headers and footers of a page opened by an empty section", () => {
     for (const page of got.slice(1)) expect(page).toMatch(/^S3DEFAULTHEADER S3DEFAULTFOOTER Body \d+$/);
   });
 
+  it("a page an empty continuous section opened for its margins goes to the next section", () => {
+    // The margin change stands in for a page break here (Word keeps section 2
+    // on page 1), so the page section 2 opens is section 3's.
+    const result = build([
+      { parts: ["default"], paragraphs: 2 },
+      { parts: ["default"], type: "continuous", margin: 2880 },
+      { parts: ["default"], type: "continuous", paragraphs: BODY, margin: 720 },
+    ]);
+    const got = pages(result);
+    expect(got[0]).toBe("S1DEFAULTHEADER S1DEFAULTFOOTER Body 1");
+    expect(got[1]).toBe("S3DEFAULTHEADER S3DEFAULTFOOTER Body 1");
+    const header = result.pages[1].items.find((item) => item.kind === "text" && item.text === "S3DEFAULTHEADER");
+    expect(header?.x).toBeCloseTo(48, 0);
+  });
+
   it("several empty continuous sections in a row leave page 1 to the first", () => {
     const result = build([
       { parts: ["first", "default"], titlePg: true },
