@@ -435,13 +435,15 @@ class Converter {
       let cellIndex = 0;
       for (let c = 0; c < t.cells.length; c++) {
         const cell = t.cells[c];
-        // A horizontally merged cell joins the one before it.
-        if (cell.horzMerge === 1 && c > 0) {
+        // A horizontally merged cell (TC80 horzMerge 2 or 3) joins the one before it; its own
+        // cell mark, and the (normally empty) content before it, are not shown.
+        if (cell.horzMerge >= 2 && c > 0) {
+          cellIndex++;
           continue;
         }
         let right = cell.right;
         let k = c + 1;
-        while (k < t.cells.length && t.cells[k].horzMerge === 1) right = t.cells[k++].right;
+        while (k < t.cells.length && t.cells[k].horzMerge >= 2) right = t.cells[k++].right;
         const span = Math.max(1, column(right) - column(prevEdge));
         const blocks = row.cells[cellIndex];
         cellIndex++;
