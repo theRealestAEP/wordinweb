@@ -311,6 +311,8 @@ WordInWeb never converts the document to flowing HTML. It parses the OOXML into 
 
 A Strict Open XML Document (ISO/IEC 29500 Strict, Word's "Strict Open XML Document") is read as Transitional: its namespaces, relationship types, unit-carrying measures ("72pt", "2.54cm", "63%") and renamed values are rewritten once, as the package is read (`packages/core/src/strict.ts`), so the viewer, the PDF renderer and the compare see the same document as its Transitional twin. A saved or compared Strict document is written as Transitional.
 
+A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.load`, `renderDocxToPdf` and the `docx-pdf` CLI convert it to a .docx in memory, and `docx-compare` (`compareFiles`) converts it to a working .docx in its temp directory, so a .doc can be compared with a .docx. The file's bytes decide, not its name. The converter (`packages/core/src/doc/`, exported as `docToDocx`) reads the text, formatting, styles, lists, sections, headers and footers, notes, tables, fields, bookmarks, comments and tracked changes from the binary structures ([MS-DOC]). Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95 and older Word files, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
+
 ## Collaboration
 
 Real-time collaboration ships as a separate entry (`wordinweb/collab`). It

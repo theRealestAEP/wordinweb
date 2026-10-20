@@ -951,8 +951,11 @@ function widthXml(name: string, w: { fts: number; w: number } | undefined): stri
   return `<w:${name} w:w="${w.w}" w:type="${FTS[w.fts] ?? "dxa"}"/>`;
 }
 
-/** A row mark's tblPr: the table-wide properties this row carries. */
-export function tblPrXml(t: TableProps, ctx: XmlContext, tblInd: number | undefined): string {
+/**
+ * A row mark's tblPr: the table-wide properties this row carries. A table
+ * style's tblPr (`inStyle`) holds only what its sprms set.
+ */
+export function tblPrXml(t: TableProps, ctx: XmlContext, tblInd: number | undefined, inStyle = false): string {
   const out: string[] = [];
   if (t.istd !== undefined) {
     const id = ctx.styleId(t.istd);
@@ -972,28 +975,29 @@ export function tblPrXml(t: TableProps, ctx: XmlContext, tblInd: number | undefi
   }
   if (t.noAllowOverlap) out.push('<w:tblOverlap w:val="never"/>');
   out.push(onOff("bidiVisual", t.bidi));
-  out.push(widthXml("tblW", t.tableWidth) || '<w:tblW w:w="0" w:type="auto"/>');
+  out.push(widthXml("tblW", t.tableWidth) || (inStyle ? "" : '<w:tblW w:w="0" w:type="auto"/>'));
   if (t.jc !== undefined && t.jc !== 0) out.push(`<w:jc w:val="${t.jc === 1 ? "center" : "right"}"/>`);
   if (t.cellSpacing !== undefined) out.push(`<w:tblCellSpacing w:w="${Math.floor(t.cellSpacing / 2)}" w:type="dxa"/>`);
-  if (t.indent && t.indent.fts === 3) out.push(`<w:tblInd w:w="${t.indent.w}" w:type="dxa"/>`);
-  else if (tblInd !== undefined && tblInd !== 0) out.push(`<w:tblInd w:w="${tblInd}" w:type="dxa"/>`);
+  if (t.indent && t.indent.fts === 3) {
+    if (t.indent.w !== 0) out.push(`<w:tblInd w:w="${t.indent.w}" w:type="dxa"/>`);
+  } else if (tblInd !== undefined && tblInd !== 0) out.push(`<w:tblInd w:w="${tblInd}" w:type="dxa"/>`);
   const borders = (["top", "left", "bottom", "right", "insideH", "insideV"] as const).map((side) => borderXml(side, t.borders[side])).join("");
   if (borders) out.push(`<w:tblBorders>${borders}</w:tblBorders>`);
   out.push(shadingXml(t.shading));
-  if (!t.autofit) out.push('<w:tblLayout w:type="fixed"/>');
-  const mar: string[] = [];
-  const left = t.cellMargins.left ?? t.dxaGapHalf;
-  const right = t.cellMargins.right ?? t.dxaGapHalf;
-  if (t.cellMargins.top !== undefined) mar.push(`<w:top w:w="${t.cellMargins.top}" w:type="dxa"/>`);
-  if (left !== undefined) mar.push(`<w:left w:w="${left}" w:type="dxa"/>`);
-  if (t.cellMargins.bottom !== undefined) mar.push(`<w:bottom w:w="${t.cellMargins.bottom}" w:type="dxa"/>`);
-  if (right !== undefined) mar.push(`<w:right w:w="${right}" w:type="dxa"/>`);
+  if (inStyle ? t.autofit === false : !t.autofit) out.push('<w:tblLayout w:type="fixed"/>');
+  // A table with no style of its own leaves out the margins Normal Table has (0, 108, 0, 108), as Word writes it.
+  const normal = !inStyle && t.istd === undefined;
+  const margins = { top: t.cellMargins.top, left: t.cellMargins.left ?? t.dxaGapHalf, bottom: t.cellMargins.bottom, right: t.cellMargins.right ?? t.dxaGapHalf };
+  const normalMargins = { top: 0, left: 108, bottom: 0, right: 108 };
+  const mar = (["top", "left", "bottom", "right"] as const)
+    .filter((side) => margins[side] !== undefined && !(normal && margins[side] === normalMargins[side]))
+    .map((side) => `<w:${side} w:w="${margins[side]}" w:type="dxa"/>`);
   if (mar.length) out.push(`<w:tblCellMar>${mar.join("")}</w:tblCellMar>`);
-  if (t.tlpFlags !== undefined) {
-    const f = t.tlpFlags;
-    const bit = (mask: number): string => (f & mask ? "1" : "0");
-    out.push(`<w:tblLook w:val="${f.toString(16).toUpperCase().padStart(4, "0")}" w:firstRow="${bit(0x20)}" w:lastRow="${bit(0x40)}" w:firstColumn="${bit(0x80)}" w:lastColumn="${bit(0x100)}" w:noHBand="${bit(0x200)}" w:noVBand="${bit(0x400)}"/>`);
-  }
+  // Word writes a table with no look (no sprmTTlp) as tblLook 0000.
+  if (inStyle && t.tlpFlags === undefined) return out.join("");
+  const look = t.tlpFlags ?? 0;
+  const bit = (mask: number): string => (look & mask ? "1" : "0");
+  out.push(`<w:tblLook w:val="${look.toString(16).toUpperCase().padStart(4, "0")}" w:firstRow="${bit(0x20)}" w:lastRow="${bit(0x40)}" w:firstColumn="${bit(0x80)}" w:lastColumn="${bit(0x100)}" w:noHBand="${bit(0x200)}" w:noVBand="${bit(0x400)}"/>`);
   return out.join("");
 }
 
@@ -1006,7 +1010,7 @@ export function trPrXml(t: TableProps, gridBefore: number, gridAfter: number): s
   if (gridBefore) out.push(widthXml("wBefore", t.widthBefore));
   if (gridAfter) out.push(widthXml("wAfter", t.widthAfter));
   out.push(onOff("cantSplit", t.cantSplit));
-  if (t.dyaRowHeight) out.push(`<w:trHeight w:val="${Math.abs(t.dyaRowHeight)}"${t.dyaRowHeight < 0 ? ' w:hRule="exact"' : ""}/>`);
+  if (t.dyaRowHeight) out.push(`<w:trHeight${t.dyaRowHeight < 0 ? ' w:hRule="exact"' : ""} w:val="${Math.abs(t.dyaRowHeight)}"/>`);
   out.push(onOff("tblHeader", t.header));
   if (t.jc !== undefined && t.jc !== 0) out.push(`<w:jc w:val="${t.jc === 1 ? "center" : "right"}"/>`);
   return out.join("");
@@ -1017,7 +1021,9 @@ const TEXT_DIRECTION: Record<number, string> = { 1: "tbRl", 3: "btLr", 4: "lrTbV
 /** A cell's tcPr: its width, span, merges, borders, shading and margins. */
 export function tcPrXml(cell: CellProps, width: number, gridSpan: number, autofit: boolean): string {
   const out: string[] = [];
-  if (cell.prefWidth && cell.prefWidth.fts !== 0) out.push(widthXml("tcW", cell.prefWidth));
+  // The preferred width: sprmTCellWidth's, else the TC80's own (wWidth, ftsWidth).
+  const prefWidth = cell.prefWidth ?? { fts: cell.ftsWidth, w: cell.width };
+  if (prefWidth.fts !== 0) out.push(widthXml("tcW", prefWidth));
   else if (autofit) out.push('<w:tcW w:w="0" w:type="auto"/>');
   else out.push(`<w:tcW w:w="${width}" w:type="dxa"/>`);
   if (gridSpan > 1) out.push(`<w:gridSpan w:val="${gridSpan}"/>`);
@@ -1128,10 +1134,12 @@ export function sectPrXml(s: SectionProps, headerRefs: string, footnotePr: strin
   const pb = (["top", "left", "bottom", "right"] as const).map((side) => borderXml(side, s.borders[side])).join("");
   if (pb) {
     const prop = s.pgbProp ?? 0;
+    // Only the values that differ from the defaults (front, allPages, text), as Word writes them.
     const display = ["allPages", "firstPage", "notFirstPage"][prop & 7] ?? "allPages";
     const offsetFrom = (prop >>> 5) & 7 ? "page" : "text";
     const zOrder = (prop >>> 3) & 3 ? "back" : "front";
-    out.push(`<w:pgBorders w:zOrder="${zOrder}" w:display="${display}" w:offsetFrom="${offsetFrom}">${pb}</w:pgBorders>`);
+    const attrs = (zOrder !== "front" ? ` w:zOrder="${zOrder}"` : "") + (display !== "allPages" ? ` w:display="${display}"` : "") + (offsetFrom !== "text" ? ` w:offsetFrom="${offsetFrom}"` : "");
+    out.push(`<w:pgBorders${attrs}>${pb}</w:pgBorders>`);
   }
   if (s.nLnnMod) {
     const restart = ["newPage", "newSection", "continuous"][s.lnc ?? 0] ?? "newPage";
@@ -1140,20 +1148,18 @@ export function sectPrXml(s: SectionProps, headerRefs: string, footnotePr: strin
   if (s.pgnRestart || (s.nfcPgn !== undefined && s.nfcPgn !== 0)) {
     out.push(`<w:pgNumType${s.nfcPgn !== undefined && s.nfcPgn !== 0 ? ` w:fmt="${numFormat(s.nfcPgn)}"` : ""}${s.pgnRestart ? ` w:start="${s.pgnStart ?? 1}"` : ""}/>`);
   }
+  // The column spacing is 720 twips unless the section says otherwise.
   const num = s.columns ?? 1;
-  if (num > 1 || s.lineBetween) {
-    let cols = `<w:cols w:num="${num}"`;
-    if (s.dxaColumns !== undefined) cols += ` w:space="${s.dxaColumns}"`;
-    if (s.lineBetween) cols += ' w:sep="1"';
-    if (s.evenlySpaced === false && s.colWidths.length) {
-      cols += ' w:equalWidth="0">';
-      for (let i = 0; i < num; i++) cols += `<w:col w:w="${s.colWidths[i] ?? 0}"${i < num - 1 ? ` w:space="${s.colSpacings[i] ?? s.dxaColumns ?? 0}"` : ""}/>`;
-      cols += "</w:cols>";
-    } else {
-      cols += "/>";
-    }
-    out.push(cols);
+  let cols = `<w:cols${num > 1 ? ` w:num="${num}"` : ""} w:space="${s.dxaColumns ?? 720}"`;
+  if (s.lineBetween) cols += ' w:sep="1"';
+  if (num > 1 && s.evenlySpaced === false && s.colWidths.length) {
+    cols += ' w:equalWidth="0">';
+    for (let i = 0; i < num; i++) cols += `<w:col w:w="${s.colWidths[i] ?? 0}"${i < num - 1 ? ` w:space="${s.colSpacings[i] ?? s.dxaColumns ?? 0}"` : ""}/>`;
+    cols += "</w:cols>";
+  } else {
+    cols += "/>";
   }
+  out.push(cols);
   if (s.vjc) out.push(`<w:vAlign w:val="${["top", "center", "both", "bottom"][s.vjc] ?? "top"}"/>`);
   if (s.titlePage) out.push("<w:titlePg/>");
   if (s.bidi) out.push("<w:bidi/>");
@@ -1161,6 +1167,9 @@ export function sectPrXml(s: SectionProps, headerRefs: string, footnotePr: strin
   if (s.clm !== undefined && s.clm !== 0 && s.dyaLinePitch) {
     const type = ["default", "lines", "linesAndChars", "snapToChars"][s.clm & 7] ?? "lines";
     out.push(`<w:docGrid w:type="${type}" w:linePitch="${s.dyaLinePitch}"${s.dxtCharSpace ? ` w:charSpace="${s.dxtCharSpace}"` : ""}/>`);
+  } else if (s.dyaLinePitch) {
+    // No grid: the pitch is kept for when one is turned on.
+    out.push(`<w:docGrid w:linePitch="${s.dyaLinePitch}"/>`);
   }
   return out.join("");
 }
