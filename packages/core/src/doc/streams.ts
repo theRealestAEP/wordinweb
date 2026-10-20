@@ -10,7 +10,7 @@ export interface DocStreams {
   table: Uint8Array;
   /** Absent in a document with no pictures or large properties. */
   data: Uint8Array | null;
-  /** A Word 6.0/95 file's stream `name` of the embedded object storage `ObjectPool/<storage>`, where its OLE objects keep their pictures. */
+  /** The stream `name` of the embedded object storage `ObjectPool/<storage>`, where OLE objects keep their pictures. */
   objectStream?: (storage: string, name: string) => Uint8Array | null;
 }
 
@@ -59,7 +59,7 @@ export function openDocStreams(bytes: Uint8Array): DocStreams {
   const tableName = flags & 0x0200 ? "1Table" : "0Table";
   const table = streamBytes(cfb, tableName);
   if (!table) throw new Error(`damaged: the compound file has no ${tableName} stream`);
-  return { wordDocument, table, data: streamBytes(cfb, "Data") };
+  return { wordDocument, table, data: streamBytes(cfb, "Data"), objectStream: (storage, name) => streamBytes(cfb, `ObjectPool/${storage}/${name}`) };
 }
 
 /**

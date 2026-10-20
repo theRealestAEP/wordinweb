@@ -86,6 +86,13 @@ describe("doc drawings: pictures", () => {
     expect(rule).toContain('<a:srgbClr val="808080">');
     expect(rule).toContain('<wp:extent cx="5943600"');
   });
+
+  it("draws a Word 97 OLE object's picture from its ObjectPool storage", () => {
+    // GovDocs1 025372.doc: six equations whose picture characters (sprmCFOle2) name ObjectPool storages.
+    const files = convert("025372.doc");
+    expect(Object.keys(files).filter((part) => part.startsWith("word/media/")).length).toBe(6);
+    expect([...text(files).matchAll(/<wp:inline\b/g)].length).toBe(6);
+  });
 });
 
 describe("doc drawings: floating shapes", () => {

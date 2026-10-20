@@ -66,11 +66,12 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
     if (ch === 0x01) {
       // A picture in a field's code (Word's QUOTE field keeps an equation's
       // picture there and again in the result) shows only in the result.
-      if (props.fData || props.picLocation === undefined || !streams.data || inCode.has(cp)) return undefined;
-      // A Word 6 OLE object's picture is in its ObjectPool storage, which the picture character names.
+      if (props.fData || props.picLocation === undefined || inCode.has(cp)) return undefined;
+      // An OLE object's picture can be in its ObjectPool storage, which the picture character names: in Word 6,
+      // and in Word 97 when the character is an OLE object (sprmCFOle2).
       const picture =
-        parseInlinePicture(streams.data, props.picLocation, { store: art, delayStream: streams.wordDocument, word6: !!fib.word6 }) ??
-        (streams.objectStream ? word6ObjectPicture(streams.objectStream, props.picLocation) : null);
+        (streams.data ? parseInlinePicture(streams.data, props.picLocation, { store: art, delayStream: streams.wordDocument, word6: !!fib.word6 }) : null) ??
+        ((fib.word6 || props.fOle2) && streams.objectStream ? word6ObjectPicture(streams.objectStream, props.picLocation) : null);
       if (!picture || (!picture.image && !picture.shape)) return undefined;
       return `<w:r>${rPrXml}${inlinePictureXml(picture, { addMedia, nextId })}</w:r>`;
     }

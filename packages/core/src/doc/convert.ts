@@ -211,9 +211,20 @@ class Converter {
     const lists6 = this.lists6?.xml();
     if (lists6) this.addPart("word/numbering.xml", lists6, "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml", `${REL_NS}/numbering`);
     this.parts["word/document.xml"] = this.encoder.encode(`${XML_HEAD}<w:document ${W_NS}><w:body>${body}</w:body></w:document>`);
-    this.parts["word/_rels/document.xml.rels"] = this.encoder.encode(
-      `${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${this.documentRels.map((rel) => `<Relationship Id="${rel.id}" Type="${rel.type}" Target="${escapeAttr(rel.target)}"/>`).join("")}</Relationships>`,
-    );
+    const relsXml = (rels: { id: string; type: string; target: string }[]): Uint8Array =>
+      this.encoder.encode(
+        `${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.map((rel) => `<Relationship Id="${rel.id}" Type="${rel.type}" Target="${escapeAttr(rel.target)}"/>`).join("")}</Relationships>`,
+      );
+    this.parts["word/_rels/document.xml.rels"] = relsXml(this.documentRels);
+    // A picture in a header, footer, note or comment uses the same media ids, from that part's own .rels.
+    const mediaRels = this.documentRels.filter((rel) => rel.target.startsWith("media/"));
+    for (const name of mediaRels.length ? Object.keys(this.parts) : []) {
+      const story = /^word\/((?:header|footer)\d+|footnotes|endnotes|comments)\.xml$/.exec(name);
+      if (!story) continue;
+      const xml = new TextDecoder().decode(this.parts[name]);
+      const used = mediaRels.filter((rel) => xml.includes(`r:embed="${rel.id}"`));
+      if (used.length) this.parts[`word/_rels/${story[1]}.xml.rels`] = relsXml(used);
+    }
     this.parts["_rels/.rels"] = this.encoder.encode(
       `${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL_NS}/officeDocument" Target="word/document.xml"/></Relationships>`,
     );
