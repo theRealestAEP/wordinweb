@@ -1,4 +1,4 @@
-import { WriteStream, closeSync, createWriteStream, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
+import { WriteStream, closeSync, createWriteStream, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, statfsSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
@@ -40,6 +40,8 @@ import {
 } from "../../core/src/edit/compare/index.js";
 import { MARKERS, RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
 import { CompareError, isDiskFull } from "./errors.js";
+import { docToDocx } from "../../core/src/doc/hooks.js";
+import { isOleFile, oleKind } from "../../core/src/doc/streams.js";
 import { PdfRenderError } from "../../core/src/pdf/errors.js";
 import { renderDocxToPdf } from "../../core/src/pdf/render.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
@@ -145,9 +147,9 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
   let pdf: WriteStream | null = null;
   try {
     dir = mkdtempSync(join(options.tempDir ?? tmpdir(), "docx-compare-"));
-    const oZip = openInput(originalPath, "original");
+    const oZip = openInput(originalPath, "original", dir);
     zips.push(oZip);
-    const rZip = openInput(revisedPath, "revised");
+    const rZip = openInput(revisedPath, "revised", dir);
     zips.push(rZip);
     checkDiskSpace(dir, [oZip, rZip]);
 
@@ -238,12 +240,56 @@ function notesOf(input: Input): DiskNotes[] {
   return [input.notes.footnote, input.notes.endnote].filter((notes): notes is DiskNotes => notes !== null);
 }
 
-function openInput(path: string, side: Side): ZipReader {
+function openInput(path: string, side: Side, dir: string): ZipReader {
   try {
-    return ZipReader.open(path);
+    const zip = ZipReader.open(docxPathOf(path, side, dir));
+    if (zip.entries.has("mimetype") && zip.entries.has("content.xml")) {
+      zip.close();
+      throw new CompareError("unsupported_format", `${path}: an OpenDocument file`, side);
+    }
+    return zip;
   } catch (error) {
     throw inputError(error, side, path);
   }
+}
+
+/**
+ * The .docx to read for an input: the input itself, or, for a Word
+ * 97-2003 .doc, a working file it is converted to (core's doc/convert.ts;
+ * the .doc and its .docx are in memory for the conversion). Another format
+ * (RTF, PDF, Word 6.0/95, a password-protected document) is refused from
+ * its first bytes as unsupported_format.
+ */
+function docxPathOf(path: string, side: Side, dir: string): string {
+  const fd = openSync(path, "r");
+  let head: Buffer;
+  try {
+    head = Buffer.alloc(8);
+    head = head.subarray(0, readSync(fd, head, 0, head.length, 0));
+  } finally {
+    closeSync(fd);
+  }
+  const ascii = head.subarray(0, 5).toString("latin1");
+  if (ascii.startsWith("{\\rtf")) throw new CompareError("unsupported_format", `${path}: an RTF file`, side);
+  if (ascii.startsWith("%PDF")) throw new CompareError("unsupported_format", `${path}: a PDF file`, side);
+  if (!isOleFile(head)) return path;
+  // The whole file: the directory that names its streams can be at its end.
+  const bytes = readFileSync(path);
+  const kind = oleKind(bytes);
+  if (kind === "encrypted") throw new CompareError("unsupported_format", `${path}: a password-protected document (its package is encrypted)`, side);
+  if (kind !== "doc") throw new CompareError("unsupported_format", `${path}: an OLE compound file with no Word document`, side);
+  let docx: Uint8Array;
+  try {
+    docx = docToDocx(bytes);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const unsupported = /^unsupported format: (.*)/.exec(message);
+    if (unsupported) throw new CompareError("unsupported_format", `${path}: ${unsupported[1]}`, side, { cause: error });
+    throw new CompareError("damaged", `${path}: ${message.replace(/^damaged: /, "")}`, side, { cause: error });
+  }
+  const converted = join(dir, `${side}.docx`);
+  writeFileSync(converted, docx);
+  return converted;
 }
 
 async function readNamed(zip: ZipReader, side: Side, dir: string): Promise<Input> {

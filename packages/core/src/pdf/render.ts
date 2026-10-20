@@ -25,6 +25,9 @@ export { PdfRenderError } from "./errors.js";
 export type { PdfRenderErrorCode } from "./errors.js";
 export { bytesSource } from "../stream/source.js";
 export type { ByteSource } from "../stream/source.js";
+export { docToDocx } from "../doc/hooks.js";
+export type { ConvertHooks } from "../doc/convert.js";
+export { isWordDocumentFile } from "../doc/streams.js";
 
 export interface RenderPdfOptions {
   /** Directories scanned for fonts INSTEAD of the defaults (the system

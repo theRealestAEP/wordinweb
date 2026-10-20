@@ -36,6 +36,8 @@ import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
 import { extractOlePackage } from "./parse/ole.js";
+import { docPackageFiles } from "./doc/hooks.js";
+import { isOleFile } from "./doc/streams.js";
 import { isSourcesRoot } from "./citations.js";
 import {
   buildSmartArtColorsXml,
@@ -3134,9 +3136,12 @@ export class DocxDocument {
     return { dataRelId, layoutRelId, styleRelId, colorsRelId, drawingRelId };
   }
 
-  /** A document from a .docx's bytes; a Strict Open XML package is read as Transitional (strict.ts). */
+  /** A document from a .docx's bytes; a Strict Open XML package is read as
+   * Transitional (strict.ts), and a Word 97-2003 .doc is converted on the way in
+   * (doc/convert.ts), unzipped parts and all. */
   static load(data: ArrayBuffer | Uint8Array): DocxDocument {
-    const pkg = Package.from(data);
+    const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+    const pkg = isOleFile(bytes) ? Package.fromFiles(docPackageFiles(bytes)) : Package.from(bytes);
     normalizeStrictPackage(pkg.raw());
     return new DocxDocument(pkg);
   }
