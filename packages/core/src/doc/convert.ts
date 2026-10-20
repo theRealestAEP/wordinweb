@@ -4,6 +4,7 @@
 // WordprocessingML for the same parser, layout and compare a .docx gets.
 import { parsePlc, parseSttb, u16, u32 } from "./bytes.js";
 import { FC, Fib, PartStarts, parseFib, partStarts, tableBlob } from "./fib.js";
+import { ffDataXml } from "./formfields.js";
 import { numberingXml } from "./numbering.js";
 import { CharRun, PropertyTables } from "./props.js";
 import {
@@ -139,6 +140,12 @@ interface NoteRef {
   kind: "footnote" | "endnote";
   id: number;
   custom: boolean;
+}
+
+/** Where a paragraph's writer is among its fields: whether each open field is in its code, and the CP before which text was already written (a ruby). */
+interface FieldState {
+  inCode: boolean[];
+  skipTo: number;
 }
 
 interface Section {
@@ -421,7 +428,7 @@ class Converter {
     if (sectPr) pPr += sectPr;
     if (extra?.pPr) pPr += extra.pPr;
     const out: string[] = [pPr ? `<w:p><w:pPr>${pPr}</w:pPr>` : "<w:p>"];
-    const field = { inCode: [] as boolean[] };
+    const field: FieldState = { inCode: [], skipTo: 0 };
     for (const run of runs) {
       const end = Math.min(run.end, p.mark);
       if (run.cp >= end && run.cp !== p.mark) continue;
@@ -434,7 +441,7 @@ class Converter {
   }
 
   /** The runs for the text of one character run, split at special characters and markers. */
-  private runsXml(run: CharRun, end: number, istdPara: number, field: { inCode: boolean[] }, noteRef: NoteRef | null): string {
+  private runsXml(run: CharRun, end: number, istdPara: number, field: FieldState, noteRef: NoteRef | null): string {
     const { ctx, fonts } = this.reader;
     const props = newRunProps();
     applyRunSprms(run.grpprl, props);
@@ -467,7 +474,7 @@ class Converter {
       }
       runStart = cpEnd;
     };
-    for (let cp = run.cp; cp < end; cp++) {
+    for (let cp = Math.max(run.cp, field.skipTo); cp < end; cp++) {
       const markers = this.markersAt(cp);
       if (markers) {
         flushRun(cp);
@@ -494,7 +501,28 @@ class Converter {
         case 0x0e: flushText(); content += '<w:br w:type="column"/>'; break;
         case 0x1e: flushText(); content += "<w:noBreakHyphen/>"; break;
         case 0x1f: flushText(); content += "<w:softHyphen/>"; break;
-        case 0x13: flushText(); content += '<w:fldChar w:fldCharType="begin"/>'; field.inCode.push(true); break;
+        case 0x13: {
+          flushText();
+          // A ruby (an EQ \o\ad field), as Word converts it: the field gives way to a w:ruby.
+          const ruby = this.rubyXml(cp, istdPara);
+          if (ruby) {
+            flushRun(cp);
+            out.push(ruby.xml);
+            // What the field's code held besides text: range marks, and comment references.
+            for (let k = cp + 1; k <= ruby.end; k++) {
+              out.push(this.markersAt(k));
+              if (this.text.charCodeAt(k) === 0x05) out.push(this.hooks.special?.(0x05, k, props, rPrFull, (s, e) => this.storyXml(s, e, null, null, null)) ?? "");
+            }
+            field.skipTo = ruby.end + 1;
+            runStart = ruby.end + 1;
+            cp = ruby.end;
+            break;
+          }
+          const ffData = this.formFieldData(cp);
+          content += ffData ? `<w:fldChar w:fldCharType="begin">${ffData}</w:fldChar>` : '<w:fldChar w:fldCharType="begin"/>';
+          field.inCode.push(true);
+          break;
+        }
         case 0x14: flushText(); content += '<w:fldChar w:fldCharType="separate"/>'; if (field.inCode.length) field.inCode[field.inCode.length - 1] = false; break;
         case 0x15: flushText(); content += '<w:fldChar w:fldCharType="end"/>'; field.inCode.pop(); break;
         case 0x02: {
@@ -526,6 +554,68 @@ class Converter {
     }
     flushRun(end);
     return out.join("");
+  }
+
+  /**
+   * The w:ffData of the field that begins at `cp`: a form field (FORMTEXT,
+   * FORMCHECKBOX, FORMDROPDOWN) holds a U+0001 in its code whose run points
+   * at the data (sprmCFData, sprmCPicLocation).
+   */
+  private formFieldData(cp: number): string {
+    for (let k = cp + 1; k < this.text.length; k++) {
+      const ch = this.text.charCodeAt(k);
+      if (ch === 0x13 || ch === 0x14 || ch === 0x15) return "";
+      if (ch !== 0x01) continue;
+      const [run] = this.reader.props.charRuns(k, k + 1);
+      const props = newRunProps();
+      if (run) applyRunSprms(run.grpprl, props);
+      return props.fData && props.picLocation !== undefined ? ffDataXml(this.reader.streams.data, props.picLocation) : "";
+    }
+    return "";
+  }
+
+  /**
+   * A ruby field (EQ \* jc2 \* hps10 \o\ad(\s\up 9(guide),base)) at
+   * `cp` as a w:ruby run, and the CP of its end character; null for any
+   * other field.
+   */
+  private rubyXml(cp: number, istdPara: number): { xml: string; end: number } | null {
+    let depth = 1;
+    let separator = -1;
+    let end = -1;
+    for (let k = cp + 1; k < this.text.length && end < 0; k++) {
+      const ch = this.text.charCodeAt(k);
+      if (ch === 0x13) return null;
+      if (ch === 0x14 && depth === 1 && separator < 0) separator = k;
+      if (ch === 0x15 && --depth === 0) end = k;
+    }
+    if (end < 0) return null;
+    const codeStart = cp + 1;
+    const code = this.text.slice(codeStart, separator >= 0 ? separator : end);
+    const m = /^\s*EQ\s[\s\S]*?\\o\s*\\a[dclr]\s*\(\s*\\s\s*\\up\s*(\d+)\s*\(([^)]*)\)\s*,([^)]*)\)\s*$/i.exec(code);
+    if (!m) return null;
+    // \up is in points; hpsRaise, like \* hps, in half-points.
+    const [, raise, guide, base] = m;
+    const guideAt = codeStart + code.indexOf(guide, code.search(/\\up/i));
+    const baseAt = codeStart + code.lastIndexOf(base);
+    const propsAt = (at: number): RunProps => {
+      const props = newRunProps();
+      const [run] = this.reader.props.charRuns(at, at + 1);
+      if (run) applyRunSprms(run.grpprl, props);
+      return props;
+    };
+    const baseProps = propsAt(baseAt);
+    const guideProps = propsAt(guideAt);
+    const hps = Number(/\\\*\s*hps(\d+)/i.exec(code)?.[1] ?? guideProps.hps ?? 10);
+    guideProps.hps = hps;
+    const align = ["center", "distributeLetter", "distributeSpace", "left", "right", "rightVertical"][Number(/\\\*\s*jc(\d+)/i.exec(code)?.[1] ?? 0)] ?? "center";
+    const run = (props: RunProps, text: string): string => {
+      const rPr = rPrXml(props, this.reader.ctx, istdPara);
+      // A comment reference or other special character inside the field code is left out.
+      return `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ""}<w:t xml:space="preserve">${escapeText(text.replace(/[\u0000-\u001f]/g, ""))}</w:t></w:r>`;
+    };
+    const rubyPr = `<w:rubyAlign w:val="${align}"/><w:hps w:val="${hps}"/><w:hpsRaise w:val="${Number(raise) * 2}"/>${baseProps.hps !== undefined ? `<w:hpsBaseText w:val="${baseProps.hps}"/>` : ""}`;
+    return { xml: `<w:r><w:ruby><w:rubyPr>${rubyPr}</w:rubyPr><w:rt>${run(guideProps, guide)}</w:rt><w:rubyBase>${run(baseProps, base)}</w:rubyBase></w:ruby></w:r>`, end };
   }
 
   // ---- The body, headers and footers, notes ----------------------------
