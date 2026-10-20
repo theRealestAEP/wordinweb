@@ -70,6 +70,10 @@ export interface RenderPdfOptions {
 
 export interface RenderPdfResult {
   pages: number;
+  /** The counting pass's page total: the Y of "Page X of Y" (NUMPAGES).
+   * Always equal to `pages`; a difference is a layout bug, which
+   * scripts/pdf-page-count.mjs looks for. */
+  countedPages: number;
   /** Faces embedded, "family subfamily". */
   fonts: string[];
   /** Families the document asked for that no font directory holds; a
@@ -312,6 +316,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   await new Promise<void>((resolve, reject) => out.end((error?: Error | null) => (error ? reject(error) : resolve())));
   return {
     pages: pageNums.length,
+    countedPages: final.result.totalPages,
     fonts: resources.embedded(),
     missingFonts: [...fonts.missing],
     missingCharacters: [...fonts.missingCodePoints].sort((a, b) => a - b).map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")} ${String.fromCodePoint(cp)}`),

@@ -155,6 +155,35 @@ describe("renderDocxToPdf", () => {
     expect(text).toContain("see page 3.");
   });
 
+  it.skipIf(!hasPdftotext)("counts the pages it renders when a two-column section is too long for the page it would share", async () => {
+    // Section 2 starts below the intro on page 1 (a continuous break) and
+    // balances before section 3's continuous break, but fills more than the
+    // rest of page 1, so it moves to page 2. The counting pass lays its
+    // lines without page items; it once took page 1 for empty, kept the
+    // section there, and counted one page fewer than the render drew.
+    const words = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
+    const footer = `<w:footerReference ${R_NS} w:type="default" r:id="rIdF"/>`;
+    const page = `<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:header="720" w:footer="720"/>`;
+    const body = [
+      para("Intro"),
+      `<w:p><w:pPr><w:sectPr>${footer}${page}</w:sectPr></w:pPr></w:p>`,
+      ...Array.from({ length: 60 }, (_, i) => para(`${i + 1}. ${words}`)),
+      `<w:p><w:pPr><w:sectPr>${footer}<w:type w:val="continuous"/>${page}<w:cols w:num="2" w:space="720"/></w:sectPr></w:pPr></w:p>`,
+      para("Closing words"),
+      `<w:sectPr>${footer}<w:type w:val="continuous"/>${page}</w:sectPr>`,
+    ];
+    const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${W_NS} ${R_NS}><w:body>${body.join("")}</w:body></w:document>`;
+    const footerXml = `<?xml version="1.0"?>\n<w:ftr ${W_NS}><w:p><w:r><w:t xml:space="preserve">Sheet </w:t></w:r>${field("PAGE", "1")}<w:r><w:t xml:space="preserve"> of </w:t></w:r>${field("NUMPAGES", "1")}</w:p></w:ftr>`;
+    const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`;
+    const docx = makeDocx({ "word/document.xml": document, "word/footer1.xml": footerXml, "word/_rels/document.xml.rels": rels });
+    const out = new HeldWritable(Infinity);
+    const result = await renderDocxToPdf(bytesSource(docx), out);
+    expect([result.pages, result.countedPages]).toEqual([3, 3]);
+    const text = pdfText(Buffer.concat(out.chunks));
+    expect(text.split("\f")[0]).not.toContain("1. Lorem");
+    expect(text).toContain("Sheet 3 of 3");
+  });
+
   it("maps glyphs back to Unicode through a ToUnicode CMap", async () => {
     const { bytes, text } = await render(multiPageDocx(1));
     // The CMap is a deflated stream: inflate each stream and find it.

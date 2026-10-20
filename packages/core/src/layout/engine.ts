@@ -2703,11 +2703,14 @@ class Engine {
     }
 
     const snap = this.snapshot();
-    // A partial page is only "shared" when it actually holds content. When the
-    // section boundary landed on a fresh page (e.g. a preceding hard page break
-    // emptied the cursor to the page top), the multi-column section starts on
-    // THAT page rather than moving to yet another fresh page.
-    const sharedPartialPage = this.y > this.cur.bodyTop + 0.01 && this.cur.items.length > 0;
+    // A partial page is only "shared" when content sits above the cursor. When
+    // the section boundary landed on a fresh page (e.g. a preceding hard page
+    // break emptied the cursor to the page top), the multi-column section
+    // starts on THAT page rather than moving to yet another fresh page. The
+    // test reads the cursor, never the page's items: a streamed counting pass
+    // lays its lines without items, and must decide as the rendering pass
+    // does, or the two passes disagree on the page count (wild-multicolumn).
+    const sharedPartialPage = !this.pageIsEmptyAtCursor();
     // Measure pass from the current (possibly shared) position.
     this.beginMeasure();
     this.layoutBlocks(section.blocks);
