@@ -12,9 +12,11 @@ const WMF = (WmfModule.default ?? WmfModule) as typeof WmfModule.default;
  * RecordingCanvas. Null when the converter rejects the bytes.
  */
 export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: FontSet, resources: Resources): Promise<RecordingCanvas | null> {
-  if (ext === "wmf") return convertWmf(bytes, fonts, resources);
-  if (ext === "emf") return convertEmf(bytes, fonts, resources);
-  return null;
+  const canvas = ext === "wmf" ? convertWmf(bytes, fonts, resources) : ext === "emf" ? await convertEmf(bytes, fonts, resources) : null;
+  // The page draws the operators inside one q ... Q: a save the converter
+  // left open would keep the picture's transform and clip on the rest of the page.
+  canvas?.getContext("2d")?.restoreAll();
+  return canvas;
 }
 
 function convertWmf(bytes: Uint8Array, fonts: FontSet, resources: Resources): RecordingCanvas | null {

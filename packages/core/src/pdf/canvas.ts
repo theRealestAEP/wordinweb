@@ -191,6 +191,12 @@ export class RecordingContext {
     this.state = state;
     this.canvas.ops.push("Q");
   }
+  /** Restores every save still open. A converter can leave saves open (an
+   * EMF's SaveDC or clip with no restore): harmless on a canvas it throws
+   * away, but here the operators go into the page's content. */
+  restoreAll(): void {
+    while (this.stack.length > 0) this.restore();
+  }
 
   setTransform(a: number, b: number, c: number, d: number, e: number, f: number): void {
     this.state.ctm = [a, b, c, d, e, f];
