@@ -96,3 +96,59 @@ describe("a text box shorter than one line of its text (GovDocs 042652)", () => 
     expect(el!.style.clipPath).toMatch(/^inset\(/);
   });
 });
+
+describe("a linked chain of three or more text boxes (GovDocs 032370, 027984)", () => {
+  // Three one-line boxes side by side; the first holds the story FIRST /
+  // SECOND / THIRD / FOURTH. The third box used to repeat the second's text.
+  const cy = 190500; // 20px: one 12pt line
+  const xs = [914400, 2914650, 4914900];
+  const story = `<wps:txbx id="24"><w:txbxContent>${para("FIRST")}${para("SECOND")}${para("THIRD")}${para("FOURTH")}</w:txbxContent></wps:txbx>`;
+  const chainBox = (seq: number) =>
+    box({ x: xs[seq], y: 914400, cx: 1809750, cy, story: seq === 0 ? story : `<wps:linkedTxbx id="24" seq="${seq}"/>` });
+  // The left edge of each word's text item on page 1, for every copy of it.
+  const shown = (order: number[]) => {
+    const { result } = layout(`<w:p>${order.map(chainBox).join("")}<w:r><w:t>Anchor</w:t></w:r></w:p>`);
+    const page = texts(result.pages[0].items);
+    return ["FIRST", "SECOND", "THIRD", "FOURTH"].map((word) => page.filter((t) => t.text === word).map((t) => Math.round(t.x)));
+  };
+  const left = xs.map((x) => Math.round((x / 914400) * 96));
+
+  it("continues the story in each box, and hides what is left", () => {
+    expect(shown([0, 1, 2])).toEqual([[left[0]], [left[1]], [left[2]], []]);
+  });
+
+  it("does not depend on the order the anchors are laid out in", () => {
+    expect(shown([0, 2, 1])).toEqual([[left[0]], [left[1]], [left[2]], []]);
+    expect(shown([1, 0, 2])).toEqual([[left[0]], [left[1]], [left[2]], []]);
+  });
+
+  it("continues a chain in a header, which the prescan does not walk", () => {
+    const R = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:sectPr><w:headerReference ${R} w:type="default" r:id="rIdH"/>` +
+            `<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr>`,
+        ),
+        "word/_rels/document.xml.rels":
+          `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/></Relationships>`,
+        "word/header1.xml": `<?xml version="1.0"?><w:hdr ${W}><w:p>${[0, 1, 2].map(chainBox).join("")}</w:p></w:hdr>`,
+      }),
+    );
+    const page = texts(layoutDocument(doc, { measurer }).pages[0].items);
+    const at = (word: string) => page.filter((t) => t.text === word).map((t) => Math.round(t.x));
+    expect([at("FIRST"), at("SECOND"), at("THIRD"), at("FOURTH")]).toEqual([[left[0]], [left[1]], [left[2]], []]);
+  });
+
+  it("paints each box's part once in the DOM renderer", () => {
+    const { doc, result } = layout(`<w:p>${[0, 2, 1].map(chainBox).join("")}<w:r><w:t>Anchor</w:t></w:r></w:p>`);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const rendered = renderToDom(doc, result, container);
+    const words = rendered.bindings.map((b) => b.el.textContent);
+    expect(words.filter((w) => w === "SECOND")).toHaveLength(1);
+    expect(words.filter((w) => w === "THIRD")).toHaveLength(1);
+  });
+});

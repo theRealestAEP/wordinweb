@@ -686,6 +686,11 @@ export class Prescan {
   private readonly bmNumbered = new Map<string, boolean>();
   private readonly refs: { field: FieldContent; ordinal: number; target: string; position: boolean; number: boolean }[] = [];
   private readonly notes: { type: "footnote" | "endnote"; id: number; section: number }[] = [];
+  /** Linked text-box chains (wps:txbx/@id, wps:linkedTxbx) by chain id: the
+   * story (the seq-0 box's blocks) and each box's text height by chainSeq.
+   * A box finds where its part of the story starts from the boxes before it
+   * in the chain, whatever order the anchors are laid out in. */
+  readonly textboxChains = new Map<string, { blocks?: Block[]; capacities: Map<number, number> }>();
   private ordinal = 0;
   private section = 0;
 
@@ -723,6 +728,10 @@ export class Prescan {
             if (known.has(rc.id)) this.notes.push({ type: rc.noteType, id: rc.id, section: this.section });
             continue;
           }
+          if (rc.kind === "anchor" && rc.shape.type === "textbox" && rc.shape.chainId !== undefined) {
+            this.visitChainBox(rc.shape);
+            continue;
+          }
           if (rc.kind !== "field") continue;
           const parts = rc.instruction.trim().split(/\s+/);
           if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
@@ -738,6 +747,18 @@ export class Prescan {
         }
       }
     }
+  }
+
+  private visitChainBox(shape: Extract<Shape, { type: "textbox" }>): void {
+    let chain = this.textboxChains.get(shape.chainId!);
+    if (!chain) {
+      chain = { capacities: new Map() };
+      this.textboxChains.set(shape.chainId!, chain);
+    }
+    const seq = shape.chainSeq ?? 0;
+    if (seq === 0) chain.blocks = shape.blocks;
+    const ins = shape.insets ?? TEXTBOX_INSETS;
+    chain.capacities.set(seq, shape.height - ins.t - ins.b);
   }
 
   /** The blocks visited from here on belong to the next section. */
@@ -770,6 +791,26 @@ export class Prescan {
       numbers.set(note.id, note.type === "footnote" ? ++fnCounter : ++enCounter);
     }
   }
+}
+
+/** Default text box insets px (bodyPr lIns/tIns/rIns/bIns: 0.1in, 0.05in). */
+const TEXTBOX_INSETS = { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+
+/** Where the part of a linked chain's story that follows a box starts: the
+ * top of the first line past the box bottom (story Y, frame-local), or
+ * Infinity when the story ends in the box. `start` is where the box's part
+ * starts and `capacity` its text height. The box always takes the first line
+ * of its part, clipped at its bottom when the box is shorter than the line:
+ * Word places at least one line in a box rather than leave it empty. */
+function chainBoxEnd(items: PageItem[], start: number, capacity: number): number {
+  let firstTop = Infinity;
+  for (const it of items) if (it.kind === "text" && it.lineTop >= start - 0.5) firstTop = Math.min(firstTop, it.lineTop);
+  let end = Infinity;
+  for (const it of items) {
+    if (it.kind !== "text" || it.lineTop <= firstTop + 0.5) continue;
+    if (it.lineTop - start + it.lineHeight > capacity + 0.5) end = Math.min(end, it.lineTop);
+  }
+  return end;
 }
 
 function prescanDocument(doc: DocxDocument): Prescan {
@@ -838,9 +879,8 @@ class Engine {
   /** Resolved floating-table footprints. Omitted tblOverlap permits overlap;
    * `never` tables are shifted below earlier colliding floating tables. */
   private floatingTablePositions = new Map<Table, { page: InternalPage; x: number; y: number; width: number; height: number; allowOverlap: boolean }>();
-  /** Linked text-box chains (wps:linkedTxbx): the seq-0 box records its story
-   * and the frame-local Y at which it overflowed, so later boxes continue it. */
-  private textboxChains = new Map<string, { blocks: Block[]; consumedY: number }>();
+  /** Linked text-box chains, from the prescan (Prescan.textboxChains). */
+  private textboxChains = new Map<string, { blocks?: Block[]; capacities: Map<number, number> }>();
   /** Note id → sequential display number, assigned in document order pre-layout. */
   private footnoteNumbers = new Map<number, number>();
   private endnoteNumbers = new Map<number, number>();
@@ -1198,6 +1238,8 @@ class Engine {
   private adoptPrescan(prescan: Prescan): void {
     this.footnoteNumbers = prescan.footnoteNumbers;
     this.endnoteNumbers = prescan.endnoteNumbers;
+    // A copy: the chains of headers and footers are added as they are laid out.
+    this.textboxChains = new Map(prescan.textboxChains);
     this.seqAssigned = prescan.seq;
     this.seqCounters = new Map(prescan.seqCounters);
     this.refFieldPosition = prescan.refPosition;
@@ -5623,7 +5665,7 @@ class Engine {
             page.items.push({ kind: "edge", x1: bx, y1: by, x2: bx, y2: by + h, border: b });
             page.items.push({ kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b });
           }
-          const ins = tb.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+          const ins = tb.insets ?? TEXTBOX_INSETS;
           // Horizontally the shape stroke STRADDLES the shape edge (half in, half
           // out), so only HALF the border eats into the text on each side — the
           // usable WIDTH shrinks by bw (not 2*bw) and the left origin sits at
@@ -6716,7 +6758,7 @@ class Engine {
         // the top/bottom insets (the stored cy is only Word's cached value and
         // drifts from our text metrics; Word recomputes it to the content).
         if (shape.autofitHeight) {
-          const aIns = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+          const aIns = shape.insets ?? TEXTBOX_INSETS;
           const countersSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
           const seenSnapshot = new Set(this.seenNumIds);
           const measured = this.layoutFrame(shape.blocks, Math.max(width - aIns.l - aIns.r, 1), fields);
@@ -6822,23 +6864,36 @@ class Engine {
           edge(x0 + width, y0, x0 + width, y0 + height);
         }
         // Text insets (bodyPr lIns/tIns/rIns/bIns), default 0.1in/0.05in.
-        const ins = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
-        // Linked text-box chain: a continuation box (chainSeq>0) renders its
-        // chain's story starting where the previous box overflowed; the content
-        // box records that overflow point so the next box picks it up. Both
-        // boxes share a width, so one layout serves the whole chain.
-        const chain =
-          shape.chainId !== undefined ? this.textboxChains.get(shape.chainId) : undefined;
+        const ins = shape.insets ?? TEXTBOX_INSETS;
+        // Linked text-box chain: every box lays out the chain's whole story at
+        // its own width and shows the part the boxes before it in the chain
+        // leave over (their text heights come from the prescan), so the order
+        // the anchors are laid out in does not matter: GovDocs 032370 anchors
+        // one chain's boxes as seq 0, 2, 1 and another's as 1, 0. The prescan
+        // walks the body only; a chain in a header or footer is recorded here
+        // as its boxes are laid out.
+        let chain = shape.chainId !== undefined ? this.textboxChains.get(shape.chainId) : undefined;
+        if (shape.chainId !== undefined && !chain) {
+          chain = { capacities: new Map() };
+          this.textboxChains.set(shape.chainId, chain);
+        }
+        if (chain && !shape.chainSeq && !chain.blocks) chain.blocks = shape.blocks;
+        if (chain && !chain.capacities.has(shape.chainSeq ?? 0)) chain.capacities.set(shape.chainSeq ?? 0, height - ins.t - ins.b);
         const isContinuation = shape.chainSeq !== undefined && shape.chainSeq > 0;
-        const storyBlocks = isContinuation && chain ? chain.blocks : shape.blocks;
-        // Content above skipTopY (frame-local) was shown by earlier boxes.
-        const skipTopY = isContinuation && chain ? chain.consumedY : 0;
+        const storyBlocks = isContinuation ? (chain?.blocks ?? shape.blocks) : shape.blocks;
         // A chained box clips at its bottom (overflow flows to the next box)
         // even without noAutofit.
         const chained = shape.chainId !== undefined;
         const capacity = height - ins.t - ins.b;
         const innerWidth = Math.max(width - ins.l - ins.r, 1);
         const inner = this.layoutFrame(storyBlocks, innerWidth, fields, { x: ox + ins.l, y: oy + ins.t });
+        // Content above skipTopY (frame-local) was shown by earlier boxes in
+        // the chain; Infinity: the story ended before this box.
+        let skipTopY = 0;
+        for (let seq = 0; seq < (shape.chainSeq ?? 0) && skipTopY !== Infinity; seq++) {
+          const before = chain?.capacities.get(seq);
+          if (before !== undefined) skipTopY = chainBoxEnd(inner.items, skipTopY, before);
+        }
         // a:prstTxWarp — the shape's text is bent onto a preset envelope filling
         // the box, not flowed as ordinary lines. Reuse the frame's resolved font
         // and color (theme/style resolution already applied), then hand the box
@@ -6893,28 +6948,10 @@ class Engine {
         let innerTop = oy + ins.t;
         if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
         else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
-        // A chained box always shows the first line of its window, clipped at
-        // the box bottom when the box is shorter than the line: Word places at
-        // least one line in a box rather than leave it empty. The .doc reader
-        // chains every box whose shape names a next shape, so a one-line label
-        // box can be a chain of one (GovDocs 042652).
-        let firstTop = Infinity;
-        if (chained) {
-          for (const it of inner.items) {
-            if (it.kind === "text" && it.lineTop >= skipTopY - 0.5) firstTop = Math.min(firstTop, it.lineTop);
-          }
-        }
-        const crossesBottom = (it: TextItem) => it.lineTop - skipTopY + it.lineHeight > capacity + 0.5;
-        const flowsOn = (it: TextItem) => crossesBottom(it) && it.lineTop > firstTop + 0.5;
-        // Record the overflow point for the next box in the chain (seq-0 box).
-        if (shape.chainId !== undefined && !isContinuation) {
-          let cut = Infinity;
-          for (const it of inner.items) {
-            if (it.kind !== "text") continue;
-            if (flowsOn(it)) cut = Math.min(cut, it.lineTop);
-          }
-          this.textboxChains.set(shape.chainId, { blocks: storyBlocks, consumedY: cut });
-        }
+        // Lines from chainEnd on flow into the next box in the chain. The
+        // .doc reader chains every box whose shape names a next shape, so a
+        // one-line label box can be a chain of one (GovDocs 042652).
+        const chainEnd = chained ? chainBoxEnd(inner.items, skipTopY, capacity) : Infinity;
         // Every text box keeps a full-box hit target, including Word's
         // transparent/borderless VML text boxes. It is emitted before the
         // story text so glyph clicks can enter text editing while blank parts
@@ -6951,7 +6988,9 @@ class Engine {
         // clipped to the box (TextItem.clip), as Word paints it: a one-line
         // label in a box a little shorter than its line height (the SF-424
         // form in GovDocs 042652) shows its text, not an empty box.
-        for (const it of inner.items) {
+        // A continuation box whose story ended in an earlier box stays empty.
+        const storyItems = skipTopY === Infinity ? [] : inner.items;
+        for (const it of storyItems) {
           let clipped = false;
           let partial = false;
           if (it.kind === "text") {
@@ -6961,8 +7000,8 @@ class Engine {
             // content-bottom] window (overflow flows to the next box, which
             // paints them and owns their caret); a plain noAutofit box clips
             // at the box bottom edge with nowhere else for the line to go.
-            if (chained && flowsOn(it)) { clippedLines++; continue; }
-            if (chained && crossesBottom(it) && it.lineTop >= skipTopY - 0.5) { clippedLines++; partial = true; }
+            if (chained && it.lineTop >= chainEnd - 0.5) { clippedLines++; continue; }
+            if (chained && it.lineTop >= skipTopY - 0.5 && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; partial = true; }
             if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) {
               clippedLines++;
               if (innerTop - oy + it.lineTop < height - 0.5) partial = true;
