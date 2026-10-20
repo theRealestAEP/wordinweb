@@ -1,0 +1,262 @@
+import { describe, expect, it } from "vitest";
+import { DocxDocument } from "../src/docx.js";
+import { layoutDocument } from "../src/layout/engine.js";
+import { ApproxMeasurer } from "../src/layout/measure.js";
+import type { LaidOutPage } from "../src/layout/types.js";
+import { makeDocxWithMedia } from "./helpers.js";
+
+/**
+ * A paragraph that ends with a page break arms the paragraph after it to open
+ * at the top of the new page. When a table came next, the table opened there,
+ * but the flag stayed armed. The first paragraph after the table then went
+ * back to the page top and was drawn over the table's first row (a Word 95
+ * sample garbled pages 2 to 4 this way; repro r1.docx).
+ *
+ * Each fixture below puts a break of some kind next to a table, a picture or
+ * a text box, and checks that every word is on a page, in reading order, and
+ * that no two pieces of content are drawn over each other.
+ */
+
+const measurer = new ApproxMeasurer();
+
+const NS =
+  'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+  'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+  'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+  'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" ' +
+  'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" ' +
+  'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"';
+
+const PGMAR =
+  '<w:pgSz w:w="12240" w:h="15840"/>' +
+  '<w:pgMar w:top="1440" w:right="1800" w:bottom="1440" w:left="1800" w:header="720" w:footer="720" w:gutter="0"/>';
+const SECT = `<w:sectPr>${PGMAR}</w:sectPr>`;
+
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+const p = (text: string) => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+const PAGE_BREAK_ONLY = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+const LONG =
+  "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen " +
+  "sixteen seventeen eighteen nineteen twenty twentyone twentytwo twentythree twentyfour twentyfive";
+
+/** A two-cell table, as repro r1.docx has it: "A" and a five-line text. */
+const table = (a = "A", b = LONG) =>
+  '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>' +
+  '<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="4000"/></w:tblGrid><w:tr>' +
+  `<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>${a.startsWith("<") ? a : p(a)}</w:tc>` +
+  `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/></w:tcPr>${p(b)}</w:tc>` +
+  "</w:tr></w:tbl>";
+
+/** A one-cell table whose cell holds the given block XML. */
+const oneCell = (cellXml: string) =>
+  '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>' +
+  '<w:tblGrid><w:gridCol w:w="6000"/></w:tblGrid><w:tr>' +
+  `<w:tc><w:tcPr><w:tcW w:w="6000" w:type="dxa"/></w:tcPr>${cellXml}</w:tc>` +
+  "</w:tr></w:tbl>";
+
+const picture =
+  '<w:p><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0">' +
+  '<wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Picture 1"/>' +
+  '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+  '<pic:pic><pic:nvPicPr><pic:cNvPr id="1" name="image1.png"/><pic:cNvPicPr/></pic:nvPicPr>' +
+  '<pic:blipFill><a:blip r:embed="rIdImg"/></pic:blipFill>' +
+  '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></pic:spPr>' +
+  "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>";
+
+function layout(body: string): LaidOutPage[] {
+  const doc = DocxDocument.load(
+    makeDocxWithMedia(
+      {
+        "word/document.xml":
+          `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}>` +
+          `<w:body>${body}${SECT}</w:body></w:document>`,
+        "word/_rels/document.xml.rels":
+          '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>' +
+          "</Relationships>",
+      },
+      { "word/media/image1.png": PNG },
+    ),
+  );
+  return layoutDocument(doc, { measurer }).pages;
+}
+
+interface Box {
+  label: string;
+  page: number;
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+/** Every word, picture and table drawn, as boxes in reading order. */
+function boxesOf(pages: LaidOutPage[]): Box[] {
+  const out: Box[] = [];
+  pages.forEach((page, n) => {
+    for (const it of page.items) {
+      if (it.kind === "text" && it.text.trim() !== "") {
+        out.push({ label: it.text, page: n, x0: it.x, x1: it.x + it.width, y0: it.lineTop, y1: it.lineTop + it.lineHeight });
+      } else if (it.kind === "image") {
+        out.push({ label: "[picture]", page: n, x0: it.x, x1: it.x + it.width, y0: it.y, y1: it.y + it.height });
+      }
+    }
+  });
+  return out;
+}
+
+/** The tables' outer boxes on each page, from their move grips. */
+function tablesOf(pages: LaidOutPage[]): Box[] {
+  const out: Box[] = [];
+  pages.forEach((page, n) => {
+    for (const it of page.items) {
+      if (it.kind === "grip" && it.axis === "move") {
+        out.push({ label: "[table]", page: n, x0: it.x, x1: it.x2 ?? it.x, y0: it.y1, y1: it.y2 });
+      }
+    }
+  });
+  return out;
+}
+
+const EPS = 0.5;
+const meets = (a: Box, b: Box) =>
+  a.page === b.page && a.x0 < b.x1 - EPS && b.x0 < a.x1 - EPS && a.y0 < b.y1 - EPS && b.y0 < a.y1 - EPS;
+
+/** Pairs of drawn boxes that cover each other. */
+function overlaps(boxes: Box[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      if (meets(boxes[i], boxes[j])) out.push(`${boxes[i].label} / ${boxes[j].label} on page ${boxes[i].page + 1}`);
+    }
+  }
+  return out;
+}
+
+/** Body paragraphs (named by their text) that are drawn inside a table's box. */
+function bodyTextInTables(pages: LaidOutPage[], bodyWords: string[]): string[] {
+  const tables = tablesOf(pages);
+  return boxesOf(pages)
+    .filter((b) => bodyWords.includes(b.label) && tables.some((t) => meets(b, t)))
+    .map((b) => `${b.label} on page ${b.page + 1}`);
+}
+
+/** The page (1-based) of each listed word, in the order given. */
+const pagesOfWords = (pages: LaidOutPage[], words: string[]) =>
+  words.map((w) => {
+    const hit = boxesOf(pages).find((b) => b.label === w);
+    return hit ? hit.page + 1 : 0;
+  });
+
+/** True when the words appear in this order in the drawn reading order (page, then y). */
+function inOrder(pages: LaidOutPage[], words: string[]): boolean {
+  const boxes = boxesOf(pages);
+  const at = words.map((w) => boxes.find((b) => b.label === w));
+  if (at.some((b) => !b)) return false;
+  for (let i = 1; i < at.length; i++) {
+    const a = at[i - 1]!;
+    const b = at[i]!;
+    if (b.page < a.page || (b.page === a.page && b.y0 < a.y0 - EPS)) return false;
+  }
+  return true;
+}
+
+function expectClean(pages: LaidOutPage[], order: string[], body: string[]) {
+  expect(pagesOfWords(pages, order).every((n) => n > 0)).toBe(true);
+  expect(inOrder(pages, order)).toBe(true);
+  expect(overlaps(boxesOf(pages))).toEqual([]);
+  expect(bodyTextInTables(pages, body)).toEqual([]);
+}
+
+describe("a break next to a table, a picture or a text box", () => {
+  it("lays out repro r1: a page-break-only paragraph and then a table", () => {
+    const pages = layout(p("Before") + PAGE_BREAK_ONLY + table() + p("After"));
+    expect(pagesOfWords(pages, ["Before", "A", "one", "twentyfive", "After"])).toEqual([1, 2, 2, 2, 2]);
+    expectClean(pages, ["Before", "A", "twentyfive", "After"], ["Before", "After"]);
+    // The paragraph after the table starts below the table's bottom edge.
+    const [tbl] = tablesOf(pages);
+    const after = boxesOf(pages).find((b) => b.label === "After")!;
+    expect(after.y0).toBeGreaterThanOrEqual(tbl.y1 - EPS);
+  });
+
+  it("lays out the same document with w:pageBreakBefore in place of the break run", () => {
+    const pages = layout(
+      p("Before") + '<w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>' + table() + p("After"),
+    );
+    expectClean(pages, ["Before", "A", "twentyfive", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a paragraph with text that ends in a page break, then a table", () => {
+    const pages = layout(
+      '<w:p><w:r><w:t>Before</w:t></w:r><w:r><w:br w:type="page"/></w:r></w:p>' + table() + p("After"),
+    );
+    expect(pagesOfWords(pages, ["Before", "A", "After"])).toEqual([1, 2, 2]);
+    expectClean(pages, ["Before", "A", "twentyfive", "After"], ["Before", "After"]);
+  });
+
+  it("lays out two tables after a page-break-only paragraph", () => {
+    const pages = layout(p("Before") + PAGE_BREAK_ONLY + table("A") + p("Mid") + table("B") + p("After"));
+    expectClean(pages, ["Before", "A", "Mid", "B", "After"], ["Before", "Mid", "After"]);
+  });
+
+  it("lays out a table directly after another table after a page break", () => {
+    const pages = layout(p("Before") + PAGE_BREAK_ONLY + table("A") + table("B") + p("After"));
+    expectClean(pages, ["Before", "A", "B", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a column-break-only paragraph and then a table in two columns", () => {
+    const cols = `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PGMAR}<w:cols w:num="2" w:space="720"/></w:sectPr></w:pPr></w:p>`;
+    const pages = layout(
+      `<w:p><w:pPr><w:sectPr>${PGMAR}</w:sectPr></w:pPr><w:r><w:t>Intro</w:t></w:r></w:p>` +
+        p("Before") +
+        '<w:p><w:r><w:br w:type="column"/></w:r></w:p>' +
+        table("A", "one two three four five six seven eight") +
+        p("After") +
+        cols,
+    );
+    expectClean(pages, ["Before", "A", "After"], ["Intro", "Before", "After"]);
+  });
+
+  it("lays out a page-break-only paragraph and then a picture", () => {
+    const pages = layout(p("Before") + PAGE_BREAK_ONLY + picture + p("After"));
+    expect(pagesOfWords(pages, ["Before", "[picture]", "After"])).toEqual([1, 2, 2]);
+    expectClean(pages, ["Before", "[picture]", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a page break inside a table cell", () => {
+    const cell = '<w:p><w:r><w:t>C1</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>C2</w:t></w:r></w:p>';
+    const pages = layout(p("Before") + oneCell(cell) + p("After"));
+    expectClean(pages, ["Before", "C1", "C2", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a page-break-only paragraph inside a cell, then a nested table", () => {
+    const cell = p("Outer") + PAGE_BREAK_ONLY + table("A", "nested text") + p("Tail");
+    const pages = layout(p("Before") + oneCell(cell) + p("After"));
+    expectClean(pages, ["Before", "Outer", "A", "nested", "Tail", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a page-break-only paragraph and then a table that opens with a nested table", () => {
+    const pages = layout(p("Before") + PAGE_BREAK_ONLY + oneCell(table("A", "nested text") + p("Tail")) + p("After"));
+    expect(pagesOfWords(pages, ["Before", "A", "Tail", "After"])).toEqual([1, 2, 2, 2]);
+    expectClean(pages, ["Before", "A", "nested", "Tail", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a next-page section break and then a table", () => {
+    const pages = layout(
+      `<w:p><w:pPr><w:sectPr>${PGMAR}</w:sectPr></w:pPr><w:r><w:t>Before</w:t></w:r></w:p>` + table() + p("After"),
+    );
+    expect(pagesOfWords(pages, ["Before", "A", "After"])).toEqual([1, 2, 2]);
+    expectClean(pages, ["Before", "A", "twentyfive", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a page-break-only paragraph that also ends a section, then a table", () => {
+    const pages = layout(
+      p("Before") +
+        `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PGMAR}</w:sectPr></w:pPr><w:r><w:br w:type="page"/></w:r></w:p>` +
+        table() +
+        p("After"),
+    );
+    expectClean(pages, ["Before", "A", "twentyfive", "After"], ["Before", "After"]);
+  });
+});

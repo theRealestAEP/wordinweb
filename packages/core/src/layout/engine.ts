@@ -8289,6 +8289,11 @@ class Engine {
     this.lastParaSpacingAfter = 0;
     this.lastParaAfterPad = 0;
     this.lastParaWasEmpty = false;
+    // A paragraph that ends with a page break arms the next paragraph to open
+    // at the top of the new page. This table opens there instead, so the flag
+    // is used up here. Left armed, the paragraph after the table went back to
+    // the page top and was drawn over the table's first row.
+    this.suppressNextSpaceBefore = false;
     this.ensureTableBorders(tbl);
     const sourceTablePr = tbl.src ? child(tbl.src, "tblPr") : undefined;
     const sourceBorders = sourceTablePr ? child(sourceTablePr, "tblBorders") : undefined;
