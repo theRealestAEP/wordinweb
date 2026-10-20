@@ -547,6 +547,13 @@ class Converter {
         case 0x0e: flushText(); content += '<w:br w:type="column"/>'; break;
         case 0x1e: flushText(); content += "<w:noBreakHyphen/>"; break;
         case 0x1f: flushText(); content += "<w:softHyphen/>"; break;
+        case 0x00:
+          // A Word 6 special character 0 is the current page number.
+          if (word6 && special) {
+            flushText();
+            content += '<w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/>';
+          }
+          break;
         case 0x13: {
           flushText();
           // A ruby (an EQ \o\ad field), as Word converts it: the field gives way to a w:ruby.
