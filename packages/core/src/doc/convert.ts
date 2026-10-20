@@ -682,13 +682,14 @@ class Converter {
    * The header story of kind `k` (in Word 97's order: even header, odd
    * header, even footer, odd footer, first header, first footer) of section
    * `index` in a Word 6 file, which stores only the stories the document
-   * (its footnote separators, DOP grpfIhdt) and each section (SEP grpfIhdt)
+   * (its note separators, DOP grpfIhdt) and each section (SEP grpfIhdt)
    * have, in that order. Undefined when the section has none: it keeps the
    * previous section's.
    */
   private word6HeaderStory(index: number, k: number): number | undefined {
     const dop = tableBlob(this.reader.fib, this.reader.streams.table, FC.dop);
-    let story = bitCount((dop[1] ?? 0) & 0x07);
+    // The footnote and endnote separators, continuation separators and continuation notices.
+    let story = bitCount((dop[1] ?? 0) & 0x3f);
     for (let s = 0; s < index; s++) story += bitCount((this.sections[s].props.grpfIhdt ?? 0) & 0x3f);
     const bits = this.sections[index].props.grpfIhdt ?? 0;
     if (!(bits & (1 << k))) return undefined;
