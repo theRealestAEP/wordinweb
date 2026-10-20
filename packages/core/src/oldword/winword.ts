@@ -129,7 +129,7 @@ class WinWordReader extends Word2Reader {
    * which of the others are set: the color, the font, the size, the
    * underline, the raise, the spacing; then the font (a word), the size and
    * the raise (a byte each), the spacing, the color and underline, and the
-   * picture's file offset at 8.
+   * picture's file offset in three bytes at 8.
    */
   private applyWord1Chpx(c: Char, d: Uint8Array): void {
     const flips: [number, number][] = [[0x01, 0], [0x02, 1], [0x04, 2], [0x08, 3], [0x20, 5], [0x40, 6], [0x80, 7]];
@@ -143,7 +143,7 @@ class WinWordReader extends Word2Reader {
     if (set & 0x80) c.dxaSpace = d.length >= 7 ? (((d[6] & 0x3f) << 26) >> 26) * 5 : 0;
     if (set & 0x04) c.ico = d.length >= 8 ? d[7] & 0x0f : 0;
     if (set & 0x20) c.kul = d.length >= 8 ? (d[7] >> 4) & 7 : 0;
-    if (d.length >= 12) c.picture = this.n32(d, 8);
+    if (d.length >= 11) c.picture = this.n32(d, 8) & 0xffffff;
   }
 
   protected isCharSprm(op: number): boolean {
@@ -207,14 +207,16 @@ class WinWordReader extends Word2Reader {
    * The picture a U+0001 shows: a PIC at the file offset its run gives (its
    * size, its header's size, the metafile's mapping mode and extent, the
    * size it shows at in twips, its scale in tenths of a percent and its
-   * crops), then a Windows metafile or a bitmap.
+   * crops), then a Windows metafile or a bitmap. Word for Windows 1's
+   * header is 0x2E bytes, Word for Windows 2's 0x3A; the fields read here
+   * are at the same places in both.
    */
   private readonly pictureIndex = new Map<number, number>();
   protected picture(char: Char): Inline | undefined {
     const at = char.picture ?? 0;
     const lcb = this.u32(at);
     const cbHeader = this.u16(at + 4);
-    if (at < 0x80 || lcb < 0x3a || cbHeader < 0x3a || cbHeader >= lcb || at + lcb > this.bytes.length) return undefined;
+    if (at < 0x80 || lcb < 0x2e || cbHeader < 0x2e || cbHeader >= lcb || at + lcb > this.bytes.length) return undefined;
     let index = this.pictureIndex.get(at);
     if (index === undefined) {
       const data = this.bytes.subarray(at + cbHeader, at + lcb);
