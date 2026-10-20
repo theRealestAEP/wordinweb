@@ -10,9 +10,9 @@
 // the FKP pages), Microsoft's KB articles on Word for MS-DOS, and the
 // structures as observed in Word's files. libwps's notes on the format were
 // a guide to the property bytes.
-import { Border, ParaProps, RunProps, SectionProps, Tab, newParaProps, newSectionProps } from "../doc/sprm.js";
+import { Border, ParaProps, RunProps, SectionProps, Tab, newParaProps, newSectionProps, newTableProps } from "../doc/sprm.js";
 import { symbolText } from "../pdf/dib.js";
-import { Block, Inline, OldDocument, Paragraph, Run, Section } from "./model.js";
+import { Block, Inline, OldDocument, Paragraph, Run, Section, Table } from "./model.js";
 
 /** Code page 437 (US) and 850 (multilingual), bytes 0x80-0xFF. */
 const CP437 = "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■\u00a0";
@@ -68,7 +68,12 @@ interface DosPara {
   props: ParaProps;
   /** Header (0) or footer (1) and the pages: odd (2), even (4), first (8); 0 for a body paragraph. */
   rhc: number;
+  /** Side by side with the paragraphs next to it that are too, each in the place its indents give it. */
+  sideBySide: boolean;
 }
+
+/** A row of side-by-side paragraphs: per column its left edge, its right edge and its paragraphs. */
+type SideBySideRow = { left: number; paragraphs: { p: Paragraph; right: number }[] }[];
 
 interface FkpRun {
   fc: number;
@@ -125,7 +130,7 @@ class DosReader {
     const textEnd = this.fcMac - 128;
     this.readNotes(textEnd);
     // The notes' texts follow the main text.
-    const mainEnd = Math.min(textEnd, ...this.notes.map((note) => note.start));
+    const mainEnd = this.notes.reduce((end, note) => Math.min(end, note.start), textEnd);
     const sections = this.readSections(mainEnd);
     const footnotes = this.notes.map((note) => this.blocks(note.start, note.end, true));
     return {
@@ -317,6 +322,10 @@ class DosReader {
     const heads = new Map<string, { group: number; blocks: Block[] }>();
     let group = 0;
     let pageBreak = false;
+    const rows: SideBySideRow[] = [];
+    // The width of the text (of a column): side-by-side paragraphs' right indents are from its right edge.
+    const columns = props.columns ?? 1;
+    const textWidth = Math.round(((props.xaPage ?? 12240) - (props.dxaLeft ?? 1800) - (props.dxaRight ?? 1800) - (columns - 1) * (props.dxaColumns ?? 720)) / columns);
     for (const { para, start: pStart, end: pEnd } of this.paragraphs(start, end)) {
       if (para.rhc & 0x0e) {
         const p = this.paragraph(pStart, pEnd, para, false);
@@ -339,8 +348,13 @@ class DosReader {
       const p = this.paragraph(pStart, pEnd, para, false);
       if (pageBreak) p.props.pageBreakBefore = true;
       pageBreak = false;
-      blocks.push(p);
+      if (para.sideBySide) {
+        addSideBySide(rows, p, textWidth);
+        continue;
+      }
+      for (const block of [...sideBySideBlocks(rows.splice(0)), p]) blocks.push(block);
     }
+    for (const block of sideBySideBlocks(rows)) blocks.push(block);
     const headers: Section["headers"] = [];
     for (const kind of ["header", "footer"] as const) {
       const odd = heads.get(`${kind} default`)?.blocks ?? [];
@@ -365,9 +379,16 @@ class DosReader {
     let cp = start;
     while (cp < end) {
       const run = this.runAt(this.papRuns, cp + 128);
-      const pEnd = Math.min(run ? run.end - 128 : end, end);
-      yield { para: parsePara(run?.data), start: cp, end: Math.max(pEnd, cp + 1) };
-      cp = Math.max(pEnd, cp + 1);
+      const runEnd = Math.max(Math.min(run ? run.end - 128 : end, end), cp + 1);
+      const para = parsePara(run?.data);
+      // A run of the same properties holds paragraphs that end in a CR LF each.
+      while (cp < runEnd) {
+        let pEnd = cp;
+        while (pEnd < runEnd && !(this.bytes[127 + pEnd] === 0x0d && this.bytes[128 + pEnd] === 0x0a)) pEnd++;
+        pEnd = Math.min(pEnd + 1, runEnd);
+        yield { para: { ...para, props: structuredClone(para.props) }, start: cp, end: pEnd };
+        cp = pEnd;
+      }
     }
   }
 
@@ -611,7 +632,7 @@ function parsePara(data: Uint8Array | undefined): DosPara {
     tabs.push({ pos, jc: Math.min(d[at + 2] & 7, 3), leader: Math.min((d[at + 2] >> 3) & 7, 3) });
   }
   p.tabs = tabs;
-  return { props: p, rhc: d[16] & 0x0f };
+  return { props: p, rhc: d[16] & 0x0f, sideBySide: (d[1] & 0x10) !== 0 };
 }
 
 /** A shade of grey: `percent` of black. */
@@ -619,6 +640,53 @@ function grey(percent: number): string {
   const v = Math.round(255 * (1 - percent / 100));
   const h = v.toString(16).toUpperCase().padStart(2, "0");
   return h + h + h;
+}
+
+/**
+ * Adds a side-by-side paragraph to the rows: a paragraph with the left
+ * indent of the column before it joins that column, one further right
+ * starts the next column, one further left starts a new row.
+ */
+function addSideBySide(rows: SideBySideRow[], p: Paragraph, textWidth: number): void {
+  const left = p.props.dxaLeft ?? 0;
+  const right = Math.max(left + 1, textWidth - (p.props.dxaRight ?? 0));
+  const row = rows[rows.length - 1];
+  const column = row?.[row.length - 1];
+  if (column && left === column.left) column.paragraphs.push({ p, right });
+  else if (column && left > column.left) row.push({ left, paragraphs: [{ p, right }] });
+  else rows.push([{ left, paragraphs: [{ p, right }] }]);
+}
+
+/**
+ * Side-by-side paragraphs as a table with no borders: a column a cell,
+ * which reaches to the next column's left edge (the last, to its widest
+ * paragraph's right edge); each paragraph keeps the space between its own
+ * right edge and the cell's as its right indent. Rows of one column are
+ * the paragraphs as they are.
+ */
+function sideBySideBlocks(rows: SideBySideRow[]): Block[] {
+  if (rows.every((row) => row.length === 1)) return rows.flatMap((row) => row[0].paragraphs.map(({ p }) => p));
+  const table: Table = { type: "table", rows: [] };
+  for (const row of rows) {
+    const props = newTableProps();
+    props.left = row[0].left;
+    props.cellMargins = { left: 0, right: 0 };
+    const cells: Block[][] = [];
+    row.forEach((column, i) => {
+      const edge = i + 1 < row.length ? row[i + 1].left : column.paragraphs.reduce((edge, { right }) => Math.max(edge, right), 0);
+      props.cells.push({
+        right: edge, horzMerge: 0, vertMerge: 0, vertAlign: 0, textFlow: 0, ftsWidth: 0, width: 0,
+        fitText: false, noWrap: false, hideMark: false, borders: {}, margins: {},
+      });
+      for (const { p, right } of column.paragraphs) {
+        p.props.dxaLeft = undefined;
+        p.props.dxaRight = edge > right ? edge - right : undefined;
+      }
+      cells.push(column.paragraphs.map(({ p }) => p));
+    });
+    table.rows.push({ props, cells });
+  }
+  return [table];
 }
 
 function sameBlocks(a: Block[], b: Block[]): boolean {

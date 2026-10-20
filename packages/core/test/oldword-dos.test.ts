@@ -80,8 +80,20 @@ describe("Word for MS-DOS", () => {
     expect(body).not.toContain("─");
   });
 
+  it("makes a table of side-by-side paragraphs", () => {
+    const doc = readDosWord(fixture("govdocs-921227"));
+    const tables = doc.sections.flatMap((s) => s.blocks).filter((b) => b.type === "table");
+    const first = tables[0];
+    if (first?.type !== "table") throw new Error("no table");
+    const cells = first.rows.map((row) => row.cells.map((cell) => text(cell)));
+    expect(cells[0]).toEqual(["Volcano", "SO2-start ", "number of measurements", "CO2 - start", "number of measurements"]);
+    expect(cells[1]).toEqual(["Redoubt", "March, 1990", "   64", "June, 1990", "   7"]);
+    // The cells' edges are the paragraphs' left indents.
+    expect(first.rows[1].props.cells.map((c) => c.right)).toEqual([1296, 2880, 4464, 6048, expect.any(Number)]);
+  });
+
   it("converts to a .docx that compares equal to itself", () => {
-    for (const name of ["govdocs-804182", "govdocs-262493", "govdocs-199583", "govdocs-974019", "govdocs-191777"]) {
+    for (const name of ["govdocs-804182", "govdocs-262493", "govdocs-921227", "govdocs-199583", "govdocs-974019", "govdocs-191777"]) {
       const docx = zipSync(oldDocumentFiles(readDosWord(fixture(name))));
       const result = compareDocuments(DocxDocument.load(docx), DocxDocument.load(docx), { author: "test", date: "2026-01-01T00:00:00Z" });
       expect(collectRevisions(result), name).toHaveLength(0);
