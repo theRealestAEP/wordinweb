@@ -317,7 +317,9 @@ describe("renderDocxToPdf", () => {
     const cases: [string, Uint8Array, RegExp][] = [
       ["xls", ole("Workbook"), /Excel 97-2003 workbook/],
       ["wordperfect", new Uint8Array([0xff, 0x57, 0x50, 0x43, 16, 0, 0, 0]), /WordPerfect/],
-      ["mac word 5", new Uint8Array([0xfe, 0x37, 0x00, 0x23, 0, 0, 0, 0]), /Word for Macintosh/],
+      // A Word for the Macintosh or Word for Windows file of a version oldword/ does not read (a 4.0/5.x one is read).
+      ["mac word, another version", new Uint8Array([0xfe, 0x37, 0x00, 0x1e, 0, 0, 0, 0]), /Word for Macintosh/],
+      ["word for windows 1.0 beta", new Uint8Array([0x9b, 0xa5, 0x1c, 0x00, 0, 0, 0, 0]), /Word for Windows 1\.x\/2\.0/],
       ["html", new TextEncoder().encode("\ufeff\n<!DOCTYPE html><html><body>Hi</body></html>"), /HTML/],
       ["word 2003 xml", new TextEncoder().encode('<?xml version="1.0"?><?mso-application progid="Word.Document"?><w:wordDocument/>'), /Word 2003 XML/],
       ["encrypted", ole("EncryptionInfo"), /password-protected/],

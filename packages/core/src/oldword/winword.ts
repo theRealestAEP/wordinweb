@@ -66,13 +66,14 @@ class WinWordReader extends Word2Reader {
     };
   }
 
-  /** The font table: its size, then per font a size byte, two bytes, and the name ending in a zero byte. */
+  /** The font table: its size, then per font a size byte, the family byte, (Word 2) the character set, and the name ending in a zero byte. */
   private readFonts(entry: Entry): void {
     const table = this.entry(entry);
+    const nameAt = this.bytes[0] === 0xdb ? 3 : 2;
     let at = 2;
-    while (at + 3 < table.length) {
+    while (at + nameAt < table.length) {
       const size = table[at] + 1;
-      const name = table.subarray(at + 3, Math.min(at + size, table.length));
+      const name = table.subarray(at + nameAt, Math.min(at + size, table.length));
       const end = name.indexOf(0);
       this.fontNames.push(CP1252.decode(end >= 0 ? name.subarray(0, end) : name));
       at += size;
