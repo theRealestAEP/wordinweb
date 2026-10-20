@@ -100,7 +100,7 @@ interface StyleEntry {
 }
 
 /** The standard styles by their number (stc - 256), as Word for Windows 2.0 numbers them. */
-const STANDARD_STYLES: Record<number, string> = {
+export const STANDARD_STYLES: Record<number, string> = {
   [-1]: "Normal Indent", [-2]: "heading 1", [-3]: "heading 2", [-4]: "heading 3", [-5]: "heading 4", [-6]: "heading 5", [-7]: "heading 6",
   [-8]: "heading 7", [-9]: "heading 8", [-10]: "heading 9", [-11]: "footnote text", [-12]: "footnote reference", [-13]: "header",
   [-14]: "footer", [-15]: "index heading", [-16]: "line number", [-17]: "index 1", [-18]: "index 2", [-19]: "index 3", [-20]: "index 4",
@@ -626,6 +626,13 @@ export abstract class Word2Reader {
     const decode = this.decoder(char.fontId);
     for (let cp = start; cp < end; cp++) {
       const ch = this.text[cp];
+      const note = ch >= 0x20 ? this.noteRefs.get(cp) : undefined;
+      if (note) {
+        // A footnote reference with a mark of its own: the character at the reference.
+        flush();
+        content.push({ kind: "footnote", id: note, customMark: decode(ch) });
+        continue;
+      }
       if (ch >= 0x20) {
         text += decode(ch);
         continue;

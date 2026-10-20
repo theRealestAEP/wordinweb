@@ -1,6 +1,7 @@
 import { ImageDataShim, RecordingCanvas, RecordingContext } from "./canvas.js";
 import { symbolText } from "./dib.js";
 import { FontSet } from "./fonts.js";
+import { PIXEL_BUDGET } from "./images.js";
 import { Resources } from "./resources.js";
 
 /**
@@ -13,7 +14,8 @@ import { Resources } from "./resources.js";
  * rounded rectangles, ovals, arcs, polygons and text as vector shapes. A
  * pattern draws as its share of the foreground color over the background;
  * a region draws and clips as its bounding box when it is not a plain
- * rectangle. Version 1 pictures (one-byte opcodes) are not read.
+ * rectangle. A version 1 picture (one-byte opcodes) plays the same way,
+ * and only when it reaches its end (playVersion1).
  */
 
 interface Rect {
@@ -113,9 +115,11 @@ class Reader {
 export function convertPict(bytes: Uint8Array, fonts: FontSet, resources: Resources): RecordingCanvas | null {
   // A PICT file starts with 512 bytes for the application; a picture in a document does not.
   for (const start of [0, 512]) {
-    if (bytes.length < start + 40) continue;
+    if (bytes.length < start + 13) continue;
     const r = new Reader(bytes, start + 2);
     const frame = r.rect();
+    if (bytes[r.at] === 0x11 && bytes[r.at + 1] === 0x01) return playVersion1(r, frame, fonts, resources);
+    if (bytes.length < start + 40) continue;
     if (r.u16() !== 0x0011 || r.u16() !== 0x02ff) continue;
     if (r.u16() !== 0x0c00) return null;
     // The extended header (version -2) gives the rectangle the opcodes use, at its own resolution.
@@ -134,6 +138,21 @@ export function convertPict(bytes: Uint8Array, fonts: FontSet, resources: Resour
     return canvas;
   }
   return null;
+}
+
+/**
+ * A version 1 PICT (Word for the Macintosh 4 and 5 keep many): the opcodes
+ * of version 2 below 0x100, one byte each and with no padding between
+ * them, in the frame's coordinates. Null for a picture that does not reach
+ * its end opcode: one cut short, or with an opcode this does not read.
+ */
+function playVersion1(r: Reader, frame: Rect, fonts: FontSet, resources: Resources): RecordingCanvas | null {
+  const width = frame.right - frame.left;
+  const height = frame.bottom - frame.top;
+  if (width <= 0 || height <= 0 || width * height > PIXEL_BUDGET) return null;
+  const canvas = new RecordingCanvas(width, height, fonts, resources);
+  const ended = new PictPlayer(r, canvas.getContext("2d") as RecordingContext, frame, true).play(r.at + 2);
+  return ended ? canvas : null;
 }
 
 class PictPlayer {
@@ -160,6 +179,7 @@ class PictPlayer {
     private readonly r: Reader,
     private readonly ctx: RecordingContext,
     private readonly source: Rect,
+    private readonly version1 = false,
   ) {
     const empty = { top: 0, left: 0, bottom: 0, right: 0 };
     this.last = { rect: empty, rrect: empty, oval: empty, arc: empty, poly: [] };
@@ -172,22 +192,28 @@ class PictPlayer {
     return v - this.source.top - this.origin[1];
   }
 
-  play(at: number): void {
+  /** Play the opcodes from `at`; whether they reached the end opcode. */
+  play(at: number): boolean {
     const r = this.r;
     r.at = at;
     this.ctx.save();
+    let ended = false;
     try {
-      while (r.at + 2 <= r.bytes.length) {
-        if (r.at & 1) r.at++;
-        const op = r.u16();
-        if (op === 0x00ff) break;
+      while (r.at + (this.version1 ? 1 : 2) <= r.bytes.length) {
+        if (!this.version1 && r.at & 1) r.at++;
+        const op = this.version1 ? r.u8() : r.u16();
+        if (op === 0x00ff) {
+          ended = true;
+          break;
+        }
         if (!this.op(op)) break;
       }
     } catch {
-      // A picture cut short draws what came before.
+      // A version 2 picture cut short draws what came before.
     }
     this.flushLines();
     this.ctx.restoreAll();
+    return ended;
   }
 
   /** One opcode and its data; false for one whose length is unknown. */
@@ -626,6 +652,7 @@ class PictPlayer {
     const mode = r.u16();
     if (op & 1) r.at += r.view.getUint16(r.at);
     const packed = op !== 0x90 && op !== 0x91 && rowBytes >= 8;
+    if (width * height > PIXEL_BUDGET) throw new Error("a PICT bitmap over the pixel budget");
     const rgba = new Uint8ClampedArray(Math.max(width, 0) * Math.max(height, 0) * 4);
     for (let row = 0; row < height; row++) {
       let data: Uint8Array;

@@ -10,7 +10,7 @@ const DRAWING_NS =
 const REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const XML_HEAD = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 const CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml";
-const PICTURE_TYPES: Record<string, string> = { pict: "image/x-pict", wmf: "image/x-wmf", bmp: "image/bmp" };
+const PICTURE_TYPES: Record<string, string> = { pict: "image/x-pict", wmf: "image/x-wmf" };
 
 /** The .docx package's parts for an old Word document. */
 export function oldDocumentFiles(doc: OldDocument): Record<string, Uint8Array> {

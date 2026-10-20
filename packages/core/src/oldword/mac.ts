@@ -8,7 +8,7 @@
 import { newSectionProps } from "../doc/sprm.js";
 import { symbolText } from "../pdf/dib.js";
 import { Inline, OldDocument } from "./model.js";
-import { Char, DocProps, Entry, Fib, Sprm, Word2Reader, popcount } from "./word2.js";
+import { Char, DocProps, Entry, Fib, STANDARD_STYLES, Sprm, Word2Reader, popcount } from "./word2.js";
 
 const MAC_ROMAN = new TextDecoder("macintosh");
 const MAC_ROMAN_CHARS: string[] = Array.from({ length: 256 }, (_, i) => MAC_ROMAN.decode(Uint8Array.of(i)));
@@ -164,6 +164,11 @@ export class MacReader extends Word2Reader {
       case 0x53: this.applyChpx(c, arg); break;
       default: break;
     }
+  }
+
+  /** Word for the Macintosh numbers the standard styles one after Word for Windows 2.0: its -1 is heading 1, its -12 header. */
+  protected standardStyleName(id: number): string | undefined {
+    return STANDARD_STYLES[id - 1];
   }
 
   protected fontName(id: number): string {
