@@ -20,13 +20,13 @@ import { localName, XmlElement } from "../xml.js";
 import { formatNumber } from "../parse/numbering.js";
 
 /** Apply a field's `\* <format>` general-formatting switch to a computed
- * number (Word's PAGE/NUMPAGES/SECTIONPAGES honour it, overriding the section's
- * pgNumType). Returns undefined when no numeric switch is present so the caller
- * keeps its default (section) formatting. The switch keyword is case-sensitive
- * in Word: `roman`→i, `ROMAN`→I. `ArabicDash` wraps the arabic value in hyphens
+ * number. The argument can immediately follow `\*`. Returns undefined when
+ * no numeric switch is present so the caller keeps its default formatting.
+ * The format keyword is case-sensitive in Word: `roman`→i, `ROMAN`→I.
+ * `ArabicDash` wraps the arabic value in hyphens
  * ("- 1 -"), matching Word's footer probe. */
-function starNumberFormat(instr: string, n: number): string | undefined {
-  const m = /\\\*\s+([A-Za-z]+)/.exec(instr);
+export function starNumberFormat(instr: string, n: number): string | undefined {
+  const m = /\\\*\s*([A-Za-z]+)/.exec(instr);
   if (!m) return undefined;
   switch (m[1]) {
     case "Arabic":
