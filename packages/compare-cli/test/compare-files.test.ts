@@ -491,6 +491,37 @@ describe("compareFiles errors", () => {
     }
   });
 
+  it("refuses a w:altChunk with unsupported_content, in the body, a table, a header and a footnote", async () => {
+    const R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const chunk = `<w:altChunk ${R_NS} r:id="rIdAlt"/>`;
+    const rels = (...more: string[]): string =>
+      `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdAlt" Type="${REL}/aFChunk" Target="chunk.html"/>${more.join("")}</Relationships>`;
+    const cases: Record<string, Record<string, string>> = {
+      body: { "word/document.xml": wrapDocument(para("Before.") + chunk + para("After.")), "word/_rels/document.xml.rels": rels() },
+      table: { "word/document.xml": wrapDocument(`<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>${para("Cell.")}${chunk}</w:tc></w:tr></w:tbl>`), "word/_rels/document.xml.rels": rels() },
+      header: {
+        "word/document.xml": wrapDocument(para("Body.") + `<w:sectPr><w:headerReference ${R_NS} w:type="default" r:id="rIdH"/></w:sectPr>`),
+        "word/_rels/document.xml.rels": rels(`<Relationship Id="rIdH" Type="${REL}/header" Target="header1.xml"/>`),
+        "word/header1.xml": `<?xml version="1.0"?>\n<w:hdr ${W_NS}>${para("Header.")}${chunk}</w:hdr>`,
+        "word/_rels/header1.xml.rels": rels(),
+      },
+      footnote: {
+        "word/document.xml": wrapDocument(`<w:p><w:r><w:t>Body.</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`),
+        "word/_rels/document.xml.rels": rels(`<Relationship Id="rIdF" Type="${REL}/footnotes" Target="footnotes.xml"/>`),
+        "word/footnotes.xml": `<?xml version="1.0"?>\n<w:footnotes ${W_NS}><w:footnote w:id="1">${para("Note.")}${chunk}</w:footnote></w:footnotes>`,
+        "word/_rels/footnotes.xml.rels": rels(),
+      },
+    };
+    for (const [where, parts] of Object.entries(cases)) {
+      const path = join(dir, `altchunk-${where}.docx`);
+      writeFileSync(path, makeDocx({ ...parts, "word/chunk.html": "<html><body><p>Chunk.</p></body></html>" }));
+      const error = await errorOf(good, path, join(dir, "x.docx"));
+      expect([error.code, error.file], where).toEqual(["unsupported_content", "revised"]);
+      expect(error.message, where).toBe(`${path}: the document embeds an alternative-format chunk (w:altChunk, word/chunk.html) that Word imports on open`);
+    }
+  });
+
   it("refuses two outputs on one path, naming them", async () => {
     const options = { author: AUTHOR, date: DATE };
     const out = join(dir, "collide.docx");

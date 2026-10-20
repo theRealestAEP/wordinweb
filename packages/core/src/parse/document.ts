@@ -56,6 +56,22 @@ export interface DocParseContext extends ParseContext {
   };
 }
 
+/**
+ * The error for content Word prints that this library does not read. The
+ * document is refused, so the content is never dropped with no report:
+ * PdfRenderError and CompareError give it the code "unsupported_content".
+ */
+export function unsupportedContent(what: string): Error {
+  return new Error(`unsupported content: ${what}`);
+}
+
+/** A w:altChunk: a part in another format (HTML, RTF, text, another
+ * .docx) that Word imports in the chunk's place when it opens the file. */
+export function altChunkError(el: XmlElement, rels: Relationships): Error {
+  const part = rels.get(attr(el, "id") ?? "")?.target;
+  return unsupportedContent(`the document embeds an alternative-format chunk (w:altChunk${part ? `, ${part}` : ""}) that Word imports on open`);
+}
+
 /** Parse w:body into sections (the body's trailing sectPr closes the last one). */
 export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
   const sections: Section[] = [];
@@ -90,6 +106,8 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
       } else if (ln === "sdt") {
         const content = child(el, "sdtContent");
         if (content) walk(content.children);
+      } else if (ln === "altChunk") {
+        throw altChunkError(el, ctx.rels);
       }
       // bookmarkStart/End, proofErr, etc. — ignored
     }
@@ -144,7 +162,7 @@ export function parseBlocks(container: XmlElement, ctx: DocParseContext): Block[
     else if (ln === "sdt") {
       const content = child(el, "sdtContent");
       if (content) blocks.push(...parseBlocks(content, ctx));
-    }
+    } else if (ln === "altChunk") throw altChunkError(el, ctx.rels);
   }
   return blocks;
 }

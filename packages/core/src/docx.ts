@@ -31,7 +31,7 @@ import {
 } from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
 import { StableIds } from "./edit/ids.js";
-import { parseBody, parseBlocks, parseParagraph, DocParseContext } from "./parse/document.js";
+import { parseBody, parseBlocks, parseParagraph, DocParseContext, altChunkError } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
@@ -1209,6 +1209,10 @@ export class DocxDocument {
       if (localName(c.name) !== "comment") continue;
       const paras: string[] = [];
       const collectPara = (el: XmlElement): void => {
+        if (localName(el.name) === "altChunk") {
+          const part = this.commentsPart as string;
+          throw altChunkError(el, parseRelationships(this.readXmlOptional(relsPathFor(part)), part));
+        }
         if (localName(el.name) === "p") {
           let text = "";
           const collectT = (e: XmlElement): void => {

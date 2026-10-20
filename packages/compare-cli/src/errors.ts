@@ -11,6 +11,10 @@ export type CompareErrorCode =
   | "unsupported_format"
   /** An input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed, a .doc whose tables are corrupt. */
   | "damaged"
+  /** An input holds content Word prints that the compare does not read,
+   * which the message names: a w:altChunk (a part in another format, such
+   * as HTML, that Word imports on open). */
+  | "unsupported_content"
   /** An input holds more outside its body than the compare keeps in memory (MAX_HELD_BYTES). */
   | "too_large"
   /** The temp folder or the result's folder ran out of space. */

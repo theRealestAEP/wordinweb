@@ -39,7 +39,9 @@ Options:
 
 Exit codes: 0 done; 1 failed (the message starts with the reason's code, such as
 not_docx, unsupported_format for an RTF, PDF, OpenDocument, Word 6.0/95 or
-password-protected file, or unsupported_script); 2 usage.`;
+password-protected file, unsupported_content for content Word prints that the
+compare does not read, such as a w:altChunk (an HTML or RTF part Word imports
+on open), or unsupported_script); 2 usage.`;
 
 /** A mistake in the command line: reported with exit code 2. */
 class UsageError extends Error {}

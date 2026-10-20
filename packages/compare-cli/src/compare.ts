@@ -298,13 +298,17 @@ async function readNamed(zip: ZipReader, side: Side, dir: string): Promise<Input
 
 /**
  * An error reading an input, as a CompareError naming the input: its own
- * code when it has one, disk_full when the disk filled up, else damaged (a
- * part that does not parse).
+ * code when it has one, disk_full when the disk filled up,
+ * unsupported_content for content it does not read, else damaged (a part
+ * that does not parse).
  */
 function inputError(error: unknown, side: Side, path: string): CompareError {
   const message = error instanceof Error ? error.message : String(error);
   const named = message.startsWith(path) ? message : `${path}: ${message}`;
   if (isDiskFull(error)) return new CompareError("disk_full", named, undefined, { cause: error });
+  // core's parse/document.ts says this for content it does not read.
+  const unsupported = /^unsupported content: (.*)/.exec(message);
+  if (unsupported) return new CompareError("unsupported_content", `${path}: ${unsupported[1]}`, side, { cause: error });
   return new CompareError(error instanceof CompareError ? error.code : "damaged", named, side, { cause: error });
 }
 

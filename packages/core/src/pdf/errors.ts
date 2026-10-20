@@ -17,6 +17,11 @@ export type PdfRenderErrorCode =
   | "unsupported_format"
   /** The input is a .docx or .doc that cannot be read: a corrupt entry, XML that is not well formed, a .doc whose tables are corrupt. */
   | "damaged"
+  /** The document holds content Word prints that this renderer does not
+   * read, which the message names: a w:altChunk (a part in another
+   * format, such as HTML, that Word imports on open). The document is
+   * refused rather than printed without it. */
+  | "unsupported_content"
   /** Anything else. The message and `cause` say what. */
   | "failed";
 
@@ -40,6 +45,8 @@ export function asPdfRenderError(error: unknown): PdfRenderError {
   const message = error instanceof Error ? error.message : String(error);
   // stream/body.ts says this for a file of another format it knows ...
   if (/^unsupported format: /.test(message)) return new PdfRenderError("unsupported_format", message.slice("unsupported format: ".length), { cause: error });
+  // ... and parse/document.ts says this for content it does not read ...
+  if (/^unsupported content: /.test(message)) return new PdfRenderError("unsupported_content", message.slice("unsupported content: ".length), { cause: error });
   // ... and stream/zip.ts and stream/body.ts say these for a file that is no .docx ...
   if (/not a \.docx file|^missing |encrypted entries/.test(message)) return new PdfRenderError("not_docx", message, { cause: error });
   // ... and these (or fflate's inflate errors, or a read past the end) for one that is but cannot be read.

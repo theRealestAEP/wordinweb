@@ -8,6 +8,8 @@ import { paragraphText } from "../../core/src/edit/compare/content.js";
 import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionReferences } from "../../core/src/edit/compare/index.js";
 import { normalizeText } from "../../core/src/edit/compare/text.js";
 import { resolvePartPath } from "../../core/src/zip.js";
+import { altChunkError } from "../../core/src/parse/document.js";
+import { parseRelationships, relsPathFor } from "../../core/src/parse/rels.js";
 import { CompareError } from "./errors.js";
 import { DiskNotes } from "./notes.js";
 import { scanBody, scanChildren } from "./scan.js";
@@ -157,6 +159,19 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     for (let i = 0; i < names.length; i++) if (isSectPr(i)) skeleton.push(Buffer.from(range(starts[i], ends[i])));
     skeleton.push(Buffer.from(range(bounds.contentEnd, fstatSync(fd).size)));
     files[docPart] = Buffer.concat(skeleton);
+    /** Refuse a w:altChunk in `el`, from `part`: its content is in another
+     * format, which Word imports on open and the compare does not read. */
+    const refuseAltChunk = (el: XmlElement, part: string): void => {
+      if (localName(el.name) === "altChunk") {
+        const rels = files[relsPathFor(part)];
+        throw altChunkError(el, parseRelationships(rels ? parseXml(Buffer.from(rels).toString("utf8")) : undefined, part));
+      }
+      for (const c of el.children) refuseAltChunk(c, part);
+    };
+    for (const rel of documentRels(zip, docPart)) {
+      const text = /\/(header|footer)$/.test(rel.type) && files[rel.part] ? Buffer.from(files[rel.part]).toString("utf8") : "";
+      if (text.includes("altChunk")) refuseAltChunk(parseXml(text), rel.part);
+    }
     // The compare reads the headers' and footers' XML; their block models would cost about 1 KB a paragraph.
     const shell = DocxDocument.fromFiles(files, { headerFooterBlocks: false });
     let hadRevisions = false;
@@ -308,6 +323,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
         (c) => {
           const xml = range(c.start, c.end).toString("utf8");
           const el = parseXml(xml);
+          if (xml.includes("altChunk")) refuseAltChunk(el, docPart);
           const tracked = TRACKED_CHANGE.test(xml);
           if (tracked) hadRevisions = true;
           if (!ROW_LEVEL.includes(localName(el.name))) {
@@ -352,6 +368,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       }
       const xml = range(starts[i], ends[i]).toString("utf8");
       const el = parseXml(xml);
+      if (xml.includes("altChunk")) refuseAltChunk(el, docPart);
       if (batch.length > 0 || TRACKED_CHANGE.test(xml)) {
         hadRevisions = true;
         batch.push(el);
@@ -388,6 +405,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
           (c) => {
             const xml = readRange(notesFd, c.start, c.end);
             const el = parseXml(xml);
+            if (xml.includes("altChunk")) refuseAltChunk(el, part);
             if (batch.length > 0 || TRACKED_CHANGE.test(xml)) {
               hadRevisions = true;
               batch.push(el);

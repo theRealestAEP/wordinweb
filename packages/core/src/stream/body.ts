@@ -3,7 +3,7 @@ import { DocxDocument } from "../docx.js";
 import { StrictRewriter, normalizeStrictXml } from "../strict.js";
 import { Prescan, bodyHasPageTotal } from "../layout/engine.js";
 import { Block, FieldContent, Paragraph, Revision, Section, SectionProps } from "../model.js";
-import { DocParseContext, formatChange, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
+import { DocParseContext, altChunkError, formatChange, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
 import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
@@ -310,9 +310,10 @@ function lastParagraph(block: Block): Paragraph | null {
 
 /** A body's block as parse/document.ts's parseBody makes it: null when the
  * element is no block (a paragraph deleted in the final view, a table whose
- * rows all are). */
+ * rows all are). An altChunk is refused, as parseBody refuses it. */
 function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
   const ln = localName(el.name);
+  if (ln === "altChunk") throw altChunkError(el, ctx.rels);
   if (ln === "p") {
     const para = parseParagraph(el, ctx);
     return para.revisionHidden ? null : para;
@@ -362,7 +363,7 @@ function documentPart(rels: string | undefined): string {
 class BodyStore {
   /** Each candidate's [start, end) in the concatenated candidate bytes, as pairs. */
   private readonly ranges: number[] = [];
-  /** Each candidate's local name: p, tbl, or the body's own sectPr. */
+  /** Each candidate's local name: p, tbl, altChunk, or the body's own sectPr. */
   private readonly kinds: string[] = [];
   /** Each block-level w:sdt's properties, as its start tag through its
    * sdtContent's, and the sdt it sits in; each candidate's innermost one. */
@@ -415,7 +416,8 @@ class BodyStore {
       (child) => {
         const ln = localName(child.name);
         // A sectPr counts at the body's own level only, as parseBody walks it.
-        if (ln !== "p" && ln !== "tbl" && (ln !== "sectPr" || !child.top)) return;
+        // An altChunk is refused when the first pass parses it.
+        if (ln !== "p" && ln !== "tbl" && ln !== "altChunk" && (ln !== "sectPr" || !child.top)) return;
         if (pieceBytes >= PIECE_BYTES) flush();
         if (piece.length === 0) this.starts.push(total);
         piece.push(child.bytes.slice());

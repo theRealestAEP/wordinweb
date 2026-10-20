@@ -1,5 +1,6 @@
 import { Writable } from "node:stream";
 import { beforeAll, describe, expect, it } from "vitest";
+import { DocxDocument } from "../src/docx.js";
 import { PdfRenderError, unsupportedScript } from "../src/pdf/errors.js";
 import { FontSet, defaultFontDirs } from "../src/pdf/fonts.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
@@ -141,6 +142,47 @@ describe("renderDocxToPdf errors", () => {
     } catch (error) {
       expect((error as PdfRenderError).code).toBe("unsupported_script");
       expect((error as PdfRenderError).message).toContain("Mongolian");
+    }
+  });
+
+  it("refuses a w:altChunk with unsupported_content wherever it would print, and so does DocxDocument.load", async () => {
+    const R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+    const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    const chunk = `<w:altChunk ${R_NS} r:id="rIdAlt"/>`;
+    const rels = (...more: string[]): string =>
+      `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdAlt" Type="${REL}/aFChunk" Target="chunk.html"/>${more.join("")}</Relationships>`;
+    const tbl = (cell: string): string => `<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc>${cell}</w:tc></w:tr></w:tbl>`;
+    const box = `<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" style="width:100pt;height:50pt"><v:textbox><w:txbxContent>${p("box")}${chunk}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>`;
+    const cases: Record<string, Record<string, string>> = {
+      body: { "word/document.xml": wrapDocument(p("before") + chunk + p("after")), "word/_rels/document.xml.rels": rels() },
+      "table cell": { "word/document.xml": wrapDocument(tbl(p("cell") + chunk)), "word/_rels/document.xml.rels": rels() },
+      "content control": { "word/document.xml": wrapDocument(`<w:sdt><w:sdtContent>${p("in")}${chunk}</w:sdtContent></w:sdt>`), "word/_rels/document.xml.rels": rels() },
+      "text box": { "word/document.xml": wrapDocument(box), "word/_rels/document.xml.rels": rels() },
+      header: {
+        "word/document.xml": wrapDocument(p("body") + `<w:sectPr><w:headerReference ${R_NS} w:type="default" r:id="rIdH"/></w:sectPr>`),
+        "word/_rels/document.xml.rels": rels(`<Relationship Id="rIdH" Type="${REL}/header" Target="header1.xml"/>`),
+        "word/header1.xml": `<?xml version="1.0"?>\n<w:hdr ${W_NS}>${p("header")}${chunk}</w:hdr>`,
+        "word/_rels/header1.xml.rels": rels(),
+      },
+      footnote: {
+        "word/document.xml": wrapDocument(`<w:p><w:r><w:t>body</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p>`),
+        "word/_rels/document.xml.rels": rels(`<Relationship Id="rIdF" Type="${REL}/footnotes" Target="footnotes.xml"/>`),
+        "word/footnotes.xml": `<?xml version="1.0"?>\n<w:footnotes ${W_NS}><w:footnote w:id="1">${p("note")}${chunk}</w:footnote></w:footnotes>`,
+        "word/_rels/footnotes.xml.rels": rels(),
+      },
+      comment: {
+        "word/document.xml": wrapDocument(`<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>body</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`),
+        "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" w:author="A">${p("comment")}${chunk}</w:comment></w:comments>`,
+        "word/_rels/comments.xml.rels": rels(),
+      },
+    };
+    for (const [where, parts] of Object.entries(cases)) {
+      const docx = makeDocx({ ...parts, "word/chunk.html": "<html><body><p>chunk</p></body></html>" });
+      const { error, bytes } = await failure(docx);
+      expect(error.code, where).toBe("unsupported_content");
+      expect(error.message, where).toBe("the document embeds an alternative-format chunk (w:altChunk, word/chunk.html) that Word imports on open");
+      expect(bytes, where).toBe(0);
+      expect(() => DocxDocument.load(docx), where).toThrow("unsupported content: the document embeds an alternative-format chunk");
     }
   });
 

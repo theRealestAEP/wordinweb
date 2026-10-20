@@ -313,6 +313,20 @@ A Strict Open XML Document (ISO/IEC 29500 Strict, Word's "Strict Open XML Docume
 
 A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.load`, `renderDocxToPdf` and the `docx-pdf` CLI convert it to a .docx in memory, and `docx-compare` (`compareFiles`) converts it to a working .docx in its temp directory, so a .doc can be compared with a .docx. The file's bytes decide, not its name. The converter (`packages/core/src/doc/`, exported as `docToDocx`) reads the text, formatting, styles, lists, sections, headers and footers, notes, tables, fields and form fields, bookmarks, comments and tracked changes, pictures, shapes and text boxes from the binary structures ([MS-DOC], [MS-ODRAW]). Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95 and older Word files, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
 
+`renderDocxToPdf` throws a `PdfRenderError` and `compareFiles` throws a `CompareError`. Each error has a `code` for the caller to act on, and a message that names the cause:
+
+| Code | Meaning | `docx-pdf` exit code |
+|---|---|---|
+| `not_docx` | The input is not a .docx: not a zip, or a zip with no Word document. | 4 |
+| `unsupported_format` | The input is another format, such as RTF, PDF, OpenDocument, Word 6.0/95, or a password-protected document. | 6 |
+| `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. | 5 |
+| `unsupported_content` | The document holds content that Word prints and that is not read here, such as a `w:altChunk` (an HTML or RTF part that Word imports when it opens the file). The document is refused rather than printed without that content. | 7 |
+| `unsupported_script` | The text is in a script the PDF renderer cannot shape, such as Mongolian. | 3 |
+| `too_large` | `compareFiles` only: the parts outside the body are more than the compare holds in memory. | — |
+| `failed` | Anything else. | 1 |
+
+`compareFiles` also has codes for its files: `missing`, `disk_full`, `result_folder_missing`, `result_is_input` and `output_collision`. The `docx-compare` CLI exits with 1 for every failure, and its message starts with the code. `DocxDocument.load` throws an `Error` whose message starts with `unsupported content:` for the content that `unsupported_content` refuses.
+
 A printed PDF names the authors of its comments and tracked changes by default. To print it with no author's name, set `authors: false`:
 
 | Where | Option |
