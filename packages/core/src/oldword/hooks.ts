@@ -3,6 +3,7 @@
 // compare, as doc/hooks.ts is for a Word 97-2003 .doc.
 import { zipSync } from "fflate";
 import { FIXED_ZIP_MTIME } from "../zip.js";
+import { isDosWordFile, readDosWord } from "./dos.js";
 import { isMacEarlyFile, readMacEarly } from "./mac-early.js";
 import { isMacWordFile, readMacWord } from "./mac.js";
 import { OldDocument } from "./model.js";
@@ -11,11 +12,12 @@ import { isWinWordFile, readWinWord } from "./winword.js";
 
 /** Whether the file whose first bytes are `head` is one of the old Word formats read here. */
 export function isOldWordFile(head: Uint8Array): boolean {
-  return isMacEarlyFile(head) || isMacWordFile(head) || isWinWordFile(head);
+  return isMacEarlyFile(head) || isMacWordFile(head) || isWinWordFile(head) || isDosWordFile(head);
 }
 
 function readOldWord(bytes: Uint8Array): OldDocument {
   if (isMacEarlyFile(bytes)) return readMacEarly(bytes);
+  if (isDosWordFile(bytes)) return readDosWord(bytes);
   return isMacWordFile(bytes) ? readMacWord(bytes) : readWinWord(bytes);
 }
 

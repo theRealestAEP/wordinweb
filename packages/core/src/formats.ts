@@ -2,8 +2,9 @@
 // first bytes, so the refusal names what the file is. A Word 97-2003 .doc
 // (an OLE compound file) is not among them: it is read (doc/). Nor are the
 // oldest Word formats oldword/ reads (Word for the Macintosh 1.x, 3.0,
-// 4.0 and 5.x; Word for Windows 1.x and 2.0): the callers ask oldword/
-// first, so the entries below name only the variants it does not read.
+// 4.0 and 5.x; Word for Windows 1.x and 2.0; Word for MS-DOS): the
+// callers ask oldword/ first, so the entries below name only the variants
+// it does not read.
 
 /** Enough of a file's start for every check here. */
 export const FORMAT_HEAD_BYTES = 1024;
@@ -13,8 +14,8 @@ const SIGNATURES: [number[], string][] = [
   [[0x25, 0x50, 0x44, 0x46], "a PDF file"], // %PDF
   [[0xff, 0x57, 0x50, 0x43], "a WordPerfect document"], // \xFFWPC
   [[0xfe, 0x37, 0x00], "a Word for Macintosh 4.0/5.0 document"],
-  [[0x31, 0xbe, 0x00, 0x00], "a Word for DOS or Windows Write document"],
-  [[0x32, 0xbe, 0x00, 0x00], "a Word for DOS or Windows Write document"],
+  [[0x31, 0xbe, 0x00, 0x00], "a Windows Write document"],
+  [[0x32, 0xbe, 0x00, 0x00], "a Windows Write document"],
   [[0x9b, 0xa5], "a Word for Windows 1.x/2.0 document"],
   [[0xdb, 0xa5], "a Word for Windows 1.x/2.0 document"],
 ];
