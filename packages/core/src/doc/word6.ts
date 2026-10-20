@@ -7,13 +7,13 @@
 //
 // - The FIB (fib.ts parseFib6) has its own fixed layout, and every
 //   structure is in the WordDocument stream.
-// - Text is 8-bit, in the character set of its font (or the Macintosh
-//   character set for a file Word for the Macintosh saved).
+// - Text is 8-bit, in the character set of its font, or the Macintosh
+//   character set when the FIB's chse or a run's sprmCChse says so.
 // - Sprms are a one-byte opcode with their own numbering, and some
 //   operands are smaller (a BRC is 2 bytes, a TC 10).
 // - String tables and the font table hold 8-bit strings after a 2-byte
 //   byte count.
-// - Lists are autonumbering (ANLD) on each paragraph; numbering.ts reads
+// - Lists are autonumbering (ANLD) on each paragraph; numbering6.ts reads
 //   them through the two sprms below.
 import { u16 } from "./bytes.js";
 import type { Font } from "./styles.js";
