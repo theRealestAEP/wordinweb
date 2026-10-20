@@ -74,10 +74,14 @@ export function wrapRunRevisions(runXml: string, revisions: DocRevision[], id: (
   return xml;
 }
 
+/** Nothing but bookmark and comment range marks. */
+const RANGE_MARKS = /^(?:<w:(?:bookmarkStart|bookmarkEnd|commentRangeStart|commentRangeEnd)\b[^>]*\/>)*$/;
+
 /** Join adjacent w:ins (or w:del) elements of one author and date in a
  * paragraph's XML into one, as Word writes a change over several runs:
  * `<w:del A>r1</w:del><w:del A>r2</w:del>` becomes `<w:del A>r1r2</w:del>`
- * (the first element keeps its w:id). Nested pairs join level by level. */
+ * (the first element keeps its w:id). Bookmark and comment range marks
+ * between the two go inside. Nested pairs join level by level. */
 export function joinRevisionWrappers(xml: string): string {
   const tag = /<w:(ins|del) w:id="\d+"([^>]*)>|<\/w:(ins|del)>/g;
   interface Closed {
@@ -85,7 +89,7 @@ export function joinRevisionWrappers(xml: string): string {
     attrs: string;
     /** The length of `out` right after the close tag. */
     outEnd: number;
-    /** The element closed just before this one's close tag, if nothing came between. */
+    /** The element closed just before this one's close tag, if only range marks came between. */
     inner?: Closed;
   }
   const open: { kind: string; attrs: string }[] = [];
@@ -97,11 +101,12 @@ export function joinRevisionWrappers(xml: string): string {
     if (m[1] && m[2].endsWith("/")) continue; // a mark's revision, <w:ins .../>
     out += xml.slice(from, at);
     from = at + m[0].length;
-    const last = closed && closed.outEnd === out.length ? closed : undefined;
+    const between = closed ? out.slice(closed.outEnd) : "";
+    const last = closed && RANGE_MARKS.test(between) ? closed : undefined;
     if (m[1]) {
       if (last && last.kind === m[1] && last.attrs === m[2]) {
-        // Drop the close tag just written and this open tag: the element goes on.
-        out = out.slice(0, last.outEnd - `</w:${last.kind}>`.length);
+        // Drop the close tag and this open tag: the element goes on, the marks between inside it.
+        out = out.slice(0, last.outEnd - `</w:${last.kind}>`.length) + between;
         open.push({ kind: last.kind, attrs: last.attrs });
         closed = last.inner;
         continue;
