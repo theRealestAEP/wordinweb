@@ -1,10 +1,12 @@
 // Word 6.0/95 lists as numbering.xml. Word 6 has no list tables: each
 // numbered paragraph carries its own autonumbering, an ANLD (sprmPAnld)
 // and a level (sprmPNLvlAnm), in its PAPX or its style's: 10 numbered,
-// 11 bulleted, 1-9 a heading level numbered as its section's OLST
-// (sprmSOlstAnm) says. A run of paragraphs with the same ANLD is one list,
-// and a paragraph without numbering ends it; heading numbers run through
-// the document. Each list becomes a num with its own abstractNum.
+// 11 bulleted, 12 in the list but skipped (no number), 1-9 a heading
+// level numbered as its section's OLST (sprmSOlstAnm) says. In a run of
+// autonumbered paragraphs, those with the same level and ANLD are one list
+// (a numbered list runs on past the bullets and skipped paragraphs in it),
+// and a paragraph without autonumbering ends the run; heading numbers run
+// through the document. Each list becomes a num with its own abstractNum.
 import { u16 } from "./bytes.js";
 import { ParaProps, XmlContext, escapeAttr, icoColor, numFormat } from "./sprm.js";
 import type { Font } from "./styles.js";
@@ -27,14 +29,15 @@ const UNDERLINE = ["none", "single", "words", "double", "dotted"];
 export class Word6Lists {
   /** The abstractNum (and num) XML of each list, numId 1 first. */
   private readonly lists: string[] = [];
-  private open: { key: string; numId: number } | undefined;
+  /** The lists of the run of autonumbered paragraphs being read, by level and ANLD. */
+  private readonly open = new Map<string, number>();
   private readonly headingLists = new Map<string, number>();
 
   constructor(private readonly fonts: Font[], private readonly mac: boolean, private readonly ctx: XmlContext) {}
 
   /** A new story: a list does not run on into it. */
   startStory(): void {
-    this.open = undefined;
+    this.open.clear();
   }
 
   /**
@@ -58,20 +61,24 @@ export class Word6Lists {
       }
       p.ilfo = numId;
       p.ilvl = nLvlAnm - 1;
-      this.open = undefined;
+      this.open.clear();
       return;
     }
+    // 12 skips numbering: the paragraph has no number but stays in the lists.
+    if (nLvlAnm === 12) return;
     if ((nLvlAnm !== 10 && nLvlAnm !== 11) || !anld || anld.length < 20) {
-      this.open = undefined;
+      this.open.clear();
       return;
     }
     const key = `${nLvlAnm}:${hex(anld)}`;
-    if (this.open?.key !== key) {
+    let numId = this.open.get(key);
+    if (numId === undefined) {
       const level = this.level(anld, anld.subarray(20));
       if (nLvlAnm === 11) level.nfc = 23;
-      this.open = { key, numId: this.add([level], "singleLevel") };
+      numId = this.add([level], "singleLevel");
+      this.open.set(key, numId);
     }
-    p.ilfo = this.open.numId;
+    p.ilfo = numId;
     p.ilvl = 0;
   }
 
