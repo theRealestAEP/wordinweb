@@ -112,6 +112,9 @@ export interface TextItem {
   /** The text is part of a tracked change, or its paragraph's format was
    * changed: a printed markup page bars the line in the margin. */
   changed?: true;
+  /** Printed markup: this empty item is the clear space after a tracked
+   * change that ends inside a word, where the change's bar goes. */
+  changeGap?: true;
   /** Source drawing when this text belongs to an independently editable
    * text-box story. */
   textboxStory?: XmlElement;

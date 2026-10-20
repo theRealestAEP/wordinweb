@@ -5917,6 +5917,7 @@ class Engine {
         href: span.href,
         src: span.src,
         changed: span.src?.run.changes?.length ? true : undefined,
+        changeGap: span.changeGap,
         rtl: span.rtl,
         caretClampX: span.caretClampX === undefined ? undefined : originX + span.caretClampX,
         hanging: span.hanging,

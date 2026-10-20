@@ -156,6 +156,9 @@ interface FragAtom {
   metricsStrut?: boolean;
   /** Render right-to-left (Arabic/Hebrew run). */
   rtl?: boolean;
+  /** Printed markup: the clear space after a tracked change that ends
+   * inside a word, where the change's bar goes (see CHANGE_GAP). */
+  changeGap?: true;
 }
 interface SpaceAtom {
   kind: "space";
@@ -514,6 +517,8 @@ export interface LineSpan {
   caretClampX?: number;
   /** A trailing space hung past the line's end (a wrap, a paragraph end): it draws no underline or strike, as in Word without w:ulTrailSpace. */
   hanging?: boolean;
+  /** Printed markup: see FragAtom.changeGap. */
+  changeGap?: true;
   /** Render this span right-to-left (browser shapes/orders within the box). */
   rtl?: boolean;
   /** East-Asian ruby cluster: the base text rides in `text`; `ruby` carries
@@ -2035,7 +2040,7 @@ function breakParagraphImpl(
         let headW = 0;
         while (glued && hi > minSpans) {
           const s = cur[hi - 1];
-          if (s.isSpace || !s.text || s.text === "\t" || s.image || s.drawing || s.breakAfter) break;
+          if (s.isSpace || (!s.text && !s.changeGap) || s.text === "\t" || s.image || s.drawing || s.breakAfter) break;
           headW += s.width;
           hi--;
         }
@@ -2168,7 +2173,7 @@ function breakParagraphImpl(
         const s = cur[hi - 1];
         // A noBreak space (word glued to a following NBSP) is not a break
         // opportunity: keep walking so the whole glued unit moves together.
-        if ((s.isSpace && !s.noBreak) || !s.text || s.text === "\t" || s.image || s.drawing) break;
+        if ((s.isSpace && !s.noBreak) || (!s.text && !s.changeGap) || s.text === "\t" || s.image || s.drawing) break;
         // A hyphen break opportunity ends the head: the hyphenated left part
         // stays on this line, only the current segment (+tail) moves down.
         if (s.breakAfter) {
@@ -2427,7 +2432,7 @@ function breakParagraphImpl(
     // this atom to a fresh line, where a mid-segment continuation re-insets.
     const padL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
     x += padL;
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, softHyphen: atom.softHyphen, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, softHyphen: atom.softHyphen, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby, changeGap: atom.changeGap });
     curLineWidth += padL + atom.width + bdrPadR;
     x += atom.width + bdrPadR;
     // A packed word may continue across formatting-run fragments, but an
@@ -4210,8 +4215,26 @@ function buildAtoms(
       if (prevNbsp) a.noBreak = true;
     } else prevNbsp = false;
   }
+  // Printed markup marks the end of each tracked change with a hairline
+  // bar (pdf/comments.ts). A change that ends inside a word ("two (2"
+  // deleted, "three (3" inserted, then ")") gets clear space after its last
+  // letter for that bar, so the bar touches neither letter. A change that
+  // ends at a space or at the paragraph's end needs none: its bar goes in
+  // the space or past the text.
+  for (let i = atoms.length - 2; i >= 0; i--) {
+    const a = atoms[i];
+    const next = atoms[i + 1];
+    if (a.kind !== "frag" || !a.text || !a.src?.run.changes || next.kind !== "frag" || !next.text) continue;
+    const continuing = new Set(next.src?.run.changes?.map((change) => change.id));
+    if (a.src.run.changes.every((change) => continuing.has(change.id))) continue;
+    atoms.splice(i + 1, 0, { kind: "frag", text: "", props: a.props, font: a.font, width: CHANGE_GAP, src: { run: a.src.run, t: null, offset: 0 }, changeGap: true });
+  }
   return { atoms, anchors };
 }
+
+/** Printed markup: the clear space, px, after a tracked change that ends
+ * inside a word: a hairline bar with 1 px clear on each side. */
+const CHANGE_GAP = 3;
 
 // ---------- fields ----------
 

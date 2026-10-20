@@ -32,6 +32,8 @@ Options:
   --pdf FILE          also write the redline as a PDF: the result with its tracked
                       changes as plain formatting, rendered without a browser
   --pdf-comments      print the review comments beside the PDF's pages
+  --hide-authors      name no author in the PDF: each comment keeps its date
+                      and text, with no name and no initials
   --quiet             do not print notes about differences that could not be expressed exactly
   -h, --help          show this help
 
@@ -43,7 +45,7 @@ password-protected file, or unsupported_script); 2 usage.`;
 class UsageError extends Error {}
 
 const VALUED = new Set(["out", "author", "date", "temp-dir", "pdf"]);
-const SWITCHES = new Set(["no-formatting", "no-whitespace", "pdf-comments", "quiet", "help"]);
+const SWITCHES = new Set(["no-formatting", "no-whitespace", "pdf-comments", "hide-authors", "quiet", "help"]);
 
 function parseArgs(argv: string[]): { files: string[]; flags: Record<string, string | boolean> } {
   const files: string[] = [];
@@ -100,6 +102,7 @@ async function main(): Promise<void> {
   const pdf = typeof flags.pdf === "string" ? flags.pdf : undefined;
   if (pdf && !isFolder(dirname(resolve(pdf)))) throw new Error(`${pdf}: the folder for the PDF does not exist`);
   if (flags["pdf-comments"] && !pdf) throw new UsageError("--pdf-comments needs --pdf FILE");
+  if (flags["hide-authors"] && !pdf) throw new UsageError("--hide-authors needs --pdf FILE");
   if (pdf && [original, revised, out].some((path) => resolve(path) === resolve(pdf))) throw new UsageError("--pdf FILE must not be an input or the result");
   const pdfPartial = pdf ? `${pdf}.${process.pid}.partial` : undefined;
   const work = mkdtempSync(join(tempDir, "docx-compare-"));
@@ -121,7 +124,7 @@ async function main(): Promise<void> {
       formatting: !flags["no-formatting"],
       whitespace: !flags["no-whitespace"],
       tempDir: work,
-      pdf: pdfPartial ? { path: pdfPartial, comments: !!flags["pdf-comments"] } : undefined,
+      pdf: pdfPartial ? { path: pdfPartial, comments: !!flags["pdf-comments"], authors: !flags["hide-authors"] } : undefined,
       onNote: flags.quiet ? undefined : (note) => console.error(`note: ${note.code}: ${note.detail}`),
     });
     renameSync(partial, out);

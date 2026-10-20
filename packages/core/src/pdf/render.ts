@@ -57,6 +57,14 @@ export interface RenderPdfOptions {
    * "Moved from", "Inserted row", "Formatted: Font: Bold", ...).
    */
   markup?: boolean;
+  /**
+   * Name the authors of the comments and the tracked changes. Default true.
+   * False prints no author's name or initials anywhere: each comment's and
+   * change's balloon keeps its date, what it is and its text, with no name
+   * line and no avatar, and every author's changes are in one color, red
+   * (moves stay green). The comments' leaders are one color too.
+   */
+  authors?: boolean;
 }
 
 export interface RenderPdfResult {
@@ -124,15 +132,18 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   const measurer = new NodeMeasurer(fonts);
   // Text this renderer cannot shape is refused before any layout, naming
   // where it is: the body's blocks as they are first parsed (with markup,
-  // the deleted text and the change authors the balloons name too); the
+  // the deleted text and the change authors the balloons name too, when
+  // they name them); the
   // held parts (headers, footers, notes) and the comments to be printed
   // once the document is open. FontSet.shape refuses whatever else reaches
   // the page (a numbering label, a balloon's words).
   let hasChanges = false;
+  const authors = options.authors !== false;
   const opened = await openStreamingDocument(typeof source === "string" ? fileSource(source) : source, {
     markup: options.markup,
+    authors: options.authors,
     onBlock: (block, index) => {
-      const found = unsupportedInBlock(block);
+      const found = unsupportedInBlock(block, authors);
       if (found) throw unsupported(found.script, `in paragraph ${index + 1}, "${found.sample}"`);
       hasChanges ||= blockHasChanges(block);
     },
@@ -156,7 +167,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   // document with no other gets no column.
   const marked = new Set<string>();
   for (const root of opened.doc.revisionRoots()) {
-    const found = unsupportedInXml(root, !!options.markup);
+    const found = unsupportedInXml(root, !!options.markup, authors);
     if (found) throw unsupported(found.script, `in a header, footer or note, "${found.sample}"`);
     hasChanges ||= xmlHasChanges(root);
     commentMarkers(root, marked);
@@ -166,7 +177,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     opened.doc.comments.some((c) => !c.parentId && (marked.has(c.id) || opened.commentAnchor(c.id) !== undefined));
   if (printComments) {
     for (const comment of opened.doc.comments) {
-      for (const text of [comment.text, comment.author, comment.initials ?? ""]) {
+      for (const text of authors ? [comment.text, comment.author, comment.initials ?? ""] : [comment.text]) {
         const script = unsupportedScript(text);
         if (script) throw unsupported(script, `in a comment by ${comment.author || "an unnamed author"}, "${sample(text)}"`);
       }
@@ -215,7 +226,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     return image ? { picture: { name: `Im${image.objNum}` }, xobjects: [`/Im${image.objNum} ${image.objNum} 0 R`] } : null;
   };
 
-  const column = printComments || (options.markup && hasChanges) ? new CommentColumn(opened.doc, measurer, resources, opened, undrawn?.anchors() ?? new Map()) : null;
+  const column = printComments || (options.markup && hasChanges) ? new CommentColumn(opened.doc, measurer, resources, opened, undrawn?.anchors() ?? new Map(), authors) : null;
   const sheet = column ? { width: final.maxWidth + RAIL_WIDTH, height: final.maxHeight } : null;
   /** Each page's top edge in PDF units, by page index from 0. */
   const pageTops: string[] = [];
@@ -327,11 +338,11 @@ function sample(text: string): string {
 }
 
 /** The first unsupported script in a block's text, or in the authors of
- * its tracked changes (the balloons name them), with a sample of the text. */
-function unsupportedInBlock(block: Block): { script: string; sample: string } | undefined {
+ * its tracked changes when the balloons name them, with a sample of the text. */
+function unsupportedInBlock(block: Block, authors: boolean): { script: string; sample: string } | undefined {
   if (block.type !== "paragraph") {
     for (const row of block.rows) for (const cell of row.cells) for (const nested of cell.blocks) {
-      const found = unsupportedInBlock(nested);
+      const found = unsupportedInBlock(nested, authors);
       if (found) return found;
     }
     return undefined;
@@ -340,10 +351,10 @@ function unsupportedInBlock(block: Block): { script: string; sample: string } | 
   for (const child of block.children) {
     for (const run of child.type === "run" ? [child] : child.runs) {
       for (const content of run.content) if (content.kind === "text") texts.push(content.text);
-      for (const change of run.changes ?? []) texts.push(change.author);
+      if (authors) for (const change of run.changes ?? []) texts.push(change.author);
     }
   }
-  for (const change of block.markChanges ?? []) texts.push(change.author);
+  if (authors) for (const change of block.markChanges ?? []) texts.push(change.author);
   for (const text of texts) {
     const script = unsupportedScript(text);
     if (script) return { script, sample: sample(text) };
@@ -375,20 +386,21 @@ function xmlHasChanges(el: XmlElement): boolean {
 }
 
 /** The first unsupported script in a part's w:t elements; with markup, in
- * its w:delText elements and in the authors of its changes (w:author) too. */
-function unsupportedInXml(el: XmlElement, markup: boolean): { script: string; sample: string } | undefined {
+ * its w:delText elements and, when the balloons name them, in the authors
+ * of its changes (w:author) too. */
+function unsupportedInXml(el: XmlElement, markup: boolean, authors: boolean): { script: string; sample: string } | undefined {
   const name = localName(el.name);
   if (name === "t" || (markup && name === "delText")) {
     const script = unsupportedScript(el.text);
     return script ? { script, sample: sample(el.text) } : undefined;
   }
-  const author = markup ? attr(el, "author") : undefined;
+  const author = markup && authors ? attr(el, "author") : undefined;
   if (author) {
     const script = unsupportedScript(author);
     if (script) return { script, sample: sample(author) };
   }
   for (const child of el.children) {
-    const found = unsupportedInXml(child, markup);
+    const found = unsupportedInXml(child, markup, authors);
     if (found) return found;
   }
   return undefined;

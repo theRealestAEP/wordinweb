@@ -78,6 +78,9 @@ export interface OpenStreamingOptions {
    * each author's changes in Word's color for the author (see
    * FromFilesOptions.revisionColors). */
   markup?: boolean;
+  /** With markup: false gives every author's changes one color, red
+   * (FromFilesOptions.revisionAuthors). Default true. */
+  authors?: boolean;
 }
 
 export async function openStreamingDocument(source: ByteSource, options: OpenStreamingOptions = {}): Promise<StreamingDocument> {
@@ -105,7 +108,7 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
     files[entry.name] = rewriter.strict ? strToU8(normalizeStrictXml(strFromU8(bytes))) : bytes;
   }
   files[docPart] = outline;
-  const doc = DocxDocument.fromFiles(files, options.markup ? { revisionView: "markup", revisionColors: true } : {});
+  const doc = DocxDocument.fromFiles(files, options.markup ? { revisionView: "markup", revisionColors: true, revisionAuthors: options.authors } : {});
   body.hydrate = (el) => doc.hydrateControls(el);
 
   // Every block once, in order: which candidates are blocks at all, where
