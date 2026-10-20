@@ -64,6 +64,40 @@ const picture =
   '<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></pic:spPr>' +
   "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>";
 
+/** A paragraph that anchors a 1in text box, wrapped top and bottom, holding "BOX". */
+const textBox =
+  '<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0"' +
+  ' relativeHeight="2" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+  '<wp:simplePos x="0" y="0"/>' +
+  '<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>' +
+  '<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>' +
+  '<wp:extent cx="1828800" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+  '<wp:wrapTopAndBottom/><wp:docPr id="2" name="Text Box 2"/><wp:cNvGraphicFramePr/>' +
+  '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+  '<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr>' +
+  '<a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>' +
+  '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>' +
+  `<wps:txbx><w:txbxContent>${p("BOX")}</w:txbxContent></wps:txbx>` +
+  '<wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr>' +
+  "</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>";
+
+/** A paragraph that anchors a 1in text box at a fixed place on its page, holding "PAGEBOX". */
+const pageBox = (topPx: number) =>
+  '<w:p><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0"' +
+  ' relativeHeight="3" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+  '<wp:simplePos x="0" y="0"/>' +
+  '<wp:positionH relativeFrom="page"><wp:posOffset>1143000</wp:posOffset></wp:positionH>' +
+  `<wp:positionV relativeFrom="page"><wp:posOffset>${topPx * 9525}</wp:posOffset></wp:positionV>` +
+  '<wp:extent cx="1828800" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/>' +
+  '<wp:wrapTopAndBottom/><wp:docPr id="3" name="Text Box 3"/><wp:cNvGraphicFramePr/>' +
+  '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+  '<wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr>' +
+  '<a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm>' +
+  '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr>' +
+  `<wps:txbx><w:txbxContent>${p("PAGEBOX")}</w:txbxContent></wps:txbx>` +
+  '<wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr>' +
+  "</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>";
+
 function layout(body: string): LaidOutPage[] {
   const doc = DocxDocument.load(
     makeDocxWithMedia(
@@ -222,6 +256,18 @@ describe("a break next to a table, a picture or a text box", () => {
     const pages = layout(p("Before") + PAGE_BREAK_ONLY + picture + p("After"));
     expect(pagesOfWords(pages, ["Before", "[picture]", "After"])).toEqual([1, 2, 2]);
     expectClean(pages, ["Before", "[picture]", "After"], ["Before", "After"]);
+  });
+
+  it("lays out a page-break-only paragraph and then a text box", () => {
+    const pages = layout(p("Before") + PAGE_BREAK_ONLY + textBox + p("After"));
+    expect(pagesOfWords(pages, ["Before", "BOX", "After"])).toEqual([1, 2, 2]);
+    expectClean(pages, ["Before", "BOX", "After"], ["Before", "After"]);
+  });
+
+  it("keeps a page-anchored text box on the page of its anchor, after a page break", () => {
+    const pages = layout(p("Before") + PAGE_BREAK_ONLY + pageBox(100) + p("After"));
+    expect(pagesOfWords(pages, ["Before", "PAGEBOX", "After"])).toEqual([1, 2, 2]);
+    expectClean(pages, ["Before", "PAGEBOX", "After"], ["Before", "After"]);
   });
 
   it("lays out a page break inside a table cell", () => {

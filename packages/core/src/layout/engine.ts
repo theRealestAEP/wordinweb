@@ -4380,7 +4380,11 @@ class Engine {
         broken = breakNow(paraTopEstimate);
       }
     }
-    if (next?.type === "paragraph" && broken.lines.length > 0) {
+    // A paragraph that ends with a page or column break sends the paragraphs
+    // after it to the next page or column. Their anchored boxes go there with
+    // them, so the two lookaheads below must not draw those boxes here.
+    const endsWithBreak = broken.lines[broken.lines.length - 1]?.forcedBreakAfter !== undefined;
+    if (next?.type === "paragraph" && broken.lines.length > 0 && !endsWithBreak) {
       const predictedNextTop = paraBottom;
       // topAndBottom boxes anchor at this paragraph's line bottom EXACTLY
       // (parity2-textboxes), but a SQUARE box anchors at the next paragraph's
@@ -4459,12 +4463,13 @@ class Engine {
     // around a page/margin-anchored float once its anchor paragraph lands on
     // the same page (staging-anchors2: the relH/V=margin box carves Body 3/4
     // into wrapped lines although it is anchored five paragraphs later).
-    if (broken.lines.length > 0 && siblings && index !== undefined) {
+    if (broken.lines.length > 0 && siblings && index !== undefined && !endsWithBreak) {
       const farHits: Shape[] = [];
       let lastIdx = index;
       for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
         const blk = siblings[idx];
         if (blk.type !== "paragraph") break;
+        if (this.doc.effectiveParaProps(blk).pageBreakBefore || hasHardBreak(blk)) break;
         for (const s of this.collectAnchors(blk)) {
           if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
           if ("behind" in s && s.behind) continue;
@@ -10149,6 +10154,19 @@ function sectionHasColumnBreak(section: Section): boolean {
         for (const c of r.content) {
           if (c.kind === "break" && c.breakType === "column") return true;
         }
+      }
+    }
+  }
+  return false;
+}
+
+/** Does the paragraph hold a page or column break anywhere? */
+function hasHardBreak(para: Paragraph): boolean {
+  for (const child of para.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const c of r.content) {
+        if (c.kind === "break" && (c.breakType === "page" || c.breakType === "column")) return true;
       }
     }
   }
