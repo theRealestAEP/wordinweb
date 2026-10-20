@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { docToDocxFiles, openDoc } from "../src/doc/convert.js";
 import { plainText, readDocReview, revisionsAt } from "../src/doc/review.js";
-import { commentsExtendedXml, commentsXml, reviewHooks } from "../src/doc/review-xml.js";
+import { commentsExtendedXml, commentsXml, joinRevisionWrappers, reviewHooks } from "../src/doc/review-xml.js";
 
 // Word 2016 "save as Word 97-2003" of three of the render eval's synthetic
 // documents (comments with replies, insertions and deletions, format
@@ -132,6 +132,23 @@ describe("doc review: the converter hooks", () => {
     const body = part(docToDocxFiles(bytes, reviewHooks(reader, review)), "word/document.xml");
     expect(body).toMatch(/<w:trPr>(?:(?!<\/w:trPr>).)*<w:del w:id="\d+" w:author="Editor B" w:date="2026-01-06T14:30:00Z"\/>/);
     expect(body).toMatch(/<w:trPr>(?:(?!<\/w:trPr>).)*<w:ins w:id="\d+" w:author="Editor B" w:date="2026-01-05T10:00:00Z"\/>/);
+  });
+});
+
+describe("doc review: joinRevisionWrappers", () => {
+  const A = 'w:author="A" w:date="2026-01-05T10:00:00Z"';
+  const B = 'w:author="B" w:date="2026-01-05T10:00:00Z"';
+  it("joins adjacent wrappers of one author and date, level by level", () => {
+    expect(joinRevisionWrappers(`<w:p><w:del w:id="1" ${A}>x</w:del><w:del w:id="2" ${A}>y</w:del></w:p>`)).toBe(`<w:p><w:del w:id="1" ${A}>xy</w:del></w:p>`);
+    expect(joinRevisionWrappers(`<w:ins w:id="1" ${A}><w:del w:id="2" ${B}>x</w:del></w:ins><w:ins w:id="3" ${A}><w:del w:id="4" ${B}>y</w:del></w:ins>`)).toBe(
+      `<w:ins w:id="1" ${A}><w:del w:id="2" ${B}>xy</w:del></w:ins>`,
+    );
+  });
+  it("keeps wrappers apart across other content, another author or a mark's revision", () => {
+    const apart = `<w:del w:id="1" ${A}>x</w:del><w:r/><w:del w:id="2" ${A}>y</w:del><w:del w:id="3" ${B}>z</w:del>`;
+    expect(joinRevisionWrappers(apart)).toBe(apart);
+    const mark = `<w:pPr><w:rPr><w:del w:id="1" ${A}/></w:rPr></w:pPr><w:del w:id="2" ${A}>x</w:del>`;
+    expect(joinRevisionWrappers(mark)).toBe(mark);
   });
 });
 

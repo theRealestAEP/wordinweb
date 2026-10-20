@@ -50,6 +50,7 @@ export function reviewHooks(reader: DocReader, review: DocReview = readDocReview
       return rPr || pPr ? { rPr: rPr || undefined, pPr: pPr || undefined } : undefined;
     },
     rowExtra: (cp) => markRevisionXml(revisionsAt(review, cp), id) + change("trPrChange", cp) || undefined,
+    paragraph: joinRevisionWrappers,
     parts: (paragraphs) => commentParts(review.comments, paragraphs),
   };
 }
@@ -71,6 +72,50 @@ export function wrapRunRevisions(runXml: string, revisions: DocRevision[], id: (
   if (del) xml = `<w:del ${revisionAttrs(del, id())}>${xml.replace(/<w:t(?=[\s>])/g, "<w:delText").replace(/<\/w:t>/g, "</w:delText>")}</w:del>`;
   if (ins) xml = `<w:ins ${revisionAttrs(ins, id())}>${xml}</w:ins>`;
   return xml;
+}
+
+/** Join adjacent w:ins (or w:del) elements of one author and date in a
+ * paragraph's XML into one, as Word writes a change over several runs:
+ * `<w:del A>r1</w:del><w:del A>r2</w:del>` becomes `<w:del A>r1r2</w:del>`
+ * (the first element keeps its w:id). Nested pairs join level by level. */
+export function joinRevisionWrappers(xml: string): string {
+  const tag = /<w:(ins|del) w:id="\d+"([^>]*)>|<\/w:(ins|del)>/g;
+  interface Closed {
+    kind: string;
+    attrs: string;
+    /** The length of `out` right after the close tag. */
+    outEnd: number;
+    /** The element closed just before this one's close tag, if nothing came between. */
+    inner?: Closed;
+  }
+  const open: { kind: string; attrs: string }[] = [];
+  let out = "";
+  let from = 0;
+  let closed: Closed | undefined;
+  for (const m of xml.matchAll(tag)) {
+    const at = m.index;
+    if (m[1] && m[2].endsWith("/")) continue; // a mark's revision, <w:ins .../>
+    out += xml.slice(from, at);
+    from = at + m[0].length;
+    const last = closed && closed.outEnd === out.length ? closed : undefined;
+    if (m[1]) {
+      if (last && last.kind === m[1] && last.attrs === m[2]) {
+        // Drop the close tag just written and this open tag: the element goes on.
+        out = out.slice(0, last.outEnd - `</w:${last.kind}>`.length);
+        open.push({ kind: last.kind, attrs: last.attrs });
+        closed = last.inner;
+        continue;
+      }
+      out += m[0];
+      open.push({ kind: m[1], attrs: m[2] });
+      closed = undefined;
+    } else {
+      out += m[0];
+      const top = open.pop();
+      closed = top ? { ...top, outEnd: out.length, inner: last } : undefined;
+    }
+  }
+  return out + xml.slice(from);
 }
 
 /** The w:ins / w:del elements for a paragraph mark (inside w:pPr/w:rPr) or

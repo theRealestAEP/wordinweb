@@ -89,6 +89,8 @@ export interface ConvertHooks {
   markExtra?: (cp: number, props: ParaProps, mark: RunProps) => { rPr?: string; pPr?: string } | undefined;
   /** Extra XML at the end of the trPr of the row whose row mark is at `cp` (w:ins, w:del, trPrChange). */
   rowExtra?: (cp: number, table: TableProps) => string | undefined;
+  /** A finished paragraph's XML, rewritten (adjacent w:ins/w:del of one change joined). */
+  paragraph?: (xml: string) => string;
   /**
    * Extra package parts (comments.xml, media), with their relationships
    * from document.xml and their content types. `paragraphs` writes the text
@@ -421,7 +423,8 @@ class Converter {
       out.push(this.runsXml(run, end, p.props.istd, field, noteRef));
     }
     out.push(this.markersAt(p.mark));
-    return out.join("") + "</w:p>";
+    const xml = out.join("") + "</w:p>";
+    return this.hooks.paragraph ? this.hooks.paragraph(xml) : xml;
   }
 
   /** The runs for the text of one character run, split at special characters and markers. */
