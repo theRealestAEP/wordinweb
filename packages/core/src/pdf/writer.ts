@@ -122,9 +122,15 @@ export function pdfString(text: string): string {
   return `(${text.replace(/[\\()\r\n]/g, (c) => (c === "\r" ? "\\r" : c === "\n" ? "\\n" : `\\${c}`))})`;
 }
 
-/** A number for a content stream or dictionary: short, never exponent form. */
+/**
+ * A number for a content stream or dictionary: short, in plain decimal
+ * (PDF has no exponent form), to three places. String() and toFixed() write
+ * 1e21 and above in exponent form; every number that large is an integer,
+ * which BigInt writes in full. A finite value only: the callers keep
+ * NaN and the infinities out.
+ */
 export function num(value: number): string {
-  if (Number.isInteger(value)) return String(value);
-  const fixed = value.toFixed(3);
-  return fixed.replace(/\.?0+$/, "") || "0";
+  if (Number.isInteger(value)) return Math.abs(value) < 1e21 ? String(value) : BigInt(value).toString();
+  const fixed = value.toFixed(3).replace(/\.?0+$/, "");
+  return fixed === "-0" ? "0" : fixed;
 }

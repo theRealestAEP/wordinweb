@@ -67,6 +67,8 @@ export class RecordingCanvas {
   pixels: ImageDataShim | null = null;
   /** BitmapShims drawn on this canvas. */
   bitmapsDrawn = 0;
+  /** Paints, clips and text left out for a point or length out of reach (see RecordingContext.fits). */
+  dropped = 0;
   private context: RecordingContext | null = null;
 
   constructor(
@@ -104,6 +106,15 @@ function multiply(m: Matrix, n: Matrix): Matrix {
   ];
 }
 
+/**
+ * How far from the canvas's origin a point or length may reach, in canvas
+ * sizes. The page maps the canvas onto the picture's box, so whatever is
+ * in reach lands within ten boxes of the picture: well inside the ±32767
+ * units PDF readers take, and far outside anything the box shows. A
+ * converter goes past it only on a misread record.
+ */
+const REACH = 10;
+
 const FONT = /^\s*(?:(italic|oblique)\s+)?(?:(normal|bold|bolder|lighter|[1-9]00)\s+)?(?:(normal|small-caps)\s+)?(\d+(?:\.\d+)?)(px|pt)\s+(.+)$/;
 
 export class RecordingContext {
@@ -123,6 +134,10 @@ export class RecordingContext {
   private readonly stack: State[] = [];
   /** The current path's operators, points already in canvas pixel space. */
   private path: string[] = [];
+  /** Whether every point of the current path is in reach (see fits). */
+  private pathFits = true;
+  /** Whether every point of the current path is finite: a point out of reach is clamped to it. */
+  private pathFinite = true;
   /** Last point in user space, for quadratic curves and arcTo. */
   private last: [number, number] | null = null;
   private start: [number, number] | null = null;
@@ -237,7 +252,29 @@ export class RecordingContext {
   }
   private pt(x: number, y: number): string {
     const [dx, dy] = this.device(x, y);
-    return `${num(dx)} ${num(dy)}`;
+    if (this.fits(dx, dy)) return `${num(dx)} ${num(dy)}`;
+    this.pathFits = false;
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
+      this.pathFinite = false;
+      return "0 0";
+    }
+    const reach = this.reach();
+    const clamp = (value: number) => num(Math.max(-reach, Math.min(reach, value)));
+    return `${clamp(dx)} ${clamp(dy)}`;
+  }
+  /** How far a point may lie from the canvas's origin, in canvas pixels. */
+  private reach(): number {
+    return REACH * Math.max(this.canvas.width, this.canvas.height, 1);
+  }
+  /** Whether each canvas-pixel value is finite and within REACH canvas sizes of the origin. */
+  private fits(...values: number[]): boolean {
+    const reach = this.reach();
+    return values.every((value) => Number.isFinite(value) && Math.abs(value) <= reach);
+  }
+  /** Whether the operator may be recorded; counted as dropped when it may not. */
+  private keep(fits: boolean): boolean {
+    if (!fits) this.canvas.dropped++;
+    return fits;
   }
   /** How the transform scales lengths, for line widths and dashes. */
   private lengthScale(): number {
@@ -247,6 +284,8 @@ export class RecordingContext {
 
   beginPath(): void {
     this.path = [];
+    this.pathFits = true;
+    this.pathFinite = true;
     this.last = null;
     this.start = null;
   }
@@ -365,37 +404,46 @@ export class RecordingContext {
   }
 
   fill(rule?: string): void {
-    if (this.path.length === 0 || this.invisible(this.state.fillStyle)) return;
+    if (this.path.length === 0 || this.invisible(this.state.fillStyle) || !this.keep(this.pathFits)) return;
     this.canvas.ops.push(`q ${this.paintOps(true, false)} ${this.path.join(" ")} ${rule === "evenodd" ? "f*" : "f"} Q`);
   }
   stroke(): void {
     if (this.path.length === 0 || this.invisible(this.state.strokeStyle)) return;
+    const scale = this.lengthScale();
+    if (!this.keep(this.pathFits && this.fits(this.state.lineWidth * scale, this.lineDashOffset * scale, ...this.state.dash.map((v) => v * scale)))) return;
     this.canvas.ops.push(`q ${this.paintOps(false, true)} ${this.path.join(" ")} S Q`);
   }
+  /** A clip out of reach is clamped to it: what is drawn lies within reach,
+   * and a rectangle (a PICT's clip of the whole plane, say) clamped to it
+   * clips that the same. */
   clip(rule?: string): void {
-    if (this.path.length === 0) return;
+    if (this.path.length === 0 || !this.keep(this.pathFinite)) return;
     this.canvas.ops.push(`${this.path.join(" ")} ${rule === "evenodd" ? "W*" : "W"} n`);
   }
   fillRect(x: number, y: number, w: number, h: number): void {
-    const saved = this.path;
-    this.path = [];
-    this.rect(x, y, w, h);
-    this.fill();
-    this.path = saved;
+    this.withRect(x, y, w, h, () => this.fill());
   }
   strokeRect(x: number, y: number, w: number, h: number): void {
-    const saved = this.path;
-    this.path = [];
-    this.rect(x, y, w, h);
-    this.stroke();
-    this.path = saved;
+    this.withRect(x, y, w, h, () => this.stroke());
   }
   clearRect(x: number, y: number, w: number, h: number): void {
+    this.withRect(x, y, w, h, () => {
+      if (this.keep(this.pathFits)) this.canvas.ops.push(`q 1 g ${this.path.join(" ")} f Q`);
+    });
+  }
+  /** Paint a rectangle as its own path, leaving the current path as it is. */
+  private withRect(x: number, y: number, w: number, h: number, paint: () => void): void {
     const saved = this.path;
+    const savedFits = this.pathFits;
+    const savedFinite = this.pathFinite;
     this.path = [];
+    this.pathFits = true;
+    this.pathFinite = true;
     this.rect(x, y, w, h);
-    this.canvas.ops.push(`q 1 g ${this.path.join(" ")} f Q`);
+    paint();
     this.path = saved;
+    this.pathFits = savedFits;
+    this.pathFinite = savedFinite;
   }
 
   /** The FontSpec a CSS font string names, and its size in px. */
@@ -420,7 +468,7 @@ export class RecordingContext {
     const runs = this.canvas.fonts.shape(text, font);
     const width = runs.reduce((sum, run) => sum + run.advances.reduce((s, a) => s + a, 0), 0);
     const align = this.state.textAlign;
-    let dx = align === "center" ? -width / 2 : align === "right" || align === "end" ? -width : 0;
+    const dx = align === "center" ? -width / 2 : align === "right" || align === "end" ? -width : 0;
     const face = runs[0]?.face.face;
     const ascent = face ? (face.ascent / face.unitsPerEm) * font.size : font.size * 0.8;
     const descent = face ? (-face.descent / face.unitsPerEm) * font.size : font.size * 0.2;
@@ -432,16 +480,23 @@ export class RecordingContext {
     const scale = Math.hypot(m[0], m[1]) || 1;
     const cos = m[0] / scale;
     const sin = m[1] / scale;
+    // A run's origin out of reach leaves the whole string out.
+    const origins: [number, number][] = [];
+    let advance = dx;
+    for (const run of runs) {
+      origins.push(this.device(x + advance, y + dy));
+      for (const a of run.advances) advance += a;
+    }
+    if (!this.keep(this.fits(font.size * scale, ...origins.flat()))) return;
     const c = parseColor(this.state.fillStyle) ?? { r: 0, g: 0, b: 0, a: 1 };
     const ops = [`q ${num(c.r / 255)} ${num(c.g / 255)} ${num(c.b / 255)} rg BT`];
-    for (const run of runs) {
+    for (const [i, run] of runs.entries()) {
       const embedded = this.canvas.resources.font(run.face.face);
-      const [ox, oy] = this.device(x + dx, y + dy);
+      const [ox, oy] = origins[i];
       ops.push(`/${embedded.name} ${num(font.size * scale)} Tf ${num(cos)} ${num(sin)} ${num(sin)} ${num(-cos)} ${num(ox)} ${num(oy)} Tm`);
       let hex = "";
       run.gids.forEach((gid, i) => {
         hex += embedded.cid(gid, run.codePoints[i]).toString(16).padStart(4, "0");
-        dx += run.advances[i];
       });
       ops.push(`<${hex}> Tj`);
     }
@@ -492,10 +547,11 @@ export class RecordingContext {
   }
 
   private place(image: SampleImage | { jpeg: Uint8Array }, dx: number, dy: number, dw: number, dh: number): void {
-    const index = this.canvas.images.length;
-    this.canvas.images.push(image);
     // The image's unit square onto its destination, in canvas pixels.
     const m = multiply(this.state.ctm, [dw, 0, 0, dh, dx, dy]);
+    if (!this.keep(this.fits(...m, m[4] + m[2], m[5] + m[3]))) return;
+    const index = this.canvas.images.length;
+    this.canvas.images.push(image);
     const ops = ["q"];
     if (this.state.globalAlpha < 1) ops.push(`/${this.canvas.resources.alpha(this.state.globalAlpha)} gs`);
     // The image space has y up: flip within the destination box.
