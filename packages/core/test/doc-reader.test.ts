@@ -120,6 +120,18 @@ describe("the .doc reader", () => {
     expect(refs.length).toBe(2);
   });
 
+  it("merges the cells a TC80 marks first-merged (1) and merged (2), each keeping its own content", () => {
+    // GovDocs1 076855.doc: "1. LIVING ROOM" spans 2 grid columns, "For each item numbered ..." the next 3.
+    const xml = parts(docToDocx(bytes("076855.doc")))["word/document.xml"];
+    const row = [...xml.matchAll(/<w:tr>[\s\S]*?<\/w:tr>/g)].map((m) => m[0]).find((r) => r.includes("LIVING ROOM"))!;
+    const cells = [...row.matchAll(/<w:tc>[\s\S]*?<\/w:tc>/g)].map((m) => m[0]);
+    expect(cells.length).toBe(2);
+    expect(cells[0]).toContain('<w:gridSpan w:val="2"/>');
+    expect(cells[0]).toContain("LIVING ROOM");
+    expect(cells[1]).toContain('<w:gridSpan w:val="3"/>');
+    expect(cells[1]).toContain("For each item");
+  });
+
   it("gives a header with a picture its own relationships", () => {
     // GovDocs1 040078.doc: two pictures in the first header.
     const xml = parts(docToDocx(bytes("040078.doc")));

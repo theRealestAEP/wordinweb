@@ -203,8 +203,8 @@ function defTable(o: Uint8Array, borders: boolean): number[] {
   for (let c = 0; c < count; c++) {
     const at = edgesEnd + c * 10;
     const tc = at + 10 <= o.length ? o.subarray(at, at + 10) : new Uint8Array(10);
-    // rgf: fFirstMerged (1) and fMerged (2) as the TC80's horzMerge, the first of a merged range 2 and the cells merged into it 1; the width is left to the edges.
-    const horzMerge = tc[0] & 2 ? 1 : tc[0] & 1 ? 2 : 0;
+    // rgf: fFirstMerged (1) and fMerged (2), the same bits as the TC80's horzMerge; the width is left to the edges.
+    const horzMerge = tc[0] & 3;
     body.push(horzMerge, 0, 0, 0);
     for (let side = 0; side < 4; side++) body.push(...(borders ? brc80(u16(tc, 2 + side * 2)) : [0, 0, 0, 0]));
   }

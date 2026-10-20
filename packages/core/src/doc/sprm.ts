@@ -178,6 +178,7 @@ export interface CellProps {
   /** The cell's logical right edge, in twips from the row's origin (rgdxaCenter[i+1]). */
   right: number;
   /** TC80 fields. */
+  /** 1: the first cell of a horizontally merged range; 2 or 3: merged into the cell before (as Word 97 files hold it). */
   horzMerge: number;
   vertMerge: number;
   vertAlign: number;
@@ -818,7 +819,7 @@ function applyTableSprm(sprm: number, o: Uint8Array, t: TableProps): void {
     }
     case 0x5624: {
       const cells = cellRange(o, 0, t.cells);
-      cells.forEach((cell, i) => { cell.horzMerge = i === 0 ? 2 : 1; });
+      cells.forEach((cell, i) => { cell.horzMerge = i === 0 ? 1 : 2; });
       break;
     }
     case 0x5625: for (const cell of cellRange(o, 0, t.cells)) cell.horzMerge = 0; break;
