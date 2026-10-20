@@ -153,6 +153,8 @@ export interface Ctx {
   commentIds: Map<string, string>;
   /** The ids of the comments adoptComment copied into the result from the original. */
   commentCopies: Set<string>;
+  /** Each side's comment id -> the key its references compare by (commentPairs). */
+  commentKeys: CommentPairs;
   /** The container being compared when it is not the body (a header part, "footnote 3"), for the notes. */
   container?: string;
 }
@@ -196,7 +198,7 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
   // untouched, and its model needs no rebuild (refresh was a sixth of the time
   // on a document compared with itself).
   let issued = 0;
-  const ctx = compareContext(original, merged, options, () => issued++);
+  const ctx = compareContext(original, merged, options, () => issued++, { original: commentRefs(original.docRoot), revised: commentRefs(merged.docRoot) });
 
   const originalBody = child(original.docRoot, "body");
   const mergedBody = child(merged.docRoot, "body");
@@ -229,7 +231,13 @@ function compareInto(original: DocxDocument, merged: DocxDocument, options: Comp
  * What one compare carries through every step. Revisions are written into
  * `merged`; `onIssue` is called for each revision id taken.
  */
-export function compareContext(original: DocxDocument, merged: DocxDocument, options: CompareOptions, onIssue: () => void = () => {}): Ctx {
+export function compareContext(
+  original: DocxDocument,
+  merged: DocxDocument,
+  options: CompareOptions,
+  onIssue: () => void = () => {},
+  commentOrder: { original: string[]; revised: string[] } = { original: [], revised: [] },
+): Ctx {
   return {
     doc: merged,
     original,
@@ -249,7 +257,87 @@ export function compareContext(original: DocxDocument, merged: DocxDocument, opt
     leftoverNotes: { footnote: [], endnote: [] },
     commentIds: new Map(),
     commentCopies: new Set(),
+    commentKeys: commentPairs(original, merged, commentOrder),
   };
+}
+
+interface CommentPairs {
+  original: Map<string, string>;
+  revised: Map<string, string>;
+  /** Original id -> revised id, for the comments paired by content under another id. */
+  renumbered: Map<string, string>;
+}
+
+/**
+ * Which comment of the original each comment of the revised document is,
+ * as the key both sides' references compare by. A comment pairs with one of
+ * the same author, initials, date and text first, so two documents that
+ * number the same comments differently (a .doc and the .docx Word made of
+ * it, or a renumbering save) match; the rest pair by id, as before.
+ */
+function commentPairs(original: DocxDocument, revised: DocxDocument, order: { original: string[]; revised: string[] }): CommentPairs {
+  // The comments in the order the body refers to them, so two alike pair in their places.
+  const list = (doc: DocxDocument, refs: string[]): { id: string; content: string }[] => {
+    const rank = new Map<string, number>();
+    refs.forEach((id, i) => { if (!rank.has(id)) rank.set(id, i); });
+    return (doc.commentsTree()?.children ?? [])
+      .filter((c) => localName(c.name) === "comment")
+      .map((c) => ({
+        id: c.attrs["w:id"],
+        content: [c.attrs["w:author"], c.attrs["w:initials"], c.attrs["w:date"], ...c.children.map(paragraphText)].join("\u0000"),
+      }))
+      .sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+  };
+  const o = list(original, order.original);
+  const r = list(revised, order.revised);
+  const keys: CommentPairs = { original: new Map(), revised: new Map(), renumbered: new Map() };
+  const pair = (a: string, b: string): void => {
+    const key = `comment ${keys.original.size}`;
+    keys.original.set(a, key);
+    keys.revised.set(b, key);
+    if (a !== b) keys.renumbered.set(a, b);
+  };
+  const free = (c: { id: string }): boolean => !keys.revised.has(c.id);
+  // The same comment, in document order (two alike pair first with first); then the rest by id.
+  for (const a of o) {
+    if (keys.original.has(a.id)) continue;
+    const b = r.find((c) => free(c) && c.content === a.content);
+    if (b) pair(a.id, b.id);
+  }
+  for (const a of o) if (!keys.original.has(a.id) && r.some((c) => free(c) && c.id === a.id)) pair(a.id, a.id);
+  return keys;
+}
+
+/** Whether an element named `name` is anywhere under `el`. */
+function has(el: XmlElement, name: string): boolean {
+  return el.children.some((c) => localName(c.name) === name || has(c, name));
+}
+
+/**
+ * Every w:fldSimple under `el` rewritten in place as the runs Word writes
+ * for the same field: begin, the instruction, separate, the result, end.
+ */
+function fieldsInRuns(el: XmlElement): void {
+  const w = el.name.slice(0, el.name.length - localName(el.name).length);
+  const run = (inner: XmlElement): XmlElement => ({ name: `${w}r`, attrs: {}, children: [inner], text: "" });
+  const fldChar = (type: string): XmlElement => run({ name: `${w}fldChar`, attrs: { "w:fldCharType": type }, children: [], text: "" });
+  el.children = el.children.flatMap((c) => {
+    fieldsInRuns(c);
+    if (localName(c.name) !== "fldSimple") return [c];
+    const instr: XmlElement = { name: `${w}instrText`, attrs: { "xml:space": "preserve" }, children: [], text: c.attrs["w:instr"] ?? "" };
+    return [fldChar("begin"), run(instr), fldChar("separate"), ...c.children, fldChar("end")];
+  });
+}
+
+/** The comment reference ids under `root`, in document order. */
+function commentRefs(root: XmlElement): string[] {
+  const out: string[] = [];
+  const walk = (e: XmlElement): void => {
+    if (localName(e.name) === "commentReference") out.push(e.attrs["w:id"]);
+    for (const c of e.children) walk(c);
+  };
+  walk(root);
+  return out;
 }
 
 /** Align and diff one container's blocks in place (a header, a note). */
@@ -1281,7 +1369,10 @@ export function readOptions(ctx: Ctx, original: boolean): ReadOptions {
     const id = ref.attrs["w:id"];
     return original ? `${ctx.noteIds[kind].get(id) ?? `original ${id}`}` : id;
   };
-  return { whitespace: ctx.whitespace, noteKey };
+  // A reference whose comment pairs with none keys on its id, as before.
+  const keys = original ? ctx.commentKeys.original : ctx.commentKeys.revised;
+  const commentKey = (ref: XmlElement): string => keys.get(ref.attrs["w:id"]) ?? `id ${ref.attrs["w:id"]}`;
+  return { whitespace: ctx.whitespace, noteKey, commentKey };
 }
 
 function concatMatches(O: GapSide, oAt: number[], R: GapSide, rAt: number[]): boolean {
@@ -1460,6 +1551,12 @@ export function refersToChangedPart(el: XmlElement, ctx: Ctx): boolean {
 function adoptComment(id: string, ctx: Ctx): string {
   const known = ctx.commentIds.get(id);
   if (known !== undefined) return known;
+  // The same comment, numbered otherwise in the revised document: the result holds it.
+  const renumbered = ctx.commentKeys.renumbered.get(id);
+  if (renumbered !== undefined) {
+    ctx.commentIds.set(id, renumbered);
+    return renumbered;
+  }
   const find = (root: XmlElement | null): XmlElement | undefined =>
     root?.children.find((c) => localName(c.name) === "comment" && c.attrs["w:id"] === id);
   const theirs = find(ctx.original.commentsTree());
@@ -1586,6 +1683,8 @@ export function wrapContainerContent(container: XmlElement, kind: "ins" | "del",
  */
 function unchangedComment(id: string | undefined, ctx: Ctx): boolean {
   if (id === undefined || ctx.commentCopies.has(id)) return false;
+  // A comment paired by its author, date and text under another id is the same comment.
+  if ([...ctx.commentKeys.renumbered.values()].includes(id)) return true;
   const find = (root: XmlElement | null): XmlElement | undefined => root?.children.find((c) => localName(c.name) === "comment" && c.attrs["w:id"] === id);
   const theirs = find(ctx.original.commentsTree());
   const mine = find(ctx.doc.commentsTree());
@@ -1609,6 +1708,15 @@ function commentPieceId(el: XmlElement): string | undefined {
 function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
   const partChanged = refersToChangedPart(oEl, ctx);
   if (!partChanged && sameXml(oEl, rEl)) return;
+
+  // A field written whole (w:fldSimple) on one side and in runs (w:fldChar,
+  // w:instrText) on the other is the same field to a reader: both are read
+  // in runs. The original is only read, so its runs are a copy.
+  if ((has(oEl, "fldSimple") && has(rEl, "fldChar")) || (has(rEl, "fldSimple") && has(oEl, "fldChar"))) {
+    oEl = cloneXml(oEl);
+    fieldsInRuns(oEl);
+    fieldsInRuns(rEl);
+  }
 
   if (ctx.formatting) alignParagraphProps(rEl, child(rEl, "pPr"), child(oEl, "pPr"), ctx);
 

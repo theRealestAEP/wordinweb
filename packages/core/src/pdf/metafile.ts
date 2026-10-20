@@ -26,12 +26,17 @@ function convertWmf(bytes: Uint8Array, fonts: FontSet, resources: Resources): Re
   let rawHeight: number;
   let actions: ReturnType<typeof WMF.get_actions>;
   // The parser throws on records it does not know (an unknown escape, a
-  // malformed object index): such a picture draws as an empty frame.
+  // malformed object index): such a picture draws as an empty frame. It
+  // console.logs each record it skips; that would land in a CLI's stdout.
+  const log = console.log;
+  console.log = () => {};
   try {
     [rawWidth, rawHeight] = WMF.image_size(prepared).map(Math.abs);
     actions = WMF.get_actions(prepared);
   } catch {
     return null;
+  } finally {
+    console.log = log;
   }
   if (!rawWidth || !rawHeight) return null;
   // The fixups render/wmf.ts applies before painting: text decoded from

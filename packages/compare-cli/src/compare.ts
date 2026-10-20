@@ -1,4 +1,4 @@
-import { WriteStream, closeSync, createWriteStream, mkdtempSync, openSync, rmSync, statSync, statfsSync, writeSync } from "node:fs";
+import { WriteStream, closeSync, createWriteStream, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, statfsSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
@@ -40,6 +40,9 @@ import {
 } from "../../core/src/edit/compare/index.js";
 import { MARKERS, RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
 import { CompareError, isDiskFull } from "./errors.js";
+import { docToDocx } from "../../core/src/doc/hooks.js";
+import { isOleFile } from "../../core/src/doc/streams.js";
+import { FORMAT_HEAD_BYTES, otherFormat } from "../../core/src/formats.js";
 import { PdfRenderError } from "../../core/src/pdf/errors.js";
 import { renderDocxToPdf } from "../../core/src/pdf/render.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
@@ -145,9 +148,9 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
   let pdf: WriteStream | null = null;
   try {
     dir = mkdtempSync(join(options.tempDir ?? tmpdir(), "docx-compare-"));
-    const oZip = openInput(originalPath, "original");
+    const oZip = openInput(originalPath, "original", dir);
     zips.push(oZip);
-    const rZip = openInput(revisedPath, "revised");
+    const rZip = openInput(revisedPath, "revised", dir);
     zips.push(rZip);
     checkDiskSpace(dir, [oZip, rZip]);
 
@@ -169,7 +172,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
         note({ code: "existing-revisions-accepted", detail: `the ${input.side} document held tracked changes; it was compared as if they were accepted` });
       }
     }
-    const ctx = compareContext(O.shell, R.shell, options);
+    const ctx = compareContext(O.shell, R.shell, options, undefined, { original: O.commentRefs, revised: R.commentRefs });
     reportUncomparedParts(O.shell, R.shell, ctx);
     const headerFooterPairs = pairHeadersFooters(O.shell, R.shell, { original: O.sectPrs, merged: R.sectPrs });
     // Notes first: struck body text carries the ORIGINAL's note references,
@@ -238,12 +241,50 @@ function notesOf(input: Input): DiskNotes[] {
   return [input.notes.footnote, input.notes.endnote].filter((notes): notes is DiskNotes => notes !== null);
 }
 
-function openInput(path: string, side: Side): ZipReader {
+function openInput(path: string, side: Side, dir: string): ZipReader {
   try {
-    return ZipReader.open(path);
+    const zip = ZipReader.open(docxPathOf(path, side, dir));
+    if (zip.entries.has("mimetype") && zip.entries.has("content.xml")) {
+      zip.close();
+      throw new CompareError("unsupported_format", `${path}: an OpenDocument file`, side);
+    }
+    return zip;
   } catch (error) {
     throw inputError(error, side, path);
   }
+}
+
+/**
+ * The .docx to read for an input: the input itself, or, for a Word
+ * 97-2003 .doc, a working file it is converted to (core's doc/convert.ts;
+ * the .doc and its .docx are in memory for the conversion). Another format
+ * (RTF, PDF, Word 6.0/95, a password-protected document) is refused from
+ * its first bytes as unsupported_format.
+ */
+function docxPathOf(path: string, side: Side, dir: string): string {
+  const fd = openSync(path, "r");
+  let head: Buffer;
+  try {
+    head = Buffer.alloc(FORMAT_HEAD_BYTES);
+    head = head.subarray(0, readSync(fd, head, 0, head.length, 0));
+  } finally {
+    closeSync(fd);
+  }
+  const other = otherFormat(head);
+  if (other) throw new CompareError("unsupported_format", `${path}: ${other}`, side);
+  if (!isOleFile(head)) return path;
+  let docx: Uint8Array;
+  try {
+    docx = docToDocx(readFileSync(path));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const unsupported = /^unsupported format: (.*)/.exec(message);
+    if (unsupported) throw new CompareError("unsupported_format", `${path}: ${unsupported[1]}`, side, { cause: error });
+    throw new CompareError("damaged", `${path}: ${message.replace(/^damaged: /, "")}`, side, { cause: error });
+  }
+  const converted = join(dir, `${side}.docx`);
+  writeFileSync(converted, docx);
+  return converted;
 }
 
 async function readNamed(zip: ZipReader, side: Side, dir: string): Promise<Input> {

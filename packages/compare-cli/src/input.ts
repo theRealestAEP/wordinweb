@@ -80,6 +80,8 @@ export interface Input {
   tables: Map<number, [number, number]>;
   /** Note reference ids in document order. */
   noteRefs: Record<"footnote" | "endnote", string[]>;
+  /** Comment reference ids in document order. */
+  commentRefs: string[];
   /** The footnotes and endnotes parts, on disk; the shell holds them empty. */
   notes: Record<"footnote" | "endnote", DiskNotes | null>;
   /** Whether the input held tracked changes, now accepted. */
@@ -181,6 +183,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       rowKinds: [],
       tables: new Map(),
       noteRefs: { footnote: [], endnote: [] },
+      commentRefs: [],
       notes: { footnote: null, endnote: null },
       hadRevisions,
     };
@@ -189,6 +192,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       const ln = localName(e.name);
       if (ln === "footnoteReference") input.noteRefs.footnote.push(e.attrs["w:id"]);
       else if (ln === "endnoteReference") input.noteRefs.endnote.push(e.attrs["w:id"]);
+      else if (ln === "commentReference") input.commentRefs.push(e.attrs["w:id"]);
       for (const c of e.children) noteRefsIn(c);
     };
 

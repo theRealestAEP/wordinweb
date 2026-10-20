@@ -1,3 +1,4 @@
+import * as CFB from "cfb";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -304,14 +305,23 @@ describe("renderDocxToPdf", () => {
   });
 
   it("refuses other formats from their first bytes, with unsupported_format and the format's name", async () => {
-    const ole = new Uint8Array(4096);
-    ole.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-    const encrypted = new Uint8Array(ole);
-    for (const [i, ch] of [..."EncryptionInfo"].entries()) encrypted[1024 + i * 2] = ch.charCodeAt(0);
+    // Compound files: an Excel workbook, a password-protected .docx, a Word 6.0/95 document (its FIB starts with 0xA5DC).
+    const ole = (name: string, content = new Uint8Array(64)): Uint8Array => {
+      const cfb = CFB.utils.cfb_new();
+      CFB.utils.cfb_add(cfb, name, content);
+      return new Uint8Array(CFB.write(cfb, { type: "array" }) as number[]);
+    };
+    const word6 = new Uint8Array(64);
+    word6.set([0xdc, 0xa5, 0x65, 0x00]);
     const odt = makeDocx({ mimetype: "application/vnd.oasis.opendocument.text", "content.xml": "<office:document-content/>" });
     const cases: [string, Uint8Array, RegExp][] = [
-      ["doc", ole, /Word 97-2003/],
-      ["encrypted", encrypted, /password-protected/],
+      ["xls", ole("Workbook"), /Excel 97-2003 workbook/],
+      ["wordperfect", new Uint8Array([0xff, 0x57, 0x50, 0x43, 16, 0, 0, 0]), /WordPerfect/],
+      ["mac word 5", new Uint8Array([0xfe, 0x37, 0x00, 0x23, 0, 0, 0, 0]), /Word for Macintosh/],
+      ["html", new TextEncoder().encode("\ufeff\n<!DOCTYPE html><html><body>Hi</body></html>"), /HTML/],
+      ["word 2003 xml", new TextEncoder().encode('<?xml version="1.0"?><?mso-application progid="Word.Document"?><w:wordDocument/>'), /Word 2003 XML/],
+      ["encrypted", ole("EncryptionInfo"), /password-protected/],
+      ["word6", ole("WordDocument", word6), /Word 6\.0\/95/],
       ["rtf", new TextEncoder().encode("{\\rtf1\\ansi Hello.\\par }"), /RTF/],
       ["pdf", new TextEncoder().encode("%PDF-1.4\n%%EOF\n"), /PDF/],
       ["odt", odt, /OpenDocument/],

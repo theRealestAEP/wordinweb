@@ -1,0 +1,181 @@
+/**
+ * OfficeArt shape types ([MS-ODRAW] MSOSPT) mapped to DrawingML preset
+ * geometry names (ST_ShapeType). Types with no entry are WordArt text shapes
+ * (24–31, 136–175), connectors with no straight preset, or Office-internal.
+ */
+
+export const SPT_NOT_PRIMITIVE = 0;
+export const SPT_PICTURE_FRAME = 75;
+export const SPT_TEXT_BOX = 202;
+export const SPT_HOST_CONTROL = 201;
+
+const PRESETS: Record<number, string> = {
+  1: "rect",
+  2: "roundRect",
+  3: "ellipse",
+  4: "diamond",
+  5: "triangle",
+  6: "rtTriangle",
+  7: "parallelogram",
+  8: "trapezoid",
+  9: "hexagon",
+  10: "octagon",
+  11: "plus",
+  12: "star5",
+  13: "rightArrow",
+  14: "rightArrow", // thick arrow
+  15: "homePlate",
+  16: "cube",
+  17: "wedgeRoundRectCallout", // balloon
+  18: "star16", // seal
+  19: "arc",
+  20: "line",
+  21: "plaque",
+  22: "can",
+  23: "donut",
+  32: "straightConnector1",
+  33: "bentConnector2",
+  34: "bentConnector3",
+  35: "bentConnector4",
+  36: "bentConnector5",
+  37: "curvedConnector2",
+  38: "curvedConnector3",
+  39: "curvedConnector4",
+  40: "curvedConnector5",
+  41: "callout1",
+  42: "callout2",
+  43: "callout3",
+  44: "accentCallout1",
+  45: "accentCallout2",
+  46: "accentCallout3",
+  47: "borderCallout1",
+  48: "borderCallout2",
+  49: "borderCallout3",
+  50: "accentBorderCallout1",
+  51: "accentBorderCallout2",
+  52: "accentBorderCallout3",
+  53: "ribbon",
+  54: "ribbon2",
+  55: "chevron",
+  56: "pentagon",
+  57: "noSmoking",
+  58: "star8",
+  59: "star16",
+  60: "star32",
+  61: "wedgeRectCallout",
+  62: "wedgeRoundRectCallout",
+  63: "wedgeEllipseCallout",
+  64: "wave",
+  65: "foldedCorner",
+  66: "leftArrow",
+  67: "downArrow",
+  68: "upArrow",
+  69: "leftRightArrow",
+  70: "upDownArrow",
+  71: "irregularSeal1",
+  72: "irregularSeal2",
+  73: "lightningBolt",
+  74: "heart",
+  75: "rect", // picture frame
+  76: "quadArrow",
+  77: "leftArrowCallout",
+  78: "rightArrowCallout",
+  79: "upArrowCallout",
+  80: "downArrowCallout",
+  81: "leftRightArrowCallout",
+  82: "upDownArrowCallout",
+  83: "quadArrowCallout",
+  84: "bevel",
+  85: "leftBracket",
+  86: "rightBracket",
+  87: "leftBrace",
+  88: "rightBrace",
+  89: "leftUpArrow",
+  90: "bentUpArrow",
+  91: "bentArrow",
+  92: "star24",
+  93: "stripedRightArrow",
+  94: "notchedRightArrow",
+  95: "blockArc",
+  96: "smileyFace",
+  97: "verticalScroll",
+  98: "horizontalScroll",
+  99: "circularArrow",
+  100: "circularArrow", // notched circular arrow
+  101: "uturnArrow",
+  102: "curvedRightArrow",
+  103: "curvedLeftArrow",
+  104: "curvedUpArrow",
+  105: "curvedDownArrow",
+  106: "cloudCallout",
+  107: "ellipseRibbon",
+  108: "ellipseRibbon2",
+  109: "flowChartProcess",
+  110: "flowChartDecision",
+  111: "flowChartInputOutput",
+  112: "flowChartPredefinedProcess",
+  113: "flowChartInternalStorage",
+  114: "flowChartDocument",
+  115: "flowChartMultidocument",
+  116: "flowChartTerminator",
+  117: "flowChartPreparation",
+  118: "flowChartManualInput",
+  119: "flowChartManualOperation",
+  120: "flowChartConnector",
+  121: "flowChartPunchedCard",
+  122: "flowChartPunchedTape",
+  123: "flowChartSummingJunction",
+  124: "flowChartOr",
+  125: "flowChartCollate",
+  126: "flowChartSort",
+  127: "flowChartExtract",
+  128: "flowChartMerge",
+  129: "flowChartOfflineStorage",
+  130: "flowChartOnlineStorage",
+  131: "flowChartMagneticTape",
+  132: "flowChartMagneticDisk",
+  133: "flowChartMagneticDrum",
+  134: "flowChartDisplay",
+  135: "flowChartDelay",
+  176: "flowChartAlternateProcess",
+  177: "flowChartOffpageConnector",
+  178: "callout1", // callout 90
+  179: "accentCallout1",
+  180: "borderCallout1",
+  181: "accentBorderCallout1",
+  182: "leftRightUpArrow",
+  183: "sun",
+  184: "moon",
+  185: "bracketPair",
+  186: "bracePair",
+  187: "star4",
+  188: "doubleWave",
+  189: "actionButtonBlank",
+  190: "actionButtonHome",
+  191: "actionButtonHelp",
+  192: "actionButtonInformation",
+  193: "actionButtonForwardNext",
+  194: "actionButtonBackPrevious",
+  195: "actionButtonEnd",
+  196: "actionButtonBeginning",
+  197: "actionButtonReturn",
+  198: "actionButtonDocument",
+  199: "actionButtonSound",
+  200: "actionButtonMovie",
+  202: "rect", // text box
+};
+
+/** The DrawingML preset for an OfficeArt shape type, or undefined (freeform, WordArt, unknown). */
+export function presetForShapeType(spt: number): string | undefined {
+  return PRESETS[spt];
+}
+
+/** WordArt (geometry text) shape types draw their text as the shape. */
+export function isWordArtShapeType(spt: number): boolean {
+  return (spt >= 24 && spt <= 31) || (spt >= 136 && spt <= 175);
+}
+
+/** Connector and line types: open paths DrawingML draws with no fill. */
+export function isLineShapeType(spt: number): boolean {
+  return spt === 20 || (spt >= 32 && spt <= 40);
+}

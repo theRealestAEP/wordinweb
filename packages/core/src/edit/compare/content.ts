@@ -81,6 +81,8 @@ export interface ReadOptions {
    * compareNotes). Without it a reference keys on its kind alone.
    */
   noteKey?: (ref: XmlElement) => string;
+  /** A comment reference's identity: which comment pairing it belongs to (commentPairs). Without it a reference keys on its id. */
+  commentKey?: (ref: XmlElement) => string;
   /**
    * Whether a whitespace-only difference counts. With it off, a token keys on
    * its word alone, so "double space becomes single" leaves the paragraph
@@ -103,7 +105,7 @@ const CONTAINER_PROPS = new Set(["pPr", "sdtPr", "sdtEndPr", "smartTagPr", "cust
  * text is then compared inside (emitEqualSpan); a changed shape, size or
  * picture still keys apart.
  */
-function atomKey(atom: XmlElement, noteKey?: (ref: XmlElement) => string): string {
+function atomKey(atom: XmlElement, noteKey?: (ref: XmlElement) => string, commentKey?: (ref: XmlElement) => string): string {
   // A note reference keys on its note's PAIRING, not its id: the two
   // documents may number the same note differently, and two references match
   // only when compareNotes paired their notes. Keyed by position alone, a
@@ -114,6 +116,8 @@ function atomKey(atom: XmlElement, noteKey?: (ref: XmlElement) => string): strin
     const { "w:id": _id, ...rest } = atom.attrs;
     return serializeXml({ ...atom, attrs: rest }) + (noteKey ? "\u0000" + noteKey(atom) : "");
   }
+  // A comment reference likewise keys on its comment's pairing.
+  if (ln === "commentReference" && commentKey) return "commentReference\u0000" + commentKey(atom);
   const strip = (e: XmlElement): XmlElement =>
     localName(e.name) === "txbxContent" ? { ...e, children: [], text: "" } : { ...e, children: e.children.map(strip) };
   return serializeXml(hasTextBox(atom) ? strip(atom) : atom);
@@ -225,13 +229,14 @@ export function readParagraph(pEl: XmlElement, options: ReadOptions = {}): Parag
       segmentPath = path;
       for (const rc of cEl.children) {
         const rln = localName(rc.name);
-        if (rln === "rPr") continue;
+        // A page break Word last rendered is a layout hint, not content: Word writes one on every save.
+        if (rln === "rPr" || rln === "lastRenderedPageBreak") continue;
         if (rln === "t") {
           segment.push({ run: cEl, t: rc, text: rc.text });
           continue;
         }
         flush();
-        push({ key: "a\u0000" + atomKey(rc, options.noteKey), text: "", run: cEl, atom: rc, path });
+        push({ key: "a\u0000" + atomKey(rc, options.noteKey, options.commentKey), text: "", run: cEl, atom: rc, path });
       }
     }
   };

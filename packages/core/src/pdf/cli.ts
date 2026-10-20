@@ -9,6 +9,8 @@ const USAGE = `Usage: docx-pdf IN.docx OUT.pdf [--comments] [--markup] [--fonts 
 Write OUT.pdf: IN.docx laid out and drawn as Word prints it, with the
 fonts embedded, no browser involved. Prints one JSON line about the run.
 A Strict Open XML Document (ISO/IEC 29500 Strict) is read as Transitional.
+A Word 97-2003 .doc (the binary format) is read too, converted on the way
+in; the file's bytes decide, not its name.
 
 Options:
   --comments    print the review comments beside each page, as Word's markup
@@ -21,7 +23,8 @@ Options:
 
 Exit codes: 0 done; 1 failed; 2 usage; 3 unsupported_script (text in a script
 the renderer cannot shape); 4 not_docx; 5 damaged; 6 unsupported_format (a
-.doc, a password-protected document, an RTF, PDF or OpenDocument file).`;
+password-protected document, a Word 6.0/95 file, an RTF, PDF or OpenDocument
+file).`;
 
 const EXIT: Record<PdfRenderErrorCode, number> = { failed: 1, unsupported_script: 3, not_docx: 4, damaged: 5, unsupported_format: 6 };
 
