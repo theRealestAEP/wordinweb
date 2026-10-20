@@ -42,7 +42,8 @@ export interface RenderPdfOptions {
   title?: string;
   /** Print the review comments: each sheet is the page with a comment
    * column at its right (see comments.ts), every sheet the size of the
-   * largest page plus the column. */
+   * largest page plus the column, or taller when its page's cards need it:
+   * one sheet per page. */
   comments?: boolean;
   /**
    * Print the document's own tracked changes as Word's "All Markup" shows
@@ -276,28 +277,18 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       shown.set(item.part, loaded.picture);
       xobjects.push(...loaded.xobjects);
     }
-    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, sheet?.height ?? page.height);
+    // The rail first: a sheet whose cards reach past its bottom is taller.
+    const rail = column && sheet ? column.layout(page, sheet.height, printComments && page.index === final.result.totalPages) : null;
+    const height = rail?.height ?? page.height;
+    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, height);
     drawer.drawPage((part) => shown.get(part) ?? null);
-    if (column && sheet) column.draw(page, drawer, sheet.height, printComments && page.index === final.result.totalPages);
+    rail?.draw(drawer);
     for (const [name, top] of bookmarkTops(page)) if (!bookmarkAt.has(name)) bookmarkAt.set(name, { page: page.index - 1, y: drawer.y(top) });
-    await writePage(drawer, sheet?.width ?? page.width, sheet?.height ?? page.height, xobjects, await writeLinks(page, drawer));
+    await writePage(drawer, sheet?.width ?? page.width, height, xobjects, await writeLinks(page, drawer));
     if (page.index % 25 === 0) clearBreakCache(measurer);
   };
   clearBreakCache(measurer);
   await layoutDocumentStream(opened.doc, { measurer, prescan: opened.prescan, knownTotalPages: final.knownTotalPages, final: final.result, onPage });
-
-  // Balloons past the last page go on sheets of their own. Each such sheet
-  // must take some of the waiting lines: one that takes none would be
-  // followed by another just like it, without end.
-  if (printComments) column?.placeRemaining();
-  while (column && sheet && column.carriedLines() > 0) {
-    const waiting = column.carriedLines();
-    const blank: LaidOutPage = { width: final.maxWidth, height: final.maxHeight, index: 0, number: 0, items: [], bodyTop: 0, bodyBottom: 0, hfStart: 0, columnBands: [] };
-    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, blank, 0, sheet.height);
-    column.draw(blank, drawer, sheet.height);
-    if (column.carriedLines() >= waiting) throw new PdfRenderError("failed", `sheet ${pageNums.length + 1} holds no page and took none of the ${waiting} balloon lines waiting after the last page`);
-    await writePage(drawer, sheet.width, sheet.height, []);
-  }
 
   await resources.write();
   await writer.object(pagesNum, `<< /Type /Pages /Count ${pageNums.length} /Kids [${pageNums.map((n) => `${n} 0 R`).join(" ")}] >>`);
@@ -409,7 +400,7 @@ function unsupportedInXml(el: XmlElement, markup: boolean, authors: boolean): { 
 interface Count {
   result: StreamLayoutResult;
   knownTotalPages: number | undefined;
-  /** The largest page's sides, for sheets that must all be one size. */
+  /** The largest page's sides: the least size of a sheet with a comment column. */
   maxWidth: number;
   maxHeight: number;
 }
