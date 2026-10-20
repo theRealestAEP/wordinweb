@@ -19,27 +19,14 @@ export function isOleFile(head: Uint8Array): boolean {
   return head.length >= 8 && OLE_SIGNATURE.every((byte, i) => head[i] === byte);
 }
 
-/**
- * What an OLE compound file holds, from its directory: a Word document (a
- * .doc), an encrypted package (a password-protected .docx), or something
- * else. "none" for a file that is no compound file at all, or one whose
- * directory cannot be read.
- */
-export function oleKind(bytes: Uint8Array): "doc" | "encrypted" | "other" | "none" {
-  if (!isOleFile(bytes)) return "none";
-  let names: string[];
-  try {
-    names = rootStreamNames(CFB.read(bytes, { type: "array" }));
-  } catch {
-    return "none";
-  }
-  if (names.includes("EncryptionInfo") || names.includes("EncryptedPackage")) return "encrypted";
-  return names.includes("WordDocument") ? "doc" : "other";
-}
-
-/** Whether `bytes` are a Word 97-2003 .doc: an OLE compound file with a WordDocument stream. */
+/** Whether `bytes` are a Word .doc: an OLE compound file with a WordDocument stream. */
 export function isWordDocumentFile(bytes: Uint8Array): boolean {
-  return oleKind(bytes) === "doc";
+  if (!isOleFile(bytes)) return false;
+  try {
+    return streamBytes(CFB.read(bytes, { type: "array" }), "WordDocument") !== null;
+  } catch {
+    return false;
+  }
 }
 
 /**

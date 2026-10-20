@@ -41,7 +41,7 @@ import {
 import { MARKERS, RevisionKind, RevisionRef, collectRevisionsIn } from "../../core/src/edit/suggest.js";
 import { CompareError, isDiskFull } from "./errors.js";
 import { docToDocx } from "../../core/src/doc/hooks.js";
-import { isOleFile, oleKind } from "../../core/src/doc/streams.js";
+import { isOleFile } from "../../core/src/doc/streams.js";
 import { PdfRenderError } from "../../core/src/pdf/errors.js";
 import { renderDocxToPdf } from "../../core/src/pdf/render.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
@@ -273,14 +273,9 @@ function docxPathOf(path: string, side: Side, dir: string): string {
   if (ascii.startsWith("{\\rtf")) throw new CompareError("unsupported_format", `${path}: an RTF file`, side);
   if (ascii.startsWith("%PDF")) throw new CompareError("unsupported_format", `${path}: a PDF file`, side);
   if (!isOleFile(head)) return path;
-  // The whole file: the directory that names its streams can be at its end.
-  const bytes = readFileSync(path);
-  const kind = oleKind(bytes);
-  if (kind === "encrypted") throw new CompareError("unsupported_format", `${path}: a password-protected document (its package is encrypted)`, side);
-  if (kind !== "doc") throw new CompareError("unsupported_format", `${path}: an OLE compound file with no Word document`, side);
   let docx: Uint8Array;
   try {
-    docx = docToDocx(bytes);
+    docx = docToDocx(readFileSync(path));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const unsupported = /^unsupported format: (.*)/.exec(message);

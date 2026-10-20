@@ -15,6 +15,7 @@ export function combineHooks(list: ConvertHooks[]): ConvertHooks {
     wrapRun: first("wrapRun"),
     markExtra: first("markExtra"),
     rowExtra: first("rowExtra"),
+    paragraph: first("paragraph"),
     special: specials.length ? (...args) => specials.reduce<string | undefined>((xml, special) => xml ?? special(...args), undefined) : undefined,
     parts: parts.length
       ? (paragraphs) => {

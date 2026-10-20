@@ -89,6 +89,8 @@ export interface ConvertHooks {
   markExtra?: (cp: number, props: ParaProps, mark: RunProps) => { rPr?: string; pPr?: string } | undefined;
   /** Extra XML at the end of the trPr of the row whose row mark is at `cp` (w:ins, w:del, trPrChange). */
   rowExtra?: (cp: number, table: TableProps) => string | undefined;
+  /** A finished paragraph's XML, rewritten (adjacent w:ins/w:del of one change joined). */
+  paragraph?: (xml: string) => string;
   /**
    * Extra package parts (comments.xml, media), with their relationships
    * from document.xml and their content types. `paragraphs` writes the text
@@ -250,8 +252,15 @@ class Converter {
     for (let i = 0; i < starts.data.length && i < names.length; i++) {
       const ibkl = u16(starts.data[i], 0);
       if (ibkl >= ends.cps.length - 1) continue;
-      this.addMarker(starts.cps[i], 1, `<w:bookmarkStart w:id="${i}" w:name="${escapeAttr(names[i])}"/>`);
-      this.addMarker(ends.cps[ibkl], 0, `<w:bookmarkEnd w:id="${i}"/>`);
+      const start = `<w:bookmarkStart w:id="${i}" w:name="${escapeAttr(names[i])}"/>`;
+      const end = `<w:bookmarkEnd w:id="${i}"/>`;
+      // Another bookmark's end comes before a start at the same CP; an empty bookmark's own end comes after it.
+      if (ends.cps[ibkl] === starts.cps[i]) {
+        this.addMarker(starts.cps[i], 1, start + end);
+      } else {
+        this.addMarker(starts.cps[i], 1, start);
+        this.addMarker(ends.cps[ibkl], 0, end);
+      }
     }
   }
 
@@ -420,7 +429,8 @@ class Converter {
       out.push(this.runsXml(run, end, p.props.istd, field, noteRef));
     }
     out.push(this.markersAt(p.mark));
-    return out.join("") + "</w:p>";
+    const xml = out.join("") + "</w:p>";
+    return this.hooks.paragraph ? this.hooks.paragraph(xml) : xml;
   }
 
   /** The runs for the text of one character run, split at special characters and markers. */
