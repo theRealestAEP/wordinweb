@@ -174,6 +174,8 @@ class PictPlayer {
   private last: { rect: Rect; rrect: Rect; oval: Rect; arc: Rect; poly: [number, number][] };
   /** Lines since the last other drawing, stroked as one path. */
   private lines = 0;
+  /** The pixels of the bitmaps decoded so far. */
+  private pixels = 0;
 
   constructor(
     private readonly r: Reader,
@@ -652,7 +654,10 @@ class PictPlayer {
     const mode = r.u16();
     if (op & 1) r.at += r.view.getUint16(r.at);
     const packed = op !== 0x90 && op !== 0x91 && rowBytes >= 8;
-    if (width * height > PIXEL_BUDGET) throw new Error("a PICT bitmap over the pixel budget");
+    // The picture's bitmaps together stay in the pixel budget, and each row holds its pixels.
+    this.pixels += Math.max(width, 0) * Math.max(height, 0);
+    if (this.pixels > PIXEL_BUDGET) throw new Error("a PICT's bitmaps over the pixel budget");
+    if (width > 0 && rowBytes * 8 < width * (direct ? 16 : pixelSize)) throw new Error("a PICT bitmap row shorter than its pixels");
     const rgba = new Uint8ClampedArray(Math.max(width, 0) * Math.max(height, 0) * 4);
     for (let row = 0; row < height; row++) {
       let data: Uint8Array;

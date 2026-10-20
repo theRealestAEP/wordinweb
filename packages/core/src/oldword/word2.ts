@@ -176,6 +176,16 @@ export abstract class Word2Reader {
   /** The picture the run's U+0001 shows. */
   protected abstract picture(char: Char): Inline | undefined;
 
+  /** The bytes the pictures took so far. */
+  private mediaBytes = 0;
+
+  /** Whether a picture of `size` bytes still fits: the pictures together hold no more bytes than the file twice over. */
+  protected takeMedia(size: number): boolean {
+    if (this.mediaBytes + size > 2 * this.bytes.length) return false;
+    this.mediaBytes += size;
+    return true;
+  }
+
   // ---- Bytes ----------------------------------------------------------------
 
   protected u8(at: number): number {
@@ -245,11 +255,17 @@ export abstract class Word2Reader {
       const cb = this.n16(clx, at + 1);
       const plc = clx.subarray(at + 3, at + 3 + cb);
       const n = Math.floor((plc.length - 4) / 12);
+      const modifiers = new Map<number, Sprm[]>();
       for (let i = 0; i < n; i++) {
         const cp = this.n32(plc, 4 * i);
         const end = this.n32(plc, 4 * (i + 1));
         const pcd = 4 * (n + 1) + 8 * i;
-        if (end > cp) this.pieces.push({ cp, end, fc: this.n32(plc, pcd + 2), sprms: this.prmSprms(this.n16(plc, pcd + 6), grpprls) });
+        if (end <= cp || cp < (this.pieces.length ? this.pieces[this.pieces.length - 1].end : 0)) continue;
+        // Pieces with one modifier share its sprms.
+        const prm = this.n16(plc, pcd + 6);
+        let sprms = modifiers.get(prm);
+        if (!sprms) modifiers.set(prm, (sprms = this.prmSprms(prm, grpprls)));
+        this.pieces.push({ cp, end, fc: this.n32(plc, pcd + 2), sprms });
       }
     }
     if (this.pieces.length === 0) this.pieces.push({ cp: 0, end: total, fc: fcMin, sprms: [] });
@@ -291,6 +307,8 @@ export abstract class Word2Reader {
     const bte = this.entry(table);
     const n = Math.floor((bte.length - 4) / 6);
     const runs: FkpRun[] = [];
+    // Each page is read once, however many entries lead to it.
+    const read = new Set<number>();
     for (let i = 0; i < n; i++) {
       const limit = this.n32(bte, 4 * (i + 1));
       let pn = this.n16(bte, 4 * (n + 1) + 2 * i);
@@ -298,7 +316,8 @@ export abstract class Word2Reader {
       for (let pages = 0; pages < 256; pages++, pn++) {
         const size = this.fkpPageSize;
         const page = pn * size;
-        if (page + size > this.bytes.length) break;
+        if (page + size > this.bytes.length || read.has(page)) break;
+        read.add(page);
         const crun = this.u8(page + size - 1);
         if (crun === 0 || 5 * crun + 4 > size - 1 || this.u32(page) !== expected) break;
         expected = this.u32(page + 4 * crun);
@@ -448,9 +467,12 @@ export abstract class Word2Reader {
     const cps: number[] = [];
     for (let at = 0; at + 4 <= txt.length; at += 4) cps.push(this.n32(txt, at));
     const base = this.fib.ccpText;
+    // Each note starts where the one before ended, or later.
+    let last = 0;
     for (let i = 0; i < this.noteRefs.size && i + 1 < cps.length; i++) {
-      const start = base + Math.min(cps[i], this.fib.ccpFtn);
-      const end = base + Math.min(cps[i + 1], this.fib.ccpFtn);
+      const start = base + Math.max(last, Math.min(cps[i], this.fib.ccpFtn));
+      const end = base + Math.max(last, Math.min(cps[i + 1], this.fib.ccpFtn));
+      last = end - base;
       this.footnotes.push(end > start ? this.blocks(start, end, null, true) : []);
     }
   }
@@ -474,8 +496,9 @@ export abstract class Word2Reader {
     limits[limits.length - 1].end = mainEnd;
     const sectionEnds = new Set(limits.slice(0, -1).map((l) => l.end - 1));
     const hdd = this.entry(this.fib.hdd);
+    // The story starts, each within the header stories and at or after the one before.
     const stories: number[] = [];
-    for (let at = 0; at + 4 <= hdd.length; at += 4) stories.push(this.n32(hdd, at));
+    for (let at = 0; at + 4 <= hdd.length; at += 4) stories.push(Math.max(stories[stories.length - 1] ?? 0, Math.min(this.n32(hdd, at), this.fib.ccpHdd)));
     const hddBase = this.fib.ccpText + this.fib.ccpFtn;
     // The stories of the note separators come first.
     let story = this.docProps.separatorStories;
@@ -519,8 +542,8 @@ export abstract class Word2Reader {
       for (let bit = 0; bit < 6; bit++) {
         if (!(headerFlags & (1 << bit))) continue;
         if (story + 2 >= stories.length) break;
-        const start = hddBase + Math.min(stories[story], this.fib.ccpHdd);
-        const end = hddBase + Math.min(stories[story + 1], this.fib.ccpHdd);
+        const start = hddBase + stories[story];
+        const end = hddBase + stories[story + 1];
         story++;
         const [kind, type] = kinds[bit];
         if (this.storyHasText(start, end)) headers.push({ kind, type, blocks: this.blocks(start, end, null, false) });

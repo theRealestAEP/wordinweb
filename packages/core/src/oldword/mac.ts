@@ -233,6 +233,7 @@ export class MacReader extends Word2Reader {
         const partSize = this.u32(part);
         if (partSize < 16 || part + partSize > at + size) break;
         if (partSize > 16 + 10) {
+          if (!this.takeMedia(partSize)) return undefined;
           index = this.pictures.length;
           this.pictures.push({ data: this.bytes.slice(part + 16, part + partSize), ext: "pict" });
           break;

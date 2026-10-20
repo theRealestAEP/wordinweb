@@ -2,7 +2,7 @@
 // the .doc reader's property writers (doc/sprm.ts) so the renderer and the
 // compare read it as they read a converted Word 97 document.
 import { Block, Inline, OldDocument, Paragraph, Row, Run, Section, Table } from "./model.js";
-import { ParaProps, RunProps, XmlContext, escapeAttr, escapeText, pPrXml, rPrXml, sectPrXml, tblPrXml, tcPrXml, trPrXml } from "../doc/sprm.js";
+import { ParaProps, RunProps, XmlContext, escapeAttr as escapeAttrChars, escapeText as escapeTextChars, pPrXml, rPrXml, sectPrXml, tblPrXml, tcPrXml, trPrXml } from "../doc/sprm.js";
 
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
 const DRAWING_NS =
@@ -35,7 +35,7 @@ class PackageWriter {
   constructor(private readonly doc: OldDocument) {
     this.ctx = {
       styleId: (istd) => (istd > 0 && istd < doc.styles.length ? styleId(doc, istd) : undefined),
-      fontName: (ftc) => doc.fonts[ftc],
+      fontName: (ftc) => (doc.fonts[ftc] === undefined ? undefined : xmlChars(doc.fonts[ftc])),
       styleToggle: () => false,
     };
     this.noteKind = doc.endnotes ? "endnote" : "footnote";
@@ -94,6 +94,14 @@ class PackageWriter {
       const name = `media/image${i + 1}.${picture.ext}`;
       this.parts[`word/${name}`] = picture.data;
       this.rels.push({ id: `rIdImage${i + 1}`, type: `${REL_NS}/image`, target: name });
+    }
+    // A picture in a header, a footer or a note is named from that part: each gets the pictures' relationships too.
+    if (doc.pictures.length) {
+      const images = doc.pictures.map((picture, i) => `<Relationship Id="rIdImage${i + 1}" Type="${REL_NS}/image" Target="media/image${i + 1}.${picture.ext}"/>`).join("");
+      for (const name of Object.keys(this.parts)) {
+        const part = /^word\/((?:header|footer)\d+|footnotes|endnotes)\.xml$/.exec(name);
+        if (part) this.parts[`word/_rels/${part[1]}.xml.rels`] = this.encoder.encode(`${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${images}</Relationships>`);
+      }
     }
     this.parts["word/document.xml"] = this.encoder.encode(`${XML_HEAD}<w:document ${W_NS} ${DRAWING_NS}><w:body>${body}</w:body></w:document>`);
     this.parts["word/_rels/document.xml.rels"] = this.encoder.encode(
@@ -301,6 +309,19 @@ class PackageWriter {
 
 function emptyParagraph(): Paragraph {
   return { type: "paragraph", props: { istd: 0, tabs: [], borders: {}, frame: {} } as ParaProps, mark: { toggles: {} } as RunProps, runs: [] };
+}
+
+/** A string without the characters XML 1.0 cannot hold (the C0 controls but tab, newline and return; U+FFFE, U+FFFF). */
+function xmlChars(s: string): string {
+  return s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f￾￿]/g, "");
+}
+
+function escapeAttr(s: string): string {
+  return escapeAttrChars(xmlChars(s));
+}
+
+function escapeText(s: string): string {
+  return escapeTextChars(xmlChars(s));
 }
 
 /** A style's id: its name without what an id cannot hold, unique among the document's styles. */

@@ -193,6 +193,7 @@ class WinWordReader extends Word2Reader {
     let index = this.pictureIndex.get(at);
     if (index === undefined) {
       const data = this.bytes.subarray(at + cbHeader, at + lcb);
+      if (!this.takeMedia(data.length)) return undefined;
       const image = pictureData(data);
       if (!image) return undefined;
       index = this.pictures.length;
