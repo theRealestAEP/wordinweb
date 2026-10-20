@@ -38,6 +38,7 @@ import {
   LineBox,
   breakParagraph,
   fontOf,
+  leadingBreakOf,
   resolveField,
   setBreakCacheWindowed,
 } from "./inline.js";
@@ -4425,7 +4426,11 @@ class Engine {
         broken = breakNow(paraTopEstimate);
       }
     }
-    if (next?.type === "paragraph" && broken.lines.length > 0) {
+    // A paragraph that ends with a page or column break sends the paragraphs
+    // after it to the next page or column. Their anchored boxes go there with
+    // them, so the two lookaheads below must not draw those boxes here.
+    const endsWithBreak = broken.lines[broken.lines.length - 1]?.forcedBreakAfter !== undefined;
+    if (next?.type === "paragraph" && broken.lines.length > 0 && !endsWithBreak) {
       const predictedNextTop = paraBottom;
       // topAndBottom boxes anchor at this paragraph's line bottom EXACTLY
       // (parity2-textboxes), but a SQUARE box anchors at the next paragraph's
@@ -4504,12 +4509,13 @@ class Engine {
     // around a page/margin-anchored float once its anchor paragraph lands on
     // the same page (staging-anchors2: the relH/V=margin box carves Body 3/4
     // into wrapped lines although it is anchored five paragraphs later).
-    if (broken.lines.length > 0 && siblings && index !== undefined) {
+    if (broken.lines.length > 0 && siblings && index !== undefined && !endsWithBreak) {
       const farHits: Shape[] = [];
       let lastIdx = index;
       for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
         const blk = siblings[idx];
         if (blk.type !== "paragraph") break;
+        if (this.doc.effectiveParaProps(blk).pageBreakBefore || hasHardBreak(blk)) break;
         for (const s of this.collectAnchors(blk)) {
           if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
           if ("behind" in s && s.behind) continue;
@@ -8364,6 +8370,11 @@ class Engine {
     this.lastParaSpacingAfter = 0;
     this.lastParaAfterPad = 0;
     this.lastParaWasEmpty = false;
+    // A paragraph that ends with a page break arms the next paragraph to open
+    // at the top of the new page. This table opens there instead, so the flag
+    // is used up here. Left armed, the paragraph after the table went back to
+    // the page top and was drawn over the table's first row.
+    this.suppressNextSpaceBefore = false;
     this.ensureTableBorders(tbl);
     const sourceTablePr = tbl.src ? child(tbl.src, "tblPr") : undefined;
     const sourceBorders = sourceTablePr ? child(sourceTablePr, "tblBorders") : undefined;
@@ -10225,37 +10236,17 @@ function sectionHasColumnBreak(section: Section): boolean {
   return false;
 }
 
-/** A paragraph that OPENS with a page/column break (before any real content,
- * with content following) is a break-before: return its type and source run. A
- * break-only paragraph, or one whose first content is text/tab/image, returns
- * undefined (kept on the old flow). */
-function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } | undefined {
-  let br: { type: "page" | "column"; run: Run } | undefined;
+/** Does the paragraph hold a page or column break anywhere? */
+function hasHardBreak(para: Paragraph): boolean {
   for (const child of para.children) {
     const runs = child.type === "run" ? [child] : child.runs;
     for (const r of runs) {
       for (const c of r.content) {
-        if (!br) {
-          if (c.kind === "break") {
-            if (c.breakType === "page" || c.breakType === "column") {
-              br = { type: c.breakType, run: r };
-              continue;
-            }
-            return undefined; // a line break opens the paragraph
-          }
-          if (c.kind === "text" && c.text.length === 0) continue;
-          return undefined; // real content precedes any break
-        }
-        // After the opening break: any real content confirms break-before.
-        if (c.kind === "text") {
-          if (c.text.length > 0) return br;
-          continue;
-        }
-        return br;
+        if (c.kind === "break" && (c.breakType === "page" || c.breakType === "column")) return true;
       }
     }
   }
-  return undefined; // break with nothing after it (break-only paragraph)
+  return false;
 }
 
 /** The widest laid line in a shape's freshly measured frame, px. Must be read
