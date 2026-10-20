@@ -49,9 +49,11 @@ import {
   LayoutFontSample,
   LayoutResult,
   LayoutWindow,
+  LineEdgeItem,
   PageItem,
   TextItem,
 } from "./types.js";
+import { joinBoxBorders } from "./border-edges.js";
 
 const INITIAL_MODEL_WINDOW_PAGES = 12;
 
@@ -5615,10 +5617,12 @@ class Engine {
           }
           if (tb.stroke) {
             const b = { style: "single" as const, width: tb.stroke.weight, color: tb.stroke.color, space: 0 };
-            page.items.push({ kind: "edge", x1: bx, y1: by, x2: bx + w, y2: by, border: b });
-            page.items.push({ kind: "edge", x1: bx, y1: by + h, x2: bx + w, y2: by + h, border: b });
-            page.items.push({ kind: "edge", x1: bx, y1: by, x2: bx, y2: by + h, border: b });
-            page.items.push({ kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b });
+            page.items.push(...joinBoxBorders([
+              { kind: "edge", x1: bx, y1: by, x2: bx + w, y2: by, border: b },
+              { kind: "edge", x1: bx, y1: by + h, x2: bx + w, y2: by + h, border: b },
+              { kind: "edge", x1: bx, y1: by, x2: bx, y2: by + h, border: b },
+              { kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b },
+            ]));
           }
           const ins = tb.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
           // Horizontally the shape stroke STRADDLES the shape edge (half in, half
@@ -6028,15 +6032,16 @@ class Engine {
     }
     const b = props.borders;
     if (!b) return;
+    const edges: [LineEdgeItem?, LineEdgeItem?, LineEdgeItem?, LineEdgeItem?] = [];
     if (b.top && b.top.style !== "none" && isFirstFrag) {
       const y = top - b.top.space - this.borderPaintWidth(b.top) + b.top.width / 2;
       const xPad = this.paragraphBorderOverhang(b.top);
-      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.top });
+      edges[0] = { kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.top };
     }
     if (b.bottom && b.bottom.style !== "none" && isLastFrag) {
       const y = bottom + b.bottom.space + b.bottom.width / 2;
       const xPad = this.paragraphBorderOverhang(b.bottom);
-      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.bottom });
+      edges[1] = { kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.bottom };
     }
     // w:between: when a merged run DECLARES a between border, that rule draws
     // at each interior boundary in place of the suppressed top/bottom pair. It
@@ -6051,12 +6056,13 @@ class Engine {
     }
     if (b.left && b.left.style !== "none") {
       const x = left - b.left.space - this.borderPaintWidth(b.left) + b.left.width / 2;
-      page.items.push({ kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.left });
+      edges[2] = { kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.left };
     }
     if (b.right && b.right.style !== "none") {
       const x = right + b.right.space + b.right.width / 2;
-      page.items.push({ kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.right });
+      edges[3] = { kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.right };
     }
+    page.items.push(...joinBoxBorders(edges));
   }
 
   // ---------- frames (headers, footers, table cells) ----------
@@ -6800,23 +6806,24 @@ class Engine {
           const b = { style: "single" as const, width: shape.stroke.weight, color: shape.stroke.color, space: 0 };
           const x0 = ox - fx;
           const y0 = oy - fy;
-          const edge = (x1: number, y1: number, x2: number, y2: number) =>
-            page.items.push({
-              kind: "edge",
-              x1,
-              y1,
-              x2,
-              y2,
-              border: b,
-              ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
-              ...(behind ? { behind: true } : {}),
-              ...(front ? { front: true } : {}),
-              z: shape.z,
-            });
-          edge(x0, y0, x0 + width, y0);
-          edge(x0, y0 + height, x0 + width, y0 + height);
-          edge(x0, y0, x0, y0 + height);
-          edge(x0 + width, y0, x0 + width, y0 + height);
+          const edge = (x1: number, y1: number, x2: number, y2: number): LineEdgeItem => ({
+            kind: "edge",
+            x1,
+            y1,
+            x2,
+            y2,
+            border: b,
+            ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
+            ...(behind ? { behind: true } : {}),
+            ...(front ? { front: true } : {}),
+            z: shape.z,
+          });
+          page.items.push(...joinBoxBorders([
+            edge(x0, y0, x0 + width, y0),
+            edge(x0, y0 + height, x0 + width, y0 + height),
+            edge(x0, y0, x0, y0 + height),
+            edge(x0 + width, y0, x0 + width, y0 + height),
+          ]));
         }
         // Text insets (bodyPr lIns/tIns/rIns/bIns), default 0.1in/0.05in.
         const ins = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
@@ -7021,12 +7028,14 @@ class Engine {
     }
     if (ts.stroke) {
       const b = { style: "single" as const, width: ts.stroke.weight, color: ts.stroke.color, space: 0 };
-      const edge = (x1: number, y1: number, x2: number, y2: number) =>
-        page.items.push({ kind: "edge", x1, y1, x2, y2, border: b, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(front ? { front: true } : {}), z });
-      edge(tx, ty, tx + ts.width, ty);
-      edge(tx, ty + ts.height, tx + ts.width, ty + ts.height);
-      edge(tx, ty, tx, ty + ts.height);
-      edge(tx + ts.width, ty, tx + ts.width, ty + ts.height);
+      const edge = (x1: number, y1: number, x2: number, y2: number): LineEdgeItem =>
+        ({ kind: "edge", x1, y1, x2, y2, border: b, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(front ? { front: true } : {}), z });
+      page.items.push(...joinBoxBorders([
+        edge(tx, ty, tx + ts.width, ty),
+        edge(tx, ty + ts.height, tx + ts.width, ty + ts.height),
+        edge(tx, ty, tx, ty + ts.height),
+        edge(tx + ts.width, ty, tx + ts.width, ty + ts.height),
+      ]));
     }
     const ins = ts.insets;
     const inner = this.layoutFrame(ts.blocks, Math.max(ts.width - ins.l - ins.r, 1), fields, {
@@ -8604,14 +8613,16 @@ class Engine {
   ): void {
     const tb = tbl.props.borders;
     const x1 = x0 + tableWidth;
-    const edge = (b: Border | undefined, ex1: number, ey1: number, ex2: number, ey2: number) => {
-      if (!b || b.style === "none") return;
-      page.items.push({ kind: "edge", x1: ex1, y1: ey1, x2: ex2, y2: ey2, border: b, role: "table-rule" });
+    const edge = (b: Border | undefined, ex1: number, ey1: number, ex2: number, ey2: number): LineEdgeItem | undefined => {
+      if (!b || b.style === "none") return undefined;
+      return { kind: "edge", x1: ex1, y1: ey1, x2: ex2, y2: ey2, border: b, role: "table-rule" };
     };
-    edge(tb?.top, x0, y0, x1, y0);
-    edge(tb?.bottom, x0, y1, x1, y1);
-    edge(tb?.left, x0, y0, x0, y1);
-    edge(tb?.right, x1, y0, x1, y1);
+    page.items.push(...joinBoxBorders([
+      edge(tb?.top, x0, y0, x1, y0),
+      edge(tb?.bottom, x0, y1, x1, y1),
+      edge(tb?.left, x0, y0, x0, y1),
+      edge(tb?.right, x1, y0, x1, y1),
+    ]));
   }
 
   /** Resolve a floating table's absolute footprint (x/y/size) and per-row
@@ -9615,18 +9626,12 @@ class Engine {
     const left = pick(cb?.left, condBorders?.left, tb?.left, tb?.insideV, firstCol);
     const right = pick(cb?.right, condBorders?.right, tb?.right, tb?.insideV, lastCol);
 
-    if (top) {
-      page.items.push({ kind: "edge", x1: x, y1: y, x2: x + w, y2: y, border: top, role: "table-rule" });
-    }
-    if (bottom) {
-      page.items.push({ kind: "edge", x1: x, y1: y + h, x2: x + w, y2: y + h, border: bottom, role: "table-rule" });
-    }
-    if (left) {
-      page.items.push({ kind: "edge", x1: x, y1: y, x2: x, y2: y + h, border: left, role: "table-rule" });
-    }
-    if (right) {
-      page.items.push({ kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right, role: "table-rule" });
-    }
+    page.items.push(...joinBoxBorders([
+      top ? { kind: "edge", x1: x, y1: y, x2: x + w, y2: y, border: top, role: "table-rule" } : undefined,
+      bottom ? { kind: "edge", x1: x, y1: y + h, x2: x + w, y2: y + h, border: bottom, role: "table-rule" } : undefined,
+      left ? { kind: "edge", x1: x, y1: y, x2: x, y2: y + h, border: left, role: "table-rule" } : undefined,
+      right ? { kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right, role: "table-rule" } : undefined,
+    ]));
     // Diagonal cell borders (w:tcBorders tl2br / tr2bl): corner-to-corner
     // strokes inside the cell box (probe3-table-exotics "diag" cell paints
     // both, forming an X).

@@ -41,6 +41,8 @@ export interface Border {
    * sz-4 rule contributes 0.5pt, not the floored 0.5625pt (phase23 p66:
    * 45 rows drift 2.5px down without it). */
   rawWidth?: number;
+  /** w:shadow: a strip outside the right and bottom borders. */
+  shadow?: boolean;
 }
 
 export interface ParagraphBorders {
