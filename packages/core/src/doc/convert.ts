@@ -173,11 +173,16 @@ class Converter {
   /** A Word 6.0/95 document's lists, which its paragraphs make as they are read. */
   private readonly lists6: Word6Lists | undefined;
   private readonly styleAutonumbers = new Map<number, { nLvlAnm?: number; anld?: Uint8Array }>();
+  /** A Word 6.0/95 document's field begin, separator and end marks, by CP: a 0x13, 0x14 or 0x15 no field lists is text. */
+  private readonly fieldMarks6: Set<number> | undefined;
 
   constructor(private readonly reader: DocReader, private readonly hooks: ConvertHooks) {
     // The whole text once: every story is a slice of it.
     this.text = reader.pieces.text(0, Math.min(reader.pieces.end, reader.parts.end));
-    if (reader.fib.word6) this.lists6 = new Word6Lists(reader.fonts, reader.fib.word6.mac, reader.ctx);
+    if (reader.fib.word6) {
+      this.lists6 = new Word6Lists(reader.fonts, reader.fib.word6.mac, reader.ctx);
+      this.fieldMarks6 = word6FieldMarks(reader);
+    }
     this.readSections();
     this.readHeaderStories();
     this.readNoteRefs();
@@ -540,6 +545,11 @@ class Converter {
         text += String.fromCharCode(ch);
         continue;
       }
+      // A Word 6 field mark no field lists is a character of the OEM set: ‼, ¶, §.
+      if (this.fieldMarks6 && ch >= 0x13 && ch <= 0x15 && !this.fieldMarks6.has(cp)) {
+        text += "‼¶§"[ch - 0x13];
+        continue;
+      }
       switch (ch) {
         case 0x09: flushText(); content += "<w:tab/>"; break;
         case 0x0b: flushText(); content += "<w:br/>"; break;
@@ -776,6 +786,21 @@ class Converter {
     out.push("</w:settings>");
     return out.join("");
   }
+}
+
+/** The CPs of the field marks a Word 6 file's field PLCs list, in every story. */
+function word6FieldMarks(reader: DocReader): Set<number> {
+  const { fib, streams, parts } = reader;
+  const marks = new Set<number>();
+  const stories: [number, number][] = [
+    [FC.plcfFldMom, parts.main], [FC.plcfFldHdr, parts.headers], [FC.plcfFldFtn, parts.footnotes], [FC.plcfFldAtn, parts.comments],
+    [FC.plcfFldEdn, parts.endnotes], [FC.plcfFldTxbx, parts.textboxes], [FC.plcfFldHdrTxbx, parts.headerTextboxes],
+  ];
+  for (const [index, base] of stories) {
+    const { cps } = parsePlc(tableBlob(fib, streams.table, index), 2);
+    for (let i = 0; i < cps.length - 1; i++) marks.add(base + cps[i]);
+  }
+  return marks;
 }
 
 function bitCount(v: number): number {

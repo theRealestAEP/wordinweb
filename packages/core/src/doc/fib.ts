@@ -17,6 +17,9 @@ export const FC = {
   plcfBtePapx: 13,
   sttbfFfn: 15,
   plcfFldMom: 16,
+  plcfFldHdr: 17,
+  plcfFldFtn: 18,
+  plcfFldAtn: 19,
   sttbfBkmk: 21,
   plcfBkf: 22,
   plcfBkl: 23,
@@ -33,10 +36,13 @@ export const FC = {
   plcfAtnBkl: 43,
   plcfendRef: 46,
   plcfendTxt: 47,
+  plcfFldEdn: 48,
   dggInfo: 50,
   sttbfRMark: 51,
   plcftxbxTxt: 56,
+  plcfFldTxbx: 57,
   plcfHdrtxbxTxt: 58,
+  plcfFldHdrTxbx: 59,
   plfLst: 73,
   plfLfo: 74,
   plcfTxbxBkd: 75,
@@ -160,7 +166,7 @@ export function parseFib(word: Uint8Array): Fib {
 }
 
 /** The FC indices past 37 that a Word 6.0/95 FIB has too, in the same order as Word 97's. */
-const WORD6_LATE_FC = new Set<number>([FC.plcfdoaMom, FC.plcfdoaHdr, FC.plcfAtnBkf, FC.plcfAtnBkl, FC.plcfendRef, FC.plcfendTxt, FC.sttbfRMark, FC.plcftxbxTxt, FC.plcfHdrtxbxTxt]);
+const WORD6_LATE_FC = new Set<number>([FC.plcfdoaMom, FC.plcfdoaHdr, FC.plcfAtnBkf, FC.plcfAtnBkl, FC.plcfendRef, FC.plcfendTxt, FC.plcfFldEdn, FC.sttbfRMark, FC.plcftxbxTxt, FC.plcfFldTxbx, FC.plcfHdrtxbxTxt, FC.plcfFldHdrTxbx]);
 
 /**
  * The FIB of a Word 6.0 (nFib 0x65) or Word 95 (nFib 0x68) file, from
