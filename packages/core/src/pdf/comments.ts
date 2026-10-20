@@ -400,21 +400,24 @@ export class CommentColumn {
   /** The lines of a comment's balloon: its head, text, and its thread, each
    * reply under the comment it answers, stepped in by its depth. A tracked
    * change's balloon takes its author's revision color. The head is the
-   * avatar, the author's name and the date; without authors, the date
-   * alone, on a line of its own (none when there is no date). */
+   * avatar, the author's name and the date; without authors, or for an
+   * author with no name, the date alone, on a line of its own (none when
+   * there is no date). As in Word, a comment with no author shows no date. */
   private balloon(comment: DocComment, color = this.authors ? avatarColor(comment.author) : AVATAR_COLORS[0]): Balloon {
     const lines: Line[] = [{ height: PAD_Y, paint: () => undefined }];
     const inner = CARD_WIDTH - 2 * PAD_X;
     const resolved = !!comment.resolved;
     const fg = resolved ? "#5f6368" : "#3c4043";
+    const change = comment.id.startsWith("rev:");
+    const nameOf = (source: DocComment): string => this.names.get(source.author) ?? source.author;
     const push = (indent: number, source: DocComment): void => {
       const left = PAD_X + indent;
       const width = inner - indent;
-      const name = this.names.get(source.author) ?? source.author;
-      const date = source.date ? new Date(source.date) : null;
+      const name = nameOf(source);
+      const date = source.date && (name || change) ? new Date(source.date) : null;
       const dateText = date && !Number.isNaN(date.getTime()) ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : "";
       const dateFont: FontSpec = { family: UI_FONT, size: 11, bold: false, italic: false };
-      if (!this.authors) {
+      if (!this.authors || !name) {
         if (dateText) lines.push({ height: LINE_HEIGHT + 4, paint: (drawer, x, y) => this.text(drawer, dateText, dateFont, "#5f6368", x + left, y + 12) });
       } else lines.push({
         height: AVATAR + 6,
@@ -424,10 +427,9 @@ export class CommentColumn {
           const initialsFont: FontSpec = { family: UI_FONT, size: 10, bold: true, italic: false };
           const iw = this.measurer.width(initials, initialsFont);
           this.text(drawer, initials, initialsFont, "#ffffff", x + left + AVATAR / 2 - iw / 2, y + AVATAR / 2 + 3.5);
-          const author = name || (indent ? "Reply" : "Comment");
           const authorFont: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: true, italic: false };
           const textX = x + left + AVATAR + 8;
-          this.text(drawer, this.clip(author, authorFont, width - AVATAR - 8), authorFont, fg, textX, y + (dateText ? 10 : 16));
+          this.text(drawer, this.clip(name, authorFont, width - AVATAR - 8), authorFont, fg, textX, y + (dateText ? 10 : 16));
           if (dateText) this.text(drawer, dateText, dateFont, "#5f6368", textX, y + 22);
         },
       });
@@ -466,7 +468,7 @@ export class CommentColumn {
     };
     thread(comment, 10);
     lines.push({ height: PAD_Y, paint: () => undefined });
-    return { id: comment.id, color, lines, leaderAt: PAD_Y + (this.authors ? AVATAR : LINE_HEIGHT) / 2 };
+    return { id: comment.id, color, lines, leaderAt: PAD_Y + (this.authors && nameOf(comment) ? AVATAR : LINE_HEIGHT) / 2 };
   }
 
   private text(drawer: PageDrawer, text: string, font: FontSpec, color: string, x: number, baseline: number): void {
