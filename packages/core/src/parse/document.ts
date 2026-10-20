@@ -235,7 +235,7 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
       const deleted = localName(mark.name) === "del";
       para.markRevision = deleted ? "del" : "ins";
       if (ctx.revisionColor) {
-        const author = attr(mark, "author") ?? "";
+        const author = revisionAuthor(mark);
         para.markRevisionColor = ctx.revisionColor(author);
         para.markChanges = [{ id: `mark-${para.markRevision}:${attr(mark, "id") ?? ""}`, kind: para.markRevision, author, date: attr(mark, "date"), label: deleted ? "Deleted paragraph mark" : "Inserted paragraph mark" }];
       }
@@ -257,7 +257,13 @@ const MOVE_COLOR = "#008000";
 
 /** A format change's balloon, from its w:*Change element and Word's words for what changed. */
 export function formatChange(el: XmlElement, what: string): Revision {
-  return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: attr(el, "author") ?? "", date: attr(el, "date"), label: `Formatted: ${what}` };
+  return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: revisionAuthor(el), date: attr(el, "date"), label: `Formatted: ${what}` };
+}
+
+/** A change's author as Word names it: "Unknown" for a change with no
+ * w:author. An empty w:author stays empty, and Word prints no name for it. */
+function revisionAuthor(el: XmlElement): string {
+  return attr(el, "author") ?? "Unknown";
 }
 
 function addChange(runs: Run[], change: Revision): void {
@@ -659,7 +665,7 @@ function parseParaChildren(
         // is recorded on its runs; a move is Word's default green, double
         // underlined at its destination and double struck at its origin.
         const move = ln === "moveTo" || ln === "moveFrom";
-        const author = attr(el, "author") ?? "";
+        const author = revisionAuthor(el);
         const color = ctx.revisionColor ? (move ? MOVE_COLOR : ctx.revisionColor(author)) : isInsert ? "#188038" : "#D93025";
         const double = move && !!ctx.revisionColor;
         const change: Revision | undefined = ctx.revisionColor
@@ -2751,7 +2757,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     const rowChange = child(trPr, "ins") ?? child(trPr, "del");
     if (rowChange) {
       const inserted = localName(rowChange.name) === "ins";
-      const author = attr(rowChange, "author") ?? "";
+      const author = revisionAuthor(rowChange);
       const change: Revision = { id: `row-${localName(rowChange.name)}:${attr(rowChange, "id") ?? ""}`, kind: inserted ? "ins" : "del", author, date: attr(rowChange, "date"), label: inserted ? "Inserted row" : "Deleted row" };
       const color = ctx.revisionColor(author);
       for (const run of runsOfBlocks(row.cells.flatMap((cell) => cell.blocks))) {

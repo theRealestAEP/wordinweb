@@ -423,21 +423,47 @@ describe("renderDocxToPdf with markup", () => {
         "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" ${who}><w:p>${t("The comment text.")}</w:p></w:comment></w:comments>`,
       });
     };
-    const cases: [string, string][] = [
-      ["no w:author", 'w:date="2026-08-12T10:00:00Z"'],
-      ['w:author=""', 'w:author="" w:date="2026-08-12T10:00:00Z"'],
-      ["no w:date", 'w:author="Ada Reviewer"'],
+    const print = async (bytes: Uint8Array): Promise<{ text: string; ops: string }> => {
+      const out = new Collect();
+      const result = await renderDocxToPdf(bytesSource(bytes), out, { markup: true, comments: true });
+      expect(result.pages).toBe(1);
+      const pdf = Buffer.concat(out.chunks);
+      const ops = [...pdf.toString("latin1").matchAll(/\/Length (\d+) >>\nstream\n/g)]
+        .map((m) => inflateSync(pdf.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1"))
+        .filter((s) => s.includes(" Tf"))
+        .join("\n");
+      return { text: pdfText(pdf), ops };
+    };
+    /** The avatars: filled circles. */
+    const avatars = (ops: string): number => [...ops.matchAll(/^q [\d. ]+ rg [\d. ]+ m [\d. c]+ f Q$/gm)].length;
+    const KINDS = ["Inserted", "Deleted", "Formatted: Font: Bold", "Formatted: Centered", "Inserted row"];
+    // Word, measured: a change with no w:author is by "Unknown"; one with an
+    // empty w:author names no one; a comment with either shows no name and
+    // no date; a change or comment with no w:date shows no date.
+    const cases: { name: string; who: string; changeHead: string; commentHead: string; avatars: number }[] = [
+      { name: "no w:author", who: 'w:date="2026-08-12T10:00:00Z"', changeHead: "Unknown 8/12/2026 UTC ", commentHead: "", avatars: 5 },
+      { name: 'w:author=""', who: 'w:author="" w:date="2026-08-12T10:00:00Z"', changeHead: "8/12/2026 UTC ", commentHead: "", avatars: 0 },
+      { name: "no w:date", who: 'w:author="Ada Reviewer"', changeHead: "Ada Reviewer ", commentHead: "AR Ada Reviewer ", avatars: 6 },
     ];
-    for (const [name, who] of cases) {
-      it.skipIf(!hasPdftotext)(`prints every card with ${name}`, async () => {
-        const out = new Collect();
-        const result = await renderDocxToPdf(bytesSource(anonymous(who)), out, { markup: true, comments: true });
-        expect(result.pages).toBe(1);
-        const text = pdfText(Buffer.concat(out.chunks));
-        expect(text).not.toMatch(/undefined|NaN|Invalid Date/);
-        for (const kind of ["Inserted", "Deleted", "Formatted: Font: Bold", "Formatted: Centered", "Inserted row", "The comment text."]) expect(text).toContain(kind);
+    for (const { name, who, changeHead, commentHead, avatars: count } of cases) {
+      it.skipIf(!hasPdftotext)(`prints every card with ${name} as Word does`, async () => {
+        const { text, ops } = await print(anonymous(who));
+        expect(text).not.toMatch(/undefined|NaN|Invalid Date|2001|\?/);
+        for (const kind of KINDS) expect(text).toContain(changeHead + kind);
+        expect(text).toContain(`Inserted row ${commentHead}The comment text.`);
+        expect(text).not.toMatch(/\bComment\b|\bReply\b/);
+        expect(avatars(ops)).toBe(count);
       });
     }
+
+    it.skipIf(!hasPdftotext)("gives Unknown its own author color and the initial U", async () => {
+      const bytes = docx(p(`<w:ins w:id="1" ${ADA}>${t("by Ada")}</w:ins>`), p(`<w:ins w:id="2">${t("by no one named")}</w:ins>`));
+      const { text, ops } = await print(bytes);
+      expect(text).toMatch(/\bU\b/);
+      // Ada, first, is red; Unknown blue.
+      expect(groups(ops, "1 0 0").filter((g) => g.underlined)).toHaveLength(1);
+      expect(groups(ops, "0 0 1").filter((g) => g.underlined)).toHaveLength(1);
+    });
   });
 
   it("gives the authors Word's colors in the order they first appear, the ninth taking the first again", async () => {

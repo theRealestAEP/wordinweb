@@ -719,6 +719,31 @@ describe("the pdf option", () => {
     for (const name of ["Carol", "Dan Drafter"]) expect(raw).not.toContain(name);
   });
 
+  it.skipIf(!hasPdftotext)("keeps the inputs' comments with no author or an empty one as they were, and prints them as Word does", async () => {
+    const commented = (id: number, words: string): string =>
+      `<w:p><w:commentRangeStart w:id="${id}"/><w:r><w:t xml:space="preserve">${words}</w:t></w:r><w:commentRangeEnd w:id="${id}"/><w:r><w:commentReference w:id="${id}"/></w:r></w:p>`;
+    // Comment 0 has no w:author; comment 1, on words the revised document removes, an empty one.
+    const noAuthor = `<w:comment w:id="0" w:date="2026-08-14T09:00:00Z"><w:p><w:r><w:t>Check the term.</w:t></w:r></w:p></w:comment>`;
+    const emptyAuthor = `<w:comment w:id="1" w:author="" w:date="2026-08-14T09:00:00Z"><w:p><w:r><w:t>Why keep this?</w:t></w:r></w:p></w:comment>`;
+    const original = join(dir, "no-author-o.docx");
+    const revised = join(dir, "no-author-r.docx");
+    writeFileSync(original, makeDocx({ "word/document.xml": wrapDocument(commented(0, "The term is two years.") + commented(1, "A removed sentence.")), "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}>${noAuthor}${emptyAuthor}</w:comments>` }));
+    writeFileSync(revised, makeDocx({ "word/document.xml": wrapDocument(commented(0, "The term is three years.")), "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}>${noAuthor}</w:comments>` }));
+    const out = join(dir, "no-author-out.docx");
+    const pdf = join(dir, "no-author.pdf");
+    await compareFiles(original, revised, out, { author: "Dan Drafter", date: DATE, pdf: { path: pdf, comments: true } });
+    const comments = parseXml(strFromU8(unzipSync(new Uint8Array(readFileSync(out)))["word/comments.xml"])).children.filter((c) => localName(c.name) === "comment");
+    expect(comments).toHaveLength(2);
+    expect(comments.map((c) => c.attrs["w:author"])).toEqual([undefined, ""]);
+    const text = execFileSync("pdftotext", [pdf, "-"], { encoding: "utf8" }).replace(/\s+/g, " ");
+    // Each comment card is its text alone: no name, no date.
+    for (const comment of ["Check the term.", "Why keep this?"]) {
+      expect(text).toContain(comment);
+      expect(text).not.toContain(`UTC ${comment}`);
+    }
+    expect(text).not.toMatch(/8\/14\/2026|Unknown|\bComment\b|\?\s*Check/);
+  });
+
   it("renders Arabic to the PDF now that the renderer shapes it", async () => {
     const original = join(dir, "pdf-arabic-o.docx");
     const revised = join(dir, "pdf-arabic-r.docx");
