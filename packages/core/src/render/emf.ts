@@ -20,9 +20,23 @@
  * emf-converter applies to coordinates (it keeps no extents across
  * SaveDC/RestoreDC, and neither does this).
  *
- * An EMF that also carries EMF+ records is left as it is: emf-converter
- * draws its GDI records as well, without their world transform, so drawn
- * right they would land over the EMF+ picture at the wrong scale.
+ * An EMF that also carries EMF+ records gets none of the rewrites above
+ * (emf-converter draws its EMF+ records, with their world transform), and
+ * three of its own ([MS-EMFPLUS] 1.3.1, 2.1.1.2, 2.3.3.2, 2.3.4.6):
+ *
+ * - EMF+ Dual (the EmfPlusHeader's flag 0x0001): the EMF records draw the
+ *   picture a second time, for a player that reads no EMF+. emf-converter
+ *   played both, without the EMF records' world transform: labels twice,
+ *   shapes at the wrong scale. Only the EMF records an EMF+ player plays
+ *   are kept: those after an EmfPlusGetDC, up to the next EMF+ record.
+ * - A DrawDriverString's glyph positions follow its glyphs directly, 2
+ *   bytes off a 4-byte boundary when the glyph count is odd; emf-converter
+ *   reads them from the next boundary, misread floats (a text origin of
+ *   1e+32). Two bytes of padding go after such a record's glyphs.
+ * - A bitmap image object's BitmapDataType is 0 for pixels and 1 for a
+ *   compressed image (a PNG or a JPEG); emf-converter reads 1 as pixels and
+ *   2 as compressed, so drew neither. Each is set to the value it reads.
+ *   An object continued over several records is left as it is.
  */
 
 const EMR_HEADER = 1;
@@ -35,6 +49,15 @@ const EMR_SCALEWINDOWEXTEX = 32;
 const EMR_CREATEPEN = 38;
 const EMR_COMMENT = 70;
 const EMFPLUS = 0x2b464d45;
+const EMFPLUS_HEADER = 0x4001;
+const EMFPLUS_GETDC = 0x4004;
+const EMFPLUS_OBJECT = 0x4008;
+const EMFPLUS_DRAWDRIVERSTRING = 0x4036;
+const EMFPLUS_DUAL = 0x0001;
+const EMFPLUS_CONTINUED = 0x8000;
+const OBJECT_IMAGE = 5;
+const IMAGE_BITMAP = 1;
+const GRAPHICS_VERSION_SIGNATURE = 0xdbc01;
 const EMR_BEGINPATH = 59;
 const EMR_ENDPATH = 60;
 const EMR_FILLPATH = 62;
@@ -91,7 +114,8 @@ function hasEmfPlus(view: DataView): boolean {
 /** The EMF with the records above rewritten; the same bytes when it has none. */
 export function prepareEmf(bytes: Uint8Array): Uint8Array {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes.length < 88 || view.getUint32(0, true) !== EMR_HEADER || hasEmfPlus(view)) return bytes;
+  if (bytes.length < 88 || view.getUint32(0, true) !== EMR_HEADER) return bytes;
+  if (hasEmfPlus(view)) return prepareEmfPlus(bytes, view);
   // emf-converter starts both extents at the bounds' width: one unit, one pixel.
   let windowExt = view.getInt32(16, true) - view.getInt32(8, true);
   let viewportExt = windowExt;
@@ -135,7 +159,113 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
     offset += size;
     if (type === EMR_EOF) break;
   }
-  if (!changed) return bytes;
+  return changed ? assemble(parts, records) : bytes;
+}
+
+/** An EMF with EMF+ records, as an EMF+ player plays it (see above); the same bytes when nothing changes. */
+function prepareEmfPlus(bytes: Uint8Array, view: DataView): Uint8Array {
+  const parts: Uint8Array[] = [];
+  let changed = false;
+  let dual = false;
+  /** Whether the last EMF+ record was an EmfPlusGetDC. */
+  let getDC = false;
+  let offset = 0;
+  while (offset + 8 <= bytes.length) {
+    const type = view.getUint32(offset, true);
+    const size = view.getUint32(offset + 4, true);
+    if (size < 8 || offset + size > bytes.length) break;
+    const record = bytes.subarray(offset, offset + size);
+    if (type === EMR_COMMENT && size >= 16 && view.getUint32(offset + 12, true) === EMFPLUS) {
+      const plus = emfPlusRecords(record);
+      for (const r of plus) if (r.type === EMFPLUS_HEADER) dual = (r.flags & EMFPLUS_DUAL) !== 0;
+      if (plus.length > 0) getDC = plus[plus.length - 1].type === EMFPLUS_GETDC;
+      const rewritten = plus.map(rewritePlusRecord);
+      if (rewritten.some((r, i) => r !== plus[i].bytes)) {
+        parts.push(emfPlusComment(rewritten));
+        changed = true;
+      } else {
+        parts.push(record);
+      }
+    } else if (dual && !getDC && type !== EMR_HEADER && type !== EMR_EOF && type !== EMR_COMMENT) {
+      changed = true;
+    } else {
+      parts.push(record);
+    }
+    offset += size;
+    if (type === EMR_EOF) break;
+  }
+  return changed ? assemble(parts, parts.length) : bytes;
+}
+
+interface EmfPlusRecord {
+  type: number;
+  flags: number;
+  /** The record's bytes in the EMR_COMMENT, its 12-byte header first. */
+  bytes: Uint8Array;
+}
+
+/** The EMF+ records in an EMR_COMMENT: its data after the identifier ([MS-EMFPLUS] 2.3.3). */
+function emfPlusRecords(comment: Uint8Array): EmfPlusRecord[] {
+  const view = new DataView(comment.buffer, comment.byteOffset, comment.byteLength);
+  const end = Math.min(comment.length, 12 + view.getUint32(8, true));
+  const records: EmfPlusRecord[] = [];
+  for (let at = 16; at + 12 <= end; ) {
+    const size = view.getUint32(at + 4, true);
+    if (size < 12 || at + size > end) break;
+    records.push({ type: view.getUint16(at, true), flags: view.getUint16(at + 2, true), bytes: comment.subarray(at, at + size) });
+    at += size;
+  }
+  return records;
+}
+
+/** An EMF+ record as emf-converter reads it (see above); the same bytes when it reads it right. */
+function rewritePlusRecord({ type, flags, bytes }: EmfPlusRecord): Uint8Array {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (type === EMFPLUS_DRAWDRIVERSTRING && bytes.length >= 28) {
+    // BrushId, DriverStringOptionsFlags, MatrixPresent, GlyphCount, Glyphs, GlyphPos, TransformMatrix.
+    const count = view.getUint32(24, true);
+    const glyphsEnd = 28 + count * 2;
+    const end = glyphsEnd + count * 8 + (view.getUint32(20, true) ? 24 : 0);
+    if (count % 2 === 0 || end > bytes.length) return bytes;
+    const padded = new Uint8Array(end + 2);
+    padded.set(bytes.subarray(0, glyphsEnd));
+    padded.set(bytes.subarray(glyphsEnd, end), glyphsEnd + 2);
+    const out = new DataView(padded.buffer);
+    out.setUint32(4, padded.length, true);
+    out.setUint32(8, padded.length - 12, true);
+    return padded;
+  }
+  if (type === EMFPLUS_OBJECT && ((flags >> 8) & 0x7f) === OBJECT_IMAGE && !(flags & EMFPLUS_CONTINUED) && bytes.length >= 40) {
+    // Version, ImageDataType, then a bitmap's Width, Height, Stride, PixelFormat, BitmapDataType.
+    // The version's signature tells an object from the last part of a continued one.
+    const dataType = view.getUint32(36, true);
+    if (view.getUint32(12, true) >>> 12 !== GRAPHICS_VERSION_SIGNATURE || view.getUint32(16, true) !== IMAGE_BITMAP || dataType > 1) return bytes;
+    const copy = bytes.slice();
+    new DataView(copy.buffer).setUint32(36, dataType + 1, true);
+    return copy;
+  }
+  return bytes;
+}
+
+/** An EMR_COMMENT that holds these EMF+ records. */
+function emfPlusComment(records: Uint8Array[]): Uint8Array {
+  const dataSize = 4 + records.reduce((sum, record) => sum + record.length, 0);
+  const out = new Uint8Array(12 + Math.ceil(dataSize / 4) * 4);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, EMR_COMMENT, true);
+  view.setUint32(4, out.length, true);
+  view.setUint32(8, dataSize, true);
+  view.setUint32(12, EMFPLUS, true);
+  let at = 16;
+  for (const record of records) {
+    out.set(record, at);
+    at += record.length;
+  }
+  return out;
+}
+
+/** The records as one EMF, its header's size and record count set to theirs. */
+function assemble(parts: Uint8Array[], records: number): Uint8Array {
   const total = parts.reduce((sum, part) => sum + part.length, 0);
   const out = new Uint8Array(total);
   let at = 0;

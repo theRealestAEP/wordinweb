@@ -97,7 +97,6 @@ const EMR_COMMENT = 70;
 const EMR_BITBLT = 76;
 const EMR_STRETCHDIBITS = 81;
 const EMFPLUS = 0x2b464d45;
-const EMFPLUS_HEADER = 0x4001;
 const EMFPLUS_OBJECT = 0x4008;
 const EMFPLUS_DRAWIMAGE = 0x401a;
 const EMFPLUS_DRAWIMAGEPOINTS = 0x401b;
@@ -112,8 +111,9 @@ const EMFPLUS_IMAGE = 5;
  * sizes they give, up to 8192 x 8192.
  *
  * Gives back how many EMF+ images the EMF draws (its DrawImage and
- * DrawImagePoints records), each of which must reach the canvas; none for
- * an EMF+ Dual file, whose EMF records draw the picture again on their own.
+ * DrawImagePoints records), each of which must reach the canvas. An EMF+
+ * Dual file's EMF records draw the picture again, but prepareEmf leaves
+ * them out (render/emf.ts): its EMF+ images are the only ones drawn.
  */
 function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -121,13 +121,12 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
   /** Bytes of an EMF+ object continued over several records, still to come. */
   let continued = 0;
   let images = 0;
-  let dual = false;
   for (let offset = 0; ; ) {
     if (offset + 8 > bytes.length) throw new Error("EMF ends before EMR_EOF");
     const type = view.getUint32(offset, true);
     const size = view.getUint32(offset + 4, true);
     if (size < 8 || offset + size > bytes.length) throw new Error("EMF record runs past the end");
-    if (type === EMR_EOF) return dual ? 0 : images;
+    if (type === EMR_EOF) return images;
     // The record's BITMAPINFOHEADER: its width and height.
     const dib = (field: number): void => {
       const at = field + 8 <= size ? view.getUint32(offset + field, true) : 0;
@@ -143,8 +142,7 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
         const plusSize = view.getUint32(at + 4, true);
         const dataSize = view.getUint32(at + 8, true);
         if (plusSize < 12) break;
-        if (plusType === EMFPLUS_HEADER) dual = (flags & 1) !== 0;
-        else if (plusType === EMFPLUS_DRAWIMAGE || plusType === EMFPLUS_DRAWIMAGEPOINTS) images++;
+        if (plusType === EMFPLUS_DRAWIMAGE || plusType === EMFPLUS_DRAWIMAGEPOINTS) images++;
         else if (plusType === EMFPLUS_OBJECT) {
           let data = at + 12;
           if (flags & 0x8000) {
@@ -157,8 +155,8 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
             continued = view.getUint32(data, true) - (dataSize - 4);
             data += 4;
           }
-          // An image object: version, type 1 (bitmap), width, height, stride, format, type 1 (pixels).
-          if (((flags >> 8) & 0x7f) === EMFPLUS_IMAGE && data + 28 <= offset + size && view.getUint32(data + 4, true) === 1 && view.getUint32(data + 24, true) === 1) {
+          // An image object: version, type 1 (bitmap), width, height, stride, format, type 0 (pixels; 1 is compressed).
+          if (((flags >> 8) & 0x7f) === EMFPLUS_IMAGE && data + 28 <= offset + size && view.getUint32(data + 4, true) === 1 && view.getUint32(data + 24, true) === 0) {
             budget.take(view.getInt32(data + 8, true), view.getInt32(data + 12, true));
           }
         }

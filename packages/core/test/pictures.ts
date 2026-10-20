@@ -164,8 +164,8 @@ export const PIXEL_FORMAT_8BPP_INDEXED = 0x00030803;
 export function emfPlusPixelImage(id: number, width: number, height: number, stride: number, format: number, bits: Uint8Array): [number, number, Uint8Array] {
   const data = new Uint8Array(28 + bits.length);
   const v = new DataView(data.buffer);
-  // Image version and type 1 (bitmap); bitmap width, height, stride, format and type 1 (pixels).
-  [EMFPLUS_VERSION, 1, width, height, stride, format, 1].forEach((value, i) => v.setUint32(i * 4, value >>> 0, true));
+  // Image version and type 1 (bitmap); bitmap width, height, stride, format and type 0 (pixels).
+  [EMFPLUS_VERSION, 1, width, height, stride, format, 0].forEach((value, i) => v.setUint32(i * 4, value >>> 0, true));
   data.set(bits, 28);
   return [0x4008, (5 << 8) | id, data];
 }
@@ -174,7 +174,8 @@ export function emfPlusPixelImage(id: number, width: number, height: number, str
 export function emfPlusCompressedImage(id: number, width: number, height: number, file: Uint8Array): [number, number, Uint8Array] {
   const data = new Uint8Array(28 + file.length);
   const v = new DataView(data.buffer);
-  [EMFPLUS_VERSION, 1, width, height, 0, 0, 2].forEach((value, i) => v.setUint32(i * 4, value, true));
+  // Image version and type 1 (bitmap); bitmap width, height, stride, format and type 1 (compressed).
+  [EMFPLUS_VERSION, 1, width, height, 0, 0, 1].forEach((value, i) => v.setUint32(i * 4, value, true));
   data.set(file, 28);
   return [0x4008, (5 << 8) | id, data];
 }
