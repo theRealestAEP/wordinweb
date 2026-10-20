@@ -1799,10 +1799,11 @@ function breakParagraphImpl(
       const stop = { ...rawStop, pos: rawStop.pos - offset };
       const leader = stop.leader && stop.leader !== "none" ? stop.leader : undefined;
       let target = stop.pos;
+      // The aligned text's width: the upcoming text until the next tab or break.
+      let w = 0;
       if (stop.align === "right" || stop.align === "center" || stop.align === "decimal") {
         // Aligned stops position the upcoming text (until the next tab or
         // break) so it ends at / centers on the stop.
-        let w = 0;
         for (let j = ai + 1; j < atoms.length; j++) {
           const a = atoms[j];
           if (a.kind === "tab" || a.kind === "break") break;
@@ -1896,8 +1897,13 @@ function breakParagraphImpl(
       // (the tab span carries no bidi level), reversing the leader/number and
       // shifting every entry (yiddish TOC p214: digits painted reversed,
       // 112 -> 211, one-entry page drift).
+      // The wrap needs a leader or a run that would cross the line end: a
+      // decimal stop with no separator in its text ("175\"" between columns of
+      // a tabbed table) only right-aligns, and text that cannot reach the stop
+      // continues at the cursor on the same line, as in LibreOffice and Word.
       const aligned = (stop.align === "right" || stop.align === "decimal") && !bidiPara;
-      if (aligned && curLineWidth > 0 && x > target + 0.75) {
+      const crossesLineEnd = x + w > lineStartX(lineIndex) + availFor(lineIndex) + 0.01;
+      if (aligned && curLineWidth > 0 && x > target + 0.75 && (leader || crossesLineEnd)) {
         flush(false, false);
         ai--; // re-evaluate the tab from the fresh line's start
         continue;
