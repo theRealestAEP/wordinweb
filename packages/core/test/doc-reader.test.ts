@@ -113,6 +113,13 @@ describe("the .doc reader", () => {
     expect(doc.footnotes.size).toBe(notes.length);
   });
 
+  it("writes a reference for a footnote whose custom mark is ordinary text", () => {
+    // GovDocs1 044180.doc: two footnotes with the custom mark "(" (FRD nAuto 0).
+    const xml = parts(docToDocx(bytes("044180.doc")));
+    const refs = xml["word/document.xml"].match(/<w:footnoteReference w:customMarkFollows="1" w:id="\d+"\/><w:t xml:space="preserve">\(/g) ?? [];
+    expect(refs.length).toBe(2);
+  });
+
   it("writes the sections with their headers and footers", () => {
     const xml = parts(docToDocx(bytes("parity-headerfooter--v07.doc")));
     expect(xml["word/document.xml"]).toMatch(/<w:headerReference w:type="default" r:id="rId\d+"\/>/);

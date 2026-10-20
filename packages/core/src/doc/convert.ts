@@ -521,6 +521,12 @@ class Converter {
       }
       let ch = this.text.charCodeAt(cp);
       if (ch >= 0x20) {
+        // A custom note mark of ordinary text: the PlcffndRef/PlcfendRef CP makes it a reference.
+        const refAt = this.noteRefs.get(cp);
+        if (refAt) {
+          flushText();
+          content += `<w:${refAt.kind}Reference w:customMarkFollows="1" w:id="${refAt.id}"/>`;
+        }
         if (ch === 0x28 && special && props.symbol) {
           flushText();
           const font = fonts[props.symbol.ftc]?.name ?? "Symbol";
