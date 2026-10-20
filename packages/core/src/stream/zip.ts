@@ -1,5 +1,7 @@
 import { Inflate, strFromU8 } from "fflate";
 import { ByteSource } from "./source.js";
+import { DEFAULT_XML_LIMITS } from "../xml.js";
+import { DEFAULT_ZIP_LIMITS } from "../zip.js";
 
 /** One entry of a zip's central directory. */
 export interface ZipEntry {
@@ -19,8 +21,8 @@ const MAX32 = 0xffffffff;
  */
 export const FETCH_BYTES = 1 << 20;
 
-/** The inflater takes this much input at a time, so each piece it gives is bounded too: deflate inflates at most 1032:1, so 64 MB at the very most, and about as much as the input for an image. */
-const INFLATE_INPUT = 64 << 10;
+/** The inflater takes this much input at a time, so each piece it gives is bounded too: deflate inflates at most 1032:1, so 16 MB at the very most (what an entry that outgrows its declared size can take before it is stopped), and about as much as the input for an image. */
+const INFLATE_INPUT = 16 << 10;
 
 /**
  * A zip read through its central directory, an entry at a time, so a
@@ -49,8 +51,10 @@ export class ZipIndex {
     return out;
   }
 
-  /** An entry's content, inflated in memory. */
-  async read(entry: ZipEntry): Promise<Uint8Array> {
+  /** An entry's content, inflated in memory: at most `limit` bytes, checked
+   * against the directory's size before anything is allocated. */
+  async read(entry: ZipEntry, limit = DEFAULT_ZIP_LIMITS.maxTotalUncompressed): Promise<Uint8Array> {
+    if (entry.size > limit) throw new Error(`too large: ${entry.name} is ${entry.size} bytes, over the ${limit} read whole`);
     const out = new Uint8Array(entry.size);
     let at = 0;
     await this.pieces(entry, (piece) => {
@@ -101,9 +105,10 @@ export class ZipIndex {
     if (size !== entry.size) throw new Error(`${entry.name} is corrupt`);
   }
 
+  /** An entry's content as text, at most the XML limit. */
   async text(name: string): Promise<string | undefined> {
     const entry = this.entries.get(name);
-    return entry ? strFromU8(await this.read(entry)) : undefined;
+    return entry ? strFromU8(await this.read(entry, DEFAULT_XML_LIMITS.maxLength)) : undefined;
   }
 
   /** An entry's compressed bytes, FETCH_BYTES at a time. */
@@ -176,6 +181,8 @@ export class ZipIndex {
         }
         extra += 4 + length;
       }
+      // The compressed bytes are allocated from this size (raw()): they must be in the file.
+      if (entry.headerOffset + entry.compressedSize > fileSize) throw new Error(`bad central directory: ${entry.name} runs past the end of the file`);
       if (!this.entries.has(entry.name)) this.entries.set(entry.name, entry);
       at = extraEnd + commentLength;
     }

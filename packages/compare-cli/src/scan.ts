@@ -1,4 +1,5 @@
 import { closeSync, openSync, readSync } from "node:fs";
+import { DEFAULT_XML_LIMITS } from "../../core/src/xml.js";
 import { CompareError } from "./errors.js";
 
 /** One child of an element: its bytes are [start, end) of the file. */
@@ -131,10 +132,13 @@ class Scanner {
     }
   }
 
-  /** Read the next chunk; false at the end of the file. */
+  /** Read the next chunk; false at the end of the file. What is held is
+   * one construct (a tag, a text, a comment) and a chunk at most: one over
+   * the XML limit could never be parsed, so it is refused before it is read. */
   private more(): boolean {
     if (this.eof) return false;
     const length = this.buf.length;
+    if (length > DEFAULT_XML_LIMITS.maxLength) throw new CompareError("too_large", `a tag or text runs past ${DEFAULT_XML_LIMITS.maxLength} bytes`);
     if (length + this.readSize > this.store.length) {
       const bigger = Buffer.allocUnsafe(2 * (length + this.readSize));
       this.store.copy(bigger, 0, 0, length);

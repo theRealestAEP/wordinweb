@@ -319,10 +319,10 @@ A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.loa
 |---|---|---|
 | `not_docx` | The input is not a .docx: not a zip, or a zip with no Word document. | 4 |
 | `unsupported_format` | The input is another format, such as RTF, PDF, OpenDocument, Word 6.0/95, or a password-protected document. | 6 |
-| `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. | 5 |
+| `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. For `renderDocxToPdf`, also a part over the size limits: an XML part or a body block over 64 MB, or more than 512 MB of parts in all. The zip's directory gives the sizes, so the check comes before anything is inflated. | 5 |
 | `unsupported_content` | The document holds content that Word prints and that is not read here, such as a `w:altChunk` (an HTML or RTF part that Word imports when it opens the file) or a `w:subDoc` (a subdocument that Word reads from another file). The document is refused rather than printed without that content. | 7 |
 | `unsupported_script` | The text is in a script the PDF renderer cannot shape, such as Mongolian. | 3 |
-| `too_large` | `compareFiles` only: the parts outside the body are more than the compare holds in memory. | — |
+| `too_large` | `compareFiles` only: the parts outside the body are more than the compare holds in memory (3 MB), or a body block is over 64 MB. | — |
 | `failed` | Anything else. | 1 |
 
 `compareFiles` also has codes for its files: `missing`, `disk_full`, `result_folder_missing`, `result_is_input` and `output_collision`. The `docx-compare` CLI exits with 1 for every failure, and its message starts with the code. `DocxDocument.load` throws an `Error` whose message starts with `unsupported content:` for the content that `unsupported_content` refuses.

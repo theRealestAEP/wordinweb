@@ -2,7 +2,7 @@ import { Hash, createHash } from "node:crypto";
 import { closeSync, openSync, readSync, fstatSync } from "node:fs";
 import { join } from "node:path";
 import { DocxDocument } from "../../core/src/docx.js";
-import { XmlElement, child, cyrb53, localName, parseXml, serializeXml } from "../../core/src/xml.js";
+import { DEFAULT_XML_LIMITS, XmlElement, child, cyrb53, localName, parseXml, serializeXml } from "../../core/src/xml.js";
 import { acceptAllRevisions, collectRevisions } from "../../core/src/edit/suggest.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
 import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionReferences } from "../../core/src/edit/compare/index.js";
@@ -118,6 +118,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
     // One buffer for every block read, so the reads leave no garbage outside the heap.
     let scratch = Buffer.allocUnsafe(64 * 1024);
     const range = (start: number, end: number): Buffer => {
+      checkBlock(docPart, end - start);
       if (end - start > scratch.length) scratch = Buffer.allocUnsafe(Math.max(end - start, scratch.length * 2));
       const buf = scratch.subarray(0, end - start);
       let done = 0;
@@ -406,6 +407,7 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
           0,
           () => {},
           (c) => {
+            checkBlock(part, c.end - c.start);
             const xml = readRange(notesFd, c.start, c.end);
             const el = parseXml(xml);
             if (unsupported(xml)) refuseUnsupported(el, part);
@@ -464,6 +466,12 @@ function withPart(part: string, error: unknown): CompareError {
 /** A part name as a file name. */
 function fileName(part: string): string {
   return part.replace(/\W/g, "-");
+}
+
+/** Refuse a block (a paragraph, a table's row, a note) of more bytes than
+ * parseXml takes, from its size in the file, before it is read. */
+function checkBlock(part: string, bytes: number): void {
+  if (bytes > DEFAULT_XML_LIMITS.maxLength) throw new CompareError("too_large", `${part}: a block is ${mb(bytes)}; one block is at most ${mb(DEFAULT_XML_LIMITS.maxLength)}`);
 }
 
 function readRange(fd: number, start: number, end: number): string {

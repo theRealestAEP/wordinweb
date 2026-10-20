@@ -1,3 +1,5 @@
+import { DEFAULT_XML_LIMITS } from "../xml.js";
+
 /** One block-level child of the body: its qualified name, and its bytes,
  * valid only until the scanner reads on. */
 export interface ScannedChild {
@@ -172,7 +174,9 @@ class Scanner {
     return this.store.slice(from - this.base, this.length);
   }
 
-  /** Read the next chunk; false at the end of the part. */
+  /** Read the next chunk; false at the end of the part. What is held is
+   * about one block, or one construct, and a chunk: over the XML limit, the
+   * block could never be parsed, so it is refused before it is held. */
   private more(): boolean {
     if (this.eof) return false;
     const chunk = this.pull();
@@ -180,8 +184,10 @@ class Scanner {
       this.eof = true;
       return false;
     }
+    const limit = DEFAULT_XML_LIMITS.maxLength;
+    if (this.length + chunk.length > limit) throw new Error(`too large: the body holds a block over ${limit} bytes`);
     if (this.length + chunk.length > this.store.length) {
-      const bigger = new Uint8Array(2 * (this.length + chunk.length));
+      const bigger = new Uint8Array(Math.min(2 * (this.length + chunk.length), limit));
       bigger.set(this.store.subarray(0, this.length));
       this.store = bigger;
     }

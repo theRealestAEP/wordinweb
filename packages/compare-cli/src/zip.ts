@@ -204,6 +204,8 @@ export class ZipReader {
         }
         extra += 4 + length;
       }
+      // The compressed bytes are allocated from this size (read()): they must be in the file.
+      if (entry.headerOffset + entry.compressedSize > fileSize) throw new CompareError("damaged", `${this.path}: bad central directory: ${entry.name} runs past the end of the file`);
       if (!this.entries.has(entry.name)) this.entries.set(entry.name, entry);
       at = extraEnd + commentLength;
     }

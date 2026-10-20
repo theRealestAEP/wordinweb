@@ -85,4 +85,17 @@ describe("ZipWriter and ZipReader", () => {
     writeFileSync(join(dir, "not.zip"), "hello");
     expect(() => ZipReader.open(join(dir, "not.zip"))).toThrow(/not a \.docx file/);
   });
+
+  it("rejects a directory whose compressed size runs past the end of the file, before allocating it", () => {
+    const path = join(dir, "lying.zip");
+    const writer = new ZipWriter(path);
+    writer.addBuffer("a.xml", Buffer.from("<a/>"));
+    writer.close();
+    const bytes = readFileSync(path);
+    const eocd = bytes.length - 22;
+    // The central directory's compressed size field: 3 GB.
+    bytes.writeUInt32LE(3 << 30 >>> 0, bytes.readUInt32LE(eocd + 16) + 20);
+    writeFileSync(path, bytes);
+    expect(() => ZipReader.open(path)).toThrow(/bad central directory: a\.xml runs past the end of the file/);
+  });
 });

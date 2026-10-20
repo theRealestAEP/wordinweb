@@ -16,7 +16,8 @@ export type CompareErrorCode =
    * as HTML, that Word imports on open) or a w:subDoc (a subdocument Word
    * reads from another file). */
   | "unsupported_content"
-  /** An input holds more outside its body than the compare keeps in memory (MAX_HELD_BYTES). */
+  /** An input holds more outside its body than the compare keeps in memory
+   * (MAX_HELD_BYTES), or a block of its body or notes over the XML limit. */
   | "too_large"
   /** The temp folder or the result's folder ran out of space. */
   | "disk_full"

@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +13,7 @@ import { CompareNote, compareDocuments } from "../../core/src/edit/compare/index
 import { acceptAllRevisions, collectRevisions, rejectAllRevisions } from "../../core/src/edit/suggest.js";
 import { makeDocx, makeDocxWithMedia, wrapDocument, W_NS } from "../../core/test/helpers.js";
 import { AUTHOR, DATE, canonicalBody, para } from "../../core/test/compare-helpers.js";
+import { giantParagraph, lyingBody, lyingStyles, manyParts, stylesBomb } from "../../core/test/bombs.js";
 import { compareFiles } from "../src/compare.js";
 import { CompareError } from "../src/errors.js";
 import { flatten } from "../src/printable.js";
@@ -575,6 +576,40 @@ describe("compareFiles errors", () => {
     // A binary part is never inflated, so no limit applies: it is copied as it is.
     await compareFiles(good, bigBody, join(dir, "x.docx"), options);
   });
+
+  it("refuses deflate bombs and lying directories quickly, with no large allocation", async () => {
+    // Each runs in a child with a 1024 MB heap, which reports its error and
+    // how far its peak RSS rose (zip-limits-child.ts).
+    const cases: [string, Uint8Array, string, RegExp, number][] = [
+      ["styles-bomb", stylesBomb(), "too_large", /the parts held in memory .* come to 401 MB/, 64],
+      ["lying-styles", lyingStyles(), "damaged", /word\/styles\.xml is corrupt$/, 64],
+      ["many-parts", manyParts(), "too_large", /come to 541 MB/, 64],
+      ["giant-paragraph", giantParagraph(), "too_large", /word\/document\.xml: a tag or text runs past 67108864 bytes$/, 320],
+      ["lying-body", lyingBody(), "damaged", /word\/document\.xml is corrupt$/, 160],
+    ];
+    const viteNode = fileURLToPath(new URL("../../../node_modules/.bin/vite-node", import.meta.url));
+    const child = fileURLToPath(new URL("./zip-limits-child.ts", import.meta.url));
+    const outcomes = await Promise.all(
+      cases.map(([name, bytes]) => {
+        const path = join(dir, `${name}.docx`);
+        writeFileSync(path, bytes);
+        return new Promise<{ error: { code: string; message: string }; grewMB: number; ms: number }>((resolve, reject) => {
+          const run = spawn(process.execPath, ["--max-old-space-size=1024", viteNode, child, good, path, join(dir, `${name}-out.docx`)], { stdio: ["ignore", "pipe", "pipe"] });
+          let out = "";
+          let err = "";
+          run.stdout.on("data", (d) => (out += d));
+          run.stderr.on("data", (d) => (err += d));
+          run.on("close", (status) => (status === 0 ? resolve(JSON.parse(out.trim().split("\n").pop() as string)) : reject(new Error(`${name}: exit ${status}: ${err}`))));
+        });
+      }),
+    );
+    cases.forEach(([name, , code, message, maxMB], i) => {
+      expect(outcomes[i].error?.code, name).toBe(code);
+      expect(outcomes[i].error?.message, name).toMatch(message);
+      expect(outcomes[i].grewMB, `${name}: peak RSS rise in MB`).toBeLessThan(maxMB);
+      expect(outcomes[i].ms, `${name}: ms`).toBeLessThan(5000);
+    });
+  }, 120_000);
 
   it("compares a document at the limit, in its costliest shape", async () => {
     // The parts outside the body at exactly MAX_HELD_BYTES, the bulk a

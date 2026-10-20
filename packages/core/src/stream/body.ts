@@ -7,13 +7,13 @@ import { DocParseContext, altChunkError, formatChange, inheritHeaderFooterRefs, 
 import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
-import { DEFAULT_ZIP_LIMITS } from "../zip.js";
+import { XML_PART, ZipBudget } from "../zip.js";
 import { docToDocx } from "../doc/hooks.js";
 import { isOleFile } from "../doc/streams.js";
 import { FORMAT_HEAD_BYTES, otherFormat } from "../formats.js";
 import { scanBody } from "./scan.js";
 import { ByteSource, bytesSource } from "./source.js";
-import { ZipIndex } from "./zip.js";
+import { ZipEntry, ZipIndex } from "./zip.js";
 
 /** A document whose body stays out of memory: the engine reads its blocks
  * through `doc.sections`, which parse them from the deflated body as it goes
@@ -50,9 +50,6 @@ export interface TextPosition {
   block: number;
   ordinal: number;
 }
-
-/** Parts the shell holds whole; every other part stays in the file. */
-const TEXT_PART = /\.(xml|rels|vml)$/i;
 
 /** The body's XML is deflated in pieces of about this much, cut at block boundaries. */
 const PIECE_BYTES = 1 << 20;
@@ -94,14 +91,14 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   const body = new BodyStore();
   // A Strict Open XML body is rewritten to Transitional as it is scanned (strict.ts).
   const rewriter = new StrictRewriter();
-  const outline = body.scan(rewriter.through(inflatePull(docEntry.method, await zip.raw(docEntry))));
+  const outline = body.scan(rewriter.through(inflatePull(docEntry, await zip.raw(docEntry))));
 
-  // The shell: every text part, and document.xml with only the body's own
+  // The shell: every XML part, and document.xml with only the body's own
   // section properties. Their sizes, from the directory, are held to what
   // Package allows a document loaded whole, before any of them is inflated.
-  const held = [...zip.entries.values()].filter((entry) => entry.name !== docPart && !entry.name.endsWith("/") && TEXT_PART.test(entry.name));
-  const heldBytes = held.reduce((total, entry) => total + entry.size, 0);
-  if (heldBytes > DEFAULT_ZIP_LIMITS.maxTotalUncompressed) throw new Error(`the parts held in memory come to ${heldBytes} bytes, over ${DEFAULT_ZIP_LIMITS.maxTotalUncompressed}`);
+  const held = [...zip.entries.values()].filter((entry) => entry.name !== docPart && !entry.name.endsWith("/") && XML_PART.test(entry.name));
+  const budget = new ZipBudget();
+  for (const entry of held) budget.add(entry.name, entry.size);
   const files: Record<string, Uint8Array> = {};
   for (const entry of held) {
     const bytes = await zip.read(entry);
@@ -542,9 +539,10 @@ function keyFields(block: Block, index: number, keys: WeakMap<object, string>): 
   visit(block);
 }
 
-/** The inflated part, a chunk per call; null once it is all out. */
-function inflatePull(method: number, raw: Uint8Array): () => Uint8Array | null {
-  if (method !== 8) {
+/** The inflated part, a chunk per call; null once it is all out. Stops as
+ * soon as the part outgrows the size the directory gives, as ZipIndex.pieces does. */
+function inflatePull(entry: ZipEntry, raw: Uint8Array): () => Uint8Array | null {
+  if (entry.method !== 8) {
     let done = false;
     return () => {
       if (done) return null;
@@ -553,12 +551,18 @@ function inflatePull(method: number, raw: Uint8Array): () => Uint8Array | null {
     };
   }
   const out: Uint8Array[] = [];
-  const inflater = new Inflate((chunk) => out.push(chunk));
+  let size = 0;
+  const inflater = new Inflate((chunk) => {
+    size += chunk.length;
+    if (size > entry.size) throw new Error(`${entry.name} is corrupt`);
+    out.push(chunk);
+  });
   let at = 0;
   return () => {
     while (out.length === 0) {
       if (at >= raw.length) return null;
-      const next = Math.min(at + (64 << 10), raw.length);
+      // 16 KB at a time, as ZipIndex inflates: at most 16 MB comes out of one.
+      const next = Math.min(at + (16 << 10), raw.length);
       inflater.push(raw.subarray(at, next), next === raw.length);
       at = next;
     }

@@ -1,5 +1,5 @@
 import { unzipSync, strFromU8 } from "fflate";
-import { zipEntrySizes } from "../../zip.js";
+import { budgetZip, zipEntrySizes } from "../../zip.js";
 
 /** What comparing two .docx files will need, estimated before loading either. */
 export interface CompareMemoryEstimate {
@@ -51,7 +51,8 @@ const PROCESS_BASE = 96 * MB;
  * Estimate the memory compareDocuments needs for two .docx files. No tree is
  * built: the estimate reads the sizes the zip directories list, and unzips
  * the XML parts to search them for tracked changes, holding their text only
- * while it searches. Throws when either file is not a zip.
+ * while it searches. Throws when either file is not a zip, or holds more
+ * than DocxDocument.load would inflate (ZipBudget).
  */
 export function estimateCompareMemory(
   original: Uint8Array,
@@ -66,6 +67,7 @@ export function estimateCompareMemory(
       all += size;
       if (/\.(xml|rels)$/i.test(name)) xml += size;
     }
+    budgetZip(data);
     const parts = unzipSync(data, { filter: (file) => /\.(xml|rels)$/i.test(file.name) });
     for (const name in parts) {
       // Latin-1 keeps the markup searchable at one byte per character.

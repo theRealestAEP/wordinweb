@@ -59,4 +59,20 @@ describe("ZipIndex", () => {
     await expect(zip.pieces(zip.entries.get("bomb.xml")!, (piece) => (inflated += piece.length))).rejects.toThrow(/bomb\.xml is corrupt/);
     expect(inflated).toBeLessThan(FETCH_BYTES);
   });
+
+  it("refuses a directory whose compressed size runs past the end of the file, before allocating it", async () => {
+    const bytes = zipSync({ "word/document.xml": new Uint8Array(100) });
+    const view = new DataView(bytes.buffer);
+    let at = bytes.length - 22;
+    while (view.getUint32(at, true) !== 0x06054b50) at--;
+    // The central directory's compressed size field: 3 GB.
+    view.setUint32(view.getUint32(at + 16, true) + 20, 3 << 30 >>> 0, true);
+    await expect(ZipIndex.open(bytesSource(bytes))).rejects.toThrow(/bad central directory: word\/document\.xml runs past the end of the file/);
+  });
+
+  it("reads no entry whole past the limit it is given, from the directory's size", async () => {
+    const zip = await ZipIndex.open(bytesSource(zipSync({ "big.bin": new Uint8Array(4096) })));
+    await expect(zip.read(zip.entries.get("big.bin")!, 4095)).rejects.toThrow(/too large: big\.bin is 4096 bytes, over the 4095 read whole/);
+    expect((await zip.read(zip.entries.get("big.bin")!, 4096)).length).toBe(4096);
+  });
 });

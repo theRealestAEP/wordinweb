@@ -1,4 +1,5 @@
 import { unzipSync, strFromU8 } from "fflate";
+import { DEFAULT_XML_LIMITS } from "./xml.js";
 
 /** Fixed mtime for every zip entry we write (2020-01-01T00:00:00Z). Without
  * it fflate stamps `new Date()` at 2-second DOS granularity, so two save()
@@ -14,23 +15,62 @@ export const DEFAULT_ZIP_LIMITS = {
   maxEntries: 20_000,
 };
 
+/** A part that is XML: inflated whole, decoded and parsed, so parseXml's
+ * DEFAULT_XML_LIMITS.maxLength holds it. */
+export const XML_PART = /\.(xml|rels|vml)$/i;
+
+/**
+ * Holds a package's entries to DEFAULT_ZIP_LIMITS, and each XML part to
+ * DEFAULT_XML_LIMITS.maxLength, from the sizes the zip's directory gives,
+ * before any entry is inflated. Bytes are compared with the XML limit,
+ * which counts characters: UTF-8 has at least one byte a character, so this
+ * check is the stricter one.
+ */
+export class ZipBudget {
+  private entries = 0;
+  private total = 0;
+
+  add(name: string, size: number): void {
+    if (++this.entries > DEFAULT_ZIP_LIMITS.maxEntries) throw new Error(`zip has too many entries (> ${DEFAULT_ZIP_LIMITS.maxEntries})`);
+    if (XML_PART.test(name) && size > DEFAULT_XML_LIMITS.maxLength) throw new Error(`too large: ${name} is ${size} bytes, over the ${DEFAULT_XML_LIMITS.maxLength} an XML part may be`);
+    this.total += size;
+    if (this.total > DEFAULT_ZIP_LIMITS.maxTotalUncompressed) throw new Error(`too large: the zip's parts come to over ${DEFAULT_ZIP_LIMITS.maxTotalUncompressed} bytes`);
+  }
+}
+
+/** Hold every entry of the zip `data` to ZipBudget, from its directory: an
+ * unzip whose filter takes no entry inflates nothing. */
+export function budgetZip(data: Uint8Array): void {
+  const budget = new ZipBudget();
+  unzipSync(data, {
+    filter: (file) => {
+      budget.add(file.name, file.originalSize);
+      return false;
+    },
+  });
+}
+
 /** A read-only view over the OPC (zip) package inside a .docx file. */
 export class Package {
   private files: Record<string, Uint8Array>;
 
+  /** Every entry is held to ZipBudget before any is inflated. fflate
+   * inflates an entry into a buffer of the size the directory gives, so an
+   * entry whose data holds more stops there: memory stays within the
+   * budget, and the entry fails, or comes out cut short (an XML part then
+   * fails to parse). */
   constructor(data: Uint8Array) {
-    this.files = unzipSync(data);
-    let total = 0;
-    let entries = 0;
-    for (const name in this.files) {
-      entries++;
-      total += this.files[name].length;
-      if (entries > DEFAULT_ZIP_LIMITS.maxEntries) {
-        throw new Error(`zip has too many entries (> ${DEFAULT_ZIP_LIMITS.maxEntries})`);
-      }
-      if (total > DEFAULT_ZIP_LIMITS.maxTotalUncompressed) {
-        throw new Error(`zip uncompressed size exceeds ${DEFAULT_ZIP_LIMITS.maxTotalUncompressed} bytes`);
-      }
+    budgetZip(data);
+    let name = "";
+    try {
+      this.files = unzipSync(data, {
+        filter: (file) => {
+          name = file.name;
+          return true;
+        },
+      });
+    } catch (error) {
+      throw name ? new Error(`${name} is corrupt`) : error;
     }
   }
 
