@@ -3,6 +3,8 @@
 // 16-bit. Every document part (main text, footnotes, headers, comments,
 // endnotes, text boxes) is in the one CP space the pieces cover.
 import { u16, u32 } from "./bytes.js";
+import type { Word6Fib } from "./fib.js";
+import { word6Grpprl } from "./word6.js";
 
 export interface Piece {
   /** The first CP of the piece and one past its last. */
@@ -27,20 +29,41 @@ const PRM0_SPRMS: Record<number, number> = {
 };
 
 const cp1252 = new TextDecoder("windows-1252");
+/** Each byte as the character of the same code (the Encoding Standard's "latin1" is Windows-1252). */
+const bytesDecoder = {
+  decode(bytes: Uint8Array): string {
+    const parts: string[] = [];
+    for (let at = 0; at < bytes.length; at += 8192) parts.push(String.fromCharCode(...bytes.subarray(at, at + 8192)));
+    return parts.join("");
+  },
+};
 
 export class PieceTable {
   readonly pieces: Piece[] = [];
   /** The Clx's Prc grpprls, which a Prm1 indexes. */
   private readonly prcs: Uint8Array[] = [];
   private readonly prmCache = new Map<number, Uint8Array | null>();
+  /** 8-bit text: Windows-1252, or for a Word 6 file the bytes themselves (its characters depend on their font). */
+  private readonly eightBit: { decode(bytes: Uint8Array): string };
 
-  constructor(clx: Uint8Array, private readonly word: Uint8Array) {
+  /**
+   * A Word 6.0/95 file (`word6`) has 8-bit text only: at the offset its
+   * Pcd gives, with no compression flag, or, when it was not fast-saved,
+   * in one run from fcMin to fcMac with no piece table at all.
+   */
+  constructor(clx: Uint8Array, private readonly word: Uint8Array, private readonly word6?: Word6Fib) {
+    this.eightBit = word6 ? bytesDecoder : cp1252;
+    if (word6 && !word6.complex) {
+      this.pieces.push({ cp: 0, end: Math.max(0, word6.fcMac - word6.fcMin), fc: word6.fcMin * 2, compressed: true, prm: 0 });
+      return;
+    }
     let at = 0;
     while (at < clx.length) {
       const clxt = clx[at];
       if (clxt === 0x01) {
         const cb = u16(clx, at + 1);
-        this.prcs.push(clx.subarray(at + 3, at + 3 + cb));
+        const prc = clx.subarray(at + 3, at + 3 + cb);
+        this.prcs.push(word6 ? word6Grpprl(prc) : prc);
         at += 3 + cb;
       } else if (clxt === 0x02) {
         const lcb = u32(clx, at + 1);
@@ -49,7 +72,11 @@ export class PieceTable {
         for (let i = 0; i < n; i++) {
           const pcd = (n + 1) * 4 + i * 8;
           const fcc = u32(plc, pcd + 2);
-          this.pieces.push({ cp: u32(plc, i * 4), end: u32(plc, (i + 1) * 4), fc: fcc & 0x3fffffff, compressed: (fcc & 0x40000000) !== 0, prm: u16(plc, pcd + 6) });
+          const cp = u32(plc, i * 4);
+          const end = u32(plc, (i + 1) * 4);
+          // A Word 6 Pcd's fc is the plain byte offset of 8-bit text (stored doubled, as Word 97's compressed fc is).
+          if (word6) this.pieces.push({ cp, end, fc: fcc * 2, compressed: true, prm: u16(plc, pcd + 6) });
+          else this.pieces.push({ cp, end, fc: fcc & 0x3fffffff, compressed: (fcc & 0x40000000) !== 0, prm: u16(plc, pcd + 6) });
         }
         break;
       } else {
@@ -94,7 +121,7 @@ export class PieceTable {
       if (lo >= hi) continue;
       if (piece.compressed) {
         const from = piece.fc / 2 + (lo - piece.cp);
-        parts.push(cp1252.decode(this.word.subarray(from, from + (hi - lo))));
+        parts.push(this.eightBit.decode(this.word.subarray(from, from + (hi - lo))));
       } else {
         const from = piece.fc + 2 * (lo - piece.cp);
         const bytes = this.word.subarray(from, from + 2 * (hi - lo));
@@ -120,6 +147,10 @@ export class PieceTable {
       const index = prm >>> 1;
       const prc = this.prcs[index];
       if (prc) out = prc;
+    } else if (this.word6) {
+      // A Word 6 Prm holds one sprm whose operand is one byte or none.
+      const grpprl = word6Grpprl(new Uint8Array([(prm >>> 1) & 0x7f, (prm >>> 8) & 0xff]));
+      if (grpprl.length) out = grpprl;
     } else {
       const isprm = (prm >>> 1) & 0x7f;
       const val = (prm >>> 8) & 0xff;

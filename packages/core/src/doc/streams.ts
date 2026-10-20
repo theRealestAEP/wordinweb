@@ -47,10 +47,11 @@ export function openDocStreams(bytes: Uint8Array): DocStreams {
     throw new Error(`unsupported format: ${compoundFileKind(rootStreamNames(cfb))}`);
   }
   if (wordDocument.length < 0x0c) throw new Error("damaged: the WordDocument stream is shorter than the FIB");
-  // A Word 6.0/95 file keeps everything in the WordDocument stream and has no Table stream.
+  // A Word 6.0/95 file keeps everything, pictures too, in the WordDocument stream and has no Table stream.
   const wIdent = u16(wordDocument, 0);
   const nFib = u16(wordDocument, 2);
-  if (wIdent === 0xa5dc || (wIdent === 0xa5ec && nFib < 0x00c1)) throw new Error("unsupported format: a Word 6.0/95 document (only Word 97-2003 .doc files are read)");
+  if (wIdent === 0xa5dc) return { wordDocument, table: wordDocument, data: wordDocument };
+  if (wIdent === 0xa5ec && nFib < 0x00c1) throw new Error("unsupported format: a Word 6.0/95 document (only Word 97-2003 .doc files are read)");
   if (wIdent !== 0xa5ec) throw new Error("unsupported format: not a Word document (the WordDocument stream does not start with a FIB)");
   const flags = u16(wordDocument, 0x0a);
   const tableName = flags & 0x0200 ? "1Table" : "0Table";

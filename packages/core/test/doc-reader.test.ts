@@ -175,13 +175,16 @@ describe("the .doc reader", () => {
     expect(() => docToDocx(ole("PowerPoint Document"))).toThrow(/unsupported format: a PowerPoint 97-2003 presentation/);
     expect(() => docToDocx(ole("Contents"))).toThrow(/unsupported format: an OLE compound file with no Word document/);
     expect(() => docToDocx(ole("EncryptedPackage"))).toThrow(/unsupported format: a password-protected document/);
-    // A Word 6.0/95 file: its FIB starts with 0xA5DC.
+    // An encrypted Word 95 file: its FIB starts with 0xA5DC and nFib 0x68.
     const word6 = bytes("parity-lists--v00.doc").slice();
     const streams = openDocStreams(word6);
     const at = findStream(word6, streams.wordDocument);
     expect(at).toBeGreaterThan(0);
     word6[at] = 0xdc;
-    expect(() => docToDocx(word6)).toThrow(/unsupported format: a Word 6\.0\/95 document/);
+    word6[at + 2] = 0x68;
+    word6[at + 3] = 0;
+    word6[at + 0x0b] |= 0x01;
+    expect(() => docToDocx(word6)).toThrow(/unsupported format: a password-protected document \(Word 6\.0\/95 encryption\)/);
     // An encrypted one: fEncrypted in the FIB's flags.
     const encrypted = bytes("parity-lists--v00.doc").slice();
     encrypted[at + 0x0b] |= 0x01;

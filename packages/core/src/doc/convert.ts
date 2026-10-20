@@ -33,6 +33,8 @@ import {
 import { DocStreams, openDocStreams } from "./streams.js";
 import { Font, StyleSheet, parseFonts } from "./styles.js";
 import { PieceTable } from "./text.js";
+import { Word6Lists } from "./numbering6.js";
+import { highHalf, parseSttb6, word6Grpprl } from "./word6.js";
 
 /** The parsed structures of a .doc, for every module that reads one. */
 export interface DocReader {
@@ -51,7 +53,7 @@ export interface DocReader {
 export function openDoc(bytes: Uint8Array): DocReader {
   const streams = openDocStreams(bytes);
   const fib = parseFib(streams.wordDocument);
-  const pieces = new PieceTable(tableBlob(fib, streams.table, FC.clx), streams.wordDocument);
+  const pieces = new PieceTable(tableBlob(fib, streams.table, FC.clx), streams.wordDocument, fib.word6);
   const props = new PropertyTables(streams.wordDocument, streams.table, streams.data, fib, pieces);
   const fonts = parseFonts(fib, streams.table);
   const styles = new StyleSheet(fib, streams.table);
@@ -168,10 +170,14 @@ class Converter {
   private footerCount = 0;
   private readonly rPrCache = new Map<string, string>();
   private readonly encoder = new TextEncoder();
+  /** A Word 6.0/95 document's lists, which its paragraphs make as they are read. */
+  private readonly lists6: Word6Lists | undefined;
+  private readonly styleAutonumbers = new Map<number, { nLvlAnm?: number; anld?: Uint8Array }>();
 
   constructor(private readonly reader: DocReader, private readonly hooks: ConvertHooks) {
     // The whole text once: every story is a slice of it.
     this.text = reader.pieces.text(0, Math.min(reader.pieces.end, reader.parts.end));
+    if (reader.fib.word6) this.lists6 = new Word6Lists(reader.fonts, reader.fib.word6.mac, reader.ctx);
     this.readSections();
     this.readHeaderStories();
     this.readNoteRefs();
@@ -197,6 +203,8 @@ class Converter {
       this.documentRels.push(...extra.documentRels);
       this.contentTypes.push(...extra.contentTypes);
     }
+    const lists6 = this.lists6?.xml();
+    if (lists6) this.addPart("word/numbering.xml", lists6, "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml", `${REL_NS}/numbering`);
     this.parts["word/document.xml"] = this.encoder.encode(`${XML_HEAD}<w:document ${W_NS}><w:body>${body}</w:body></w:document>`);
     this.parts["word/_rels/document.xml.rels"] = this.encoder.encode(
       `${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${this.documentRels.map((rel) => `<Relationship Id="${rel.id}" Type="${rel.type}" Target="${escapeAttr(rel.target)}"/>`).join("")}</Relationships>`,
@@ -230,7 +238,8 @@ class Converter {
       const fcSepx = u32(plc.data[i], 2);
       if (fcSepx !== 0xffffffff && fcSepx + 2 <= word.length) {
         const cb = u16(word, fcSepx);
-        applySectSprms(word.subarray(fcSepx + 2, fcSepx + 2 + cb), props);
+        const grpprl = word.subarray(fcSepx + 2, fcSepx + 2 + cb);
+        applySectSprms(fib.word6 ? word6Grpprl(grpprl) : grpprl, props);
       }
       this.sections.push({ start: plc.cps[i], end: Math.min(plc.cps[i + 1], fib.ccpText), props });
     }
@@ -253,7 +262,8 @@ class Converter {
 
   private readBookmarks(): void {
     const { fib, streams } = this.reader;
-    const names = parseSttb(tableBlob(fib, streams.table, FC.sttbfBkmk)).strings;
+    const sttb = tableBlob(fib, streams.table, FC.sttbfBkmk);
+    const names = (fib.word6 ? parseSttb6(sttb, 0) : parseSttb(sttb)).strings;
     const starts = parsePlc(tableBlob(fib, streams.table, FC.plcfBkf), 4);
     const ends = parsePlc(tableBlob(fib, streams.table, FC.plcfBkl), 0);
     for (let i = 0; i < starts.data.length && i < names.length; i++) {
@@ -294,6 +304,7 @@ class Converter {
   private paragraphs(start: number, end: number, sectionEnds: Set<number> | null): Paragraph[] {
     const out: Paragraph[] = [];
     let pStart = start;
+    this.lists6?.startStory();
     for (let cp = start; cp < end; cp++) {
       const ch = this.text.charCodeAt(cp);
       const isMark = ch === 0x0d || ch === 0x07 || (ch === 0x0c && sectionEnds?.has(cp));
@@ -302,6 +313,11 @@ class Converter {
       const direct = this.reader.props.paragraphProps(mark);
       const props = newParaProps(direct.istd);
       applyParaSprms(direct.grpprl, props);
+      if (this.lists6) {
+        const style = this.styleAutonumber(props.istd);
+        const section = this.sections.find((s) => mark < s.end) ?? this.sections[0];
+        this.lists6.number(props, props.nLvlAnm ?? style.nLvlAnm ?? 0, props.anld ?? style.anld, section.props.olst);
+      }
       let depth = props.itap ?? (props.inTable ? 1 : 0);
       if (props.dtap) depth += props.dtap;
       if (depth < 0) depth = 0;
@@ -312,6 +328,25 @@ class Converter {
       pStart = cp + 1;
     }
     return out;
+  }
+
+  /** A Word 6 paragraph style's autonumbering, through the styles it is based on. */
+  private styleAutonumber(istd: number): { nLvlAnm?: number; anld?: Uint8Array } {
+    let found = this.styleAutonumbers.get(istd);
+    if (!found) {
+      const chain: Uint8Array[] = [];
+      for (let i = istd, seen = 0; i !== 0x0fff && seen < 32; seen++) {
+        const style = this.reader.styles.style(i);
+        if (!style) break;
+        if (style.papx) chain.unshift(style.papx);
+        i = style.base;
+      }
+      const props = newParaProps(istd);
+      for (const papx of chain) applyParaSprms(papx, props);
+      found = { nLvlAnm: props.nLvlAnm, anld: props.anld };
+      this.styleAutonumbers.set(istd, found);
+    }
+    return found;
   }
 
   /** The blocks of a story as XML: its paragraphs and tables. */
@@ -454,7 +489,11 @@ class Converter {
     const rPrFull = rPr + (this.hooks.runExtra?.(run.cp, end, props) ?? "");
     const rPrXmlWrapped = rPrFull ? `<w:rPr>${rPrFull}</w:rPr>` : "";
     const special = toggleValue(props, "fSpec", ctx, istdPara) === true;
-    const symbolFont = run.compressed && props.ftc0 !== undefined && fonts[props.ftc0]?.charset === 2;
+    // Word 6 text is bytes in the character set of the font the run shows in.
+    const word6 = this.reader.fib.word6;
+    const ftc = props.ftc0 ?? (word6 ? this.reader.styles.font(istdPara, props.istd) : undefined);
+    const symbolFont = run.compressed && ftc !== undefined && fonts[ftc]?.charset === 2;
+    const highChars = word6 && highHalf(ftc !== undefined ? fonts[ftc]?.charset ?? 0 : 0, word6.mac);
     const out: string[] = [];
     let text = "";
     let content = "";
@@ -490,6 +529,7 @@ class Converter {
         }
         if (special && (ch === 0x3c || ch === 0x3e)) continue;
         if (symbolFont && ch < 0x100) ch += 0xf000;
+        else if (highChars && ch >= 0x80 && ch < 0x100) ch = highChars.charCodeAt(ch - 0x80);
         if (ch === 0x7f) continue;
         text += String.fromCharCode(ch);
         continue;

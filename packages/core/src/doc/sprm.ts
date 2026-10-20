@@ -5,6 +5,7 @@
 // which are the .docx units too.
 import { i16, i32, u16, u32, utf16 } from "./bytes.js";
 import { sprms } from "./props.js";
+import { SPRM_ANLD, SPRM_NLVLANM } from "./word6.js";
 
 export interface Border {
   /** A BrcType ([MS-DOC] 2.9.22); 0 for none, 0xff for "nil" (leave as inherited). */
@@ -140,6 +141,9 @@ export interface ParaProps {
   textAlignment?: number;
   ilfo?: number;
   ilvl?: number;
+  /** Word 6 autonumbering (word6.ts): the ANLD, and the level: 1-9 a heading level, 10 numbered, 11 bulleted, 0 none. */
+  anld?: Uint8Array;
+  nLvlAnm?: number;
   dxaLeft?: number;
   dxaRight?: number;
   dxaLeft1?: number;
@@ -278,6 +282,8 @@ export interface SectionProps {
   nfcEdnRef?: number;
   endnotesHere?: boolean;
   propRevision?: PropRevision;
+  /** Word 6 heading numbering (sprmSOlstAnm): an OLST. */
+  olst?: Uint8Array;
 }
 
 export function newRunProps(): RunProps {
@@ -594,6 +600,8 @@ export function applyParaSprms(grpprl: Uint8Array, p: ParaProps): void {
       case 0x2406: p.keepNext = o[0] !== 0; break;
       case 0x2407: p.pageBreakBefore = o[0] !== 0; break;
       case 0x260a: p.ilvl = o[0]; break;
+      case SPRM_ANLD: p.anld = o.subarray(1); break;
+      case SPRM_NLVLANM: p.nLvlAnm = o[0]; break;
       case 0x460b: {
         const v = u16(o, 0);
         p.ilfo = v === 0xf801 ? 0 : v >= 0xf802 ? 0x10000 - v : v;
@@ -1126,6 +1134,7 @@ export function applySectSprms(grpprl: Uint8Array, s: SectionProps): void {
         else delete s.propRevision;
         break;
       case 0x7044: s.pgnStart = u32(o, 0); break;
+      case 0xd202: s.olst = o.subarray(1); break;
       default: break;
     }
   }
