@@ -284,6 +284,10 @@ interface InternalPage {
   /** The page shell remains, but positioned items can be rematerialized. */
   discarded?: boolean;
   sp: SectionProps;
+  /** The props the page opened with, once a continuous section has taken
+   * it over (newBand replaces sp). The header and footer belong to the
+   * section at the top of the page, so they are laid out against these. */
+  hfSp?: SectionProps;
   physIndex: number;
   displayNumber: number;
   headerRel?: string;
@@ -393,6 +397,7 @@ interface IncrState {
    * rebuilt without re-running newPage's section/hf logic. */
   page: {
     sp: SectionProps;
+    hfSp?: SectionProps;
     physIndex: number;
     displayNumber: number;
     bodyTop: number;
@@ -1049,8 +1054,9 @@ class Engine {
 
     for (let i = 0; i < this.pages.length; i++) {
       const page = this.pages[i];
-      this.sp = page.sp;
-      const contentWidth = page.sp.pageWidth - page.sp.marginLeft - page.sp.marginRight - page.sp.gutter;
+      const sp = page.hfSp ?? page.sp;
+      this.sp = sp;
+      const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
       const header = this.doc.headers.get(page.headerRel ?? "");
       const footer = this.doc.footers.get(page.footerRel ?? "");
       const headerHeight = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header), true);
@@ -1324,14 +1330,7 @@ class Engine {
         // This leading break will start a page. Create it before restoring the
         // carried after so placeParagraph does not clear the carry itself.
         if (keepEmptyAfter) this.newPage(false);
-        else if (openedEmpty) {
-          // The new band takes this section's columns and margins, but the
-          // page keeps the props of the section that opened it: its header
-          // and footer are laid out against them.
-          const pageSp = this.cur.sp;
-          this.newBand();
-          this.cur.sp = pageSp;
-        } else this.newBand();
+        else this.newBand();
       } else this.newPage(true);
       if (prevSp !== null) {
         if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
@@ -1718,6 +1717,7 @@ class Engine {
         seenNumIds: [...this.seenNumIds],
         page: {
           sp: p.sp,
+          hfSp: p.hfSp,
           physIndex: p.physIndex,
           displayNumber: p.displayNumber,
           bodyTop: p.bodyTop,
@@ -1836,6 +1836,7 @@ class Engine {
     const page: InternalPage = {
       items: prefixItems,
       sp: ps.sp,
+      hfSp: ps.hfSp,
       physIndex: ps.physIndex,
       displayNumber: ps.displayNumber,
       bodyTop: ps.bodyTop,
@@ -2676,6 +2677,7 @@ class Engine {
   private newBand(): void {
     const sp = this.sp;
     const page = this.cur;
+    page.hfSp ??= page.sp;
     page.sp = sp;
     const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
     const { colXs, colWidths } = computeColumns(sp, contentWidth);
@@ -7098,8 +7100,9 @@ class Engine {
     // be consumed by measurement: snapshot.
     const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
     const seenSnapshot = new Set(this.seenNumIds);
+    const sp = page.hfSp ?? page.sp;
     const origin = reserveBodyClearance
-      ? { x: page.sp.marginLeft + page.sp.gutter, y: page.sp.headerDistance }
+      ? { x: sp.marginLeft + sp.gutter, y: sp.headerDistance }
       : undefined;
     // A FOOTER paragraph framed to the PAGE (w:framePr vAnchor="page") is
     // positioned absolutely and consumes no footer flow, so it must not
@@ -7183,7 +7186,7 @@ class Engine {
       page.hfStart = 0;
       return;
     }
-    const sp = page.sp;
+    const sp = page.hfSp ?? page.sp;
     this.sp = sp; // frames built here must resolve anchors against this page's section
     if (emitBorders) this.emitPageBorders(page);
     page.hfStart = page.items.length;

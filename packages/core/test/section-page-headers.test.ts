@@ -150,6 +150,21 @@ describe("headers and footers of a page opened by an empty section", () => {
     for (const page of got.slice(1)) expect(page).toMatch(/^S2DEFAULTHEADER S2DEFAULTFOOTER Body \d+$/);
   });
 
+  it("a third section on the shared page leaves the header at section 1's margins", () => {
+    const result = build([
+      { parts: ["first", "default"], titlePg: true },
+      { parts: ["first", "default"], type: "continuous", paragraphs: 2, margin: 2880 },
+      { parts: ["default"], type: "continuous", paragraphs: BODY, margin: 2880 },
+    ]);
+    const got = pages(result);
+    expect(got[0]).toBe("S1FIRSTHEADER S1FIRSTFOOTER Body 1");
+    const first = result.pages[0].items;
+    const x = (text: string) => first.find((item) => item.kind === "text" && item.text.startsWith(text))?.x;
+    expect(x("S1FIRSTHEADER")).toBeCloseTo(96, 0);
+    expect(x("S1FIRSTFOOTER")).toBeCloseTo(96, 0);
+    for (const page of got.slice(1)) expect(page).toMatch(/^S3DEFAULTHEADER S3DEFAULTFOOTER Body \d+$/);
+  });
+
   it("several empty continuous sections in a row leave page 1 to the first", () => {
     const result = build([
       { parts: ["first", "default"], titlePg: true },
