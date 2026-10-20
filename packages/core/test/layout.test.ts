@@ -5324,6 +5324,88 @@ describe("floating table flow and overlap", () => {
   });
 });
 
+describe("floating table taller than the page", () => {
+  // GovDocs1 026283 (B5): a text-anchored floating table of ~2,000 rows printed
+  // its first page and lost the rest. Word breaks a floating table across
+  // pages like an inline table.
+  const tallFloat = (tblpPr: string, rows: string[], header = "") =>
+    `<w:tbl><w:tblPr><w:tblpPr ${tblpPr}/>` +
+    `<w:tblW w:w="9000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>` +
+    (header
+      ? `<w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${p(header)}</w:tc></w:tr>`
+      : "") +
+    rows.join("") +
+    `</w:tbl>`;
+  const row = (paras: string[], trPr = "") =>
+    `<w:tr>${trPr ? `<w:trPr>${trPr}</w:trPr>` : ""}<w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>` +
+    paras.map((t) => p(t)).join("") +
+    `</w:tc></w:tr>`;
+  const num = (i: number) => String(i).padStart(3, "0");
+  const find = (result: ReturnType<typeof layoutDocument>, text: string) => {
+    for (let pi = 0; pi < result.pages.length; pi++) {
+      const item = result.pages[pi].items.find((i) => i.kind === "text" && i.text === text);
+      if (item?.kind === "text") return { page: pi, item };
+    }
+    throw new Error(`missing ${text}`);
+  };
+
+  it("continues the rows on the next pages at the same tblpPr x, with the header repeated", () => {
+    const rows = Array.from({ length: 120 }, (_, i) => row([`row${num(i + 1)}`]));
+    const body =
+      p("Before") +
+      tallFloat(`w:horzAnchor="margin" w:vertAnchor="text" w:tblpX="360" w:tblpY="300"`, rows, "HEAD") +
+      p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(result.pages.length).toBeGreaterThanOrEqual(3);
+    const first = find(result, "row001");
+    for (let i = 1; i <= 120; i++) {
+      const hit = find(result, `row${num(i)}`);
+      expect(hit.item.x).toBeCloseTo(first.item.x, 1);
+      expect(hit.item.lineTop + hit.item.lineHeight).toBeLessThanOrEqual(result.pages[hit.page].bodyBottom + 1);
+    }
+    const last = find(result, "row120");
+    for (let pi = 1; pi <= last.page; pi++) {
+      const texts = result.pages[pi].items.filter((i) => i.kind === "text");
+      expect(texts[0]?.kind === "text" && texts[0].text).toBe("HEAD");
+    }
+    // The text after the table goes to the page of the table's last part,
+    // below that part (the table spans the column, so nothing fits beside).
+    const after = find(result, "After");
+    expect(after.page).toBe(last.page);
+    expect(after.item.lineTop).toBeGreaterThanOrEqual(last.item.lineTop + last.item.lineHeight - 0.01);
+  });
+
+  it("keeps a cantSplit row whole when the table breaks", () => {
+    const lines = (i: number) => ["a", "b", "c", "d", "e"].map((s) => `r${num(i)}${s}`);
+    const rows = Array.from({ length: 30 }, (_, i) => row(lines(i + 1), "<w:cantSplit/>"));
+    const body = tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows) + p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(result.pages.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i <= 30; i++) {
+      const pages = lines(i).map((t) => find(result, t).page);
+      expect(new Set(pages).size).toBe(1);
+    }
+  });
+
+  it("starts a page-anchored table's later parts at the body top", () => {
+    const rows = Array.from({ length: 80 }, (_, i) => row([`row${num(i + 1)}`]));
+    const body =
+      p("Before") +
+      tallFloat(`w:horzAnchor="page" w:vertAnchor="page" w:tblpX="1800" w:tblpY="2880"`, rows) +
+      p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const first = find(result, "row001");
+    expect(first.page).toBe(0);
+    expect(first.item.lineTop).toBeGreaterThanOrEqual(192 - 0.01);
+    const last = find(result, "row080");
+    expect(last.page).toBeGreaterThan(0);
+    const firstOnPage2 = result.pages[1].items.find((i) => i.kind === "text");
+    expect(firstOnPage2?.kind === "text" && firstOnPage2.lineTop).toBeLessThan(result.pages[1].bodyTop + 20);
+    expect(firstOnPage2?.kind === "text" && firstOnPage2.x).toBeCloseTo(first.item.x, 1);
+  });
+});
+
 describe("mirror margins", () => {
   // settings.xml w:mirrorMargins: odd (recto) pages keep the gutter on the
   // left (content origin = left margin + gutter); even (verso) pages swap the

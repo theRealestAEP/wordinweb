@@ -8280,13 +8280,16 @@ class Engine {
     return lead;
   }
 
-  private placeTable(tbl: Table): void {
+  /** Lay a table into the flow and return where its last part starts. A
+   * floating table that breaks across pages comes here with `floatX`, its
+   * left edge on the current page, and the cursor at its top. */
+  private placeTable(tbl: Table, floatX?: () => number): { page: InternalPage; top: number } {
     // Floating (tblpPr) tables leave the flow entirely: absolute position,
     // body text wraps around the float rect. Page/margin-anchored ones were
     // usually pre-placed by layoutBlocks so earlier text already wrapped.
-    if (tbl.props.floating) {
+    if (tbl.props.floating && !floatX) {
       this.placeFloatingTable(tbl);
-      return;
+      return { page: this.cur, top: this.y };
     }
     this.clearBannerSlot();
     this.lastParaSpacingAfter = 0;
@@ -8316,6 +8319,7 @@ class Engine {
     // continuation row painted at column 1's x, overlapping the first row). A
     // page split keeps the same colX, so single-column tables are unaffected.
     const computeX0 = () => {
+      if (floatX) return floatX();
       const cw = this.colWidth;
       if (tbl.props.alignment === "center") return this.colX + (cw - tableWidth) / 2;
       // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
@@ -8352,8 +8356,9 @@ class Engine {
     // A normal table cannot wrap beside a floating exclusion rectangle. If
     // its footprint would intersect one, Word moves the whole table below the
     // float (benchmark-edited: the inline fixed-width table follows the moved
-    // page-anchored table instead of painting through it).
-    for (let guard = 0; guard < 20; guard++) {
+    // page-anchored table instead of painting through it). A floating table
+    // keeps its own position.
+    for (let guard = 0; guard < 20 && !floatX; guard++) {
       const hit = (this.floats.get(this.cur) ?? []).find(
         (rect) =>
           this.y < rect.y1 &&
@@ -8592,6 +8597,7 @@ class Engine {
     if (tbl.rows.length > 0) this.y += s2 || this.rowBottomLead(tbl, tbl.rows.length - 1);
     if (s2) this.paintTableOutline(this.cur, tbl, x0, segTop, this.y, tableWidth);
     this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
+    return { page: segPage, top: segTop };
   }
 
   /** Outer table outline box for a separated-cell-border table (w:tblCellSpacing):
@@ -8651,16 +8657,7 @@ class Engine {
     const tableHeight =
       topLead + rowHeights.reduce((a, b) => a + b, 0) + Math.max(0, nRows - 1) * s2 + botLead;
 
-    // Horizontal: page origin is the sheet edge, margin origin the left margin,
-    // text origin the current column x. Alignment keywords span the anchor box.
-    const contentW = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
-    const hOriginX = fl.hAnchor === "page" ? 0 : fl.hAnchor === "margin" ? sp.marginLeft : this.colX;
-    const hRefW = fl.hAnchor === "page" ? sp.pageWidth : fl.hAnchor === "margin" ? contentW : this.colWidth;
-    let x: number;
-    if (fl.xAlign === "center") x = hOriginX + (hRefW - tableWidth) / 2;
-    else if (fl.xAlign === "right") x = hOriginX + hRefW - tableWidth;
-    else if (fl.xAlign === "left") x = hOriginX;
-    else x = hOriginX + (fl.x ?? 0);
+    let x = this.floatingTableX(tbl, tableWidth);
 
     const bodyH = sp.pageHeight - Math.abs(sp.marginTop) - Math.abs(sp.marginBottom);
     const vOriginY = fl.vAnchor === "page" ? 0 : fl.vAnchor === "margin" ? Math.abs(sp.marginTop) : this.y;
@@ -8701,6 +8698,21 @@ class Engine {
     return { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights };
   }
 
+  /** A floating table's left edge on the current page. Page origin is the
+   * sheet edge, margin origin the left margin, text origin the current column
+   * x. Alignment keywords span the anchor box. */
+  private floatingTableX(tbl: Table, tableWidth: number): number {
+    const fl = tbl.props.floating!;
+    const sp = this.cur.sp;
+    const contentW = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+    const hOriginX = fl.hAnchor === "page" ? 0 : fl.hAnchor === "margin" ? sp.marginLeft : this.colX;
+    const hRefW = fl.hAnchor === "page" ? sp.pageWidth : fl.hAnchor === "margin" ? contentW : this.colWidth;
+    if (fl.xAlign === "center") return hOriginX + (hRefW - tableWidth) / 2;
+    if (fl.xAlign === "right") return hOriginX + hRefW - tableWidth;
+    if (fl.xAlign === "left") return hOriginX;
+    return hOriginX + (fl.x ?? 0);
+  }
+
   /** Register a floating table's square wrap rect on the current page so
    * paragraphs (including ones EARLIER in the flow) reflow around it — Word
    * reflows preceding content around a page/margin-anchored floating table. */
@@ -8723,9 +8735,10 @@ class Engine {
 
   /** Floating table (w:tblpPr): absolutely positioned against page/margin/
    * column origin, painted over an opaque white sheet, with body text wrapping
-   * square around it (leftFromText/… distances). Word does not split a floating
-   * table across pages, and the flow cursor is untouched — the table leaves the
-   * flow entirely, so earlier/later paragraphs on the page reflow around it. */
+   * square around it (leftFromText/… distances). The flow cursor is untouched
+   * — the table leaves the flow entirely, so earlier/later paragraphs on the
+   * page reflow around it. A table that runs past the page breaks across
+   * pages instead (see splitFloatingTable). */
   private placeFloatingTable(tbl: Table): void {
     const fl = tbl.props.floating!;
     this.ensureTableBorders(tbl);
@@ -8733,6 +8746,14 @@ class Engine {
     const { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights } =
       this.floatingTableGeom(tbl);
     const nRows = tbl.rows.length;
+    // A text-anchored table may not pass the body bottom. A page- or margin-
+    // anchored table may sit in the bottom margin, so it breaks only when it
+    // runs off the sheet.
+    const limit = fl.vAnchor === "text" ? this.bodyBottom : page.sp.pageHeight;
+    if (y + tableHeight > limit + 0.01) {
+      this.splitFloatingTable(tbl, y, tableWidth);
+      return;
+    }
 
     // Opaque white sheet behind the footprint: Word hides flow text and any
     // earlier floating table under a floating table's own rectangle (the two
@@ -8802,6 +8823,34 @@ class Engine {
       this.floats.set(page, list);
       this.floatWrapRegistered.set(tbl, page);
     }
+  }
+
+  /** A floating table that does not fit below its position breaks across
+   * pages like an inline table: the rows that do not fit continue at the body
+   * top of the next page, at the tblpPr horizontal position on that page, with
+   * the header rows repeated and w:cantSplit kept. Without
+   * w:allowTextAfterFloatingTableBreak (not read, so always off) Word puts the
+   * text after the table on the page of its last part only, where the text
+   * wraps around that part. */
+  private splitFloatingTable(tbl: Table, top: number, tableWidth: number): void {
+    const fl = tbl.props.floating!;
+    const startPage = this.cur;
+    const startCol = this.col;
+    const startY = this.y;
+    this.y = top;
+    const last = this.placeTable(tbl, () => this.floatingTableX(tbl, tableWidth));
+    const x = this.floatingTableX(tbl, tableWidth);
+    const list = this.floats.get(this.cur) ?? [];
+    list.push({
+      x0: x - fl.dist.l,
+      x1: x + tableWidth + fl.dist.r,
+      y0: last.top - fl.dist.t,
+      y1: this.y + fl.dist.b,
+      mode: "square",
+    });
+    this.floats.set(this.cur, list);
+    this.floatWrapRegistered.set(tbl, this.cur);
+    this.y = this.cur === startPage && this.col === startCol ? startY : this.columnStartY(this.col);
   }
 
   /** Interactive column-resize zones over each vertical table boundary. */
