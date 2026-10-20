@@ -173,7 +173,7 @@ class Converter {
   /** A Word 6.0/95 document's lists, which its paragraphs make as they are read. */
   private readonly lists6: Word6Lists | undefined;
   private readonly styleAutonumbers = new Map<number, { nLvlAnm?: number; anld?: Uint8Array }>();
-  /** A Word 6.0/95 document's field begin, separator and end marks, by CP: a 0x13, 0x14 or 0x15 no field lists is text. */
+  /** A Word 6.0/95 document's field begin, separator and end marks, by CP (word6FieldMarks): another 0x13, 0x14 or 0x15 is text. */
   private readonly fieldMarks6: Set<number> | undefined;
 
   constructor(private readonly reader: DocReader, private readonly hooks: ConvertHooks) {
@@ -181,7 +181,7 @@ class Converter {
     this.text = reader.pieces.text(0, Math.min(reader.pieces.end, reader.parts.end));
     if (reader.fib.word6) {
       this.lists6 = new Word6Lists(reader.fonts, reader.fib.word6.mac, reader.ctx);
-      this.fieldMarks6 = word6FieldMarks(reader);
+      this.fieldMarks6 = word6FieldMarks(this.text);
     }
     this.readSections();
     this.readHeaderStories();
@@ -558,7 +558,7 @@ class Converter {
         text += String.fromCharCode(ch);
         continue;
       }
-      // A Word 6 field mark no field lists is a character of the OEM set: ‼, ¶, §.
+      // A Word 6 field mark that no field holds is a character of the OEM set: ‼, ¶, §.
       if (this.fieldMarks6 && ch >= 0x13 && ch <= 0x15 && !this.fieldMarks6.has(cp)) {
         text += "‼¶§"[ch - 0x13];
         continue;
@@ -801,17 +801,24 @@ class Converter {
   }
 }
 
-/** The CPs of the field marks a Word 6 file's field PLCs list, in every story. */
-function word6FieldMarks(reader: DocReader): Set<number> {
-  const { fib, streams, parts } = reader;
+/**
+ * The CPs of a Word 6 file's field marks: a begin and its end, and the
+ * separators between them. A separator or end with no field open, or a
+ * begin never ended, is not one: a DOS or WordPerfect conversion left it
+ * as a character. (The field PLCs cannot decide: Word leaves fields such as
+ * PRIVATE out of them.)
+ */
+function word6FieldMarks(text: string): Set<number> {
   const marks = new Set<number>();
-  const stories: [number, number][] = [
-    [FC.plcfFldMom, parts.main], [FC.plcfFldHdr, parts.headers], [FC.plcfFldFtn, parts.footnotes], [FC.plcfFldAtn, parts.comments],
-    [FC.plcfFldEdn, parts.endnotes], [FC.plcfFldTxbx, parts.textboxes], [FC.plcfFldHdrTxbx, parts.headerTextboxes],
-  ];
-  for (const [index, base] of stories) {
-    const { cps } = parsePlc(tableBlob(fib, streams.table, index), 2);
-    for (let i = 0; i < cps.length - 1; i++) marks.add(base + cps[i]);
+  const open: number[] = [];
+  for (let cp = 0; cp < text.length; cp++) {
+    const ch = text.charCodeAt(cp);
+    if (ch === 0x13) open.push(cp);
+    else if (ch === 0x14 && open.length) marks.add(cp);
+    else if (ch === 0x15 && open.length) {
+      marks.add(open.pop()!);
+      marks.add(cp);
+    }
   }
   return marks;
 }
