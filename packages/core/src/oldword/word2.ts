@@ -254,6 +254,8 @@ export abstract class Word2Reader {
     }
     if (this.pieces.length === 0) this.pieces.push({ cp: 0, end: total, fc: fcMin, sprms: [] });
     const length = this.pieces[this.pieces.length - 1].end;
+    // Every character is a byte of the file.
+    if (total > this.bytes.length || length > this.bytes.length) throw new Error("the text is longer than the file");
     this.text = new Uint8Array(length);
     for (const piece of this.pieces) {
       const from = Math.min(piece.fc, this.bytes.length);
@@ -369,7 +371,8 @@ export abstract class Word2Reader {
       const names = entriesOf(zones[0] ?? new Uint8Array(0));
       const chpxs = entriesOf(zones[1] ?? new Uint8Array(0));
       const papxs = entriesOf(zones[2] ?? new Uint8Array(0));
-      const count = at + 2 <= stsh.length ? this.n16(stsh, at) : 0;
+      // The based-on pairs: no more than fit in the style sheet.
+      const count = at + 2 <= stsh.length ? Math.min(this.n16(stsh, at), Math.floor((stsh.length - at - 2) / 2)) : 0;
       for (let i = 0; i < Math.max(names.length, count); i++) {
         const name = names[i];
         if (name === null) continue;
@@ -446,8 +449,8 @@ export abstract class Word2Reader {
     for (let at = 0; at + 4 <= txt.length; at += 4) cps.push(this.n32(txt, at));
     const base = this.fib.ccpText;
     for (let i = 0; i < this.noteRefs.size && i + 1 < cps.length; i++) {
-      const start = base + cps[i];
-      const end = Math.min(base + cps[i + 1], base + this.fib.ccpFtn);
+      const start = base + Math.min(cps[i], this.fib.ccpFtn);
+      const end = base + Math.min(cps[i + 1], this.fib.ccpFtn);
       this.footnotes.push(end > start ? this.blocks(start, end, null, true) : []);
     }
   }
@@ -464,7 +467,8 @@ export abstract class Word2Reader {
       const fcSepx = this.n32(sed, 4 * (n + 1) + 6 * i + 2);
       let sepx: Uint8Array | undefined;
       if (fcSepx !== 0xffffffff && fcSepx < this.bytes.length) sepx = this.bytes.subarray(fcSepx + 1, fcSepx + 1 + this.u8(fcSepx));
-      if (end > cp) limits.push({ cp, end, sepx });
+      // Sections follow each other: one that goes back over the last is left out.
+      if (end > cp && cp >= (limits.length ? limits[limits.length - 1].end : 0)) limits.push({ cp, end, sepx });
     }
     if (limits.length === 0) limits.push({ cp: 0, end: mainEnd });
     limits[limits.length - 1].end = mainEnd;
@@ -515,8 +519,8 @@ export abstract class Word2Reader {
       for (let bit = 0; bit < 6; bit++) {
         if (!(headerFlags & (1 << bit))) continue;
         if (story + 2 >= stories.length) break;
-        const start = hddBase + stories[story];
-        const end = hddBase + stories[story + 1];
+        const start = hddBase + Math.min(stories[story], this.fib.ccpHdd);
+        const end = hddBase + Math.min(stories[story + 1], this.fib.ccpHdd);
         story++;
         const [kind, type] = kinds[bit];
         if (this.storyHasText(start, end)) headers.push({ kind, type, blocks: this.blocks(start, end, null, false) });
