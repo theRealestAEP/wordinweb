@@ -5437,6 +5437,66 @@ describe("floating table taller than the page", () => {
     expect(firstOnPage2?.kind === "text" && firstOnPage2.lineTop).toBeLessThan(result.pages[1].bodyTop + 20);
     expect(firstOnPage2?.kind === "text" && firstOnPage2.x).toBeCloseTo(first.item.x, 1);
   });
+
+  it("continues a margin-anchored table in the next column of a two-column section", () => {
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      `<w:tr><w:trPr><w:trHeight w:val="500"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${p(`row${num(i + 1)}`)}</w:tc></w:tr>`,
+    );
+    const table =
+      `<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="text"/>` +
+      `<w:tblW w:w="3000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>${rows.join("")}</w:tbl>`;
+    const sectPr = `<w:sectPr><w:cols w:num="2" w:space="720"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(table + p("After") + sectPr) });
+    const first = find(result, "row001");
+    const last = find(result, "row040");
+    expect(last.page).toBe(first.page);
+    // 4320tw columns with a 720tw gap: the second part starts 5040tw (336px)
+    // to the right.
+    expect(last.item.x - first.item.x).toBeCloseTo(336, 0);
+  });
+
+  it("numbers list paragraphs in a broken floating table once", () => {
+    const numbering =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:numbering ${W_NS}><w:abstractNum w:abstractNumId="1">` +
+      `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>` +
+      `</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
+    const item = (text: string) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const rows = Array.from({ length: 80 }, (_, i) =>
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${item(`row${num(i + 1)}`)}</w:tc></w:tr>`,
+    );
+    const { result } = layout({
+      "word/document.xml": wrapDocument(tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows)),
+      "word/numbering.xml": numbering,
+    });
+    const labels = result.pages.flatMap((page) =>
+      page.items.filter((i) => i.kind === "text" && /^\d+\.$/.test(i.text)).map((i) => (i.kind === "text" ? i.text : "")),
+    );
+    expect(labels[0]).toBe("1.");
+    expect(labels[labels.length - 1]).toBe("80.");
+  });
+
+  it("keeps a later tblOverlap=never table off the last part", () => {
+    const rows = Array.from({ length: 80 }, (_, i) => row([`row${num(i + 1)}`]));
+    const second =
+      `<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpY="1440"/>` +
+      `<w:tblOverlap w:val="never"/><w:tblW w:w="9000" w:type="dxa"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>${row(["SECOND"])}</w:tbl>`;
+    const body =
+      tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows).replace(
+        "<w:tblW",
+        `<w:tblOverlap w:val="never"/><w:tblW`,
+      ) +
+      second +
+      p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const last = find(result, "row080");
+    const other = find(result, "SECOND");
+    expect(other.page).toBe(last.page);
+    expect(other.item.lineTop).toBeGreaterThanOrEqual(last.item.lineTop + last.item.lineHeight - 0.01);
+  });
 });
 
 describe("mirror margins", () => {

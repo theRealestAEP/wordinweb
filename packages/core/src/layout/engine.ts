@@ -8743,6 +8743,8 @@ class Engine {
     const fl = tbl.props.floating!;
     this.ensureTableBorders(tbl);
     const page = this.cur;
+    const counters = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+    const seenNumIds = new Set(this.seenNumIds);
     const { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights } =
       this.floatingTableGeom(tbl);
     const nRows = tbl.rows.length;
@@ -8751,6 +8753,9 @@ class Engine {
     // runs off the sheet.
     const limit = fl.vAnchor === "text" ? this.bodyBottom : page.sp.pageHeight;
     if (y + tableHeight > limit + 0.01) {
+      // The split lays the rows out again: count their list numbers once.
+      this.counters = counters;
+      this.seenNumIds = seenNumIds;
       this.splitFloatingTable(tbl, y, tableWidth);
       return;
     }
@@ -8836,10 +8841,16 @@ class Engine {
     const fl = tbl.props.floating!;
     const startPage = this.cur;
     const startCol = this.col;
+    const startColX = this.colX;
     const startY = this.y;
+    const spacing = [this.lastParaSpacingAfter, this.lastParaAfterPad, this.lastParaWasEmpty] as const;
+    // A part that continues in another column of a multi-column section moves
+    // with that column. A text-anchored table follows the column already.
+    const floatX = () =>
+      this.floatingTableX(tbl, tableWidth) + (fl.hAnchor === "text" ? 0 : this.colX - startColX);
     this.y = top;
-    const last = this.placeTable(tbl, () => this.floatingTableX(tbl, tableWidth));
-    const x = this.floatingTableX(tbl, tableWidth);
+    const last = this.placeTable(tbl, floatX);
+    const x = floatX();
     const list = this.floats.get(this.cur) ?? [];
     list.push({
       x0: x - fl.dist.l,
@@ -8850,7 +8861,22 @@ class Engine {
     });
     this.floats.set(this.cur, list);
     this.floatWrapRegistered.set(tbl, this.cur);
-    this.y = this.cur === startPage && this.col === startCol ? startY : this.columnStartY(this.col);
+    // Later floating tables avoid the last part (w:tblOverlap="never").
+    this.floatingTablePositions.set(tbl, {
+      page: this.cur,
+      x,
+      y: last.top,
+      width: tableWidth,
+      height: this.y - last.top,
+      allowOverlap: fl.allowOverlap,
+    });
+    if (this.cur === startPage && this.col === startCol) {
+      // The table fit after all: the flow goes on as if it had not been there.
+      this.y = startY;
+      [this.lastParaSpacingAfter, this.lastParaAfterPad, this.lastParaWasEmpty] = spacing;
+    } else {
+      this.y = this.columnStartY(this.col);
+    }
   }
 
   /** Interactive column-resize zones over each vertical table boundary. */
