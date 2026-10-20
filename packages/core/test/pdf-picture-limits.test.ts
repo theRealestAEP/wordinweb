@@ -3,12 +3,30 @@ import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
-import { emf, emfFill, grayPng, pictBitmap, pictureDocx, tinyGif, tinyTiff, wmfDib, wmfLines } from "./pictures.js";
+import {
+  PIXEL_FORMAT_32BPP_ARGB,
+  PIXEL_FORMAT_8BPP_INDEXED,
+  argbBits,
+  emf,
+  emfFill,
+  emfPlus,
+  emfPlusCompressedImage,
+  emfPlusDrawImage,
+  emfPlusMetafileImage,
+  emfPlusPixelImage,
+  grayPng,
+  pictBitmap,
+  pictureDocx,
+  tinyGif,
+  tinyTiff,
+  wmfDib,
+  wmfLines,
+} from "./pictures.js";
 
-// A picture cut short or malformed is listed in unsupportedImages and drawn
-// as the empty frame, as a missing picture part is: never in part, never
-// blank while the render reports success. The rest of the page is the same
-// as with no picture at all.
+// A picture cut short or malformed, or one that would draw only in part, is
+// listed in unsupportedImages and drawn as the empty frame, as a missing
+// picture part is: never in part, never blank while the render reports
+// success. The rest of the page is the same as with no picture at all.
 
 class Collect extends Writable {
   readonly chunks: Buffer[] = [];
@@ -34,6 +52,9 @@ async function render(ext: string, bytes: Uint8Array | undefined): Promise<{ pag
 }
 
 const cut = (bytes: Uint8Array, end: number): Uint8Array => bytes.slice(0, end < 0 ? bytes.length + end : end);
+
+/** An EMF+ Only EMF that draws image object 0, 2 x 2 pixels. */
+const emfPlusImage = (image: [number, number, Uint8Array]): Uint8Array => emf([emfPlus([image, emfPlusDrawImage(0, 2, 2, [10, 10, 40, 20])])]);
 
 /** Each format: a good picture, and the same picture cut short or malformed in each way. */
 const cases: [string, Uint8Array, Record<string, Uint8Array>][] = [
@@ -70,6 +91,15 @@ const cases: [string, Uint8Array, Record<string, Uint8Array>][] = [
       "cut before EMR_EOF": cut(emfFill(), -20),
       "cut in a record": cut(emfFill(), -30),
       "no records": emf([]).slice(0, 88),
+    },
+  ],
+  [
+    "emf",
+    emfPlusImage(emfPlusPixelImage(0, 2, 2, 8, PIXEL_FORMAT_32BPP_ARGB, argbBits([0xffff0000, 0xff00ff00, 0xff0000ff, 0xffffffff]))),
+    {
+      "an EMF+ image in a pixel format the converter does not decode": emfPlusImage(emfPlusPixelImage(0, 2, 2, 4, PIXEL_FORMAT_8BPP_INDEXED, new Uint8Array(8))),
+      "an EMF+ image that is a GIF": emfPlusImage(emfPlusCompressedImage(0, 2, 2, tinyGif())),
+      "an EMF+ image that is a metafile": emfPlusImage(emfPlusMetafileImage(0, emfFill())),
     },
   ],
   [

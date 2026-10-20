@@ -49,12 +49,24 @@ export class ImageDataShim {
   }
 }
 
+/** What createImageBitmap gives emf-converter here: a decoded bitmap for drawImage. */
+export class BitmapShim {
+  constructor(
+    readonly image: SampleImage | { jpeg: Uint8Array },
+    readonly width: number,
+    readonly height: number,
+  ) {}
+  close(): void {}
+}
+
 export class RecordingCanvas {
   readonly ops: string[] = [];
   /** Bitmaps drawn, by placeholder index: samples, or a JPEG kept as it is. */
   readonly images: (SampleImage | { jpeg: Uint8Array })[] = [];
   /** Pixels put on this canvas with putImageData, for a drawImage of it. */
   pixels: ImageDataShim | null = null;
+  /** BitmapShims drawn on this canvas. */
+  bitmapsDrawn = 0;
   private context: RecordingContext | null = null;
 
   constructor(
@@ -459,13 +471,18 @@ export class RecordingContext {
     this.state.ctm = saved;
   }
 
-  drawImage(source: { pixels?: ImageDataShim | null; width: number; height: number }, ...args: number[]): void {
-    const pixels = source.pixels;
-    if (!pixels) return;
+  drawImage(source: { pixels?: ImageDataShim | null; width: number; height: number } | BitmapShim, ...args: number[]): void {
     let [dx, dy, dw, dh] = args;
     if (args.length >= 8) [, , , , dx, dy, dw, dh] = args;
     if (dw === undefined) dw = source.width;
     if (dh === undefined) dh = source.height;
+    if (source instanceof BitmapShim) {
+      this.place(source.image, dx, dy, dw, dh);
+      this.canvas.bitmapsDrawn++;
+      return;
+    }
+    const pixels = source.pixels;
+    if (!pixels) return;
     this.place(boundedRgba(pixels.data, pixels.width, pixels.height), dx, dy, dw, dh);
   }
 
@@ -490,15 +507,23 @@ export class RecordingContext {
 /**
  * Run `work` with OffscreenCanvas and ImageData globals that record into
  * canvases bound to these fonts and resources, as emf-converter looks for
- * them, and give back the first canvas it made: the picture itself (any
- * later ones are its bitmaps' temporaries).
+ * them, and a createImageBitmap that decodes with `bitmap`; give back the
+ * first canvas it made: the picture itself (any later ones are its
+ * bitmaps' temporaries).
  */
-export async function withRecordingCanvas<T>(fonts: FontSet, resources: Resources, work: () => Promise<T>): Promise<{ canvas: RecordingCanvas | null; result: T }> {
+export async function withRecordingCanvas<T>(
+  fonts: FontSet,
+  resources: Resources,
+  bitmap: (blob: Blob) => Promise<BitmapShim>,
+  work: () => Promise<T>,
+): Promise<{ canvas: RecordingCanvas | null; result: T }> {
   const g = globalThis as Record<string, unknown>;
   const hadCanvas = "OffscreenCanvas" in g;
   const hadImageData = "ImageData" in g;
+  const hadBitmap = "createImageBitmap" in g;
   const savedCanvas = g.OffscreenCanvas;
   const savedImageData = g.ImageData;
+  const savedBitmap = g.createImageBitmap;
   let first: RecordingCanvas | null = null;
   g.OffscreenCanvas = class extends RecordingCanvas {
     constructor(width: number, height: number) {
@@ -507,6 +532,7 @@ export async function withRecordingCanvas<T>(fonts: FontSet, resources: Resource
     }
   };
   if (!hadImageData) g.ImageData = ImageDataShim;
+  g.createImageBitmap = bitmap;
   try {
     const result = await work();
     return { canvas: first, result };
@@ -515,5 +541,7 @@ export async function withRecordingCanvas<T>(fonts: FontSet, resources: Resource
     else delete g.OffscreenCanvas;
     if (hadImageData) g.ImageData = savedImageData;
     else delete g.ImageData;
+    if (hadBitmap) g.createImageBitmap = savedBitmap;
+    else delete g.createImageBitmap;
   }
 }
