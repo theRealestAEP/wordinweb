@@ -158,6 +158,18 @@ describe("renderDocxToPdf errors", () => {
       "table cell": { "word/document.xml": wrapDocument(tbl(p("cell") + chunk)), "word/_rels/document.xml.rels": rels() },
       "content control": { "word/document.xml": wrapDocument(`<w:sdt><w:sdtContent>${p("in")}${chunk}</w:sdtContent></w:sdt>`), "word/_rels/document.xml.rels": rels() },
       "text box": { "word/document.xml": wrapDocument(box), "word/_rels/document.xml.rels": rels() },
+      // The placements no parse path walks into: each one's raw XML is checked.
+      "tracked insertion": { "word/document.xml": wrapDocument(p("before") + `<w:ins w:id="1" w:author="A">${chunk}</w:ins>`), "word/_rels/document.xml.rels": rels() },
+      "tracked deletion": { "word/document.xml": wrapDocument(p("before") + `<w:del w:id="1" w:author="A">${chunk}</w:del>`), "word/_rels/document.xml.rels": rels() },
+      "move destination": { "word/document.xml": wrapDocument(p("before") + `<w:moveTo w:id="1" w:author="A">${chunk}</w:moveTo>`), "word/_rels/document.xml.rels": rels() },
+      "inside a paragraph": { "word/document.xml": wrapDocument(`<w:p><w:r><w:t>run</w:t></w:r>${chunk}</w:p>`), "word/_rels/document.xml.rels": rels() },
+      "mc:Fallback": {
+        "word/document.xml": wrapDocument(
+          `<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="w14">${p("choice")}</mc:Choice><mc:Fallback>${chunk}</mc:Fallback></mc:AlternateContent>`,
+        ),
+        "word/_rels/document.xml.rels": rels(),
+      },
+      "another prefix": { "word/document.xml": wrapDocument(p("before") + `<x:altChunk xmlns:x="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ${R_NS} r:id="rIdAlt"/>`), "word/_rels/document.xml.rels": rels() },
       header: {
         "word/document.xml": wrapDocument(p("body") + `<w:sectPr><w:headerReference ${R_NS} w:type="default" r:id="rIdH"/></w:sectPr>`),
         "word/_rels/document.xml.rels": rels(`<Relationship Id="rIdH" Type="${REL}/header" Target="header1.xml"/>`),
