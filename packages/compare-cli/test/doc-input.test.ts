@@ -1,3 +1,4 @@
+import * as CFB from "cfb";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -52,17 +53,13 @@ describe("compareFiles with a Word 97-2003 .doc", () => {
     const good = join(fixtures, "parity-columns--v03.docx");
     writeFileSync(join(dir, "text.doc"), "{\\rtf1\\ansi Hello}");
     writeFileSync(join(dir, "print.doc"), "%PDF-1.4 ...");
-    const empty = new Uint8Array(512);
-    empty.set([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-    empty[30] = 9;
-    empty[32] = 6;
-    empty.set([0xfe, 0xff, 0xff, 0xff], 48);
-    empty.set([0xfe, 0xff, 0xff, 0xff], 68);
-    writeFileSync(join(dir, "empty.doc"), empty);
+    const cfb = CFB.utils.cfb_new();
+    CFB.utils.cfb_add(cfb, "Workbook", new Uint8Array(64));
+    writeFileSync(join(dir, "empty.doc"), new Uint8Array(CFB.write(cfb, { type: "array" }) as number[]));
     const cases: [string, RegExp][] = [
       [join(dir, "text.doc"), /text\.doc: an RTF file/],
       [join(dir, "print.doc"), /print\.doc: a PDF file/],
-      [join(dir, "empty.doc"), /empty\.doc: an OLE compound file with no Word document/],
+      [join(dir, "empty.doc"), /empty\.doc: an Excel 97-2003 workbook/],
     ];
     for (const [path, message] of cases) {
       const error = await errorOf(path, good);

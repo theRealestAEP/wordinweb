@@ -3,6 +3,7 @@
 import { zipSync } from "fflate";
 import { FIXED_ZIP_MTIME } from "../zip.js";
 import { ConvertHooks, DocReader, ExtraParts, convertDoc, openDoc } from "./convert.js";
+import { reviewHooks } from "./review-xml.js";
 
 /** Several readers' hooks as one: `special` from the first that writes the character, `parts` merged, every other hook from the first that has it. */
 export function combineHooks(list: ConvertHooks[]): ConvertHooks {
@@ -15,6 +16,7 @@ export function combineHooks(list: ConvertHooks[]): ConvertHooks {
     wrapRun: first("wrapRun"),
     markExtra: first("markExtra"),
     rowExtra: first("rowExtra"),
+    paragraph: first("paragraph"),
     special: specials.length ? (...args) => specials.reduce<string | undefined>((xml, special) => xml ?? special(...args), undefined) : undefined,
     parts: parts.length
       ? (paragraphs) => {
@@ -33,7 +35,7 @@ export function combineHooks(list: ConvertHooks[]): ConvertHooks {
 
 /** Every reader's hooks for one .doc. */
 export function docHooks(reader: DocReader): ConvertHooks {
-  return combineHooks([]);
+  return combineHooks([reviewHooks(reader)]);
 }
 
 /** A Word 97-2003 .doc as a .docx package's parts, with everything every reader adds. */

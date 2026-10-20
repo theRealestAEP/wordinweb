@@ -461,7 +461,7 @@ describe("compareFiles errors", () => {
     writeFileSync(join(dir, "text.docx"), "not a zip");
     await fails(join(dir, "text.docx"), good, join(dir, "x.docx")).toThrow(/text\.docx: not a \.docx file$/);
     writeFileSync(join(dir, "ole.docx"), Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, 0, 0]));
-    await fails(join(dir, "ole.docx"), good, join(dir, "x.docx")).toThrow(/a \.doc file or a password-protected document/);
+    await fails(join(dir, "ole.docx"), good, join(dir, "x.docx")).toThrow(/ole\.docx: the compound file cannot be read/);
   });
 
   it("names the input and part whose XML cannot be read", async () => {

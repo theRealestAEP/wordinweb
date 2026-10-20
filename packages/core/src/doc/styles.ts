@@ -171,7 +171,7 @@ export class StyleSheet {
         const para = newParaProps(style.istd);
         applyParaSprms(style.tapx, para);
         if (para.table) {
-          s += `<w:tblPr>${tblPrXml(para.table, ctx, undefined)}</w:tblPr>`;
+          s += `<w:tblPr>${tblPrXml(para.table, ctx, undefined, true)}</w:tblPr>`;
         }
       }
       if (style.papx) {

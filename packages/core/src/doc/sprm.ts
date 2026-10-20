@@ -63,6 +63,8 @@ export interface RunProps {
   kul?: number;
   /** Twips. */
   dxaSpace?: number;
+  /** sprmCFitText: the width in twips the run is fitted to, and the id that joins the runs fitted together. */
+  fitText?: { width: number; id: number };
   charScale?: number;
   hpsKern?: number;
   hpsPos?: number;
@@ -262,6 +264,10 @@ export interface SectionProps {
   dxtCharSpace?: number;
   dyaLinePitch?: number;
   clm?: number;
+  /** MSOTXFL ([MS-ODRAW] 2.4.5): the direction text flows on the page. */
+  textFlow?: number;
+  /** The printer's paper code (sprmSDmPaperReq). */
+  paperCode?: number;
   /** SFpcOperand: 0 end of section, 1 bottom of page, 2 beneath text. */
   fpc?: number;
   rncFtn?: number;
@@ -315,6 +321,9 @@ export function colorref(b: Uint8Array, at: number): string {
 function hex2(n: number): string {
   return n.toString(16).toUpperCase().padStart(2, "0");
 }
+
+/** A cell border that is explicitly none (Brc80MayBeNil all ones). */
+const NIL_BORDER: Border = { width: 0, type: 0xff, color: "auto", space: 0, shadow: false, frame: false };
 
 /** A Brc80 (4 bytes) at `at`; undefined for the nil value. */
 export function brc80(b: Uint8Array, at: number): Border | undefined {
@@ -419,6 +428,7 @@ export function applyRunSprms(grpprl: Uint8Array, p: RunProps): void {
       case 0x2a34: p.kcd = o[0]; break;
       case 0x2a3e: p.kul = o[0]; break;
       case 0x8840: p.dxaSpace = i16(o, 0); break;
+      case 0xca76: p.fitText = { width: i32(o, 1), id: i32(o, 5) }; break;
       case 0x2a42: p.color = icoColor(o[0]); break;
       case 0x4a43: p.hps = u16(o, 0); break;
       case 0x4845: p.hpsPos = i16(o, 0); break;
@@ -546,6 +556,7 @@ export function rPrXml(p: RunProps, ctx: XmlContext, istdPara: number): string {
   if (p.sfx !== undefined && EFFECTS[p.sfx]) out.push(`<w:effect w:val="${EFFECTS[p.sfx]}"/>`);
   if (p.border) out.push(borderXml("bdr", p.border));
   if (p.shading) out.push(shadingXml(p.shading));
+  if (p.fitText && p.fitText.width > 0) out.push(`<w:fitText w:val="${p.fitText.width}" w:id="${p.fitText.id}"/>`);
   if (p.iss !== undefined) out.push(`<w:vertAlign w:val="${p.iss === 1 ? "superscript" : p.iss === 2 ? "subscript" : "baseline"}"/>`);
   out.push(onOff("rtl", t("rtl")), onOff("cs", t("cs")));
   if (p.kcd !== undefined && EMPHASIS[p.kcd]) out.push(`<w:em w:val="${EMPHASIS[p.kcd]}"/>`);
@@ -742,6 +753,16 @@ function applyTableSprm(sprm: number, o: Uint8Array, t: TableProps): void {
     case 0x3615: t.autofit = o[0] !== 0; break;
     case 0xf617: t.widthBefore = ftsWidth(o, 0); break;
     case 0xf618: t.widthAfter = ftsWidth(o, 0); break;
+    case 0xd61a: case 0xd61b: case 0xd61c: case 0xd61d: {
+      // sprmTBrc*Cv: the full color of each cell's border, which its TC80 holds only as an Ico.
+      const side = (["top", "left", "bottom", "right"] as const)[sprm - 0xd61a];
+      for (let i = 0; i < Math.floor(o[0] / 4) && i < t.cells.length; i++) {
+        const border = t.cells[i].borders[side];
+        const color = colorref(o, 1 + i * 4);
+        if (border && color !== "auto") t.cells[i].borders[side] = { ...border, color };
+      }
+      break;
+    }
     case 0xd620: case 0xd62f: {
       const wide = sprm === 0xd62f;
       const border = wide ? brc(o, 4) : brc80(o, 4);
@@ -860,10 +881,12 @@ function applyDefTable(o: Uint8Array, t: TableProps): void {
       cell.noWrap = (grf & 0x2000) !== 0;
       cell.hideMark = (grf & 0x4000) !== 0;
       cell.width = u16(o, at + 2);
-      cell.borders.top = brc80(o, at + 4);
-      cell.borders.left = brc80(o, at + 8);
-      cell.borders.bottom = brc80(o, at + 12);
-      cell.borders.right = brc80(o, at + 16);
+      // A TC80's borders are Brc80MayBeNil: all ones is nil, which hides the table's border there.
+      const cellBorder = (at: number): Border | undefined => (u32(o, at) === 0xffffffff ? NIL_BORDER : brc80(o, at));
+      cell.borders.top = cellBorder(at + 4);
+      cell.borders.left = cellBorder(at + 8);
+      cell.borders.bottom = cellBorder(at + 12);
+      cell.borders.right = cellBorder(at + 16);
     }
     t.cells.push(cell);
   }
@@ -934,8 +957,8 @@ function framePrXml(f: FrameProps): string {
   if (f.dxaFromText !== undefined) attrs.push(`w:hSpace="${f.dxaFromText}"`);
   if (f.dyaFromText !== undefined) attrs.push(`w:vSpace="${f.dyaFromText}"`);
   if (f.wrap !== undefined && WRAP[f.wrap]) attrs.push(`w:wrap="${WRAP[f.wrap]}"`);
-  if (f.pcHorz !== undefined && f.pcHorz !== 3) attrs.push(`w:hAnchor="${["text", "margin", "page"][f.pcHorz]}"`);
   if (f.pcVert !== undefined && f.pcVert !== 3) attrs.push(`w:vAnchor="${["margin", "page", "text"][f.pcVert]}"`);
+  if (f.pcHorz !== undefined && f.pcHorz !== 3) attrs.push(`w:hAnchor="${["text", "margin", "page"][f.pcHorz]}"`);
   if (f.x !== undefined) attrs.push(X_ALIGN[f.x] ? `w:xAlign="${X_ALIGN[f.x]}"` : `w:x="${(f.x << 16) >> 16}"`);
   if (f.y !== undefined) attrs.push(Y_ALIGN[f.y] ? `w:yAlign="${Y_ALIGN[f.y]}"` : `w:y="${(f.y << 16) >> 16}"`);
   if (f.locked) attrs.push('w:anchorLock="1"');
@@ -951,8 +974,11 @@ function widthXml(name: string, w: { fts: number; w: number } | undefined): stri
   return `<w:${name} w:w="${w.w}" w:type="${FTS[w.fts] ?? "dxa"}"/>`;
 }
 
-/** A row mark's tblPr: the table-wide properties this row carries. */
-export function tblPrXml(t: TableProps, ctx: XmlContext, tblInd: number | undefined): string {
+/**
+ * A row mark's tblPr: the table-wide properties this row carries. A table
+ * style's tblPr (`inStyle`) holds only what its sprms set.
+ */
+export function tblPrXml(t: TableProps, ctx: XmlContext, tblInd: number | undefined, inStyle = false): string {
   const out: string[] = [];
   if (t.istd !== undefined) {
     const id = ctx.styleId(t.istd);
@@ -972,28 +998,29 @@ export function tblPrXml(t: TableProps, ctx: XmlContext, tblInd: number | undefi
   }
   if (t.noAllowOverlap) out.push('<w:tblOverlap w:val="never"/>');
   out.push(onOff("bidiVisual", t.bidi));
-  out.push(widthXml("tblW", t.tableWidth) || '<w:tblW w:w="0" w:type="auto"/>');
+  out.push(widthXml("tblW", t.tableWidth) || (inStyle ? "" : '<w:tblW w:w="0" w:type="auto"/>'));
   if (t.jc !== undefined && t.jc !== 0) out.push(`<w:jc w:val="${t.jc === 1 ? "center" : "right"}"/>`);
   if (t.cellSpacing !== undefined) out.push(`<w:tblCellSpacing w:w="${Math.floor(t.cellSpacing / 2)}" w:type="dxa"/>`);
-  if (t.indent && t.indent.fts === 3) out.push(`<w:tblInd w:w="${t.indent.w}" w:type="dxa"/>`);
-  else if (tblInd !== undefined && tblInd !== 0) out.push(`<w:tblInd w:w="${tblInd}" w:type="dxa"/>`);
+  if (t.indent && t.indent.fts === 3) {
+    if (t.indent.w !== 0) out.push(`<w:tblInd w:w="${t.indent.w}" w:type="dxa"/>`);
+  } else if (tblInd !== undefined && tblInd !== 0) out.push(`<w:tblInd w:w="${tblInd}" w:type="dxa"/>`);
   const borders = (["top", "left", "bottom", "right", "insideH", "insideV"] as const).map((side) => borderXml(side, t.borders[side])).join("");
   if (borders) out.push(`<w:tblBorders>${borders}</w:tblBorders>`);
   out.push(shadingXml(t.shading));
-  if (!t.autofit) out.push('<w:tblLayout w:type="fixed"/>');
-  const mar: string[] = [];
-  const left = t.cellMargins.left ?? t.dxaGapHalf;
-  const right = t.cellMargins.right ?? t.dxaGapHalf;
-  if (t.cellMargins.top !== undefined) mar.push(`<w:top w:w="${t.cellMargins.top}" w:type="dxa"/>`);
-  if (left !== undefined) mar.push(`<w:left w:w="${left}" w:type="dxa"/>`);
-  if (t.cellMargins.bottom !== undefined) mar.push(`<w:bottom w:w="${t.cellMargins.bottom}" w:type="dxa"/>`);
-  if (right !== undefined) mar.push(`<w:right w:w="${right}" w:type="dxa"/>`);
+  if (inStyle ? t.autofit === false : !t.autofit) out.push('<w:tblLayout w:type="fixed"/>');
+  // A table with no style of its own leaves out the margins Normal Table has (0, 108, 0, 108), as Word writes it.
+  const normal = !inStyle && t.istd === undefined;
+  const margins = { top: t.cellMargins.top, left: t.cellMargins.left ?? t.dxaGapHalf, bottom: t.cellMargins.bottom, right: t.cellMargins.right ?? t.dxaGapHalf };
+  const normalMargins = { top: 0, left: 108, bottom: 0, right: 108 };
+  const mar = (["top", "left", "bottom", "right"] as const)
+    .filter((side) => margins[side] !== undefined && !(normal && margins[side] === normalMargins[side]))
+    .map((side) => `<w:${side} w:w="${margins[side]}" w:type="dxa"/>`);
   if (mar.length) out.push(`<w:tblCellMar>${mar.join("")}</w:tblCellMar>`);
-  if (t.tlpFlags !== undefined) {
-    const f = t.tlpFlags;
-    const bit = (mask: number): string => (f & mask ? "1" : "0");
-    out.push(`<w:tblLook w:val="${f.toString(16).toUpperCase().padStart(4, "0")}" w:firstRow="${bit(0x20)}" w:lastRow="${bit(0x40)}" w:firstColumn="${bit(0x80)}" w:lastColumn="${bit(0x100)}" w:noHBand="${bit(0x200)}" w:noVBand="${bit(0x400)}"/>`);
-  }
+  // Word writes a table with no look (no sprmTTlp) as tblLook 0000.
+  if (inStyle && t.tlpFlags === undefined) return out.join("");
+  const look = t.tlpFlags ?? 0;
+  const bit = (mask: number): string => (look & mask ? "1" : "0");
+  out.push(`<w:tblLook w:val="${look.toString(16).toUpperCase().padStart(4, "0")}" w:firstRow="${bit(0x20)}" w:lastRow="${bit(0x40)}" w:firstColumn="${bit(0x80)}" w:lastColumn="${bit(0x100)}" w:noHBand="${bit(0x200)}" w:noVBand="${bit(0x400)}"/>`);
   return out.join("");
 }
 
@@ -1006,7 +1033,7 @@ export function trPrXml(t: TableProps, gridBefore: number, gridAfter: number): s
   if (gridBefore) out.push(widthXml("wBefore", t.widthBefore));
   if (gridAfter) out.push(widthXml("wAfter", t.widthAfter));
   out.push(onOff("cantSplit", t.cantSplit));
-  if (t.dyaRowHeight) out.push(`<w:trHeight w:val="${Math.abs(t.dyaRowHeight)}"${t.dyaRowHeight < 0 ? ' w:hRule="exact"' : ""}/>`);
+  if (t.dyaRowHeight) out.push(`<w:trHeight${t.dyaRowHeight < 0 ? ' w:hRule="exact"' : ""} w:val="${Math.abs(t.dyaRowHeight)}"/>`);
   out.push(onOff("tblHeader", t.header));
   if (t.jc !== undefined && t.jc !== 0) out.push(`<w:jc w:val="${t.jc === 1 ? "center" : "right"}"/>`);
   return out.join("");
@@ -1017,13 +1044,15 @@ const TEXT_DIRECTION: Record<number, string> = { 1: "tbRl", 3: "btLr", 4: "lrTbV
 /** A cell's tcPr: its width, span, merges, borders, shading and margins. */
 export function tcPrXml(cell: CellProps, width: number, gridSpan: number, autofit: boolean): string {
   const out: string[] = [];
-  if (cell.prefWidth && cell.prefWidth.fts !== 0) out.push(widthXml("tcW", cell.prefWidth));
+  // The preferred width: sprmTCellWidth's, else the TC80's own (wWidth, ftsWidth).
+  const prefWidth = cell.prefWidth ?? { fts: cell.ftsWidth, w: cell.width };
+  if (prefWidth.fts !== 0) out.push(widthXml("tcW", prefWidth));
   else if (autofit) out.push('<w:tcW w:w="0" w:type="auto"/>');
   else out.push(`<w:tcW w:w="${width}" w:type="dxa"/>`);
   if (gridSpan > 1) out.push(`<w:gridSpan w:val="${gridSpan}"/>`);
   if (cell.vertMerge === 3) out.push('<w:vMerge w:val="restart"/>');
   else if (cell.vertMerge === 1) out.push("<w:vMerge/>");
-  const borders = (["top", "left", "bottom", "right", "tl2br", "tr2bl"] as const).map((side) => borderXml(side, cell.borders[side])).join("");
+  const borders = (["top", "left", "bottom", "right", "tl2br", "tr2bl"] as const).map((side) => (cell.borders[side] === NIL_BORDER ? `<w:${side} w:val="nil"/>` : borderXml(side, cell.borders[side]))).join("");
   if (borders) out.push(`<w:tcBorders>${borders}</w:tcBorders>`);
   out.push(shadingXml(cell.shading));
   if (cell.noWrap) out.push("<w:noWrap/>");
@@ -1079,6 +1108,8 @@ export function applySectSprms(grpprl: Uint8Array, s: SectionProps): void {
       case 0x7030: s.dxtCharSpace = i32(o, 0); break;
       case 0x9031: s.dyaLinePitch = i16(o, 0); break;
       case 0x5032: s.clm = u16(o, 0); break;
+      case 0x5033: s.textFlow = u16(o, 0); break;
+      case 0x5026: s.paperCode = u16(o, 0); break;
       case 0xd234: s.borders.top = brc(o, 1); break;
       case 0xd235: s.borders.left = brc(o, 1); break;
       case 0xd236: s.borders.bottom = brc(o, 1); break;
@@ -1123,15 +1154,17 @@ export function sectPrXml(s: SectionProps, headerRefs: string, footnotePr: strin
   out.push(footnotePr, endnotePr);
   const types = ["continuous", "nextColumn", "nextPage", "evenPage", "oddPage"];
   if (s.bkc !== undefined && s.bkc !== 2) out.push(`<w:type w:val="${types[s.bkc] ?? "nextPage"}"/>`);
-  out.push(`<w:pgSz w:w="${s.xaPage ?? 12240}" w:h="${s.yaPage ?? 15840}"${s.landscape ? ' w:orient="landscape"' : ""}/>`);
+  out.push(`<w:pgSz w:w="${s.xaPage ?? 12240}" w:h="${s.yaPage ?? 15840}"${s.landscape ? ' w:orient="landscape"' : ""}${s.paperCode ? ` w:code="${s.paperCode}"` : ""}/>`);
   out.push(`<w:pgMar w:top="${s.dyaTop ?? 1440}" w:right="${s.dxaRight ?? 1800}" w:bottom="${s.dyaBottom ?? 1440}" w:left="${s.dxaLeft ?? 1800}" w:header="${s.dyaHdrTop ?? 720}" w:footer="${s.dyaHdrBottom ?? 720}" w:gutter="${s.dzaGutter ?? 0}"/>`);
   const pb = (["top", "left", "bottom", "right"] as const).map((side) => borderXml(side, s.borders[side])).join("");
   if (pb) {
     const prop = s.pgbProp ?? 0;
+    // Only the values that differ from the defaults (front, allPages, text), as Word writes them.
     const display = ["allPages", "firstPage", "notFirstPage"][prop & 7] ?? "allPages";
     const offsetFrom = (prop >>> 5) & 7 ? "page" : "text";
     const zOrder = (prop >>> 3) & 3 ? "back" : "front";
-    out.push(`<w:pgBorders w:zOrder="${zOrder}" w:display="${display}" w:offsetFrom="${offsetFrom}">${pb}</w:pgBorders>`);
+    const attrs = (zOrder !== "front" ? ` w:zOrder="${zOrder}"` : "") + (display !== "allPages" ? ` w:display="${display}"` : "") + (offsetFrom !== "text" ? ` w:offsetFrom="${offsetFrom}"` : "");
+    out.push(`<w:pgBorders${attrs}>${pb}</w:pgBorders>`);
   }
   if (s.nLnnMod) {
     const restart = ["newPage", "newSection", "continuous"][s.lnc ?? 0] ?? "newPage";
@@ -1140,27 +1173,30 @@ export function sectPrXml(s: SectionProps, headerRefs: string, footnotePr: strin
   if (s.pgnRestart || (s.nfcPgn !== undefined && s.nfcPgn !== 0)) {
     out.push(`<w:pgNumType${s.nfcPgn !== undefined && s.nfcPgn !== 0 ? ` w:fmt="${numFormat(s.nfcPgn)}"` : ""}${s.pgnRestart ? ` w:start="${s.pgnStart ?? 1}"` : ""}/>`);
   }
+  // The column spacing is 720 twips unless the section says otherwise.
   const num = s.columns ?? 1;
-  if (num > 1 || s.lineBetween) {
-    let cols = `<w:cols w:num="${num}"`;
-    if (s.dxaColumns !== undefined) cols += ` w:space="${s.dxaColumns}"`;
-    if (s.lineBetween) cols += ' w:sep="1"';
-    if (s.evenlySpaced === false && s.colWidths.length) {
-      cols += ' w:equalWidth="0">';
-      for (let i = 0; i < num; i++) cols += `<w:col w:w="${s.colWidths[i] ?? 0}"${i < num - 1 ? ` w:space="${s.colSpacings[i] ?? s.dxaColumns ?? 0}"` : ""}/>`;
-      cols += "</w:cols>";
-    } else {
-      cols += "/>";
-    }
-    out.push(cols);
+  let cols = `<w:cols${num > 1 ? ` w:num="${num}"` : ""} w:space="${s.dxaColumns ?? 720}"`;
+  if (s.lineBetween) cols += ' w:sep="1"';
+  if (num > 1 && s.evenlySpaced === false && s.colWidths.length) {
+    cols += ' w:equalWidth="0">';
+    for (let i = 0; i < num; i++) cols += `<w:col w:w="${s.colWidths[i] ?? 0}"${i < num - 1 ? ` w:space="${s.colSpacings[i] ?? s.dxaColumns ?? 0}"` : ""}/>`;
+    cols += "</w:cols>";
+  } else {
+    cols += "/>";
   }
+  out.push(cols);
   if (s.vjc) out.push(`<w:vAlign w:val="${["top", "center", "both", "bottom"][s.vjc] ?? "top"}"/>`);
   if (s.titlePage) out.push("<w:titlePg/>");
+  if (s.textFlow && TEXT_DIRECTION[s.textFlow]) out.push(`<w:textDirection w:val="${TEXT_DIRECTION[s.textFlow]}"/>`);
   if (s.bidi) out.push("<w:bidi/>");
   if (s.rtlGutter) out.push("<w:rtlGutter/>");
   if (s.clm !== undefined && s.clm !== 0 && s.dyaLinePitch) {
-    const type = ["default", "lines", "linesAndChars", "snapToChars"][s.clm & 7] ?? "lines";
+    // SClmOperand: 1 chars and lines, 2 lines only, 3 every character in its own square.
+    const type = ["default", "linesAndChars", "lines", "snapToChars"][s.clm & 3];
     out.push(`<w:docGrid w:type="${type}" w:linePitch="${s.dyaLinePitch}"${s.dxtCharSpace ? ` w:charSpace="${s.dxtCharSpace}"` : ""}/>`);
+  } else if (s.dyaLinePitch) {
+    // No grid: the pitch and spacing are kept for when one is turned on.
+    out.push(`<w:docGrid w:linePitch="${s.dyaLinePitch}"${s.dxtCharSpace ? ` w:charSpace="${s.dxtCharSpace}"` : ""}/>`);
   }
   return out.join("");
 }

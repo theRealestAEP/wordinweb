@@ -143,6 +143,26 @@ describe("the .doc reader", () => {
     expect(Object.keys(docToDocxFiles(bytes("parity-columns--v03.doc")))).toContain("word/styles.xml");
   });
 
+  it("writes legacy form fields with their data, as Word converts them", () => {
+    const body = parts(docToDocx(bytes("probe2-form-checkboxes--v02.doc")))["word/document.xml"];
+    expect(body).toContain('<w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="Name"/><w:enabled/><w:calcOnExit w:val="0"/><w:textInput/></w:ffData></w:fldChar>');
+    expect(body).toContain('<w:ddList><w:result w:val="1"/><w:listEntry w:val="Sales"/><w:listEntry w:val="Engineering"/><w:listEntry w:val="Finance"/></w:ddList>');
+    expect(body).toContain('<w:name w:val="Sub"/><w:enabled/><w:calcOnExit w:val="0"/><w:checkBox><w:sizeAuto/><w:default w:val="1"/><w:checked/></w:checkBox>');
+    expect(body).toContain('<w:checkBox><w:sizeAuto/><w:default w:val="0"/><w:checked w:val="0"/></w:checkBox>');
+  });
+
+  it("writes an EQ ruby field as a w:ruby, keeping the comment its code holds", () => {
+    const body = parts(docToDocx(bytes("probe2-ruby-vertical--v00.doc")))["word/document.xml"];
+    expect(body.match(/<w:ruby>/g)?.length).toBe(6);
+    expect(body).toMatch(/<w:ruby><w:rubyPr><w:rubyAlign w:val="distributeSpace"\/><w:hps w:val="8"\/><w:hpsRaise w:val="10"\/><\/w:rubyPr><w:rt><w:r>.*?<w:t xml:space="preserve">かんじ<\/w:t><\/w:r><\/w:rt><w:rubyBase><w:r>.*?<w:t xml:space="preserve">漢字<\/w:t><\/w:r><\/w:rubyBase><\/w:ruby>/);
+    expect(body).not.toContain("EQ \\* jc2");
+    // Ten comment references, as in Word's conversion: one sits inside a ruby field's code.
+    expect(body.match(/<w:commentReference /g)?.length).toBe(10);
+    // The section's vertical text flow and its grid.
+    expect(body).toContain('<w:textDirection w:val="tbRl"/>');
+    expect(body).toContain('<w:docGrid w:type="lines" w:linePitch="360"/>');
+  });
+
   it("refuses what is not a Word 97-2003 document, naming it", async () => {
     expect(() => docToDocx(new TextEncoder().encode("{\\rtf1 hello}"))).toThrow(/unsupported format: not an OLE compound file/);
     // A compound file with another stream (an Excel 97-2003 workbook), and a password-protected .docx.
@@ -151,7 +171,9 @@ describe("the .doc reader", () => {
       CFB.utils.cfb_add(cfb, name, new Uint8Array(64));
       return new Uint8Array(CFB.write(cfb, { type: "array" }) as number[]);
     };
-    expect(() => docToDocx(ole("Workbook"))).toThrow(/unsupported format: an OLE compound file with no Word document/);
+    expect(() => docToDocx(ole("Workbook"))).toThrow(/unsupported format: an Excel 97-2003 workbook/);
+    expect(() => docToDocx(ole("PowerPoint Document"))).toThrow(/unsupported format: a PowerPoint 97-2003 presentation/);
+    expect(() => docToDocx(ole("Contents"))).toThrow(/unsupported format: an OLE compound file with no Word document/);
     expect(() => docToDocx(ole("EncryptedPackage"))).toThrow(/unsupported format: a password-protected document/);
     // A Word 6.0/95 file: its FIB starts with 0xA5DC.
     const word6 = bytes("parity-lists--v00.doc").slice();
