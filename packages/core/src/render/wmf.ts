@@ -68,6 +68,11 @@ function isMathTypeEscape(bytes: Uint8Array, offset: number, length: number): bo
   return name.every((value, i) => bytes[offset + 10 + i] === value);
 }
 
+/** A META_ESCAPE MFCOMMENT that carries part of an embedded EMF (comment identifier "WMFC"). */
+function isEmbeddedEmfEscape(view: DataView, params: number, end: number): boolean {
+  return params + 8 <= end && view.getUint16(params, true) === 0x000f && view.getUint32(params + 4, true) === 0x43464d57;
+}
+
 function hasMathTypeEscapes(bytes: Uint8Array): boolean {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let offset = 18;
@@ -149,9 +154,10 @@ export function prepareWmf(input: Uint8Array): Uint8Array | null {
         }
         append(copy);
       }
-    } else if (fn === META_ESCAPE && mathType) {
-      // MathType metadata is not a drawing command. The dependency otherwise
-      // mistakes it for an embedded EMF comment and rejects the whole image.
+    } else if (fn === META_ESCAPE && (mathType || !isEmbeddedEmfEscape(view, params, offset + length))) {
+      // An escape other than an embedded EMF (MathType metadata, printer
+      // escapes, other comments) is not a drawing command. The dependency
+      // otherwise rejects the whole image on it.
     } else if (fn !== META_SETBKCOLOR) {
       append(bytes.slice(offset, offset + length));
     }

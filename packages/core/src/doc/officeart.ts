@@ -110,13 +110,24 @@ export function readProps(bytes: Uint8Array, rec: ArtRecord, into: ArtProps = ne
       complexOffset += length;
       into.set(id, data);
     } else {
-      into.set(id, value);
+      const before = into.get(id);
+      into.set(id, typeof before === "number" && (id & 0x3f) === 0x3f ? mergeBooleans(before, value) : value);
     }
   }
   return into;
 }
 
-/** All property tables of a shape container merged (later tables win). */
+/**
+ * Two values of a boolean property set (the last property of each block of
+ * 64): each table sets only the flags whose use bits it has, so a tertiary
+ * table's fUsefLayoutInCell keeps the primary table's fBehindDocument.
+ */
+function mergeBooleans(before: number, value: number): number {
+  const use = value >>> 16;
+  return ((((before >>> 16) | use) << 16) | ((before & 0xffff & ~use) | (value & use))) | 0;
+}
+
+/** All property tables of a shape container merged (later tables win, flag by flag for boolean sets). */
 export function shapeProps(bytes: Uint8Array, sp: ArtRecord): ArtProps {
   const props: ArtProps = new Map();
   for (const rec of childRecords(bytes, sp.start, sp.start + sp.length)) {

@@ -20,9 +20,18 @@ export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: Fon
 function convertWmf(bytes: Uint8Array, fonts: FontSet, resources: Resources): RecordingCanvas | null {
   const prepared = prepareWmf(bytes);
   if (!prepared) return null;
-  const [rawWidth, rawHeight] = WMF.image_size(prepared).map(Math.abs);
+  let rawWidth: number;
+  let rawHeight: number;
+  let actions: ReturnType<typeof WMF.get_actions>;
+  // The parser throws on records it does not know (an unknown escape, a
+  // malformed object index): such a picture draws as an empty frame.
+  try {
+    [rawWidth, rawHeight] = WMF.image_size(prepared).map(Math.abs);
+    actions = WMF.get_actions(prepared);
+  } catch {
+    return null;
+  }
   if (!rawWidth || !rawHeight) return null;
-  const actions = WMF.get_actions(prepared);
   // The fixups render/wmf.ts applies before painting: text decoded from
   // symbol fonts, and a default pen and brush for shapes without them.
   for (const action of actions) {

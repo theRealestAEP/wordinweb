@@ -4,7 +4,7 @@
  * `<w:r><w:drawing>` run, and `parts` collects the media parts those runs
  * refer to.
  */
-import { parsePlc, u16 } from "./bytes.js";
+import { parsePlc } from "./bytes.js";
 import type { ConvertHooks, DocReader, ExtraParts } from "./convert.js";
 import { FC, tableBlob } from "./fib.js";
 import {
@@ -69,7 +69,7 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
         const range = shape.text && textBoxRange(reader, shape.text, anchor.header);
         return range && range.end > range.start ? paragraphs(range.start, range.end) : undefined;
       };
-      return `<w:r>${rPrXml}${anchoredShapeXml(floating, { addMedia, nextId, textBoxContent })}</w:r>`;
+      return `<w:r>${rPrXml}${anchoredShapeXml(floating, { addMedia, nextId, textBoxContent, textBoxIdBase: anchor.header ? 0x10000 : 0 })}</w:r>`;
     }
     return undefined;
   };
@@ -83,23 +83,17 @@ export function documentArt(reader: DocReader): DocOfficeArt {
   return parseOfficeArtContent(dgg, 0, dgg.length, reader.streams.wordDocument);
 }
 
-/** The CP range of a text box's text in the document's CP space, without the story's guard paragraph mark. */
+/**
+ * The CP range of a text box story in the document's CP space, without the
+ * story's guard paragraph mark. A linked chain shares one story.
+ */
 export function textBoxRange(reader: DocReader, text: DocTextBox, header: boolean): { start: number; end: number } | undefined {
   const { fib, streams, parts: starts } = reader;
   const stories = parsePlc(tableBlob(fib, streams.table, header ? FC.plcfHdrtxbxTxt : FC.plcftxbxTxt), 22);
   if (text.story < 0 || text.story + 1 >= stories.cps.length) return undefined;
   const base = header ? starts.headerTextboxes : starts.textboxes;
-  let start = stories.cps[text.story];
-  let end = stories.cps[text.story + 1];
-  // A linked chain's story is split per box by the break table (Tbkd.itxbxs names the story).
-  const breaks = parsePlc(tableBlob(fib, streams.table, header ? FC.plcfTxbxHdrBkd : FC.plcfTxbxBkd), 10);
-  const own: number[] = [];
-  for (let i = 0; i < breaks.data.length; i++) if (u16(breaks.data[i], 0) === text.story) own.push(i);
-  if (own.length > 1 && text.sequence < own.length) {
-    const i = own[text.sequence];
-    start = Math.max(start, breaks.cps[i]);
-    end = Math.min(end, breaks.cps[i + 1]);
-  }
+  const start = stories.cps[text.story];
+  const end = stories.cps[text.story + 1];
   // The story's last character is its guard paragraph mark.
   return { start: base + start, end: base + Math.max(start, end - 1) };
 }

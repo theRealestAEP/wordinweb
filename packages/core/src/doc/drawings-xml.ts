@@ -15,6 +15,8 @@ export interface DrawingXmlOptions {
   nextId: () => number;
   /** The block content of a text box (w:p / w:tbl elements), or undefined for an empty paragraph. */
   textBoxContent?: (shape: DocShape) => string | undefined;
+  /** Added to a text box story's number to make a linked chain's id unique in the document (header stories count apart). */
+  textBoxIdBase?: number;
 }
 
 const NS =
@@ -37,13 +39,18 @@ export function inlinePictureXml(picture: DocInlinePicture, options: DrawingXmlO
   const name = picture.shape?.name ?? `Picture ${id}`;
   const shape = picture.shape;
   const line = shape?.line ?? picfBorderLine(picture);
-  const pic = picXml(picture.image, picture.crop, { x: 0, y: 0, cx: picture.size.cx, cy: picture.size.cy }, shape?.rotation ?? 0, !!shape?.flipH, !!shape?.flipV, line, name, options);
+  const frame = { x: 0, y: 0, cx: picture.size.cx, cy: picture.size.cy };
+  // An inline shape with no picture (a horizontal rule): drawn as a shape.
+  const asShape = !picture.image && shape && shape.kind === "shape";
+  const graphic = asShape
+    ? `<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">${wspXml(shape, frame, false, options)}</a:graphicData>`
+    : `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">${picXml(picture.image, picture.crop, frame, shape?.rotation ?? 0, !!shape?.flipH, !!shape?.flipV, line, name, options)}</a:graphicData>`;
   return (
     `<w:drawing ${NS}><wp:inline distT="0" distB="0" distL="0" distR="0">` +
     `<wp:extent cx="${emu(picture.size.cx)}" cy="${emu(picture.size.cy)}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
     `<wp:docPr id="${id}" name="${escape(name)}"${shape?.description ? ` descr="${escape(shape.description)}"` : ""}/>` +
-    `<wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>` +
-    `<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">${pic}</a:graphicData></a:graphic>` +
+    `<wp:cNvGraphicFramePr>${asShape ? "" : '<a:graphicFrameLocks noChangeAspect="1"/>'}</wp:cNvGraphicFramePr>` +
+    `<a:graphic>${graphic}</a:graphic>` +
     `</wp:inline></w:drawing>`
   );
 }
@@ -150,9 +157,15 @@ function wspXml(shape: DocShape, frame: { x: number; y: number; cx: number; cy: 
   const isTextBox = !!text || !!shape.wordArt;
   const cNvPr = inGroup ? `<wps:cNvPr id="${options.nextId()}" name="${escape(shape.name ?? "Shape")}"/>` : "";
   let body = "";
-  if (isTextBox) {
+  // A linked chain: the first box holds the whole story and the layout
+  // flows its overflow into the boxes that continue it (the .doc keeps no
+  // split of its own).
+  const chainId = text ? (options.textBoxIdBase ?? 0) + text.story + 1 : 0;
+  if (text && text.sequence > 0) {
+    body = `<wps:linkedTxbx id="${chainId}" seq="${text.sequence}"/>`;
+  } else if (isTextBox) {
     const content = shape.wordArt ? `<w:p><w:r><w:t xml:space="preserve">${escape(shape.wordArt.text)}</w:t></w:r></w:p>` : options.textBoxContent?.(shape) ?? "<w:p/>";
-    body = `<wps:txbx><w:txbxContent>${content}</w:txbxContent></wps:txbx>`;
+    body = `<wps:txbx${text?.next ? ` id="${chainId}"` : ""}><w:txbxContent>${content}</w:txbxContent></wps:txbx>`;
   }
   const insets = text?.insets ?? { left: 91440, top: 45720, right: 91440, bottom: 45720 };
   const bodyPr =
