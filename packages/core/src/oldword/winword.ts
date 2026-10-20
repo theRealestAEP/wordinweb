@@ -102,10 +102,11 @@ class WinWordReader extends Word2Reader {
    * outline, small caps, all caps and hidden, byte 1 strikethrough and holds
    * fSpec; byte 2 says which of the others are set: the font, the size, the
    * spacing, the color and underline, the raise; then the picture's file
-   * offset at 20.
+   * offset at 14.
    */
   protected applyChpx(c: Char, d: Uint8Array): void {
     if (d.length === 0) return;
+    if (this.bytes[0] === 0x9b) return this.applyWord1Chpx(c, d);
     const flips: [number, number][] = [[0x01, 0], [0x02, 1], [0x08, 3], [0x20, 5], [0x40, 6], [0x80, 7]];
     for (const [bit, i] of flips) if (d[0] & bit) c.flags[i] = !c.flags[i];
     if (d.length < 2) return;
@@ -118,7 +119,31 @@ class WinWordReader extends Word2Reader {
     if (set & 0x01) c.ico = d.length >= 10 ? d[9] & 0x1f : 0;
     if (set & 0x08) c.kul = d.length >= 10 ? d[9] >> 5 : 0;
     if (set & 0x10) c.hpsPos = d.length >= 11 ? (d[10] << 24) >> 24 : 0;
-    if (d.length >= 24) c.picture = this.n32(d, 20);
+    // The language at 12, then the picture's file offset: three bytes at 14 (the fourth holds something else).
+    if (d.length >= 17) c.picture = this.n32(d, 14) & 0xffffff;
+  }
+
+  /**
+   * Word for Windows 1's CHPX: byte 0 flips bold, italic, strikethrough,
+   * outline, small caps, all caps and hidden; byte 1 holds fSpec and says
+   * which of the others are set: the color, the font, the size, the
+   * underline, the raise, the spacing; then the font (a word), the size and
+   * the raise (a byte each), the spacing, the color and underline, and the
+   * picture's file offset at 8.
+   */
+  private applyWord1Chpx(c: Char, d: Uint8Array): void {
+    const flips: [number, number][] = [[0x01, 0], [0x02, 1], [0x04, 2], [0x08, 3], [0x20, 5], [0x40, 6], [0x80, 7]];
+    for (const [bit, i] of flips) if (d[0] & bit) c.flags[i] = !c.flags[i];
+    if (d.length < 2) return;
+    const set = d[1];
+    c.special = (set & 0x02) !== 0;
+    if (set & 0x08 && d.length >= 4) c.fontId = this.n16(d, 2);
+    if (set & 0x10 && d.length >= 5 && d[4]) c.hps = d[4];
+    if (set & 0x40) c.hpsPos = d.length >= 6 ? (d[5] << 24) >> 24 : 0;
+    if (set & 0x80) c.dxaSpace = d.length >= 7 ? (((d[6] & 0x3f) << 26) >> 26) * 5 : 0;
+    if (set & 0x04) c.ico = d.length >= 8 ? d[7] & 0x0f : 0;
+    if (set & 0x20) c.kul = d.length >= 8 ? (d[7] >> 4) & 7 : 0;
+    if (d.length >= 12) c.picture = this.n32(d, 8);
   }
 
   protected isCharSprm(op: number): boolean {
