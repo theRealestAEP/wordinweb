@@ -190,7 +190,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     const size = opened.mediaSize(part);
     if (size === undefined) return null;
     const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
-    if (ext === "emf" || ext === "wmf") {
+    if (ext === "emf" || ext === "wmf" || ext === "pict") {
       const bytes = await opened.media(part);
       const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources));
       if (!canvas) return null;
@@ -198,7 +198,13 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       const names: string[] = [];
       const xobjects: string[] = [];
       for (const image of canvas.images) {
-        const written = await writeSamples(writer, image);
+        const written =
+          "jpeg" in image
+            ? ((await writeImage(writer, "picture.jpg", image.jpeg.length, async (onPiece) => {
+                await onPiece(image.jpeg);
+                return true;
+              })) ?? (await writeSamples(writer, { width: 1, height: 1, gray: true, samples: Uint8Array.of(255), alpha: Uint8Array.of(0) })))
+            : await writeSamples(writer, image);
         names.push(`Im${written.objNum}`);
         xobjects.push(`/Im${written.objNum} ${written.objNum} 0 R`);
       }

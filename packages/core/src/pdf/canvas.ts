@@ -51,7 +51,8 @@ export class ImageDataShim {
 
 export class RecordingCanvas {
   readonly ops: string[] = [];
-  readonly images: SampleImage[] = [];
+  /** Bitmaps drawn, by placeholder index: samples, or a JPEG kept as it is. */
+  readonly images: (SampleImage | { jpeg: Uint8Array })[] = [];
   /** Pixels put on this canvas with putImageData, for a drawImage of it. */
   pixels: ImageDataShim | null = null;
   private context: RecordingContext | null = null;
@@ -465,8 +466,17 @@ export class RecordingContext {
     if (args.length >= 8) [, , , , dx, dy, dw, dh] = args;
     if (dw === undefined) dw = source.width;
     if (dh === undefined) dh = source.height;
+    this.place(boundedRgba(pixels.data, pixels.width, pixels.height), dx, dy, dw, dh);
+  }
+
+  /** A JPEG drawn as it is (it goes into the PDF as DCTDecode). */
+  drawJpeg(jpeg: Uint8Array, dx: number, dy: number, dw: number, dh: number): void {
+    this.place({ jpeg }, dx, dy, dw, dh);
+  }
+
+  private place(image: SampleImage | { jpeg: Uint8Array }, dx: number, dy: number, dw: number, dh: number): void {
     const index = this.canvas.images.length;
-    this.canvas.images.push(boundedRgba(pixels.data, pixels.width, pixels.height));
+    this.canvas.images.push(image);
     // The image's unit square onto its destination, in canvas pixels.
     const m = multiply(this.state.ctm, [dw, 0, 0, dh, dx, dy]);
     const ops = ["q"];

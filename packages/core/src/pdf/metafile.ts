@@ -2,15 +2,16 @@ import { prepareEmf } from "../render/emf.js";
 import { RecordingCanvas, withRecordingCanvas } from "./canvas.js";
 import { FontSet } from "./fonts.js";
 import { Resources } from "./resources.js";
+import { convertPict } from "./pict.js";
 import { convertWmf } from "./wmf.js";
 
 /**
- * An EMF or WMF picture as recorded operators: emf-converter (as the
- * browser renderer uses it) or the WMF player in wmf.ts replayed onto a
+ * An EMF, WMF or PICT picture as recorded operators: emf-converter (as the
+ * browser renderer uses it) or the players in wmf.ts and pict.ts replayed onto a
  * RecordingCanvas. Null when the converter rejects the bytes.
  */
 export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: FontSet, resources: Resources): Promise<RecordingCanvas | null> {
-  const canvas = ext === "wmf" ? convertWmf(bytes, fonts, resources) : ext === "emf" ? await convertEmf(bytes, fonts, resources) : null;
+  const canvas = ext === "wmf" ? convertWmf(bytes, fonts, resources) : ext === "emf" ? await convertEmf(bytes, fonts, resources) : ext === "pict" ? convertPict(bytes, fonts, resources) : null;
   // The page draws the operators inside one q ... Q: a save the converter
   // left open would keep the picture's transform and clip on the rest of the page.
   canvas?.getContext("2d")?.restoreAll();
