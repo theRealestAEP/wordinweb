@@ -1,4 +1,5 @@
 import * as WmfModule from "wmf";
+import { prepareEmf } from "../render/emf.js";
 import { decodeWmfText, prepareWmf } from "../render/wmf.js";
 import { ImageDataShim, RecordingCanvas, withRecordingCanvas } from "./canvas.js";
 import { FontSet } from "./fonts.js";
@@ -68,7 +69,8 @@ function convertWmf(bytes: Uint8Array, fonts: FontSet, resources: Resources): Re
 
 async function convertEmf(bytes: Uint8Array, fonts: FontSet, resources: Resources): Promise<RecordingCanvas | null> {
   const { convertEmfToDataUrl } = await import("emf-converter");
-  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const prepared = prepareEmf(bytes);
+  const buffer = prepared.buffer.slice(prepared.byteOffset, prepared.byteOffset + prepared.byteLength) as ArrayBuffer;
   // The converter paints at 1:1 and then exports a PNG, which fails here
   // (no FileReader) after every record is recorded; the canvas is what counts.
   const { canvas } = await withRecordingCanvas(fonts, resources, () => convertEmfToDataUrl(buffer, undefined, undefined, { dpiScale: 1 }).catch(() => null));

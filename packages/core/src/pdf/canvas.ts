@@ -339,18 +339,24 @@ export class RecordingContext {
       const c = parseColor(this.state.strokeStyle) ?? { r: 0, g: 0, b: 0, a: 1 };
       const scale = this.lengthScale();
       ops.push(`${num(c.r / 255)} ${num(c.g / 255)} ${num(c.b / 255)} RG ${num(Math.max(this.state.lineWidth * scale, 0.2))} w`);
+      if (c.a < 1 && this.state.globalAlpha === 1) ops.push(`/${this.canvas.resources.alpha(c.a)} gs`);
       ops.push(`${this.state.lineCap === "round" ? 1 : this.state.lineCap === "square" ? 2 : 0} J ${this.state.lineJoin === "round" ? 1 : this.state.lineJoin === "bevel" ? 2 : 0} j`);
       if (this.state.dash.length > 0) ops.push(`[${this.state.dash.map((v) => num(v * scale)).join(" ")}] ${num(this.lineDashOffset * scale)} d`);
     }
     return ops.join(" ");
   }
 
+  /** A paint in a fully transparent color (a converter's null pen or brush) draws nothing. */
+  private invisible(style: string): boolean {
+    return this.state.globalAlpha === 0 || parseColor(style)?.a === 0;
+  }
+
   fill(rule?: string): void {
-    if (this.path.length === 0) return;
+    if (this.path.length === 0 || this.invisible(this.state.fillStyle)) return;
     this.canvas.ops.push(`q ${this.paintOps(true, false)} ${this.path.join(" ")} ${rule === "evenodd" ? "f*" : "f"} Q`);
   }
   stroke(): void {
-    if (this.path.length === 0) return;
+    if (this.path.length === 0 || this.invisible(this.state.strokeStyle)) return;
     this.canvas.ops.push(`q ${this.paintOps(false, true)} ${this.path.join(" ")} S Q`);
   }
   clip(rule?: string): void {
@@ -396,7 +402,7 @@ export class RecordingContext {
   }
 
   fillText(text: string, x: number, y: number): void {
-    if (!text) return;
+    if (!text || this.invisible(this.state.fillStyle)) return;
     const font = this.fontSpec();
     const runs = this.canvas.fonts.shape(text, font);
     const width = runs.reduce((sum, run) => sum + run.advances.reduce((s, a) => s + a, 0), 0);
