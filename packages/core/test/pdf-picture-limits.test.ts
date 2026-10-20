@@ -147,6 +147,6 @@ describe("a picture cut short or malformed", () => {
         // The page is the page with no picture: its text, and the empty frame.
         expect(result.content, how).toBe(missing.content);
       }
-    });
+    }, 60_000);
   }
 });

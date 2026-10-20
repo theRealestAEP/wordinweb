@@ -7,7 +7,7 @@ import { DocParseContext, formatChange, refuseAltChunk, inheritHeaderFooterRefs,
 import { Relationships, parseRelationships, relsPathFor } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, attr, child, countElements, localName, parseXml } from "../xml.js";
-import { DOCUMENT_LIMITS, XML_PART, ZipBudget, mainDocumentPart } from "../zip.js";
+import { DOCUMENT_LIMITS, XML_PART, ZipBudget, holdXmlCounts, mainDocumentPart } from "../zip.js";
 import { docToDocx } from "../doc/hooks.js";
 import { isOleFile } from "../doc/streams.js";
 import { FORMAT_HEAD_BYTES, otherFormat } from "../formats.js";
@@ -120,6 +120,8 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
     files[entry.name] = rewriter.strict ? strToU8(normalizeStrictXml(strFromU8(bytes))) : bytes;
   }
   files[docPart] = outline;
+  // The shell's XML, counted before it is parsed; the body's was counted as it streamed.
+  holdXmlCounts(files, docPart);
   const doc = DocxDocument.fromFiles(files, options.markup ? { revisionView: "markup", revisionColors: true, revisionAuthors: options.authors } : {});
   body.hydrate = (el) => doc.hydrateControls(el);
 
