@@ -261,6 +261,18 @@ describe("renderDocxToPdf with comments", () => {
     expect(content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(2);
   });
 
+  it.skipIf(!hasPdftotext)("prints the card of a comment at no text once, on the last sheet", async () => {
+    const { docx } = commentedDocx(3, 1);
+    // A comment referenced in an empty paragraph on page 1: no drawn text is near it.
+    const xml = unzipSync(docx);
+    const document = strFromU8(xml["word/document.xml"]).replace("<w:body>", `<w:body><w:p><w:r><w:commentReference w:id="99"/></w:r></w:p>`);
+    const comments = strFromU8(xml["word/comments.xml"]).replace("</w:comments>", `<w:comment w:id="99" w:author="Ada Reviewer" w:initials="AR" w:date="2026-06-01T10:00:00Z"><w:p><w:r><w:t>Note at no text</w:t></w:r></w:p></w:comment></w:comments>`);
+    const { bytes, pages } = await render(zipSync({ ...xml, "word/document.xml": strToU8(document), "word/comments.xml": strToU8(comments) }), true);
+    expect(pages).toBe(3);
+    const sheets = pdfText(bytes, true);
+    expect(sheets.map((sheet) => sheet.split("Note at no text").length - 1)).toEqual([0, 0, 1, 0]);
+  });
+
   it.skipIf(!hasPdftotext)("prints the whole thread under its first comment, replies to replies stepped in, each author by the name people.xml gives", async () => {
     const comment = (id: number, author: string, text: string): string =>
       `<w:comment w:id="${id}" w:author="${author}" w:date="2026-06-0${id + 1}T10:00:00Z"><w:p w14:paraId="0000100${id}"><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:comment>`;

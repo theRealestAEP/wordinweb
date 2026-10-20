@@ -111,8 +111,8 @@ export function fileSource(path: string): ByteSource {
 /**
  * Render a .docx to PDF with no browser: the document streams in
  * (stream/body.ts), a counting pass learns the page total and bookmark
- * pages, and the rendering pass writes each page's objects to `out` as the
- * layout finishes it. Fonts embed once at the end, subset to the glyphs
+ * pages, and the rendering pass writes each page's objects to `out` once the
+ * layout has finished the next page (or the document). Fonts embed once at the end, subset to the glyphs
  * used. `out` is ended when the PDF is complete.
  *
  * A link (w:hyperlink, a HYPERLINK field) is a /Link annotation over each
@@ -266,7 +266,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     return annots;
   };
 
-  const onPage = async (page: LaidOutPage): Promise<void> => {
+  const writeSheet = async (page: LaidOutPage, last: boolean): Promise<void> => {
     const shown = new Map<string, Picture>();
     const xobjects: string[] = [];
     for (const item of page.items) {
@@ -282,7 +282,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       xobjects.push(...loaded.xobjects);
     }
     // The rail first: a sheet whose cards reach past its bottom is taller.
-    const rail = column && sheet ? column.layout(page, sheet.height, printComments && page.index === final.result.totalPages) : null;
+    const rail = column && sheet ? column.layout(page, sheet.height, printComments && last) : null;
     const height = rail?.height ?? page.height;
     const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, height);
     drawer.drawPage((part) => shown.get(part) ?? null);
@@ -291,8 +291,17 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     await writePage(drawer, sheet?.width ?? page.width, height, xobjects, await writeLinks(page, drawer));
     if (page.index % 25 === 0) clearBreakCache(measurer);
   };
+  // Each page's sheet is written when the next page comes, and the last
+  // one when the layout ends: only then is it known to be the last, the
+  // sheet that takes the cards of the comments no page placed.
+  let held: LaidOutPage | null = null;
+  const onPage = async (page: LaidOutPage): Promise<void> => {
+    if (held) await writeSheet(held, false);
+    held = page;
+  };
   clearBreakCache(measurer);
   await layoutDocumentStream(opened.doc, { measurer, prescan: opened.prescan, knownTotalPages: final.knownTotalPages, final: final.result, onPage });
+  if (held) await writeSheet(held, true);
 
   await resources.write();
   await writer.object(pagesNum, `<< /Type /Pages /Count ${pageNums.length} /Kids [${pageNums.map((n) => `${n} 0 R`).join(" ")}] >>`);
