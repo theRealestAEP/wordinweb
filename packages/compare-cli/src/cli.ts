@@ -12,7 +12,10 @@ tracked change by NAME. Accept all of them to get the revised document;
 reject all of them to get the original.
 
 A Strict Open XML Document (ISO/IEC 29500 Strict) is read as Transitional,
-and RESULT.docx is written as Transitional either way.
+and RESULT.docx is written as Transitional either way. Either input may be
+a Word 97-2003 .doc (the binary format): it is converted to a .docx working
+file first, so a .doc can be compared with a .docx. The file's bytes decide,
+not its name.
 
 The body, the notes and the binary parts (images, embedded files) can be any
 size. The other parts (styles, numbering, headers, footers, charts, custom
@@ -33,7 +36,8 @@ Options:
   -h, --help          show this help
 
 Exit codes: 0 done; 1 failed (the message starts with the reason's code, such as
-not_docx or unsupported_script); 2 usage.`;
+not_docx, unsupported_format for an RTF, PDF, OpenDocument, Word 6.0/95 or
+password-protected file, or unsupported_script); 2 usage.`;
 
 /** A mistake in the command line: reported with exit code 2. */
 class UsageError extends Error {}
