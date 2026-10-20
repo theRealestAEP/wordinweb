@@ -26,6 +26,7 @@ import type { DocReader } from "./convert.js";
 import { FC, tableBlob } from "./fib.js";
 import { sprms } from "./props.js";
 import { applyParaSprms, applyRunSprms, newParaProps, newRunProps } from "./sprm.js";
+import { parseSttb6 } from "./word6.js";
 
 // ---------- types ----------
 
@@ -165,8 +166,11 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 export function readDocReview(reader: DocReader): DocReview {
   const { fib, streams, parts, pieces, props } = reader;
   const table = streams.table;
-  const authors = parseSttb(tableBlob(fib, table, FC.sttbfRMark)).strings;
-  const commentAuthors = xstGroup(tableBlob(fib, table, FC.grpXstAtnOwners));
+  // Word 6: an 8-bit string table with two extra bytes per author, and 8-bit Pascal strings.
+  const rmark = tableBlob(fib, table, FC.sttbfRMark);
+  const authors = fib.word6 ? parseSttb6(rmark, 2).strings : parseSttb(rmark).strings;
+  const owners = tableBlob(fib, table, FC.grpXstAtnOwners);
+  const commentAuthors = fib.word6 ? stGroup(owners) : xstGroup(owners);
   const authorName = (ibst: number) => authors[ibst] ?? "Unknown";
   const end = Math.min(pieces.end, parts.end);
 
@@ -257,15 +261,25 @@ function xstGroup(b: Uint8Array): string[] {
   return out;
 }
 
+/** A sequence of St (a length byte, then 8-bit characters), as a Word 6 GrpStAtnOwners holds. */
+function stGroup(b: Uint8Array): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < b.length; i += 1 + b[i]) out.push(String.fromCharCode(...b.subarray(i + 1, i + 1 + b[i])));
+  return out;
+}
+
 // ---------- comments ----------
 
 const ATRD_PRE10 = 30;
 const ATRD_POST10 = 18;
+/** A Word 6 ATRD: the initials as an 8-bit St in 10 bytes, then ibst, ak, grfbmc and lTagBkmk as in Word 97's. */
+const ATRD_WORD6 = 20;
 
 function readComments(reader: DocReader, owners: string[]): DocComment[] {
   const { fib, streams, parts, pieces } = reader;
   const table = streams.table;
-  const ref = parsePlc(tableBlob(fib, table, FC.plcfandRef), ATRD_PRE10);
+  const word6 = !!fib.word6;
+  const ref = parsePlc(tableBlob(fib, table, FC.plcfandRef), word6 ? ATRD_WORD6 : ATRD_PRE10);
   const n = ref.data.length;
   if (n === 0) return [];
   const txtCps = parsePlc(tableBlob(fib, table, FC.plcfandTxt), 0).cps;
@@ -276,7 +290,8 @@ function readComments(reader: DocReader, owners: string[]): DocComment[] {
   // The commented ranges: ATRDPre10.lTagBkmk names an ATNBE in SttbfAtnBkmk,
   // whose index is the bookmark's index in PlcfAtnBkf; its FBKF.ibkl is the
   // index of the end CP in PlcfAtnBkl.
-  const bkmk = parseSttb(tableBlob(fib, table, FC.sttbfAtnBkmk)).extra;
+  const atnBkmk = tableBlob(fib, table, FC.sttbfAtnBkmk);
+  const bkmk = (word6 ? parseSttb6(atnBkmk, 10) : parseSttb(atnBkmk)).extra;
   const bkf = parsePlc(tableBlob(fib, table, FC.plcfAtnBkf), 4);
   const bklCps = parsePlc(tableBlob(fib, table, FC.plcfAtnBkl), 0).cps;
   const rangeByTag = new Map<number, [number, number]>();
@@ -289,9 +304,9 @@ function readComments(reader: DocReader, owners: string[]): DocComment[] {
   const out: DocComment[] = [];
   for (let k = 0; k < n; k++) {
     const atrd = ref.data[k];
-    const initials = utf16(atrd, 2, Math.min(u16(atrd, 0), 9));
-    const ibst = u16(atrd, 20);
-    const tag = i32(atrd, 26);
+    const initials = word6 ? String.fromCharCode(...atrd.subarray(1, 1 + Math.min(atrd[0], 9))) : utf16(atrd, 2, Math.min(u16(atrd, 0), 9));
+    const ibst = u16(atrd, word6 ? 10 : 20);
+    const tag = i32(atrd, word6 ? 16 : 26);
     const referenceCp = ref.cps[k];
     const range = tag === -1 ? undefined : rangeByTag.get(tag);
     const textStart = atn0 + (txtCps[k] ?? 0);

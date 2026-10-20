@@ -10,6 +10,8 @@ export interface DocStreams {
   table: Uint8Array;
   /** Absent in a document with no pictures or large properties. */
   data: Uint8Array | null;
+  /** A Word 6.0/95 file's stream `name` of the embedded object storage `ObjectPool/<storage>`, where its OLE objects keep their pictures. */
+  objectStream?: (storage: string, name: string) => Uint8Array | null;
 }
 
 /** The first bytes of every OLE compound file. */
@@ -50,7 +52,7 @@ export function openDocStreams(bytes: Uint8Array): DocStreams {
   // A Word 6.0/95 file keeps everything, pictures too, in the WordDocument stream and has no Table stream.
   const wIdent = u16(wordDocument, 0);
   const nFib = u16(wordDocument, 2);
-  if (wIdent === 0xa5dc) return { wordDocument, table: wordDocument, data: wordDocument };
+  if (wIdent === 0xa5dc) return { wordDocument, table: wordDocument, data: wordDocument, objectStream: (storage, name) => streamBytes(cfb, `ObjectPool/${storage}/${name}`) };
   if (wIdent === 0xa5ec && nFib < 0x00c1) throw new Error("unsupported format: a Word 6.0/95 document (only Word 97-2003 .doc files are read)");
   if (wIdent !== 0xa5ec) throw new Error("unsupported format: not a Word document (the WordDocument stream does not start with a FIB)");
   const flags = u16(wordDocument, 0x0a);

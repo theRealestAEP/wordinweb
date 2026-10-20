@@ -678,6 +678,23 @@ class Converter {
     return body + last;
   }
 
+  /**
+   * The header story of kind `k` (in Word 97's order: even header, odd
+   * header, even footer, odd footer, first header, first footer) of section
+   * `index` in a Word 6 file, which stores only the stories the document
+   * (its footnote separators, DOP grpfIhdt) and each section (SEP grpfIhdt)
+   * have, in that order. Undefined when the section has none: it keeps the
+   * previous section's.
+   */
+  private word6HeaderStory(index: number, k: number): number | undefined {
+    const dop = tableBlob(this.reader.fib, this.reader.streams.table, FC.dop);
+    let story = bitCount((dop[1] ?? 0) & 0x07);
+    for (let s = 0; s < index; s++) story += bitCount((this.sections[s].props.grpfIhdt ?? 0) & 0x3f);
+    const bits = this.sections[index].props.grpfIhdt ?? 0;
+    if (!(bits & (1 << k))) return undefined;
+    return story + bitCount(bits & ((1 << k) - 1));
+  }
+
   /** The headerReference and footerReference elements of section `index`, registering the parts. */
   private headerReferences(index: number): string {
     const stories = this.headerStories;
@@ -687,7 +704,8 @@ class Converter {
     ] as const;
     let out = "";
     for (let k = 0; k < 6; k++) {
-      const i = 6 + index * 6 + k;
+      const i = this.reader.fib.word6 ? this.word6HeaderStory(index, k) : 6 + index * 6 + k;
+      if (i === undefined) continue;
       if (i + 1 >= stories.length) break;
       const start = stories[i];
       const end = stories[i + 1];
@@ -744,6 +762,12 @@ class Converter {
     out.push("</w:settings>");
     return out.join("");
   }
+}
+
+function bitCount(v: number): number {
+  let n = 0;
+  for (; v; v &= v - 1) n++;
+  return n;
 }
 
 function latin1(bytes: Uint8Array): string {

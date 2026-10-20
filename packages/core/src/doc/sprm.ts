@@ -284,6 +284,8 @@ export interface SectionProps {
   propRevision?: PropRevision;
   /** Word 6 heading numbering (sprmSOlstAnm): an OLST. */
   olst?: Uint8Array;
+  /** The headers and footers the section has (sprmSGprfIhdt), which a Word 6 file stores only. */
+  grpfIhdt?: number;
 }
 
 export function newRunProps(): RunProps {
@@ -1135,6 +1137,7 @@ export function applySectSprms(grpprl: Uint8Array, s: SectionProps): void {
         break;
       case 0x7044: s.pgnStart = u32(o, 0); break;
       case 0xd202: s.olst = o.subarray(1); break;
+      case 0x3014: s.grpfIhdt = o[0]; break;
       default: break;
     }
   }

@@ -24,6 +24,9 @@ export const FC = {
   clx: 33,
   grpXstAtnOwners: 36,
   sttbfAtnBkmk: 37,
+  /** Word 6.0/95 drawing objects (fcUnused1 and fcUnused2 in Word 97). */
+  plcfdoaMom: 38,
+  plcfdoaHdr: 39,
   plcSpaMom: 40,
   plcSpaHdr: 41,
   plcfAtnBkf: 42,
@@ -157,7 +160,7 @@ export function parseFib(word: Uint8Array): Fib {
 }
 
 /** The FC indices past 37 that a Word 6.0/95 FIB has too, in the same order as Word 97's. */
-const WORD6_LATE_FC = new Set<number>([FC.plcfAtnBkf, FC.plcfAtnBkl, FC.plcfendRef, FC.plcfendTxt, FC.sttbfRMark, FC.plcftxbxTxt, FC.plcfHdrtxbxTxt]);
+const WORD6_LATE_FC = new Set<number>([FC.plcfdoaMom, FC.plcfdoaHdr, FC.plcfAtnBkf, FC.plcfAtnBkl, FC.plcfendRef, FC.plcfendTxt, FC.sttbfRMark, FC.plcftxbxTxt, FC.plcfHdrtxbxTxt]);
 
 /**
  * The FIB of a Word 6.0 (nFib 0x65) or Word 95 (nFib 0x68) file, from

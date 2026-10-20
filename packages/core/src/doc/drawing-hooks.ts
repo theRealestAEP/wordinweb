@@ -7,7 +7,9 @@
 import { parsePlc } from "./bytes.js";
 import type { ConvertHooks, DocReader, ExtraParts } from "./convert.js";
 import { FC, tableBlob } from "./fib.js";
+import { word6Drawings, word6ObjectPicture } from "./drawings6.js";
 import {
+  type DocFloatingShape,
   type DocFspa,
   type DocOfficeArt,
   type DocShape,
@@ -33,6 +35,12 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
   for (const { cp, fspa } of parsePlcfSpa(mom, 0, mom.length)) anchors.set(starts.main + cp, { fspa, header: false });
   const hdr = tableBlob(fib, streams.table, FC.plcSpaHdr);
   for (const { cp, fspa } of parsePlcfSpa(hdr, 0, hdr.length)) anchors.set(starts.headers + cp, { fspa, header: true });
+  // A Word 6.0/95 document's drawing objects (drawings6.ts), already described.
+  const word6Shapes = new Map<number, { floating: DocFloatingShape; header: boolean }>();
+  if (fib.word6) {
+    for (const { cp, floating } of word6Drawings(streams.wordDocument, tableBlob(fib, streams.table, FC.plcfdoaMom), starts.main, 0)) word6Shapes.set(cp, { floating, header: false });
+    for (const { cp, floating } of word6Drawings(streams.wordDocument, tableBlob(fib, streams.table, FC.plcfdoaHdr), starts.headers, 1)) word6Shapes.set(cp, { floating, header: true });
+  }
 
   const extra: ExtraParts = { files: {}, documentRels: [], contentTypes: [] };
   const mediaIds = new Map<string, string>();
@@ -59,14 +67,17 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
       // A picture in a field's code (Word's QUOTE field keeps an equation's
       // picture there and again in the result) shows only in the result.
       if (props.fData || props.picLocation === undefined || !streams.data || inCode.has(cp)) return undefined;
-      const picture = parseInlinePicture(streams.data, props.picLocation, { store: art, delayStream: streams.wordDocument });
+      // A Word 6 OLE object's picture is in its ObjectPool storage, which the picture character names.
+      const picture =
+        parseInlinePicture(streams.data, props.picLocation, { store: art, delayStream: streams.wordDocument, word6: !!fib.word6 }) ??
+        (streams.objectStream ? word6ObjectPicture(streams.objectStream, props.picLocation) : null);
       if (!picture || (!picture.image && !picture.shape)) return undefined;
       return `<w:r>${rPrXml}${inlinePictureXml(picture, { addMedia, nextId })}</w:r>`;
     }
     if (ch === 0x08) {
-      const anchor = anchors.get(cp);
+      const anchor = word6Shapes.get(cp) ?? anchors.get(cp);
       if (!anchor) return undefined;
-      const floating = floatingShape(art, anchor.fspa, streams.wordDocument, anchor.header ? 1 : 0);
+      const floating = "floating" in anchor ? anchor.floating : floatingShape(art, anchor.fspa, streams.wordDocument, anchor.header ? 1 : 0);
       if (!floating) return undefined;
       const textBoxContent = (shape: DocShape): string | undefined => {
         const range = shape.text && textBoxRange(reader, shape.text, anchor.header);
@@ -107,7 +118,8 @@ export function documentArt(reader: DocReader): DocOfficeArt {
  */
 export function textBoxRange(reader: DocReader, text: DocTextBox, header: boolean): { start: number; end: number } | undefined {
   const { fib, streams, parts: starts } = reader;
-  const stories = parsePlc(tableBlob(fib, streams.table, header ? FC.plcfHdrtxbxTxt : FC.plcftxbxTxt), 22);
+  // A Word 6 PlcftxbxTxt holds only the CPs.
+  const stories = parsePlc(tableBlob(fib, streams.table, header ? FC.plcfHdrtxbxTxt : FC.plcftxbxTxt), fib.word6 ? 0 : 22);
   if (text.story < 0 || text.story + 1 >= stories.cps.length) return undefined;
   const base = header ? starts.headerTextboxes : starts.textboxes;
   const start = stories.cps[text.story];

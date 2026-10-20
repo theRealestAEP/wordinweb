@@ -250,9 +250,13 @@ function latin1(bytes: Uint8Array): string {
   return s;
 }
 
-/** The code page of each Windows character set an FFN names. */
+/**
+ * The code page of each Windows character set an FFN names. A Macintosh
+ * font (77) has the document's: a file saved on the Macintosh may still
+ * keep its text in the Windows character set (fib.chse 0).
+ */
 const CHARSET_ENCODINGS: Record<number, string> = {
-  77: "macintosh", 161: "windows-1253", 162: "windows-1254", 163: "windows-1258", 177: "windows-1255", 178: "windows-1256", 186: "windows-1257",
+  161: "windows-1253", 162: "windows-1254", 163: "windows-1258", 177: "windows-1255", 178: "windows-1256", 186: "windows-1257",
   204: "windows-1251", 222: "windows-874", 238: "windows-1250",
 };
 
@@ -261,7 +265,7 @@ const highHalves = new Map<string, string>();
 /**
  * The characters bytes 0x80-0xFF stand for in a font with the given
  * character set: the document's own character set (Windows or Macintosh)
- * for an ANSI or default font, the font's for the others.
+ * for an ANSI, default or Macintosh font, the font's for the others.
  */
 export function highHalf(charset: number, mac: boolean): string {
   const encoding = CHARSET_ENCODINGS[charset] ?? (mac ? "macintosh" : "windows-1252");
