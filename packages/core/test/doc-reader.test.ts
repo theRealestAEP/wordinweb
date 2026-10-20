@@ -200,7 +200,8 @@ describe("the .doc reader", () => {
 // Word 6.0/95 files from GovDocs1 (public domain US government documents):
 // 000114 a full-saved Word 95 file with a table, a header and footers;
 // 025814 a fast-saved one (its text in a piece table); 004072 one with
-// tracked changes; 021219 one with bulleted lists.
+// tracked changes; 021219 one with bulleted lists; 022984 one with drawn
+// lines; 043221 one with a comment.
 describe("the .doc reader with a Word 6.0/95 file", () => {
   it("reads the FIB and the 8-bit text of a full-saved file", () => {
     const reader = openDoc(bytes("word95-000114.doc"));
@@ -224,6 +225,8 @@ describe("the .doc reader with a Word 6.0/95 file", () => {
     const texts = paragraphTexts(DocxDocument.load(docToDocx(bytes("word95-025814.doc"))));
     expect(texts).toContain("STS-84 Crew Debrief Captions");
     expect(texts).toContain("Center of Tropical Cyclone #01B in the Bay of Bengal.  It later reached landfall near the Burma/ Bangladesh boarder.");
+    // Text pasted from a Macintosh (sprmCChse) keeps its Macintosh quotes.
+    expect(texts.join("\n")).toContain("the basin’s responses to past climate change");
     // Read as 16-bit, the 8-bit text would turn into CJK characters.
     expect(texts.join("")).not.toMatch(/[　-￿]/);
   });
@@ -240,8 +243,22 @@ describe("the .doc reader with a Word 6.0/95 file", () => {
     expect(xml["word/document.xml"]).toContain('<w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr>');
   });
 
+  it("writes the drawing objects as anchored shapes", () => {
+    // 022984: horizontal rules drawn as lines, 1/4 inch under their paragraphs, 1.75 points wide, gray.
+    const body = parts(docToDocx(bytes("word95-022984.doc")))["word/document.xml"];
+    expect(body.match(/<a:prstGeom prst="line">/g)?.length).toBeGreaterThanOrEqual(6);
+    expect(body).toContain('<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>152400</wp:posOffset></wp:positionV>');
+    expect(body).toContain('<a:ln w="22225"><a:solidFill><a:srgbClr val="D4D4D4"></a:srgbClr></a:solidFill>');
+  });
+
+  it("writes the comments with their 8-bit authors and initials", () => {
+    const xml = parts(docToDocx(bytes("word95-043221.doc")));
+    expect(xml["word/comments.xml"]).toContain('<w:comment w:id="0" w:author="kevin l mitchell" w:initials="klm">');
+    expect(xml["word/document.xml"]).toContain('<w:commentReference w:id="0"/>');
+  });
+
   it("renders each file", async () => {
-    for (const name of ["word95-000114.doc", "word95-025814.doc", "word95-004072.doc", "word95-021219.doc"]) {
+    for (const name of ["word95-000114.doc", "word95-025814.doc", "word95-004072.doc", "word95-021219.doc", "word95-022984.doc", "word95-043221.doc"]) {
       expect(await pages(bytes(name)), name).toBeGreaterThan(0);
     }
   });
