@@ -57,10 +57,8 @@ class Word3Reader extends MacReader {
   protected readFib(): Fib {
     const e = (i: number): Entry => ({ fc: this.u32(0x1e + 6 * i), cb: this.u16(0x22 + 6 * i) });
     this.dop = this.bytes.subarray(0xac, 0x100);
-    const [ccpText, ccpFtn, ccpHdd] = [this.u32(0x7c), this.u32(0x80), this.u32(0x84)];
-    if (ccpText + ccpFtn + ccpHdd > this.bytes.length) throw new Error("the text is longer than the file");
     return {
-      fcMin: 0x100, ccpText, ccpFtn, ccpHdd,
+      fcMin: 0x100, ccpText: this.u32(0x7c), ccpFtn: this.u32(0x80), ccpHdd: this.u32(0x84),
       stsh: e(1).cb ? e(1) : e(0), fndRef: e(2), fndTxt: e(3), sed: e(4), hdd: e(8), bteChpx: e(9), btePapx: e(10), clx: e(14),
     };
   }
