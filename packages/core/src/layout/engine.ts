@@ -49,7 +49,9 @@ import {
   LayoutFontSample,
   LayoutResult,
   LayoutWindow,
+  LineEdgeItem,
   PageItem,
+  RectItem,
   TextItem,
 } from "./types.js";
 
@@ -3553,9 +3555,24 @@ class Engine {
           ).lineHeight;
           this.y += paraProps.spacingAfter ?? 0; // phase23's 2 x 19.4
         }
-      } else {
+      } else if (!this.placeFramedTable(block, blocks, i)) {
         this.placeTable(block);
       }
+  }
+
+  /** A table inside a positioned frame (every cell paragraph carries the
+   * frame's framePr): it is laid inside the frame with the frame's other
+   * blocks. Returns false for a table in normal flow. */
+  private placeFramedTable(tbl: Table, siblings: Block[], index: number): boolean {
+    if (this.cur.physIndex === -1) return false;
+    const fr = this.blockFrame(tbl);
+    if (fr?.w === undefined) return false;
+    if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return false;
+    if (this.continuesFrame(siblings[index - 1], tbl)) return true;
+    this.flushBannerBand();
+    this.clearBannerSlot();
+    this.placeFrame(this.frameGroup(tbl, siblings, index), fr);
+    return true;
   }
 
   // ---------- numbering ----------
@@ -3784,8 +3801,10 @@ class Engine {
    * anchor position (hAnchor/vAnchor + x/y), its content laid out at the frame
    * width, and a wrap float registered so surrounding body text flows around it
    * (staging-frames: page/margin/text-anchored callout boxes with wrap=around).
+   * `blocks` is the whole frame: adjacent blocks with equal frame properties
+   * (see frameGroup), stacked one under another inside it.
    */
-  private placeFrameParagraph(para: Paragraph, fr: ResolvedFrame): void {
+  private placeFrame(blocks: Block[], fr: ResolvedFrame): void {
     const sp = this.sp;
     const contentW = Math.max(8, fr.w ?? 0);
     const ox = this.frameOriginX(fr, contentW);
@@ -3802,7 +3821,7 @@ class Engine {
         oy = this.y + fr.y; // text / paragraph travel with the current cursor
         break;
     }
-    const laid = this.layoutFrame([para], contentW, this.fieldCtx(), { x: ox, y: oy });
+    const laid = this.layoutFrame(blocks, contentW, this.fieldCtx(), { x: ox, y: oy });
     const height =
       fr.hRule === "exact" && fr.h !== undefined
         ? fr.h
@@ -3812,22 +3831,33 @@ class Engine {
     // Word paints an exact/atLeast frame's paragraph box to the FRAME's height,
     // not the content height: probe2-dropcaps-frames' pull-quote (h=1000tw
     // exact, two lines of text) fills and rules the whole 50pt box, leaving
-    // empty shaded space under the text. Stretch the paragraph decorations by
-    // the surplus: the full-width shading rect grows, the bottom rule moves
-    // down, and the side rules extend. Content items are untouched.
+    // empty shaded space under the text. Stretch the last paragraph's
+    // decorations by the surplus: its full-width shading rect grows, the
+    // bottom rule moves down, and the side rules extend. Content items are
+    // untouched.
     const surplus = height - laid.height;
     if (surplus > 0.5) {
+      const isSideRule = (it: PageItem): it is LineEdgeItem =>
+        it.kind === "edge" && Math.abs(it.x1 - it.x2) < 0.01 && Math.abs(it.y1 - it.y2) >= 0.01;
+      const isFullRule = (it: PageItem): it is LineEdgeItem =>
+        it.kind === "edge" && Math.abs(it.y1 - it.y2) < 0.01 && Math.abs(it.x2 - it.x1) >= contentW - 8;
+      const isFullRect = (it: PageItem): it is RectItem => it.kind === "rect" && it.width >= contentW - 4;
+      let rectBottom = -Infinity;
+      let ruleY = -Infinity;
+      let sideBottom = -Infinity;
       for (const it of laid.items) {
-        if (it.kind === "rect" && it.width >= contentW - 4) {
+        if (isFullRect(it)) rectBottom = Math.max(rectBottom, it.y + it.height);
+        else if (isFullRule(it) && it.y1 > laid.height / 2) ruleY = Math.max(ruleY, it.y1);
+        else if (isSideRule(it)) sideBottom = Math.max(sideBottom, it.y2);
+      }
+      for (const it of laid.items) {
+        if (isFullRect(it) && Math.abs(it.y + it.height - rectBottom) < 0.01) {
           it.height += surplus;
-        } else if (it.kind === "edge") {
-          const horizontal = Math.abs(it.y1 - it.y2) < 0.01;
-          if (horizontal && it.y1 > laid.height / 2 && Math.abs(it.x2 - it.x1) >= contentW - 8) {
-            it.y1 += surplus;
-            it.y2 += surplus;
-          } else if (!horizontal && Math.abs(it.x1 - it.x2) < 0.01 && it.y2 - it.y1 >= laid.height * 0.5) {
-            it.y2 += surplus;
-          }
+        } else if (isFullRule(it) && Math.abs(it.y1 - ruleY) < 0.01) {
+          it.y1 += surplus;
+          it.y2 += surplus;
+        } else if (isSideRule(it) && Math.abs(it.y2 - sideBottom) < 0.01) {
+          it.y2 += surplus;
         }
       }
     }
@@ -3861,6 +3891,49 @@ class Engine {
     if (!props.frame || props.dropCap) return undefined;
     const fr = this.resolveFrame(props.frame);
     return fr.w !== undefined && (fr.vAnchor === "text" || fr.vAnchor === "paragraph") ? fr : undefined;
+  }
+
+  /** The positioned frame a block belongs to: a paragraph's own framePr (a
+   * drop cap is no such frame), or, for a table in normal flow, the framePr
+   * that every paragraph of its cells carries (a table inside a frame). */
+  private blockFrame(block: Block): ResolvedFrame | undefined {
+    if (block.type === "paragraph") {
+      const props = this.doc.effectiveParaProps(block);
+      return props.frame && !props.dropCap ? this.resolveFrame(props.frame) : undefined;
+    }
+    if (block.props.floating) return undefined;
+    let frame: ResolvedFrame | undefined;
+    for (const row of block.rows) {
+      for (const cell of row.cells) {
+        for (const b of cell.blocks) {
+          if (b.type !== "paragraph") return undefined;
+          const own = this.blockFrame(b);
+          if (!own || (frame && !sameFrame(frame, own))) return undefined;
+          frame = own;
+        }
+      }
+    }
+    return frame;
+  }
+
+  /** Whether `block` continues the frame of the block before it. Word stacks
+   * adjacent paragraphs with equal frame properties in ONE frame, one under
+   * another (ECMA-376 17.3.1.11 framePr); a section break ends the frame. */
+  private continuesFrame(prev: Block | undefined, block: Block): boolean {
+    if (!prev || (prev.type === "paragraph" && prev.sectionBreak)) return false;
+    const a = this.blockFrame(prev);
+    const b = a && this.blockFrame(block);
+    return !!a && !!b && sameFrame(a, b);
+  }
+
+  /** The blocks of the frame that starts at `siblings[index]`. */
+  private frameGroup(first: Block, siblings: Block[] | undefined, index: number | undefined): Block[] {
+    const group = [first];
+    if (!siblings || index === undefined || siblings[index] !== first) return group;
+    for (let i = index + 1; i < siblings.length && this.continuesFrame(siblings[i - 1], siblings[i]); i++) {
+      group.push(siblings[i]);
+    }
+    return group;
   }
 
   /** Whether a frame of the run of text-riding frame paragraphs from `index`
@@ -4026,6 +4099,8 @@ class Engine {
           this.placeBannerFrame(para, fr, props.spacingAfter ?? 0);
           return;
         }
+        // A later paragraph of a frame was laid with the frame's first block.
+        if (prev && this.continuesFrame(prev, para)) return;
         this.flushBannerBand();
         this.clearBannerSlot();
         // Word keeps a frame that rides with the text on the page of the
@@ -4037,7 +4112,7 @@ class Engine {
         if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
           this.nextColumn();
         }
-        this.placeFrameParagraph(para, fr);
+        this.placeFrame(this.frameGroup(para, siblings, index), fr);
         return;
       }
     }
@@ -4444,7 +4519,7 @@ class Engine {
                 floats: (this.floats.get(this.cur) ?? []).length,
                 shapes: [],
               };
-              this.placeFrameParagraph(next, fr);
+              this.placeFrame(this.frameGroup(next, siblings, index === undefined ? undefined : index + 1), fr);
               this.consumedFrames.add(next);
               lookFrame = next;
               broken = breakNow(paraTopEstimate);
@@ -9903,6 +9978,24 @@ function sameParagraphBorderBox(a: ParaProps, b: ParaProps): boolean {
   return (
     (a.indentLeft ?? 0) - (a.indentHanging ?? 0) === (b.indentLeft ?? 0) - (b.indentHanging ?? 0) &&
     (a.indentRight ?? 0) === (b.indentRight ?? 0)
+  );
+}
+
+/** Equal frame properties: two blocks with these share one frame. */
+function sameFrame(a: ResolvedFrame, b: ResolvedFrame): boolean {
+  return (
+    a.w === b.w &&
+    a.h === b.h &&
+    a.hRule === b.hRule &&
+    a.x === b.x &&
+    a.y === b.y &&
+    a.hAnchor === b.hAnchor &&
+    a.vAnchor === b.vAnchor &&
+    a.xAlign === b.xAlign &&
+    a.yAlign === b.yAlign &&
+    a.wrap === b.wrap &&
+    a.hSpace === b.hSpace &&
+    a.vSpace === b.vSpace
   );
 }
 
