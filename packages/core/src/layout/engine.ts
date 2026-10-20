@@ -6893,12 +6893,25 @@ class Engine {
         let innerTop = oy + ins.t;
         if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
         else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
+        // A chained box always shows the first line of its window, clipped at
+        // the box bottom when the box is shorter than the line: Word places at
+        // least one line in a box rather than leave it empty. The .doc reader
+        // chains every box whose shape names a next shape, so a one-line label
+        // box can be a chain of one (GovDocs 042652).
+        let firstTop = Infinity;
+        if (chained) {
+          for (const it of inner.items) {
+            if (it.kind === "text" && it.lineTop >= skipTopY - 0.5) firstTop = Math.min(firstTop, it.lineTop);
+          }
+        }
+        const crossesBottom = (it: TextItem) => it.lineTop - skipTopY + it.lineHeight > capacity + 0.5;
+        const flowsOn = (it: TextItem) => crossesBottom(it) && it.lineTop > firstTop + 0.5;
         // Record the overflow point for the next box in the chain (seq-0 box).
         if (shape.chainId !== undefined && !isContinuation) {
           let cut = Infinity;
           for (const it of inner.items) {
             if (it.kind !== "text") continue;
-            if (it.lineTop + it.lineHeight > capacity + 0.5) cut = Math.min(cut, it.lineTop);
+            if (flowsOn(it)) cut = Math.min(cut, it.lineTop);
           }
           this.textboxChains.set(shape.chainId, { blocks: storyBlocks, consumedY: cut });
         }
@@ -6930,12 +6943,17 @@ class Engine {
           page.items.push(hit);
         }
         let clippedLines = 0;
-        // A noAutofit line past the box bottom is not painted, but the story
-        // is still editable, so it keeps its geometry in page.hiddenText —
-        // otherwise a caret pushed onto that line (Enter on the last line that
-        // fits) has no binding to sit on and vanishes.
+        // A noAutofit line that starts past the box bottom is not painted, but
+        // the story is still editable, so it keeps its geometry in
+        // page.hiddenText — otherwise a caret pushed onto that line (Enter on
+        // the last line that fits) has no binding to sit on and vanishes.
+        // A line that starts inside the box and crosses its bottom is painted
+        // clipped to the box (TextItem.clip), as Word paints it: a one-line
+        // label in a box a little shorter than its line height (the SF-424
+        // form in GovDocs 042652) shows its text, not an empty box.
         for (const it of inner.items) {
           let clipped = false;
+          let partial = false;
           if (it.kind === "text") {
             if (shape.wordArtOpacity !== undefined) it.opacity = shape.wordArtOpacity;
             if (independentStory && shape.srcDrawing) it.textboxStory = shape.srcDrawing;
@@ -6943,13 +6961,19 @@ class Engine {
             // content-bottom] window (overflow flows to the next box, which
             // paints them and owns their caret); a plain noAutofit box clips
             // at the box bottom edge with nowhere else for the line to go.
-            if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; continue; }
-            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) { clippedLines++; clipped = true; }
+            if (chained && flowsOn(it)) { clippedLines++; continue; }
+            if (chained && crossesBottom(it) && it.lineTop >= skipTopY - 0.5) { clippedLines++; partial = true; }
+            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) {
+              clippedLines++;
+              if (innerTop - oy + it.lineTop < height - 0.5) partial = true;
+              else clipped = true;
+            }
             // Content above skipTopY was PAINTED by an earlier box in the
             // chain, so skipping it here hides nothing.
             if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
           }
           offsetItem(it, ox + ins.l - fx, innerTop - skipTopY - fy);
+          if (partial && it.kind === "text") it.clip = { top: oy - fy, bottom: oy - fy + height };
           if (rotate && (it.kind === "text" || it.kind === "rect")) {
             const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
             it.rotate = rotate(it.x, iy);
