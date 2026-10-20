@@ -148,6 +148,18 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     expect(body.x).toBeGreaterThan(FRAME_X + FRAME_W);
   });
 
+  it("sizes a frame of no w:w to its widest line and wraps the body beside it", () => {
+    const auto = FRAME.replace('w:w="4000" ', "");
+    const items = layoutBody(framed("Short", auto) + framed("Widest", auto) + BODY.repeat(2) + SECTION);
+    const short = line(items, "Short");
+    const widest = line(items, "Widest");
+    expect(widest.lineTop).toBeGreaterThanOrEqual(short.lineTop + short.lineHeight - 0.01);
+    expect(short.x).toBeCloseTo(FRAME_X, 1);
+    // The body's channel starts one hSpace past the widest frame line.
+    const body = line(items, "Body");
+    expect(body.x).toBeCloseTo(widest.x + widest.width + 187 * TW, 0);
+  });
+
   it("leaves a drop cap as it is", () => {
     const drop =
       `<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/></w:pPr>` +

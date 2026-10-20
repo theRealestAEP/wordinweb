@@ -3566,8 +3566,8 @@ class Engine {
   private placeFramedTable(tbl: Table, siblings: Block[], index: number): boolean {
     if (this.cur.physIndex === -1) return false;
     const fr = this.blockFrame(tbl);
-    if (fr?.w === undefined) return false;
-    if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return false;
+    if (!fr) return false;
+    if (fr.wrap === "notBeside" && fr.w !== undefined && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return false;
     if (this.continuesFrame(siblings[index - 1], tbl)) return true;
     this.flushBannerBand();
     this.clearBannerSlot();
@@ -3806,7 +3806,7 @@ class Engine {
    */
   private placeFrame(blocks: Block[], fr: ResolvedFrame): void {
     const sp = this.sp;
-    const contentW = Math.max(8, fr.w ?? 0);
+    const contentW = Math.max(8, fr.w ?? this.autoFrameWidth(blocks));
     const ox = this.frameOriginX(fr, contentW);
     // Vertical origin (frame top) from the anchor.
     let oy: number;
@@ -3882,6 +3882,21 @@ class Engine {
       });
       this.floats.set(this.cur, list);
     }
+  }
+
+  /** The width of a frame of no w:w (auto width): Word sizes it to its
+   * content, the widest line or picture of its paragraphs (laid at the column
+   * width) and the grid width of its tables. */
+  private autoFrameWidth(blocks: Block[]): number {
+    const laid = this.layoutFrame(blocks, this.colWidth, this.fieldCtx());
+    let right = 0;
+    for (const it of laid.items) {
+      if (it.kind === "text" || it.kind === "image") right = Math.max(right, it.x + it.width);
+    }
+    for (const b of blocks) {
+      if (b.type === "table") right = Math.max(right, b.grid.reduce((sum, w) => sum + w, 0));
+    }
+    return Math.min(right, this.colWidth);
   }
 
   /** A paragraph's positioned frame when it rides with the text (vAnchor text or paragraph) and has a width. */
@@ -4087,34 +4102,31 @@ class Engine {
     if (this.consumedFrames.has(para)) return; // placed by the previous paragraph's lookahead
     if (props.frame && !props.dropCap && this.cur.physIndex !== -1) {
       const fr = this.resolveFrame(props.frame);
-      // A frame needs a width to be lifted out of flow. A widthless
-      // `wrap="notBeside"` frame defaults to the full section text width (a
-      // full-width banner); any other widthless framePr falls through to normal
-      // flow (it carries no geometry to position against).
-      if (fr.w !== undefined) {
-        // A full-width `wrap="notBeside"` frame in a multi-column section is a
-        // banner (IEEE title/authors): it spans ALL columns at the section top
-        // and the column band begins below it. Otherwise it is an ordinary float.
-        if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) {
-          this.placeBannerFrame(para, fr, props.spacingAfter ?? 0);
-          return;
-        }
-        // A later paragraph of a frame was laid with the frame's first block.
-        if (prev && this.continuesFrame(prev, para)) return;
-        this.flushBannerBand();
-        this.clearBannerSlot();
-        // Word keeps a frame that rides with the text on the page of the
-        // paragraph it rides with: when a frame of the run of frame
-        // paragraphs here would reach past the body bottom, the run and that
-        // paragraph move to the next page together (probe2-dropcaps-frames
-        // with its text grown by a compare's marks: Word's export moves
-        // "Body paragraph 1" and both frames anchored above it to page 2).
-        if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
-          this.nextColumn();
-        }
-        this.placeFrame(this.frameGroup(para, siblings, index), fr);
+      // A frame is lifted out of flow. A widthless `wrap="notBeside"` frame
+      // defaults to the full section text width (a full-width banner); any
+      // other widthless frame is as wide as its content (placeFrame).
+      // A full-width `wrap="notBeside"` frame in a multi-column section is a
+      // banner (IEEE title/authors): it spans ALL columns at the section top
+      // and the column band begins below it. Otherwise it is an ordinary float.
+      if (fr.wrap === "notBeside" && fr.w !== undefined && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) {
+        this.placeBannerFrame(para, fr, props.spacingAfter ?? 0);
         return;
       }
+      // A later paragraph of a frame was laid with the frame's first block.
+      if (prev && this.continuesFrame(prev, para)) return;
+      this.flushBannerBand();
+      this.clearBannerSlot();
+      // Word keeps a frame that rides with the text on the page of the
+      // paragraph it rides with: when a frame of the run of frame
+      // paragraphs here would reach past the body bottom, the run and that
+      // paragraph move to the next page together (probe2-dropcaps-frames
+      // with its text grown by a compare's marks: Word's export moves
+      // "Body paragraph 1" and both frames anchored above it to page 2).
+      if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
+        this.nextColumn();
+      }
+      this.placeFrame(this.frameGroup(para, siblings, index), fr);
+      return;
     }
     this.flushBannerBand();
     // Word merges identical borders of consecutive paragraphs: the shared
