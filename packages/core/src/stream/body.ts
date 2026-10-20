@@ -8,8 +8,10 @@ import { parseRelationships } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
 import { DEFAULT_ZIP_LIMITS } from "../zip.js";
+import { docToDocx } from "../doc/hooks.js";
+import { isOleFile } from "../doc/streams.js";
 import { scanBody } from "./scan.js";
-import { ByteSource } from "./source.js";
+import { ByteSource, bytesSource } from "./source.js";
 import { ZipIndex } from "./zip.js";
 
 /** A document whose body stays out of memory: the engine reads its blocks
@@ -78,7 +80,7 @@ export interface OpenStreamingOptions {
 }
 
 export async function openStreamingDocument(source: ByteSource, options: OpenStreamingOptions = {}): Promise<StreamingDocument> {
-  await refuseOtherFormat(source);
+  source = await asDocxSource(source);
   const zip = await ZipIndex.open(source);
   const mimetype = zip.entries.has("mimetype") ? await zip.text("mimetype") : undefined;
   if (mimetype?.startsWith("application/vnd.oasis.opendocument")) throw new Error("unsupported format: an OpenDocument file");
@@ -319,25 +321,23 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
 }
 
 /**
- * A file that is another format altogether is refused from its first bytes,
- * before the zip directory is looked for: an OLE compound file (a Word
- * 97-2003 .doc, or a password-protected .docx, whose package is a stream
- * inside one), an RTF file, a PDF.
+ * The source as a .docx: a Word 97-2003 .doc (an OLE compound file with a
+ * WordDocument stream) is read whole and converted (doc/convert.ts); a
+ * file that is another format altogether is refused from its first bytes,
+ * before the zip directory is looked for: a password-protected .docx (an
+ * OLE compound file whose package is an encrypted stream), an RTF file, a
+ * PDF, a Word 6.0/95 file.
  */
-async function refuseOtherFormat(source: ByteSource): Promise<void> {
+async function asDocxSource(source: ByteSource): Promise<ByteSource> {
   const size = await source.size();
   const head = await source.read(0, Math.min(size, 8));
   const ascii = String.fromCharCode(...head);
   if (ascii.startsWith("{\\rtf")) throw new Error("unsupported format: an RTF file");
   if (ascii.startsWith("%PDF")) throw new Error("unsupported format: a PDF file");
-  if (head.length === 8 && [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1].every((byte, i) => head[i] === byte)) {
-    // An encrypted package names its EncryptionInfo stream in the directory,
-    // which is within the first sectors of any file Word writes.
-    const front = await source.read(0, Math.min(size, 64 << 10));
-    const names = String.fromCharCode(...front.filter((_, i) => i % 2 === 0));
-    const encrypted = names.includes("EncryptionInfo") || names.includes("EncryptedPackage");
-    throw new Error(`unsupported format: ${encrypted ? "a password-protected document (its package is encrypted)" : "an OLE compound file (a Word 97-2003 .doc)"}`);
-  }
+  if (!isOleFile(head)) return source;
+  // The whole file: the directory that names its streams can be at its end.
+  // docToDocx refuses a compound file that holds no Word 97-2003 document.
+  return bytesSource(docToDocx(await source.read(0, size)));
 }
 
 /** The main document part, as the package relationships name it. */

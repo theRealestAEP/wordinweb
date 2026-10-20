@@ -150,9 +150,9 @@ export class ZipReader {
     let eocd = tail.length - 22;
     while (eocd >= 0 && tail.readUInt32LE(eocd) !== 0x06054b50) eocd--;
     if (eocd < 0) {
-      // A .doc file, and a password-protected .docx, are OLE compound files.
+      // A password-protected .docx is an OLE compound file (a .doc is one too, converted before it gets here).
       const ole = fileSize >= 8 && this.bytes(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
-      throw new CompareError("not_docx", `${this.path}: not a .docx file${ole ? " (it is a .doc file or a password-protected document)" : ""}`);
+      throw new CompareError("not_docx", `${this.path}: not a .docx file${ole ? " (an OLE compound file: a password-protected document?)" : ""}`);
     }
     let count = tail.readUInt16LE(eocd + 10);
     let cdSize = tail.readUInt32LE(eocd + 12);

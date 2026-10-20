@@ -2,8 +2,6 @@
 // with its direct formatting, the styles, lists, sections, headers and
 // footers, footnotes and endnotes, tables, fields and bookmarks, written as
 // WordprocessingML for the same parser, layout and compare a .docx gets.
-import { zipSync } from "fflate";
-import { FIXED_ZIP_MTIME } from "../zip.js";
 import { parsePlc, parseSttb, u16, u32 } from "./bytes.js";
 import { FC, Fib, PartStarts, parseFib, partStarts, tableBlob } from "./fib.js";
 import { numberingXml } from "./numbering.js";
@@ -75,9 +73,11 @@ export interface ConvertHooks {
    * The run XML for a special character the text holds: U+0001 (a
    * picture; props.picLocation is its offset in the Data stream), U+0005
    * (a comment reference) or U+0008 (a floating shape's anchor). `rPr` is
-   * the run's rPr body. Undefined drops the character.
+   * the run's rPr body. `paragraphs` writes the text at [cpStart, cpEnd)
+   * as formatted w:p elements (a text box's text). Undefined drops the
+   * character.
    */
-  special?: (ch: number, cp: number, props: RunProps, rPr: string) => string | undefined;
+  special?: (ch: number, cp: number, props: RunProps, rPr: string, paragraphs: (cpStart: number, cpEnd: number) => string) => string | undefined;
   /** Extra XML at the end of a run's rPr (an rPrChange) for the text at [cp, end). */
   runExtra?: (cp: number, end: number, props: RunProps) => string | undefined;
   /** A finished run's XML (a special character's run too), wrapped (w:ins, w:del) as its properties say. */
@@ -105,15 +105,14 @@ export interface ExtraParts {
   contentTypes: { partName: string; contentType: string }[];
 }
 
-/** The .docx package's parts for a .doc. */
-export function docToDocxFiles(bytes: Uint8Array, hooks: ConvertHooks = {}): Record<string, Uint8Array> {
-  const reader = openDoc(bytes);
+/** The .docx package's parts for an opened .doc, with the given hooks. */
+export function convertDoc(reader: DocReader, hooks: ConvertHooks): Record<string, Uint8Array> {
   return new Converter(reader, hooks).files();
 }
 
-/** A .doc as a .docx. */
-export function docToDocx(bytes: Uint8Array, hooks: ConvertHooks = {}): Uint8Array {
-  return zipSync(docToDocxFiles(bytes, hooks), { mtime: FIXED_ZIP_MTIME });
+/** The .docx package's parts for a .doc, with only the given hooks (doc/hooks.ts adds every reader's). */
+export function docToDocxFiles(bytes: Uint8Array, hooks: ConvertHooks = {}): Record<string, Uint8Array> {
+  return convertDoc(openDoc(bytes), hooks);
 }
 
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
@@ -253,8 +252,15 @@ class Converter {
     for (let i = 0; i < starts.data.length && i < names.length; i++) {
       const ibkl = u16(starts.data[i], 0);
       if (ibkl >= ends.cps.length - 1) continue;
-      this.addMarker(starts.cps[i], 1, `<w:bookmarkStart w:id="${i}" w:name="${escapeAttr(names[i])}"/>`);
-      this.addMarker(ends.cps[ibkl], 0, `<w:bookmarkEnd w:id="${i}"/>`);
+      const start = `<w:bookmarkStart w:id="${i}" w:name="${escapeAttr(names[i])}"/>`;
+      const end = `<w:bookmarkEnd w:id="${i}"/>`;
+      // Another bookmark's end comes before a start at the same CP; an empty bookmark's own end comes after it.
+      if (ends.cps[ibkl] === starts.cps[i]) {
+        this.addMarker(starts.cps[i], 1, start + end);
+      } else {
+        this.addMarker(starts.cps[i], 1, start);
+        this.addMarker(ends.cps[ibkl], 0, end);
+      }
     }
   }
 
@@ -509,7 +515,7 @@ class Converter {
             break;
           }
           flushRun(cp);
-          const xml = this.hooks.special?.(ch, cp, props, rPrFull);
+          const xml = this.hooks.special?.(ch, cp, props, rPrFull, (s, e) => this.storyXml(s, e, null, null, null));
           if (xml) out.push(this.hooks.wrapRun ? this.hooks.wrapRun(cp, cp + 1, props, xml) : xml);
           runStart = cp + 1;
           break;

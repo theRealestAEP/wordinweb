@@ -2959,11 +2959,13 @@ class Engine {
     // Frame layout (table cells, text boxes) swaps this.cur for a fake page
     // whose displayNumber is -1 - PAGE fields inside cells must resolve
     // against the real page being built.
-    const real = () => (engine.cur.physIndex !== -1 ? engine.cur : engine.lastRealPage ?? engine.cur);
+    // Before the first page exists (a header's table measured for the body
+    // band), a PAGE field reads as page 1.
+    const real = (): InternalPage | null => (engine.cur && engine.cur.physIndex !== -1 ? engine.cur : engine.lastRealPage ?? engine.cur ?? null);
     return {
-      pageNumber: () => real().displayNumber,
+      pageNumber: () => real()?.displayNumber ?? 1,
       totalPages: () => engine.knownTotalPages ?? engine.pages.length,
-      formatPageNumber: (n) => formatNumber(n, PAGE_FMT[real().sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
+      formatPageNumber: (n) => formatNumber(n, PAGE_FMT[real()?.sp.pageNumberFormat ?? "decimal"] ?? "decimal"),
       noteMark: (type, id) => (type === "footnote" ? engine.footnoteMark(id) : engine.endnoteMark(id)),
       selfNoteMark: () => engine.selfNoteMark ?? "",
       seq: (ident, key, instr) => engine.resolveSeq(ident, key, instr),
