@@ -1059,6 +1059,44 @@ function brokenProj(b: BrokenParagraph): string {
   );
 }
 
+/** A paragraph that OPENS with a page/column break (before any real content,
+ * with content following) is a break-before: return its type and source run. A
+ * break-only paragraph, or one whose first content is text/tab/image, returns
+ * undefined (kept on the old flow). placeParagraph moves such a paragraph to
+ * the new page, and breakParagraph drops its break, so both read it here. */
+export function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } | undefined {
+  let br: { type: "page" | "column"; run: Run } | undefined;
+  for (const child of para.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const c of r.content) {
+        if (!br) {
+          if (c.kind === "break") {
+            if (c.breakType === "page" || c.breakType === "column") {
+              br = { type: c.breakType, run: r };
+              continue;
+            }
+            return undefined; // a line break opens the paragraph
+          }
+          if (c.kind === "text" && c.text.length === 0) continue;
+          // An anchored shape takes no room on the line. The line breaker
+          // also lets it pass and drops the break as a leading break, so the
+          // paragraph must move to the new page here.
+          if (c.kind === "anchor") continue;
+          return undefined; // real content precedes any break
+        }
+        // After the opening break: any real content confirms break-before.
+        if (c.kind === "text") {
+          if (c.text.length > 0) return br;
+          continue;
+        }
+        return br;
+      }
+    }
+  }
+  return undefined; // break with nothing after it (break-only paragraph)
+}
+
 export function breakParagraph(
   doc: DocxDocument,
   measurer: TextMeasurer,
@@ -1708,7 +1746,11 @@ function breakParagraphImpl(
         // page between "Before the breaks." and "After two...").
         if (!consumedLeadingBreak) {
           consumedLeadingBreak = true;
-          continue;
+          // placeParagraph moves the paragraph to the new page only when
+          // leadingBreakOf finds this break. Content that it counts but that
+          // draws nothing on the line (a SHAPE field with no text) leaves the
+          // break to this line; dropping it here lost the page break.
+          if (leadingBreakOf(para)) continue;
         }
         flush(false, true, atom.breakType);
         continue;

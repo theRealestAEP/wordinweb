@@ -38,6 +38,7 @@ import {
   LineBox,
   breakParagraph,
   fontOf,
+  leadingBreakOf,
   resolveField,
   setBreakCacheWindowed,
 } from "./inline.js";
@@ -10171,39 +10172,6 @@ function hasHardBreak(para: Paragraph): boolean {
     }
   }
   return false;
-}
-
-/** A paragraph that OPENS with a page/column break (before any real content,
- * with content following) is a break-before: return its type and source run. A
- * break-only paragraph, or one whose first content is text/tab/image, returns
- * undefined (kept on the old flow). */
-function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } | undefined {
-  let br: { type: "page" | "column"; run: Run } | undefined;
-  for (const child of para.children) {
-    const runs = child.type === "run" ? [child] : child.runs;
-    for (const r of runs) {
-      for (const c of r.content) {
-        if (!br) {
-          if (c.kind === "break") {
-            if (c.breakType === "page" || c.breakType === "column") {
-              br = { type: c.breakType, run: r };
-              continue;
-            }
-            return undefined; // a line break opens the paragraph
-          }
-          if (c.kind === "text" && c.text.length === 0) continue;
-          return undefined; // real content precedes any break
-        }
-        // After the opening break: any real content confirms break-before.
-        if (c.kind === "text") {
-          if (c.text.length > 0) return br;
-          continue;
-        }
-        return br;
-      }
-    }
-  }
-  return undefined; // break with nothing after it (break-only paragraph)
 }
 
 /** The widest laid line in a shape's freshly measured frame, px. Must be read

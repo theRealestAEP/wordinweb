@@ -98,7 +98,28 @@ const pageBox = (topPx: number) =>
   '<wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr>' +
   "</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>";
 
-function layout(body: string): LaidOutPage[] {
+/** A run holding a red 1in-wide anchored rectangle, as validator doc97-check-d made them. */
+const redBox = (wrap: "wrapNone" | "wrapTopAndBottom", offsetEmu: number, heightEmu: number) =>
+  '<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0"' +
+  ' relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">' +
+  '<wp:simplePos x="0" y="0"/>' +
+  '<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>' +
+  `<wp:positionV relativeFrom="paragraph"><wp:posOffset>${offsetEmu}</wp:posOffset></wp:positionV>` +
+  `<wp:extent cx="914400" cy="${heightEmu}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+  `<wp:${wrap}/><wp:docPr id="4" name="R"/><wp:cNvGraphicFramePr/>` +
+  '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+  '<wps:wsp><wps:cNvSpPr/><wps:spPr>' +
+  `<a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="${heightEmu}"/></a:xfrm>` +
+  '<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>' +
+  "</wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>";
+
+/** The pages (1-based) that draw a red shape. */
+const redPages = (pages: LaidOutPage[]) =>
+  pages.flatMap((page, n) =>
+    page.items.some((it) => it.kind === "path" && it.fill?.toLowerCase() === "#ff0000") ? [n + 1] : [],
+  );
+
+function layout(body: string, parts: Record<string, string> = {}): LaidOutPage[] {
   const doc = DocxDocument.load(
     makeDocxWithMedia(
       {
@@ -109,6 +130,7 @@ function layout(body: string): LaidOutPage[] {
           '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
           '<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/>' +
           "</Relationships>",
+        ...parts,
       },
       { "word/media/image1.png": PNG },
     ),
@@ -305,4 +327,49 @@ describe("a break next to a table, a picture or a text box", () => {
     );
     expectClean(pages, ["Before", "A", "twentyfive", "After"], ["Before", "After"]);
   });
+  // Validator doc97-check-d, minimal file anchor_then_br.docx: the break that
+  // follows only an anchored shape was dropped, so "ZZZ" stayed on page 1.
+  it("keeps a page break that follows only an anchored shape", () => {
+    const pages = layout(
+      p("AAA") + `<w:p>${redBox("wrapNone", 0, 914400)}<w:r><w:br w:type="page"/></w:r><w:r><w:t>ZZZ</w:t></w:r></w:p>` + p("BBB"),
+    );
+    expect(pagesOfWords(pages, ["AAA", "ZZZ", "BBB"])).toEqual([1, 2, 2]);
+    expect(redPages(pages)).toEqual([2]);
+  });
+
+  it("keeps a page break that follows an anchored shape and text", () => {
+    const pages = layout(
+      p("AAA") +
+        `<w:p>${redBox("wrapNone", 0, 914400)}<w:r><w:t>Q</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>ZZZ</w:t></w:r></w:p>` +
+        p("BBB"),
+    );
+    expect(pagesOfWords(pages, ["AAA", "Q", "ZZZ", "BBB"])).toEqual([1, 1, 2, 2]);
+    expect(redPages(pages)).toEqual([1]);
+  });
+
+  // Validator doc97-check-d, 085236.doc: a SHAPE field whose result is only an
+  // anchored drawing, then a page break. The field draws no text, so the line
+  // breaker took the break as a leading break, but placeParagraph did not.
+  it("keeps a page break that follows a field that draws no text", () => {
+    const shapeField =
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> SHAPE  \\* MERGEFORMAT </w:instrText></w:r>' +
+      `<w:r><w:fldChar w:fldCharType="separate"/></w:r>${redBox("wrapNone", 0, 914400)}<w:r><w:fldChar w:fldCharType="end"/></w:r>`;
+    const pages = layout(
+      p("AAA") + `<w:p>${shapeField}<w:r><w:br w:type="page"/></w:r><w:r><w:t>ZZZ</w:t></w:r></w:p>` + p("BBB"),
+    );
+    expect(pagesOfWords(pages, ["AAA", "ZZZ", "BBB"])).toEqual([1, 2, 2]);
+  });
+
+  // Validator doc97-check-d, minimal files br_smallTB_br.docx and
+  // br_tallTB_br.docx: the shape was drawn on page 1, before the break.
+  for (const [name, height] of [["small", 914400], ["tall", 7772400]] as const) {
+    it(`draws a ${name} top-and-bottom shape after a page break on the next page`, () => {
+      const pages = layout(
+        p("AAA") + PAGE_BREAK_ONLY + `<w:p>${redBox("wrapTopAndBottom", -152400, height)}</w:p>` + PAGE_BREAK_ONLY + p("ZZZ"),
+      );
+      expect(pages.length).toBe(3);
+      expect(pagesOfWords(pages, ["AAA", "ZZZ"])).toEqual([1, 3]);
+      expect(redPages(pages)).toEqual([2]);
+    });
+  }
 });
