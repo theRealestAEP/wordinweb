@@ -142,6 +142,8 @@ export abstract class Word2Reader {
   protected readonly fkpPageSize: number = 512;
   /** The bytes of a PAPX before its sprms: the style number and six more (three in all in Word for the Macintosh 3). */
   protected readonly papxHeader: number = 7;
+  /** True when a cell ends with CR then BEL, as in Word for Windows: the CR is then part of the cell mark. */
+  protected readonly crBeforeCellMark: boolean = false;
   /** A SEPX's sprms, in word2.ts's numbering of the section sprms. */
   protected sectionSprms(sepx: Uint8Array): Sprm[] {
     return this.parseSprms(sepx);
@@ -564,6 +566,7 @@ export abstract class Word2Reader {
     for (let cp = start; cp < end; cp++) {
       const ch = this.text[cp];
       if (ch !== 0x0d && ch !== 0x07 && !(ch === 0x0c && sectionEnds?.has(cp)) && cp !== end - 1) continue;
+      if (ch === 0x0d && this.crBeforeCellMark && this.text[cp + 1] === 0x07 && cp + 1 < end) continue;
       const para = this.paragraphProps(cp);
       const cellEnd = ch === 0x07;
       const rowEnd = cellEnd && !!para.props.ttp;

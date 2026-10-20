@@ -10,27 +10,31 @@ import { PdfRenderError, renderDocxToPdf } from "../src/pdf/render.js";
 
 // Documents in the oldest Word formats from GovDocs1 (US government works,
 // public domain), each under 100 KB: two Word for the Macintosh 5.0 files
-// (the second fast-saved, its text in pieces) and Word for Windows 2.0 and
-// 1.x files.
+// (the second fast-saved, its text in pieces), a Word for Windows 2.0 file
+// and two 1.x files (the second with tables).
 const fixtures = join(fileURLToPath(new URL(".", import.meta.url)), "fixtures", "oldword");
 const bytes = (name: string): Uint8Array => new Uint8Array(readFileSync(join(fixtures, name)));
 
+type Blocks = DocxDocument["sections"][number]["blocks"];
+
+/** The text of blocks' paragraphs, tables' too, in order. */
+function blockTexts(blocks: Blocks): string[] {
+  const texts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === "paragraph") {
+      let text = "";
+      for (const child of block.children) for (const run of child.type === "run" ? [child] : child.runs) for (const c of run.content) if (c.kind === "text") text += c.text;
+      texts.push(text);
+    } else {
+      for (const row of block.rows) for (const cell of row.cells) texts.push(...blockTexts(cell.blocks));
+    }
+  }
+  return texts;
+}
+
 /** The text of a document's body paragraphs, tables' too, in order. */
 function paragraphTexts(doc: DocxDocument): string[] {
-  const texts: string[] = [];
-  const walk = (blocks: (typeof doc.sections)[number]["blocks"]): void => {
-    for (const block of blocks) {
-      if (block.type === "paragraph") {
-        let text = "";
-        for (const child of block.children) for (const run of child.type === "run" ? [child] : child.runs) for (const c of run.content) if (c.kind === "text") text += c.text;
-        texts.push(text);
-      } else {
-        for (const row of block.rows) for (const cell of row.cells) walk(cell.blocks);
-      }
-    }
-  };
-  for (const section of doc.sections) walk(section.blocks);
-  return texts;
+  return doc.sections.flatMap((section) => blockTexts(section.blocks));
 }
 
 async function render(source: Uint8Array): Promise<number> {
@@ -73,6 +77,15 @@ describe("the oldest Word formats", () => {
     expect(word2).toContain("Bettina Löscher");
     const word1 = paragraphTexts(DocxDocument.load(bytes("winword1-govdocs-307072.doc"))).join("\n");
     expect(word1).toContain("Sampling and laboratory procedures and mathematical equations for dust and climate data");
+  });
+
+  it("reads a Word for Windows table: a cell's CR and BEL are one cell mark", () => {
+    const doc = DocxDocument.load(bytes("winword1-govdocs-845048.doc"));
+    const table = doc.sections[0].blocks.find((block) => block.type === "table");
+    if (table?.type !== "table") throw new Error("no table");
+    const cellTexts = (row: number): string[][] => table.rows[row].cells.map((cell) => blockTexts(cell.blocks));
+    expect(cellTexts(1)).toEqual([["Document Number"], ["Date of Request"], ["Title"], ["Requestor"]]);
+    expect(cellTexts(3)).toEqual([["1300"], ["91-08-06"], ["WG8 Document Register, N1257—1300"], ["WG8"]]);
   });
 
   it("renders each, and calls a cut-short file damaged", async () => {

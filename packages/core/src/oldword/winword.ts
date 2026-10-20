@@ -42,6 +42,7 @@ export function readWinWord(bytes: Uint8Array): OldDocument {
 
 class WinWordReader extends Word2Reader {
   protected readonly sprmSizes = SPRM_SIZES;
+  protected readonly crBeforeCellMark = true;
   private readonly fontNames: string[] = [];
   private dop: Uint8Array = new Uint8Array(0);
 
@@ -140,7 +141,8 @@ class WinWordReader extends Word2Reader {
     if (set & 0x08 && d.length >= 4) c.fontId = this.n16(d, 2);
     if (set & 0x10 && d.length >= 5 && d[4]) c.hps = d[4];
     if (set & 0x40) c.hpsPos = d.length >= 6 ? (d[5] << 24) >> 24 : 0;
-    if (set & 0x80) c.dxaSpace = d.length >= 7 ? (((d[6] & 0x3f) << 26) >> 26) * 5 : 0;
+    // The spacing byte (fsSpace 0x80, byte 6) stays unread: Word 1 writes 0x38 for expanded
+    // and 0x39 for condensed text, an encoding no source documents.
     if (set & 0x04) c.ico = d.length >= 8 ? d[7] & 0x0f : 0;
     if (set & 0x20) c.kul = d.length >= 8 ? (d[7] >> 4) & 7 : 0;
     if (d.length >= 11) c.picture = this.n32(d, 8) & 0xffffff;
