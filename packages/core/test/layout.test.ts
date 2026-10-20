@@ -2141,6 +2141,39 @@ describe("layout engine", () => {
     expect(textItem(measured, "AFTER").lineTop).toBeGreaterThanOrEqual(measuredCell.bottom);
   });
 
+  it("runs vertical text in a merged cell along the whole merged height", () => {
+    // GovDocs1 039756 (B13): the first row is 12pt exact and the merge is
+    // 212pt tall. The text used the first row as its line length and broke
+    // into two-letter lines.
+    const heading = "Pickup practices conducted to preclude contamination";
+    const table = (dir: string) =>
+      `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="600"/><w:gridCol w:w="1400"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:hRule="exact" w:val="240"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge w:val="restart"/><w:textDirection w:val="${dir}"/></w:tcPr>${p(heading)}</w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr>${p("x")}</w:tc></w:tr>` +
+      `<w:tr><w:trPr><w:trHeight w:val="4000"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge/><w:textDirection w:val="${dir}"/></w:tcPr><w:p/></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr>${p("y")}</w:tc></w:tr></w:tbl>`;
+    for (const dir of ["btLr", "tbRl"]) {
+      const { result } = layout({ "word/document.xml": wrapDocument(table(dir) + p("AFTER")) });
+      const lines = result.pages[0].items.filter(
+        (i): i is Extract<typeof i, { kind: "text" }> => i.kind === "text" && i.rotate !== undefined,
+      );
+      expect(lines.map((i) => i.text).join("").replace(/\s/g, "")).toBe(heading.replace(/\s/g, ""));
+      // 4240tw = 282px of line length holds the heading on one or two lines.
+      expect(new Set(lines.map((i) => i.lineTop)).size).toBeLessThanOrEqual(2);
+      // The rotated lines stay inside the 600tw (40px) first column.
+      const x = textItem(result, "x");
+      for (const line of lines) {
+        const pivotX = line.x + line.rotate!.ox;
+        const top = line.glyphTop ?? line.lineTop;
+        const across = [top, top + line.lineHeight].map((y) => pivotX - (y - (top + line.rotate!.oy)) * Math.sin((line.rotate!.deg * Math.PI) / 180));
+        expect(Math.max(...across)).toBeLessThan(x.x);
+      }
+    }
+  });
+
   it("autofits columns to content when the grid is a placeholder", () => {
     // Junk grid (100 twips per column, like generator output) + 100% width:
     // Word ignores the grid and sizes columns by content.

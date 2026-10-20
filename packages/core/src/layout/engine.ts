@@ -8346,7 +8346,7 @@ class Engine {
     // Lay out all rows up front so vertically-merged cells can be sized across
     // their spanned rows rather than inflating their starting row.
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
-    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows, widths);
     const tableHeight =
       (s2 || this.rowTopLead(tbl, 0)) +
       rowHeights.reduce((sum, height) => sum + height, 0) +
@@ -8645,7 +8645,7 @@ class Engine {
     const tableWidth = gridW + s2 * (widths.length + 1);
 
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
-    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows, widths);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -8908,7 +8908,7 @@ class Engine {
     const frameTop = this.y;
     if (tbl.rows.length > 0) this.y += this.rowTopLead(tbl, 0);
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths, fields));
-    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows, widths, fields);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -9257,6 +9257,8 @@ class Engine {
   private computeRowHeights(
     tbl: Table,
     laidRows: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number }[],
+    widths: number[],
+    fields?: FieldContext,
   ): { heights: number[]; spanPaint: Map<number, number> } {
     const n = tbl.rows.length;
     const heights = new Array<number>(n).fill(0);
@@ -9289,6 +9291,15 @@ class Engine {
         avail = m.height;
       }
       spanPaint.set(m.ri * 1000 + m.ci, avail);
+      // Vertical text in a merged cell runs along the whole merged height, not
+      // the first row's (GovDocs1 039756: a btLr heading over a 12pt first row
+      // broke into two-letter lines). Lay the cell out again at that length.
+      const dir = tbl.rows[m.ri].cells[m.ci].props.textDirection;
+      if (dir === "btLr" || dir === "tbRl") {
+        const again = this.layoutRow(tbl, tbl.rows[m.ri], m.ri, widths, fields, new Map([[m.ci, avail]]));
+        const cells = laidRows[m.ri].cells;
+        cells[cells.findIndex((c) => c.cellIdx === m.ci)] = again.cells[m.ci];
+      }
     }
     return { heights, spanPaint };
   }
@@ -9299,6 +9310,8 @@ class Engine {
     rowIdx: number,
     widths: number[],
     fields?: FieldContext,
+    /** Full height of a vertically merged rotated cell, by cell index. */
+    mergedHeights?: Map<number, number>,
   ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number; rotated?: boolean }[]; height: number } {
     const defaults = this.cellMarginsOf(tbl, false);
     // Side INSETS from the cell's grid boundaries. Left: the cell's own
@@ -9394,11 +9407,14 @@ class Engine {
       const dir = cell.props.textDirection;
       if ((dir !== "btLr" && dir !== "tbRl") || cell.props.vMerge === "continue") continue;
       const { x, width: w, margins: m } = geometry[ci];
+      const mergedHeight = mergedHeights?.get(ci);
       const frameWidth = Math.max(
         4,
-        row.props.heightRule === "exact"
-          ? (row.props.height ?? measuredContentH)
-          : Math.max(row.props.heightRule === "auto" ? 0 : (row.props.height ?? 0), measuredContentH),
+        mergedHeight !== undefined
+          ? mergedHeight - (m.top ?? 0) - (m.bottom ?? 0)
+          : row.props.heightRule === "exact"
+            ? (row.props.height ?? measuredContentH)
+            : Math.max(row.props.heightRule === "auto" ? 0 : (row.props.height ?? 0), measuredContentH),
       );
       const { items, height: frameHeight } = this.layoutFrame(
         cell.blocks,
