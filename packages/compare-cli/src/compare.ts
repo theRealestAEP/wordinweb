@@ -94,7 +94,8 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
 export interface CompareFilesResult {
   /** The result's revisions by kind, as collectRevisions counts them. */
   revisions: Record<RevisionKind, number>;
-  /** The PDF's page count, when `pdf` was asked for. */
+  /** The PDF's page count, when `pdf` was asked for: the printable copy's
+   * page count, as a page whose comments do not fit gets a taller sheet. */
   pdfPages?: number;
   /** With `pdf`: font families no installed font holds (a substitute drew
    * them), and characters no installed font has (each an empty box). */
