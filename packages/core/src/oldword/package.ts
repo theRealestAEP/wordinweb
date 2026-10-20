@@ -1,7 +1,7 @@
 // An OldDocument (model.ts) as the parts of a .docx package, written with
 // the .doc reader's property writers (doc/sprm.ts) so the renderer and the
 // compare read it as they read a converted Word 97 document.
-import { Block, OldDocument, Paragraph, Row, Run, Section, Table } from "./model.js";
+import { Block, Inline, OldDocument, Paragraph, Row, Run, Section, Table } from "./model.js";
 import { ParaProps, RunProps, XmlContext, escapeAttr, escapeText, pPrXml, rPrXml, sectPrXml, tblPrXml, tcPrXml, trPrXml } from "../doc/sprm.js";
 
 const W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
@@ -27,6 +27,10 @@ class PackageWriter {
   private headerCount = 0;
   private footerCount = 0;
   private docPrId = 0;
+  /** The open fields of the story being written: whether each is still in its code. */
+  private fields: boolean[] = [];
+  /** Field marks without their partners in their story: left out. */
+  private readonly unmatched = new Set<Inline>();
 
   constructor(private readonly doc: OldDocument) {
     this.ctx = {
@@ -35,6 +39,41 @@ class PackageWriter {
       styleToggle: () => false,
     };
     this.noteKind = doc.endnotes ? "endnote" : "footnote";
+    this.matchFields(doc.sections.map((s) => s.blocks));
+    for (const section of doc.sections) for (const header of section.headers) this.matchFields([header.blocks]);
+    for (const note of doc.footnotes) this.matchFields([note]);
+  }
+
+  /** Mark the field marks of one story that have no partner: an end with no begin, a begin with no end, and their separators. */
+  private matchFields(story: Block[][]): void {
+    const open: { begin: Inline; separators: Inline[] }[] = [];
+    const visit = (blocks: Block[]): void => {
+      for (const block of blocks) {
+        if (block.type === "table") {
+          for (const row of block.rows) for (const cell of row.cells) visit(cell);
+          continue;
+        }
+        for (const run of block.runs) {
+          for (const item of run.content) {
+            if (item.kind === "fieldBegin") open.push({ begin: item, separators: [] });
+            else if (item.kind === "fieldSeparate") {
+              if (open.length) open[open.length - 1].separators.push(item);
+              else this.unmatched.add(item);
+            } else if (item.kind === "fieldEnd") {
+              const field = open.pop();
+              if (!field) this.unmatched.add(item);
+              // A second separator in one field is left out.
+              else for (const extra of field.separators.slice(1)) this.unmatched.add(extra);
+            }
+          }
+        }
+      }
+    };
+    for (const blocks of story) visit(blocks);
+    for (const field of open) {
+      this.unmatched.add(field.begin);
+      for (const separator of field.separators) this.unmatched.add(separator);
+    }
   }
 
   files(): Record<string, Uint8Array> {
@@ -112,12 +151,16 @@ class PackageWriter {
 
   private sectionXml(section: Section, last: boolean): string {
     let refs = "";
+    // A header is a story of its own: the body's open fields wait.
+    const bodyFields = this.fields;
+    this.fields = [];
     for (const header of section.headers) {
       const n = header.kind === "header" ? ++this.headerCount : ++this.footerCount;
       const root = header.kind === "header" ? "hdr" : "ftr";
       const id = this.addPart(`word/${header.kind}${n}.xml`, `${XML_HEAD}<w:${root} ${W_NS} ${DRAWING_NS}>${this.blocksXml(header.blocks) || "<w:p/>"}</w:${root}>`, `${CONTENT_TYPE}.${header.kind}+xml`, header.kind);
       refs += `<w:${header.kind}Reference w:type="${header.type}" r:id="${id}"/>`;
     }
+    this.fields = bodyFields;
     const sectPr = `<w:sectPr>${sectPrXml(section.props, refs, "", "")}</w:sectPr>`;
     const blocks = section.blocks.length ? section.blocks : [emptyParagraph()];
     if (last) return this.blocksXml(blocks) + sectPr;
@@ -151,7 +194,26 @@ class PackageWriter {
     };
     for (const item of run.content) {
       switch (item.kind) {
-        case "text": content += `<w:t xml:space="preserve">${escapeText(item.text)}</w:t>`; break;
+        case "text": {
+          const inCode = this.fields.length > 0 && this.fields[this.fields.length - 1];
+          content += inCode ? `<w:instrText xml:space="preserve">${escapeText(item.text)}</w:instrText>` : `<w:t xml:space="preserve">${escapeText(item.text)}</w:t>`;
+          break;
+        }
+        case "fieldBegin":
+          if (this.unmatched.has(item)) break;
+          this.fields.push(true);
+          content += '<w:fldChar w:fldCharType="begin"/>';
+          break;
+        case "fieldSeparate":
+          if (this.unmatched.has(item)) break;
+          this.fields[this.fields.length - 1] = false;
+          content += '<w:fldChar w:fldCharType="separate"/>';
+          break;
+        case "fieldEnd":
+          if (this.unmatched.has(item)) break;
+          this.fields.pop();
+          content += '<w:fldChar w:fldCharType="end"/>';
+          break;
         case "tab": content += "<w:tab/>"; break;
         case "break": content += "<w:br/>"; break;
         case "page": content += '<w:br w:type="page"/>'; break;

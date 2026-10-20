@@ -4,17 +4,23 @@
 import { zipSync } from "fflate";
 import { FIXED_ZIP_MTIME } from "../zip.js";
 import { isMacWordFile, readMacWord } from "./mac.js";
+import { OldDocument } from "./model.js";
 import { oldDocumentFiles } from "./package.js";
+import { isWinWordFile, readWinWord } from "./winword.js";
 
 /** Whether the file whose first bytes are `head` is one of the old Word formats read here. */
 export function isOldWordFile(head: Uint8Array): boolean {
-  return isMacWordFile(head);
+  return isMacWordFile(head) || isWinWordFile(head);
+}
+
+function readOldWord(bytes: Uint8Array): OldDocument {
+  return isMacWordFile(bytes) ? readMacWord(bytes) : readWinWord(bytes);
 }
 
 /** An old Word document as a .docx package's parts; "damaged: ..." for one whose structures cannot be read. */
 export function oldWordPackageFiles(bytes: Uint8Array): Record<string, Uint8Array> {
   try {
-    return oldDocumentFiles(readMacWord(bytes));
+    return oldDocumentFiles(readOldWord(bytes));
   } catch (error) {
     throw new Error(`damaged: ${error instanceof Error ? error.message : String(error)}`);
   }

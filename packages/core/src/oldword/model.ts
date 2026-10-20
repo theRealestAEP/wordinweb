@@ -15,6 +15,10 @@ export type Inline =
   | { kind: "softHyphen" }
   /** A field Word computes: PAGE, DATE, TIME (with its picture switch), and the text it showed. */
   | { kind: "field"; code: string; result: string }
+  /** A field's marks, around its code and then its result (the text between them in the runs). */
+  | { kind: "fieldBegin" }
+  | { kind: "fieldSeparate" }
+  | { kind: "fieldEnd" }
   /** A picture: an index into OldDocument.pictures, its size in twips. */
   | { kind: "picture"; index: number; width: number; height: number }
   /** A footnote reference in the text: the note's number (1-based, OldDocument.footnotes[id - 1]). */
