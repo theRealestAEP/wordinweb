@@ -9,14 +9,16 @@ import { isMacWordFile, readMacWord } from "./mac.js";
 import { OldDocument } from "./model.js";
 import { oldDocumentFiles } from "./package.js";
 import { isWinWordFile, readWinWord } from "./winword.js";
+import { isWriteFile, readWrite } from "./write.js";
 
 /** Whether the file whose first bytes are `head` is one of the old Word formats read here. */
 export function isOldWordFile(head: Uint8Array): boolean {
-  return isMacEarlyFile(head) || isMacWordFile(head) || isWinWordFile(head) || isDosWordFile(head);
+  return isMacEarlyFile(head) || isMacWordFile(head) || isWinWordFile(head) || isWriteFile(head) || isDosWordFile(head);
 }
 
 function readOldWord(bytes: Uint8Array): OldDocument {
   if (isMacEarlyFile(bytes)) return readMacEarly(bytes);
+  if (isWriteFile(bytes)) return readWrite(bytes);
   if (isDosWordFile(bytes)) return readDosWord(bytes);
   return isMacWordFile(bytes) ? readMacWord(bytes) : readWinWord(bytes);
 }

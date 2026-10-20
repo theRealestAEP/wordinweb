@@ -321,8 +321,9 @@ The oldest Word formats, which are not OLE compound files, are read the same way
 | Word for the Macintosh 1.x and 3.0 | Text, character and paragraph formatting, styles, sections, headers and footers, footnotes |
 | Word for Windows 1.x and 2.0 | Text in the Windows ANSI code page (fast-saved files too), character and paragraph formatting, styles, sections and page setup, tables, headers and footers, footnotes, fields, metafile and bitmap pictures |
 | Word for MS-DOS 1 to 6 | Text in its OEM code page (437 or 850), character and paragraph formatting, sections and page setup, running heads, footnotes (styles live in a separate .STY file the document only names) |
+| Windows Write 1.0 to 3.1 | Text in the Windows ANSI code page, character and paragraph formatting, page setup, running heads, metafile and bitmap pictures |
 
-Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95, Windows Write, the pre-release builds of Word for Windows 1.0, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
+Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95, the pre-release builds of Word for Windows 1.0, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
 
 `renderDocxToPdf` throws a `PdfRenderError` and `compareFiles` throws a `CompareError`. Each error has a `code` for the caller to act on, and a message that names the cause:
 

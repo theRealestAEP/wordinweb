@@ -10,8 +10,9 @@ Write OUT.pdf: IN.docx laid out and drawn as Word prints it, with the
 fonts embedded, no browser involved. Prints one JSON line about the run.
 A Strict Open XML Document (ISO/IEC 29500 Strict) is read as Transitional.
 A Word 97-2003 .doc (the binary format) is read too, converted on the way
-in, as is a document of Word for the Macintosh 1.x-5.x or Word for Windows
-1.x/2.0; the file's bytes decide, not its name.
+in, as is a document of Word for the Macintosh 1.x-5.x, Word for Windows
+1.x/2.0, Word for MS-DOS or Windows Write; the file's bytes decide, not its
+name.
 
 Options:
   --comments      print the review comments beside each page, as Word's markup
