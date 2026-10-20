@@ -416,7 +416,7 @@ class WmfPlayer {
         if (fn === META_RECTANGLE) this.ctx.rect(x0, y0, x1 - x0, y1 - y0);
         else if (fn === META_ELLIPSE) this.ctx.ellipse((x0 + x1) / 2, (y0 + y1) / 2, Math.abs(x1 - x0) / 2, Math.abs(y1 - y0) / 2, 0, 0, 2 * Math.PI);
         else this.roundRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0), (Math.abs(this.i16(p + 2)) * this.sx()) / 2, (Math.abs(this.i16(p)) * this.sy()) / 2);
-        this.ctx.closePath();
+        if (fn !== META_RECTANGLE) this.ctx.closePath();
         this.paint(true);
         return;
       }
