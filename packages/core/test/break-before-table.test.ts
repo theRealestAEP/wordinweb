@@ -360,6 +360,28 @@ describe("a break next to a table, a picture or a text box", () => {
     expect(pagesOfWords(pages, ["AAA", "ZZZ", "BBB"])).toEqual([1, 2, 2]);
   });
 
+  // word95-check-a R1, 109561.doc: a numbered heading whose first run is a
+  // page break. The break moved the paragraph to a new page, and the label
+  // then went alone onto that page with the heading text one page later.
+  it("keeps a numbered heading's label with its text after a leading page break", () => {
+    const numbering =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:numbering ${NS}>` +
+      '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="upperRoman"/>' +
+      '<w:lvlText w:val="%1."/><w:lvlJc w:val="left"/><w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr></w:lvl></w:abstractNum>' +
+      '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>';
+    const heading = (text: string) =>
+      '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>' +
+      `<w:r><w:br w:type="page"/></w:r><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const pages = layout(p("AAA") + heading("CITE") + p("Body1") + heading("SECOND") + p("Body2"), {
+      "word/numbering.xml": numbering,
+    });
+    expect(pages.length).toBe(3);
+    expect(pagesOfWords(pages, ["AAA", "I.", "CITE", "Body1", "II.", "SECOND", "Body2"])).toEqual([1, 2, 2, 2, 3, 3, 3]);
+    const label = boxesOf(pages).find((b) => b.label === "I.")!;
+    const text = boxesOf(pages).find((b) => b.label === "CITE")!;
+    expect(label.y0).toBeCloseTo(text.y0, 1);
+  });
+
   // Validator doc97-check-d, minimal files br_smallTB_br.docx and
   // br_tallTB_br.docx: the shape was drawn on page 1, before the break.
   for (const [name, height] of [["small", 914400], ["tall", 7772400]] as const) {

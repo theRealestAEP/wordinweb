@@ -1713,6 +1713,9 @@ function breakParagraphImpl(
     if (!ba || !bb) return false;
     return ba.style === bb.style && ba.color === bb.color && ba.width === bb.width && ba.space === bb.space;
   };
+  // Spans placed before the first atom: the numbering label and its suffix.
+  // A leading break moves them to the new page with the text after it.
+  const labelSpans = cur.length;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind === "anchorPoint") {
@@ -1736,7 +1739,7 @@ function breakParagraphImpl(
       // level, dropping spacing-before). Emitting a mark line would overflow a
       // nearly-full preceding page and spuriously double-break (wild-gatech
       // title page -> phantom blank p3).
-      if (atom.breakType !== "line" && cur.length === 0 && lines.length === 0 && !trailing) {
+      if (atom.breakType !== "line" && cur.length === labelSpans && lines.length === 0 && !trailing) {
         // Only the FIRST leading break is a break-BEFORE consumed by
         // placeParagraph (which does the block-level page/column move). A SECOND
         // (or later) consecutive break at the paragraph start creates a BLANK
