@@ -41,14 +41,16 @@ const SLASH = 0x2f;
  * wrappedContent). The browser twin of compare-cli's scanner,
  * over a pull of inflated chunks instead of a file. Comments, processing
  * instructions and CDATA are skipped; a document type declaration, an
- * unterminated construct or a missing body is an error.
+ * unterminated construct or a missing body is an error. `onAltChunk` gets
+ * the start tag of every w:altChunk in the body, at any depth.
  */
 export function scanBody(
   pull: () => Uint8Array | null,
   onChild: (child: ScannedChild) => void,
   onSdt: (sdt: ScannedSdt) => void,
+  onAltChunk: (tag: string) => void,
 ): BodyOutline {
-  return new Scanner(pull).run(onChild, onSdt);
+  return new Scanner(pull).run(onChild, onSdt, onAltChunk);
 }
 
 class Scanner {
@@ -61,7 +63,7 @@ class Scanner {
 
   constructor(private readonly pull: () => Uint8Array | null) {}
 
-  run(onChild: (child: ScannedChild) => void, onSdt: (sdt: ScannedSdt) => void): BodyOutline {
+  run(onChild: (child: ScannedChild) => void, onSdt: (sdt: ScannedSdt) => void, onAltChunk: (tag: string) => void): BodyOutline {
     // The body sits at depth 1, under the document root.
     const cd = 1;
     let depth = 0;
@@ -130,6 +132,7 @@ class Scanner {
         end = this.tagEnd(lt + 1);
         const selfClosing = this.store[end - this.base - 2] === SLASH;
         const name = this.nameAt(lt + 1);
+        if (inside && localName(name) === "altChunk") onAltChunk(new TextDecoder().decode(this.store.subarray(lt, end - this.base)));
         if (!inside) {
           if (depth === cd && localName(name) === "body") {
             if (this.base !== 0) throw new Error("the document's head is longer than a chunk");

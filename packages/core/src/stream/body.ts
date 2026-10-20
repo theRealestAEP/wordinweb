@@ -3,8 +3,8 @@ import { DocxDocument } from "../docx.js";
 import { StrictRewriter, normalizeStrictXml } from "../strict.js";
 import { Prescan, bodyHasPageTotal } from "../layout/engine.js";
 import { Block, FieldContent, Paragraph, Revision, Section, SectionProps } from "../model.js";
-import { DocParseContext, altChunkError, formatChange, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
-import { parseRelationships } from "../parse/rels.js";
+import { DocParseContext, formatChange, refuseAltChunk, inheritHeaderFooterRefs, parseParagraph, parseTable } from "../parse/document.js";
+import { Relationships, parseRelationships, relsPathFor } from "../parse/rels.js";
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, attr, child, localName, parseXml } from "../xml.js";
 import { XML_PART, ZipBudget } from "../zip.js";
@@ -88,17 +88,21 @@ export async function openStreamingDocument(source: ByteSource, options: OpenStr
   const docPart = documentPart(await zip.text("_rels/.rels"));
   const docEntry = zip.entries.get(docPart);
   if (!docEntry) throw new Error(`missing ${docPart}`);
-  const body = new BodyStore();
-  // A Strict Open XML body is rewritten to Transitional as it is scanned (strict.ts).
-  const rewriter = new StrictRewriter();
-  const outline = body.scan(rewriter.through(inflatePull(docEntry, await zip.raw(docEntry))));
-
   // The shell: every XML part, and document.xml with only the body's own
   // section properties. Their sizes, from the directory, are held to what
   // Package allows a document loaded whole, before any of them is inflated.
   const held = [...zip.entries.values()].filter((entry) => entry.name !== docPart && !entry.name.endsWith("/") && XML_PART.test(entry.name));
   const budget = new ZipBudget();
   for (const entry of held) budget.add(entry.name, entry.size);
+
+  const body = new BodyStore();
+  // A Strict Open XML body is rewritten to Transitional as it is scanned (strict.ts).
+  const rewriter = new StrictRewriter();
+  // The document's relationships name the part a w:altChunk the scan finds holds.
+  const relsXml = await zip.text(relsPathFor(docPart));
+  const rels = (): Relationships => parseRelationships(relsXml === undefined ? undefined : parseXml(relsXml), docPart);
+  const outline = body.scan(rewriter.through(inflatePull(docEntry, await zip.raw(docEntry))), rels);
+
   const files: Record<string, Uint8Array> = {};
   for (const entry of held) {
     const bytes = await zip.read(entry);
@@ -307,10 +311,9 @@ function lastParagraph(block: Block): Paragraph | null {
 
 /** A body's block as parse/document.ts's parseBody makes it: null when the
  * element is no block (a paragraph deleted in the final view, a table whose
- * rows all are). An altChunk is refused, as parseBody refuses it. */
+ * rows all are). */
 function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
   const ln = localName(el.name);
-  if (ln === "altChunk") throw altChunkError(el, ctx.rels);
   if (ln === "p") {
     const para = parseParagraph(el, ctx);
     return para.revisionHidden ? null : para;
@@ -360,7 +363,7 @@ function documentPart(rels: string | undefined): string {
 class BodyStore {
   /** Each candidate's [start, end) in the concatenated candidate bytes, as pairs. */
   private readonly ranges: number[] = [];
-  /** Each candidate's local name: p, tbl, altChunk, or the body's own sectPr. */
+  /** Each candidate's local name: p, tbl, or the body's own sectPr. */
   private readonly kinds: string[] = [];
   /** Each block-level w:sdt's properties, as its start tag through its
    * sdtContent's, and the sdt it sits in; each candidate's innermost one. */
@@ -391,8 +394,10 @@ class BodyStore {
     return this.kept.length;
   }
 
-  /** Scan the document part, pulled a piece at a time; returns the part without the body's children. */
-  scan(pull: () => Uint8Array | null): Uint8Array {
+  /** Scan the document part, pulled a piece at a time; returns the part
+   * without the body's children. A w:altChunk anywhere in the body is
+   * refused; `rels` gives the document's relationships, for the message. */
+  scan(pull: () => Uint8Array | null, rels: () => Relationships): Uint8Array {
     let piece: Uint8Array[] = [];
     let pieceBytes = 0;
     let total = 0;
@@ -413,8 +418,7 @@ class BodyStore {
       (child) => {
         const ln = localName(child.name);
         // A sectPr counts at the body's own level only, as parseBody walks it.
-        // An altChunk is refused when the first pass parses it.
-        if (ln !== "p" && ln !== "tbl" && ln !== "altChunk" && (ln !== "sectPr" || !child.top)) return;
+        if (ln !== "p" && ln !== "tbl" && (ln !== "sectPr" || !child.top)) return;
         if (pieceBytes >= PIECE_BYTES) flush();
         if (piece.length === 0) this.starts.push(total);
         piece.push(child.bytes.slice());
@@ -427,6 +431,7 @@ class BodyStore {
       (sdt) => {
         this.sdts.push({ parent: sdt.parent, xml: strFromU8(sdt.bytes) });
       },
+      (tag) => refuseAltChunk(tag, rels),
     );
     flush();
     this.starts.push(total);

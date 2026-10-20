@@ -31,7 +31,7 @@ import {
 } from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
 import { StableIds } from "./edit/ids.js";
-import { parseBody, parseBlocks, parseParagraph, DocParseContext, altChunkError } from "./parse/document.js";
+import { parseBody, parseBlocks, parseParagraph, DocParseContext, refuseAltChunk } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
@@ -417,7 +417,7 @@ export class DocxDocument {
     if (this.relsRoot) this.rememberOriginalXml(this.relsPath, this.relsRoot);
     if (this.contentTypesRoot) this.rememberOriginalXml("[Content_Types].xml", this.contentTypesRoot);
 
-    const docRoot = this.readXmlOptional(docPart);
+    const docRoot = this.readPrintedXml(docPart);
     if (!docRoot) throw new Error(`Missing ${docPart} in package`);
     this.docRoot = docRoot;
     this.rememberOriginalXml(docPart, docRoot);
@@ -498,7 +498,7 @@ export class DocxDocument {
 
     // Review comments (optional part). The XML tree is retained so comments
     // can be deleted (with undo) and round-trip through save().
-    const commentsRoot = this.readXmlOptional(docDir + "comments.xml");
+    const commentsRoot = this.readPrintedXml(docDir + "comments.xml");
     if (commentsRoot) {
       this.commentsPart = docDir + "comments.xml";
       this.commentsRoot = commentsRoot;
@@ -555,7 +555,7 @@ export class DocxDocument {
       const isHeader = rel.type.endsWith("/header");
       const isFooter = rel.type.endsWith("/footer");
       if (!isHeader && !isFooter) continue;
-      const root = this.readXmlOptional(rel.target);
+      const root = this.readPrintedXml(rel.target);
       if (!root) continue;
       const partRelsRoot = this.readXmlOptional(relsPathFor(rel.target));
       const partRels = parseRelationships(partRelsRoot, rel.target);
@@ -577,7 +577,7 @@ export class DocxDocument {
       const isFn = rel.type.endsWith("/footnotes");
       const isEn = rel.type.endsWith("/endnotes");
       if (!isFn && !isEn) continue;
-      const root = this.readXmlOptional(rel.target);
+      const root = this.readPrintedXml(rel.target);
       if (!root) continue;
       const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
       if (isFn) {
@@ -1209,10 +1209,6 @@ export class DocxDocument {
       if (localName(c.name) !== "comment") continue;
       const paras: string[] = [];
       const collectPara = (el: XmlElement): void => {
-        if (localName(el.name) === "altChunk") {
-          const part = this.commentsPart as string;
-          throw altChunkError(el, parseRelationships(this.readXmlOptional(relsPathFor(part)), part));
-        }
         if (localName(el.name) === "p") {
           let text = "";
           const collectT = (e: XmlElement): void => {
@@ -3467,6 +3463,15 @@ export class DocxDocument {
   private readXmlOptional(part: string) {
     const text = this.pkg.text(part);
     if (text === undefined) return undefined;
+    return parseXml(text);
+  }
+
+  /** A part Word prints (the document, a header or footer, the notes, the
+   * comments), refused when it holds a w:altChunk anywhere. */
+  private readPrintedXml(part: string) {
+    const text = this.pkg.text(part);
+    if (text === undefined) return undefined;
+    refuseAltChunk(text, () => parseRelationships(this.readXmlOptional(relsPathFor(part)), part));
     return parseXml(text);
   }
 }
