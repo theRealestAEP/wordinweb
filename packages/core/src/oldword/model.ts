@@ -89,4 +89,6 @@ export interface OldDocument {
   defaultTab?: number;
   /** Footnotes at the end of the document rather than the foot of the page. */
   endnotes?: boolean;
+  /** Different headers and footers on even pages. */
+  evenAndOddHeaders?: boolean;
 }

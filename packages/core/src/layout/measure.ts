@@ -66,6 +66,12 @@ const METRIC_SUBSTITUTES: Record<string, string> = {
   // wrap and paginate like Word rather than the OS "Times" (~subtly different
   // advances) or a sans fallback.
   times: "Times New Roman",
+  // The classic Mac faces of Word for the Macintosh documents, as Word on
+  // Windows substitutes them.
+  "new york": "Times New Roman",
+  geneva: "Arial",
+  chicago: "Arial",
+  monaco: "Courier New",
   corbel: "Gill Sans",
   constantia: "Hoefler Text",
   "lucida sans": "Lucida Grande",

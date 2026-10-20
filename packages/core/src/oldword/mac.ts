@@ -20,11 +20,13 @@ const MAC_FONTS: Record<number, string> = {
   21: "Helvetica", 22: "Courier", 23: "Symbol", 24: "Mobile", 33: "Avant Garde", 34: "New Century Schoolbook",
 };
 
-/** The standard styles by their negative number: Word for Windows 2.0's list, which Word for the Macintosh shares. */
+/** The standard styles by their number (stc - 256): Word for Windows 2.0's list, which Word for the Macintosh shares. */
 const STANDARD_STYLES: Record<number, string> = {
   [-1]: "Normal Indent", [-2]: "heading 1", [-3]: "heading 2", [-4]: "heading 3", [-5]: "heading 4", [-6]: "heading 5", [-7]: "heading 6",
-  [-8]: "heading 7", [-9]: "heading 8", [-10]: "heading 9", [-11]: "footnote text", [-12]: "footnote reference", [-13]: "annotation text",
-  [-14]: "annotation reference", [-15]: "header", [-16]: "footer", [-17]: "index heading", [-18]: "line number",
+  [-8]: "heading 7", [-9]: "heading 8", [-10]: "heading 9", [-11]: "footnote text", [-12]: "footnote reference", [-13]: "header",
+  [-14]: "footer", [-15]: "index heading", [-16]: "line number", [-17]: "index 1", [-18]: "index 2", [-19]: "index 3", [-20]: "index 4",
+  [-21]: "index 5", [-22]: "index 6", [-23]: "index 7", [-24]: "toc 1", [-25]: "toc 2", [-26]: "toc 3", [-27]: "toc 4", [-28]: "toc 5",
+  [-29]: "toc 6", [-30]: "toc 7", [-31]: "toc 8", [-32]: "annotation text", [-33]: "annotation reference",
 };
 
 /** Whether `head` starts a Word for the Macintosh 4.0 or 5.x document. */
@@ -152,6 +154,7 @@ class MacReader {
     this.readNoteRefs();
     const sections = this.readSections(mainEnd);
     this.readFootnotes();
+    // The document's properties: the page, the margins, the default tab, then flags: facing pages (0x80) and where the notes go (0 the end of the document).
     const dop = this.entry(15);
     return {
       fonts: this.fonts,
@@ -160,6 +163,8 @@ class MacReader {
       footnotes: this.footnotes,
       pictures: this.pictures,
       defaultTab: dop.length >= 16 ? be16(dop, 14) || undefined : undefined,
+      evenAndOddHeaders: dop.length > 16 && (dop[16] & 0x80) !== 0,
+      endnotes: dop.length > 16 && ((dop[16] >> 1) & 3) === 0,
     };
   }
 
@@ -418,11 +423,15 @@ class MacReader {
     const stories: number[] = [];
     for (let at = 0; at + 4 <= hdd.length; at += 4) stories.push(be32(hdd, at));
     const hddBase = this.ccpText + this.ccpFtn;
-    let story = 0;
+    // The stories of the footnote separator, continuation separator and continuation notice come first, as the document's flags say.
+    const dop = this.entry(15);
+    let story = dop.length > 17 ? popcount(dop[17] & 0x3f) : 0;
     return limits.map((limit) => {
       const props = this.pageProps();
       let headerFlags = 0;
-      for (const { op, arg } of parseSprms(limit.sepx ?? new Uint8Array(0))) {
+      // A fast-saved file changes a section by the property modifier of the piece that holds its end.
+      const sprms = [...parseSprms(limit.sepx ?? new Uint8Array(0)), ...(this.pieceAt(limit.end - 1)?.sprms ?? [])];
+      for (const { op, arg } of sprms) {
         switch (op) {
           case 0x75: props.bkc = arg[0]; break;
           case 0x76: props.titlePage = arg[0] !== 0; break;
@@ -504,7 +513,9 @@ class MacReader {
         const item = paragraphs[i++];
         if (item.rowEnd) {
           if (cell.length) cells.push(cell);
-          rows.push({ props: item.table ?? newTableProps(), cells });
+          // A row mark with no cell edges of its own takes the row above's.
+          const props = item.table?.cells.length ? item.table : rows.length ? rows[rows.length - 1].props : item.table ?? newTableProps();
+          rows.push({ props, cells });
           cells = [];
           cell = [];
           continue;
@@ -581,11 +592,11 @@ class MacReader {
       text = "";
     };
     const fontName = this.fonts[this.font(char.fontId)];
-    const symbol = fontName === "Symbol";
+    const decode = charDecoder(fontName);
     for (let cp = start; cp < end; cp++) {
       const ch = this.text[cp];
       if (ch >= 0x20) {
-        text += symbol ? symbolText(Uint8Array.of(ch)) : MAC_ROMAN_CHARS[ch];
+        text += decode(ch);
         continue;
       }
       flush();
@@ -599,9 +610,6 @@ class MacReader {
         case 0x11: text += "⌘"; break;
         case 0x14: text += ""; break;
         case 0x02: content.push({ kind: "field", code: "PAGE", result: "1" }); break;
-        case 0x03: case 0x10: case 0x13: case 0x15: case 0x16: case 0x17: case 0x1a: case 0x1b: case 0x1d:
-          content.push({ kind: "field", code: "DATE", result: "" });
-          break;
         case 0x04: case 0x18: case 0x19: content.push({ kind: "field", code: "TIME", result: "" }); break;
         case 0x05: {
           const id = this.noteRefs.get(cp);
@@ -614,7 +622,11 @@ class MacReader {
           if (picture) content.push(picture);
           break;
         }
-        default: break;
+        default: {
+          const picture = DATE_PICTURES[ch];
+          if (picture !== undefined) content.push({ kind: "field", code: picture ? `DATE \\@ "${picture}"` : "DATE", result: "" });
+          break;
+        }
       }
     }
     flush();
@@ -692,7 +704,24 @@ class MacReader {
 
 // ---- Character formatting --------------------------------------------------
 
+/** The date characters, by their field picture: the short date, its day, month and year, and the abbreviated and long forms. */
+const DATE_PICTURES: Record<number, string> = {
+  0x03: "", 0x10: "d", 0x13: "M", 0x15: "yy", 0x16: "ddd", 0x17: "dddd", 0x1a: "MMM", 0x1b: "MMMM", 0x1d: "MMM d, yyyy",
+};
+
 const MAC_ROMAN_CHARS: string[] = Array.from({ length: 256 }, (_, i) => MAC_ROMAN.decode(Uint8Array.of(i)));
+
+/**
+ * How a character code of a font becomes text: the Symbol font's codes are
+ * its Unicode characters; a pictograph font's (Wingdings, Zapf Dingbats and
+ * its Monotype Sorts copy) stay codes, in the private-use block at U+F000 as
+ * Word keeps them; any other font's are Mac OS Roman.
+ */
+function charDecoder(fontName: string): (code: number) => string {
+  if (fontName === "Symbol") return (code) => symbolText(Uint8Array.of(code));
+  if (/wingdings|webdings|dingbats|sorts/i.test(fontName)) return (code) => String.fromCharCode(0xf000 + code);
+  return (code) => MAC_ROMAN_CHARS[code];
+}
 
 /** Word's colors by number, 1 black to 8 white (doc/sprm.ts's Ico). */
 const ICO: Record<number, string> = { 0: "auto", 1: "000000", 2: "0000FF", 3: "00FFFF", 4: "00FF00", 5: "FF00FF", 6: "FF0000", 7: "FFFF00", 8: "FFFFFF" };
@@ -752,16 +781,19 @@ function clonePara(p: MacPara): MacPara {
   return { props: structuredClone(p.props), charSprms: [...p.charSprms], borderStyle: p.borderStyle };
 }
 
-/** The operand sizes of the sprms Word for the Macintosh writes (Word for Windows 2.0's numbering); -1 for a size byte first, -2 for a size word. */
+/** The operand sizes of the sprms Word for the Macintosh writes (Word for Windows 2.0's numbering, with Word for Windows 2.0's sizes where the Mac files do not show their own); -1 for a size byte first, -2 for a size word. */
 const SPRM_SIZES: Record<number, number> = {
   0x02: 1, 0x03: -1, 0x04: 1, 0x05: 1, 0x06: 1, 0x07: 1, 0x08: 1, 0x09: 1, 0x0a: 1, 0x0b: 1, 0x0c: 1, 0x0d: 1, 0x0e: 1, 0x0f: -1,
   0x10: 2, 0x11: 2, 0x12: 2, 0x13: 2, 0x14: 2, 0x15: 2, 0x16: 2, 0x17: -1, 0x18: 1, 0x19: 1, 0x1a: 2, 0x1b: 2, 0x1c: 2, 0x1d: 1,
-  0x1e: 2, 0x1f: 2, 0x20: 2, 0x21: 2, 0x22: 2, 0x23: 2, 0x24: 2,
-  0x34: 1, 0x38: 3, 0x39: 1, 0x3a: 0, 0x3c: 1, 0x3d: 1, 0x3e: 1, 0x3f: 1, 0x40: 1, 0x41: 1, 0x42: 1, 0x43: 1, 0x44: 2, 0x45: 1,
-  0x47: 1, 0x49: 1, 0x4a: 1, 0x4c: 1, 0x4d: 1, 0x4e: -1, 0x4f: 3, 0x50: 3, 0x53: -1, 0x5e: 1, 0x5f: -1,
+  0x1e: 2, 0x1f: 2, 0x20: 2, 0x21: 2, 0x22: 2, 0x23: 2, 0x24: 2, 0x25: 1, 0x26: 2, 0x27: 2, 0x28: 2, 0x29: 2, 0x2a: 2, 0x2b: 2,
+  0x2c: 1, 0x2d: 2, 0x2e: 2, 0x2f: 2, 0x30: 2, 0x31: 2, 0x32: 1, 0x33: 1,
+  0x34: 1, 0x35: 1, 0x36: 1, 0x37: 1, 0x38: 3, 0x39: 1, 0x3a: 0, 0x3c: 1, 0x3d: 1, 0x3e: 1, 0x3f: 1, 0x40: 1, 0x41: 1, 0x42: 1, 0x43: 1,
+  0x44: 2, 0x45: 1, 0x46: 3, 0x47: 1, 0x48: 2, 0x49: 1, 0x4a: 1, 0x4b: 1, 0x4c: 1, 0x4d: 1, 0x4e: -1, 0x4f: 3, 0x50: 3, 0x53: -1, 0x5e: 1,
+  0x5f: -1, 0x60: 2, 0x61: 2, 0x62: 2, 0x63: 2,
   0x75: 1, 0x76: 1, 0x77: 2, 0x78: 2, 0x79: 1, 0x7a: 1, 0x7b: 2, 0x7c: 2, 0x7d: 1, 0x7e: 1, 0x7f: 1, 0x80: 1, 0x81: 2, 0x82: 2, 0x83: 2,
-  0x84: 2, 0x85: 1, 0x86: 1, 0x87: 2, 0x88: 2,
-  0x92: 2, 0x93: 2, 0x94: 2, 0x98: -2, 0x99: 2, 0x9a: -1, 0x9d: 5, 0x9e: 4, 0x9f: 2, 0xa0: 4, 0xa3: 5,
+  0x84: 2, 0x85: 1, 0x86: 1, 0x87: 2, 0x88: 2, 0x89: 1, 0x8a: 1, 0x8b: 2, 0x8c: 2, 0x8d: 2, 0x8e: 2, 0x8f: 2, 0x90: 2, 0x91: 2,
+  0x92: 2, 0x93: 2, 0x94: 2, 0x95: 1, 0x98: -2, 0x99: 2, 0x9a: -1, 0x9b: -1, 0x9d: 5, 0x9e: 4, 0x9f: 2, 0xa0: 4, 0xa1: 2, 0xa2: 2,
+  0xa3: 5, 0xa4: 4,
 };
 
 /** A grpprl's sprms, up to the first one whose size is unknown. */
@@ -778,7 +810,8 @@ function parseSprms(b: Uint8Array): Sprm[] {
       length = b[at + 1] ?? 0;
       start = at + 2;
     } else if (size === -2) {
-      length = be16(b, at + 1);
+      // A size word counts one byte more than follows it.
+      length = Math.max(0, be16(b, at + 1) - 1);
       start = at + 3;
     }
     if (start + length > b.length) break;
@@ -978,6 +1011,12 @@ function be16s(b: Uint8Array, at: number): number {
 
 function be32(b: Uint8Array, at: number): number {
   return (((b[at] ?? 0) << 24) | ((b[at + 1] ?? 0) << 16) | ((b[at + 2] ?? 0) << 8) | (b[at + 3] ?? 0)) >>> 0;
+}
+
+function popcount(v: number): number {
+  let n = 0;
+  for (; v; v &= v - 1) n++;
+  return n;
 }
 
 /** A style sheet list: per entry a size byte and that many bytes; 0xFF is an entry not in use (null). */

@@ -103,6 +103,7 @@ class PackageWriter {
   private settingsXml(): string {
     const { doc } = this;
     let out = `${XML_HEAD}<w:settings ${W_NS}>`;
+    if (doc.evenAndOddHeaders) out += "<w:evenAndOddHeaders/>";
     if (doc.defaultTab !== undefined && doc.defaultTab > 0) out += `<w:defaultTabStop w:val="${doc.defaultTab}"/>`;
     // These documents come from before Word 97: Word lays them out in its oldest compatibility mode.
     out += '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="11"/></w:compat>';
