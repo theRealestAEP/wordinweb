@@ -3888,7 +3888,12 @@ class Engine {
    * content, the widest line or picture of its paragraphs (laid at the column
    * width) and the grid width of its tables. */
   private autoFrameWidth(blocks: Block[]): number {
+    // The measure must not consume numbering counters: snapshot them.
+    const counters = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+    const seenNumIds = new Set(this.seenNumIds);
     const laid = this.layoutFrame(blocks, this.colWidth, this.fieldCtx());
+    this.counters = counters;
+    this.seenNumIds = seenNumIds;
     let right = 0;
     for (const it of laid.items) {
       if (it.kind === "text" || it.kind === "image") right = Math.max(right, it.x + it.width);
