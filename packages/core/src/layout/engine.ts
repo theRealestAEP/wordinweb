@@ -7310,7 +7310,7 @@ class Engine {
     if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && (cellsDeclareWidths || cellsDeclareAutoWidths)) {
       const autoOnlyColumns = base.map((_, column) =>
         tbl.rows.every((row) => {
-          let gridPos = 0;
+          let gridPos = row.props.gridBefore ?? 0;
           for (const cell of row.cells) {
             if (gridPos === column) return cell.props.gridSpan === 1 && cell.props.widthAuto;
             gridPos += cell.props.gridSpan;
@@ -7320,7 +7320,7 @@ class Engine {
       );
       const fixedColumns = base.map((_, column) =>
         tbl.rows.some((row) => {
-          let gridPos = 0;
+          let gridPos = row.props.gridBefore ?? 0;
           for (const cell of row.cells) {
             if (gridPos === column) return cell.props.gridSpan === 1 && cell.props.width !== undefined;
             gridPos += cell.props.gridSpan;
@@ -7379,7 +7379,7 @@ class Engine {
       if (!nested && (tbl.props.widthPct ?? 1) < 0.95) {
         const declared = new Array<number>(base.length).fill(0);
         for (const row of tbl.rows) {
-          let gridPos = 0;
+          let gridPos = row.props.gridBefore ?? 0;
           for (const cell of row.cells) {
             if (cell.props.gridSpan === 1 && cell.props.width !== undefined) {
               declared[gridPos] = Math.max(declared[gridPos], cell.props.width);
@@ -7655,7 +7655,7 @@ class Engine {
     if (target <= 0) return null;
     const pref = new Array<number>(nCols).fill(0);
     for (const row of tbl.rows) {
-      let g = 0;
+      let g = row.props.gridBefore ?? 0;
       for (const cell of row.cells) {
         if (cell.props.gridSpan === 1 && g < nCols && cell.props.width !== undefined) {
           pref[g] = Math.max(pref[g], cell.props.width);
@@ -7733,8 +7733,9 @@ class Engine {
     // and still only 22 when the table has width to spare. Seeding a content
     // stub on top of `pad` let a freshly inserted column claim a share of the
     // table it never earned.
-    const minW = new Array<number>(nCols).fill(pad);
-    const prefW = new Array<number>(nCols).fill(pad);
+    const omitted = omittedGridWidths(tbl, nCols);
+    const minW = omitted.map((width) => Math.max(pad, width));
+    const prefW = [...minW];
     // Hard (non-negotiable) minimum: the demand of nested tables only. Word
     // squeezes TEXT below its longest word when a cell must shrink, but never
     // squeezes a nested table below its own minimum (grid4 L2/L3).
@@ -7744,7 +7745,7 @@ class Engine {
     // columns demand on their own. See spreadSpan below.
     const spans: { at: number; span: number; min: number; pref: number; hard: number }[] = [];
     for (const row of tbl.rows) {
-      let gridPos = 0;
+      let gridPos = row.props.gridBefore ?? 0;
       for (const cell of row.cells) {
         const span = cell.props.gridSpan;
         if (gridPos < nCols && cell.props.vMerge !== "continue") {
@@ -7847,7 +7848,7 @@ class Engine {
   private measureTableWidths(tbl: Table): { min: number; pref: number } {
     const nCols = Math.max(
       tbl.grid.length,
-      ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)),
+      ...tbl.rows.map(rowGridColumns),
     );
     const { minW, prefW, fudge } = this.columnMinPref(tbl, Math.max(1, nCols));
     // A nested table is a hard constraint on its host cell, so use the same
@@ -8063,9 +8064,7 @@ class Engine {
         : 0;
     const rows = tbl.rows;
     const nRows = rows.length;
-    const nCols =
-      tbl.grid.length ||
-      rows.reduce((m, r) => Math.max(m, r.cells.reduce((a, c) => a + c.props.gridSpan, 0)), 0);
+    const nCols = Math.max(tbl.grid.length, ...rows.map(rowGridColumns));
     // Conditional table-style borders participate in the boundary width too:
     // LightGrid's firstRow bottom rule is sz-18 (2.25pt) against a sz-8
     // insideH, and Word makes the header and first body row each taller by
@@ -8111,8 +8110,8 @@ class Engine {
     // top/bottom rule (probe-exactouter11/15: a live outer rule charges in
     // full, an all-nil row zeroes it, compat-invariant).
     const colWidths = (r: number, side: "top" | "bottom", fallback?: Border): number[] => {
-      const out: number[] = [];
-      let colStart = 0;
+      const out: number[] = new Array(rows[r].props.gridBefore ?? 0).fill(0);
+      let colStart = rows[r].props.gridBefore ?? 0;
       for (const c of rows[r].cells) {
         const own = c.props.borders?.[side];
         let w: number;
@@ -8124,13 +8123,15 @@ class Engine {
         for (let i = 0; i < Math.max(1, c.props.gridSpan); i++) out.push(w);
         colStart += c.props.gridSpan;
       }
-      while (out.length < nCols) out.push(bw(fallback));
+      while (out.length < nCols) out.push(0);
       return out;
     };
     /** Each grid column's top cell margin in row `r`. */
     const colTopPads = (r: number): number[] => {
       const fallback = this.cellMarginsOf(tbl, false).top ?? 0;
-      return rows[r].cells.flatMap((c) => Array<number>(Math.max(1, c.props.gridSpan)).fill(c.props.margins?.top ?? fallback));
+      return new Array<number>(rows[r].props.gridBefore ?? 0).fill(0).concat(
+        rows[r].cells.flatMap((c) => Array<number>(Math.max(1, c.props.gridSpan)).fill(c.props.margins?.top ?? fallback)),
+      );
     };
     const boundary = (k: number): number => {
       if (k === 0) return Math.max(0, ...colWidths(0, "top", tb?.top));
@@ -8379,6 +8380,7 @@ class Engine {
     let segTop = this.y;
     let segPage = this.cur;
     let segHasRows = false;
+    let segLastLaid = laidRows[0];
     let moveEmitted = false;
     const markTableStart = () => {
       if (moveEmitted) return;
@@ -8416,9 +8418,9 @@ class Engine {
         if (segHasRows && segmentBottom && segmentBottom.style !== "none") {
           this.cur.items.push({
             kind: "edge",
-            x1: x0,
+            x1: x0 + Math.min(...segLastLaid.cells.map((cell) => cell.x)),
             y1: this.y,
-            x2: x0 + widths.reduce((sum, width) => sum + width, 0),
+            x2: x0 + Math.max(...segLastLaid.cells.map((cell) => cell.x + cell.width)),
             y2: this.y,
             border: segmentBottom,
             role: "table-rule",
@@ -8466,6 +8468,7 @@ class Engine {
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             segHasRows = true;
+            segLastLaid = hLaid;
             this.y += hH;
           }
         }
@@ -8541,12 +8544,13 @@ class Engine {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
           segHasRows = true;
+          segLastLaid = parts.top;
           if (segmentBottom && segmentBottom.style !== "none") {
             this.cur.items.push({
               kind: "edge",
-              x1: x0,
+              x1: x0 + Math.min(...parts.top.cells.map((cell) => cell.x)),
               y1: this.y + parts.top.height,
-              x2: x0 + widths.reduce((sum, width) => sum + width, 0),
+              x2: x0 + Math.max(...parts.top.cells.map((cell) => cell.x + cell.width)),
               y2: this.y + parts.top.height,
               border: segmentBottom,
               role: "table-rule",
@@ -8567,6 +8571,7 @@ class Engine {
       markTableStart();
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       segHasRows = true;
+      segLastLaid = laid;
       this.y += rowHeight;
       // Separated cell borders: 2*spacing of vertical air between each row's
       // cell boxes (matching the horizontal gap), so the row-to-row boundary
@@ -9171,10 +9176,10 @@ class Engine {
     };
   }
 
-  /** Grid-column index where each cell of a row starts (honoring gridSpan). */
+  /** Grid-column index where each cell starts, including gridBefore and gridSpan. */
   private cellGridPositions(row: TableRow): number[] {
     const pos: number[] = [];
-    let g = 0;
+    let g = row.props.gridBefore ?? 0;
     for (const c of row.cells) {
       pos.push(g);
       g += c.props.gridSpan;
@@ -9268,7 +9273,7 @@ class Engine {
     const totalW = sum(widths, 0, widths.length);
     const bidi = tbl.props.bidiVisual === true;
     const geometry: { x: number; width: number; margins: typeof defaults }[] = [];
-    let gridPos = 0;
+    let gridPos = row.props.gridBefore ?? 0;
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
       const span = cell.props.gridSpan;
@@ -9466,7 +9471,7 @@ class Engine {
     const s2 = 2 * (tbl.props.cellSpacing ?? 0);
     // Grid column start per cell (gridSpan-aware), for conditional banding.
     const colStartByIdx = new Map<number, number>();
-    let gp = 0;
+    let gp = row.props.gridBefore ?? 0;
     for (const c of row.cells) {
       colStartByIdx.set(row.cells.indexOf(c), gp);
       gp += c.props.gridSpan;
@@ -10068,6 +10073,30 @@ function distributePctColumns(grid: number[], tableWidth: number, margins: numbe
   return widths;
 }
 
+function rowGridColumns(row: TableRow): number {
+  return (row.props.gridBefore ?? 0) + row.cells.reduce((n, cell) => n + cell.props.gridSpan, 0) + (row.props.gridAfter ?? 0);
+}
+
+/** Omitted columns retain their grid widths; row widths supply missing columns. */
+function omittedGridWidths(tbl: Table, nCols: number): number[] {
+  const widths = new Array<number>(nCols).fill(0);
+  for (const row of tbl.rows) {
+    const before = row.props.gridBefore ?? 0;
+    const after = row.props.gridAfter ?? 0;
+    for (const [start, count, preferred] of [
+      [0, before, row.props.widthBefore ?? 0],
+      [rowGridColumns(row) - after, after, row.props.widthAfter ?? 0],
+    ]) {
+      const missing = Math.max(0, start + count - Math.max(start, tbl.grid.length));
+      const fallback = missing > 0 ? Math.max(0, preferred - sum(tbl.grid, start, start + count)) / missing : 0;
+      for (let i = start; i < start + count; i++) {
+        widths[i] = Math.max(widths[i], tbl.grid[i] ?? fallback);
+      }
+    }
+  }
+  return widths;
+}
+
 function resolveGrid(
   tbl: Table,
   available: number,
@@ -10108,13 +10137,15 @@ function resolveGrid(
   );
   let widths = tbl.grid.length > 0 ? [...tbl.grid] : [];
   let total = widths.reduce((a, b) => a + b, 0);
-  if (widths.length === 0 || total < 1) {
-    // No usable grid: distribute the target width equally over the columns.
-    const cols =
-      widths.length > 0
-        ? widths.length
-        : Math.max(1, ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)));
-    return new Array(cols).fill(Math.min(target, available) / cols);
+  const cols = Math.max(1, widths.length, ...tbl.rows.map(rowGridColumns));
+  if (widths.length < cols || total < 1) {
+    const omitted = omittedGridWidths(tbl, cols);
+    widths = Array.from({ length: cols }, (_, i) => widths[i] ?? omitted[i]);
+    total = widths.reduce((a, b) => a + b, 0);
+    const missing = widths.filter((width) => width === 0).length;
+    const fallback = missing > 0 ? Math.max(0, Math.min(target, available) - total) / missing : 0;
+    widths = widths.map((width) => width || fallback);
+    total = widths.reduce((a, b) => a + b, 0);
   }
   // Scale the grid to an explicit table width, or shrink to fit the column. A
   // PERCENTAGE table splits by content share (distributePctColumns); every
