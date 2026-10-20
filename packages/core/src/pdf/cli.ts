@@ -4,7 +4,7 @@ import { createWriteStream, rmSync } from "node:fs";
 import { PdfRenderError, PdfRenderErrorCode } from "./errors.js";
 import { renderDocxToPdf } from "./render.js";
 
-const USAGE = `Usage: docx-pdf IN.docx OUT.pdf [--comments] [--markup] [--fonts DIR]...
+const USAGE = `Usage: docx-pdf IN.docx OUT.pdf [--comments] [--markup] [--hide-authors] [--fonts DIR]...
 
 Write OUT.pdf: IN.docx laid out and drawn as Word prints it, with the
 fonts embedded, no browser involved. Prints one JSON line about the run.
@@ -13,13 +13,16 @@ A Word 97-2003 .doc (the binary format) is read too, converted on the way
 in; the file's bytes decide, not its name.
 
 Options:
-  --comments    print the review comments beside each page, as Word's markup
-  --markup      print the tracked changes as Word's All Markup: insertions
-                underlined and deletions struck in each author's color, a
-                balloon per change beside the page (with the comments)
-  --fonts DIR   also scan DIR for fonts, ahead of the system's directories
-                (repeatable; WORDINWEB_FONT_DIRS adds directories the same way)
-  -h, --help    show this help
+  --comments      print the review comments beside each page, as Word's markup
+  --markup        print the tracked changes as Word's All Markup: insertions
+                  underlined and deletions struck in each author's color, a
+                  balloon per change beside the page (with the comments)
+  --hide-authors  name no author anywhere: each balloon keeps its date, what
+                  changed and the comment text, with no name and no initials,
+                  and every author's changes are red
+  --fonts DIR     also scan DIR for fonts, ahead of the system's directories
+                  (repeatable; WORDINWEB_FONT_DIRS adds directories the same way)
+  -h, --help      show this help
 
 Exit codes: 0 done; 1 failed; 2 usage; 3 unsupported_script (text in a script
 the renderer cannot shape); 4 not_docx; 5 damaged; 6 unsupported_format (a
@@ -35,10 +38,11 @@ if (args.includes("-h") || args.includes("--help")) {
 }
 const comments = args.includes("--comments");
 const markup = args.includes("--markup");
+const authors = !args.includes("--hide-authors");
 const extraFontDirs: string[] = [];
 const files: string[] = [];
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--comments" || args[i] === "--markup") continue;
+  if (args[i] === "--comments" || args[i] === "--markup" || args[i] === "--hide-authors") continue;
   if (args[i] === "--fonts") {
     if (i + 1 >= args.length) {
       console.error("docx-pdf: --fonts needs a directory\nRun docx-pdf --help for the options.");
@@ -57,7 +61,7 @@ if (unknown || !input || !output || extra) {
 }
 const t0 = performance.now();
 try {
-  const result = await renderDocxToPdf(input, createWriteStream(output), { comments, markup, extraFontDirs });
+  const result = await renderDocxToPdf(input, createWriteStream(output), { comments, markup, authors, extraFontDirs });
   const ms = Math.round(performance.now() - t0);
   const rss = Math.round(process.resourceUsage().maxRSS / 1024);
   console.log(JSON.stringify({ input, output, pages: result.pages, ms, maxRssMB: rss, fonts: result.fonts, missingFonts: result.missingFonts, missingCharacters: result.missingCharacters, unsupportedImages: result.unsupportedImages }));

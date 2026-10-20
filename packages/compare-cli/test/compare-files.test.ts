@@ -693,6 +693,32 @@ describe("the pdf option", () => {
     expect((error as CompareError).message).toContain("Mongolian");
   });
 
+  it.skipIf(!hasPdftotext)("names no author in the PDF with authors: false, the summary page included", async () => {
+    const commented = (words: string): Uint8Array =>
+      makeDocx({
+        "word/document.xml": wrapDocument(`<w:p><w:commentRangeStart w:id="0"/><w:r><w:t xml:space="preserve">${words}</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p>`),
+        "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" w:author="Carol Commenter" w:initials="CC" w:date="2026-08-14T09:00:00Z"><w:p><w:r><w:t>Check the term.</w:t></w:r></w:p></w:comment></w:comments>`,
+      });
+    const original = join(dir, "anon-o.docx");
+    const revised = join(dir, "anon-r.docx");
+    writeFileSync(original, commented("The term is two years."));
+    writeFileSync(revised, commented("The term is three years."));
+    const pdf = (name: string) => join(dir, `anon-${name}.pdf`);
+    const run = (name: string, authors?: boolean) =>
+      compareFiles(original, revised, join(dir, `anon-${name}.docx`), { author: "Dan Drafter", date: DATE, summary: { originalName: "a.docx", revisedName: "b.docx" }, pdf: { path: pdf(name), comments: true, authors } });
+    await run("shown");
+    await run("hidden", false);
+    const text = (name: string) => execFileSync("pdftotext", [pdf(name), "-"], { encoding: "utf8" }).replace(/\s+/g, " ");
+    expect(text("shown")).toContain("Carol Commenter");
+    const hidden = text("hidden");
+    for (const name of ["Carol", "Commenter", "Dan", "Drafter"]) expect(hidden).not.toContain(name);
+    expect(hidden).not.toMatch(/\bCC\b/);
+    expect(hidden).toContain("8/14/2026 UTC Check the term.");
+    expect(hidden).toContain("Summary report");
+    const raw = readFileSync(pdf("hidden"), "latin1");
+    for (const name of ["Carol", "Dan Drafter"]) expect(raw).not.toContain(name);
+  });
+
   it("renders Arabic to the PDF now that the renderer shapes it", async () => {
     const original = join(dir, "pdf-arabic-o.docx");
     const revised = join(dir, "pdf-arabic-r.docx");
@@ -720,6 +746,22 @@ describe("the command line", () => {
       expect(result.stderr).toContain("--pdf FILE must not be an input or the result");
     }
     expect(existsSync(out)).toBe(false);
+  }, 60000);
+
+  it("takes --hide-authors only with --pdf", () => {
+    const original = join(dir, "cli-hide-o.docx");
+    const revised = join(dir, "cli-hide-r.docx");
+    writeFileSync(original, docx(para("One.")));
+    writeFileSync(revised, docx(para("Two.")));
+    const out = join(dir, "cli-hide-out.docx");
+    const pdf = join(dir, "cli-hide.pdf");
+    const run = (...extra: string[]) =>
+      spawnSync(process.execPath, [fileURLToPath(new URL("../../../node_modules/.bin/vite-node", import.meta.url)), fileURLToPath(new URL("../src/cli.ts", import.meta.url)), original, revised, "-o", out, "--author", "A", "--hide-authors", ...extra], { encoding: "utf8" });
+    const refused = run();
+    expect(refused.status).toBe(2);
+    expect(refused.stderr).toContain("--hide-authors needs --pdf FILE");
+    expect(run("--pdf", pdf).status).toBe(0);
+    expect(existsSync(pdf)).toBe(true);
   }, 60000);
 });
 

@@ -313,6 +313,17 @@ A Strict Open XML Document (ISO/IEC 29500 Strict, Word's "Strict Open XML Docume
 
 A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.load`, `renderDocxToPdf` and the `docx-pdf` CLI convert it to a .docx in memory, and `docx-compare` (`compareFiles`) converts it to a working .docx in its temp directory, so a .doc can be compared with a .docx. The file's bytes decide, not its name. The converter (`packages/core/src/doc/`, exported as `docToDocx`) reads the text, formatting, styles, lists, sections, headers and footers, notes, tables, fields and form fields, bookmarks, comments and tracked changes, pictures, shapes and text boxes from the binary structures ([MS-DOC], [MS-ODRAW]). Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95 and older Word files, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
 
+A printed PDF names the authors of its comments and tracked changes by default. To print it with no author's name, set `authors: false`:
+
+| Where | Option |
+|---|---|
+| `renderDocxToPdf` | `{ comments: true, markup: true, authors: false }` |
+| `compareFiles` | `pdf: { path, comments: true, authors: false }` |
+| `docx-pdf` CLI | `--hide-authors` |
+| `docx-compare` CLI | `--hide-authors` (with `--pdf FILE`) |
+
+With authors hidden, each comment's and change's balloon keeps its date, what changed and the comment text, and has no name line and no initials. Every author's tracked changes are red (moves stay green), and the margin change bars stay black.
+
 ## Collaboration
 
 Real-time collaboration ships as a separate entry (`wordinweb/collab`). It

@@ -187,6 +187,10 @@ export interface FromFilesOptions {
   /** Print markup: each author's changes in Word's color for that author,
    * and every change recorded on its runs (see Revision). */
   revisionColors?: boolean;
+  /** With revisionColors: false gives every author's changes the first
+   * color, red, so that no color tells one author from another (print
+   * without authors). Default true. */
+  revisionAuthors?: boolean;
 }
 
 /** Word's "by author" revision colors, in the order it gives them out. */
@@ -352,6 +356,8 @@ export class DocxDocument {
   revisionView: "final" | "markup" = "final";
   /** The revision authors in the order they first appeared, for revisionColor. */
   private readonly revisionAuthors: string[] = [];
+  /** FromFilesOptions.revisionAuthors. */
+  private revisionAuthorColors = true;
   private readonly relsPath: string;
   private relsRoot: XmlElement | null = null;
   private contentTypesRoot: XmlElement | null = null;
@@ -392,6 +398,7 @@ export class DocxDocument {
     this.ctxBase = { theme: this.theme };
     if (options.revisionView) this.revisionView = options.revisionView;
     this.ctxBase.revisionView = this.revisionView;
+    if (options.revisionAuthors === false) this.revisionAuthorColors = false;
     if (options.revisionColors) this.ctxBase.revisionColor = (author) => this.revisionColor(author);
 
     this.stylesPart = docDir + "styles.xml";
@@ -778,8 +785,10 @@ export class DocxDocument {
   /** An author's revision color: Word's "by author" palette, given out in
    * the order the authors first appear (the parts parsed at load, headers,
    * footers and notes, before the body), the ninth author taking the first
-   * color again. */
+   * color again. Without authors (FromFilesOptions.revisionAuthors), the
+   * first color for all. */
   revisionColor(author: string): string {
+    if (!this.revisionAuthorColors) return REVISION_COLORS[0];
     let index = this.revisionAuthors.indexOf(author);
     if (index === -1) {
       index = this.revisionAuthors.length;

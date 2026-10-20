@@ -350,6 +350,96 @@ describe("renderDocxToPdf with markup", () => {
     expect(plain.ops.replace(/\[<[0-9a-f]+>\] TJ/g, "")).toBe(plainUnchanged.ops.replace(/\[<[0-9a-f]+>\] TJ/g, ""));
   });
 
+  describe("with authors: false", () => {
+    const comment = (who: string): Uint8Array =>
+      makeDocx({
+        "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${body}${p(`<w:commentRangeStart w:id="0"/>`, t("Commented words"), `<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>`)}${SECT}</w:body></w:document>`,
+        "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" w:author="${who}" w:initials="CC" w:date="2026-08-14T09:00:00Z"><w:p>${t("The comment text.")}</w:p></w:comment></w:comments>`,
+      });
+    const print = async (bytes: Uint8Array, authors: boolean): Promise<{ pdf: Buffer; ops: string }> => {
+      const out = new Collect();
+      await renderDocxToPdf(bytesSource(bytes), out, { markup: true, comments: true, authors });
+      const pdf = Buffer.concat(out.chunks);
+      const ops = [...pdf.toString("latin1").matchAll(/\/Length (\d+) >>\nstream\n/g)]
+        .map((m) => inflateSync(pdf.subarray(m.index! + m[0].length, m.index! + m[0].length + Number(m[1]))).toString("latin1"))
+        .filter((s) => s.includes(" Tf"))
+        .join("\n");
+      return { pdf, ops };
+    };
+    /** The cards' heights, pt, in the order they are drawn. */
+    const cards = (ops: string): number[] => [...ops.matchAll(/^q 1 g 0\.878 0\.878 0\.878 RG 0\.75 w \S+ \S+ \S+ (\S+) re B Q$/gm)].map((m) => Number(m[1]));
+    /** The avatars: filled circles. */
+    const avatars = (ops: string): number => [...ops.matchAll(/^q [\d. ]+ rg [\d. ]+ m [\d. c]+ f Q$/gm)].length;
+
+    it.skipIf(!hasPdftotext)("names no author anywhere, keeps every date, kind and comment, and draws the changes in red", async () => {
+      const shown = await print(comment("Carol Commenter"), true);
+      const hidden = await print(comment("Carol Commenter"), false);
+      expect(pdfText(shown.pdf)).toContain("Ada Reviewer");
+      const text = pdfText(hidden.pdf);
+      // (The body's own words say "Ada" and "Bob".)
+      for (const name of ["Reviewer", "Editor", "Carol", "Commenter"]) expect(text).not.toContain(name);
+      for (const initials of ["AR", "BE", "CC"]) expect(text).not.toMatch(new RegExp(`\\b${initials}\\b`));
+      for (const name of ["Ada Reviewer", "Bob Editor", "Carol Commenter"]) expect(hidden.pdf.toString("latin1")).not.toContain(name);
+      for (const card of ["8/12/2026 UTC Inserted", "8/13/2026 UTC Deleted", "8/13/2026 UTC Formatted: Font: Bold", "8/12/2026 UTC Formatted: Centered", "8/13/2026 UTC Inserted row", "8/12/2026 UTC Deleted row", "8/14/2026 UTC The comment text."]) {
+        expect(text).toContain(card);
+      }
+      // No avatar; each card is shorter by the head line less the date line: 30 - 19 px.
+      expect(avatars(shown.ops)).toBeGreaterThan(0);
+      expect(avatars(hidden.ops)).toBe(0);
+      expect(cards(hidden.ops)).toHaveLength(cards(shown.ops).length);
+      cards(hidden.ops).forEach((height, i) => expect(cards(shown.ops)[i] - height).toBeCloseTo(8.25, 2));
+      // Bob's changes are red too: nothing is blue; moves stay green.
+      expect(groups(shown.ops, "0 0 1").length).toBeGreaterThan(0);
+      expect(groups(hidden.ops, "0 0 1")).toHaveLength(0);
+      expect(rules(hidden.ops, "0 0 1")).toHaveLength(0);
+      expect(hidden.ops).not.toMatch(/0 0 1 RG/);
+      expect(groups(hidden.ops, "1 0 0").length).toBeGreaterThan(groups(shown.ops, "1 0 0").length);
+      expect(rules(hidden.ops, "0 0.502 0")).toHaveLength(2);
+    });
+
+    it("prints a change author and a comment author in a script it cannot shape, as it prints neither", async () => {
+      const mongolian = "ᠮᠣᠩᠭᠣᠯ";
+      const bytes = makeDocx({
+        "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${p(`<w:ins w:id="1" w:author="${mongolian}">${t("new")}</w:ins>`, `<w:commentRangeStart w:id="0"/>`, t(" words"), `<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>`)}${SECT}</w:body></w:document>`,
+        "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" w:author="${mongolian}" w:initials="${mongolian}"><w:p>${t("Note.")}</w:p></w:comment></w:comments>`,
+      });
+      await expect(print(bytes, true)).rejects.toThrow(/Mongolian/);
+      await expect(print(bytes, false)).resolves.toBeTruthy();
+    });
+  });
+
+  describe("a change or comment with no author, an empty one, or no date", () => {
+    // One paragraph per kind of change, each attributed as `who` says.
+    const anonymous = (who: string): Uint8Array => {
+      const parts = [
+        p(t("Plain, then "), `<w:ins w:id="31" ${who}>${t("inserted words")}</w:ins>`, t(" and "), `<w:del w:id="32" ${who}><w:r><w:delText xml:space="preserve">deleted words</w:delText></w:r></w:del>`, t(".")),
+        p(t("Run: "), `<w:r><w:rPr><w:b/><w:rPrChange w:id="33" ${who}><w:rPr/></w:rPrChange></w:rPr><w:t>made bold</w:t></w:r>`),
+        `<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="34" ${who}><w:pPr/></w:pPrChange></w:pPr>${t("Centered.")}</w:p>`,
+        `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:trPr><w:ins w:id="35" ${who}/></w:trPr><w:tc>${p(`<w:ins w:id="36" ${who}>${t("Inserted row")}</w:ins>`)}</w:tc></w:tr></w:tbl>`,
+        p(`<w:commentRangeStart w:id="0"/>`, t("Commented words"), `<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>`),
+      ];
+      return makeDocx({
+        "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${parts.join("")}${SECT}</w:body></w:document>`,
+        "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}><w:comment w:id="0" ${who}><w:p>${t("The comment text.")}</w:p></w:comment></w:comments>`,
+      });
+    };
+    const cases: [string, string][] = [
+      ["no w:author", 'w:date="2026-08-12T10:00:00Z"'],
+      ['w:author=""', 'w:author="" w:date="2026-08-12T10:00:00Z"'],
+      ["no w:date", 'w:author="Ada Reviewer"'],
+    ];
+    for (const [name, who] of cases) {
+      it.skipIf(!hasPdftotext)(`prints every card with ${name}`, async () => {
+        const out = new Collect();
+        const result = await renderDocxToPdf(bytesSource(anonymous(who)), out, { markup: true, comments: true });
+        expect(result.pages).toBe(1);
+        const text = pdfText(Buffer.concat(out.chunks));
+        expect(text).not.toMatch(/undefined|NaN|Invalid Date/);
+        for (const kind of ["Inserted", "Deleted", "Formatted: Font: Bold", "Formatted: Centered", "Inserted row", "The comment text."]) expect(text).toContain(kind);
+      });
+    }
+  });
+
   it("gives the authors Word's colors in the order they first appear, the ninth taking the first again", async () => {
     const authors = Array.from({ length: 9 }, (_, i) => `Author ${i}`);
     const paras = authors.map((author, i) => p(`<w:ins w:id="${i + 1}" w:author="${author}" w:date="2026-01-01T00:00:00Z">${t(`by ${author}`)}</w:ins>`)).join("");

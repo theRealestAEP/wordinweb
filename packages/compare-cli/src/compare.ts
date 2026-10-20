@@ -78,9 +78,10 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
    * Also write the printable copy as a PDF to `path`, rendered without a
    * browser (core's pdf/render.ts) from the printable .docx (a working file
    * when `printable` is not asked for), with its review comments beside the
-   * pages when `comments` is set.
+   * pages when `comments` is set. `authors: false` names no author in it
+   * (RenderPdfOptions.authors). Default true.
    */
-  pdf?: { path: string; comments?: boolean; extraFontDirs?: string[] };
+  pdf?: { path: string; comments?: boolean; authors?: boolean; extraFontDirs?: string[] };
   /**
    * Called (and awaited) once the result and the printable copy are written,
    * before the PDF is rendered: a caller that keeps the redline somewhere
@@ -216,7 +217,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
       // Opened here, so a path that cannot be written fails as a CompareError
       // (a stream's open error would be an uncaught event); a partial PDF goes.
       pdf = createWriteStream(options.pdf.path, { fd: openSync(options.pdf.path, "w") });
-      const rendered = await renderDocxToPdf(printableSpec.path, pdf, { comments: options.pdf.comments, extraFontDirs: options.pdf.extraFontDirs });
+      const rendered = await renderDocxToPdf(printableSpec.path, pdf, { comments: options.pdf.comments, authors: options.pdf.authors, extraFontDirs: options.pdf.extraFontDirs });
       pdf = null;
       return { revisions, pdfPages: rendered.pages, missingFonts: rendered.missingFonts, missingCharacters: rendered.missingCharacters, unsupportedImages: rendered.unsupportedImages };
     }

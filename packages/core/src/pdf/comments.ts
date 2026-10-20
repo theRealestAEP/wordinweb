@@ -58,6 +58,9 @@ interface Balloon {
   /** The author's color: the avatar's, and the leader line's. */
   color: string;
   lines: Line[];
+  /** How far below the card's top the leader meets it: the avatar's
+   * middle, or with no avatar the first line's. */
+  leaderAt: number;
 }
 
 /** The line a card goes beside: its page, and where its leader starts. */
@@ -151,6 +154,9 @@ export class CommentColumn {
     private readonly source: CommentSource,
     /** The cards of the comments no page draws the text of (UndrawnComments.anchors). */
     private readonly undrawn: Map<string, LineAnchor>,
+    /** Name the authors (RenderPdfOptions.authors). Without, a card has no
+     * name line and no avatar, and every comment's leader is one color. */
+    private readonly authors = true,
   ) {
     // The column prints the review comments; with markup, the tracked
     // changes too: a balloon per change (Run.changes) with its author,
@@ -323,7 +329,7 @@ export class CommentColumn {
       const ops = [
         `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(textRight))} ${num(drawer.y(from.y))} m ${num(drawer.x(page.width))} ${num(drawer.y(from.y))} l`,
       ];
-      if (cardTop !== null) ops.push(`${num(drawer.x(cardX))} ${num(drawer.y(cardTop + PAD_Y + AVATAR / 2))} l`);
+      if (cardTop !== null) ops.push(`${num(drawer.x(cardX))} ${num(drawer.y(cardTop + balloon.leaderAt))} l`);
       ops.push("S Q");
       drawer.ops.push(ops.join(" "));
     };
@@ -393,8 +399,10 @@ export class CommentColumn {
 
   /** The lines of a comment's balloon: its head, text, and its thread, each
    * reply under the comment it answers, stepped in by its depth. A tracked
-   * change's balloon takes its author's revision color. */
-  private balloon(comment: DocComment, color = avatarColor(comment.author)): Balloon {
+   * change's balloon takes its author's revision color. The head is the
+   * avatar, the author's name and the date; without authors, the date
+   * alone, on a line of its own (none when there is no date). */
+  private balloon(comment: DocComment, color = this.authors ? avatarColor(comment.author) : AVATAR_COLORS[0]): Balloon {
     const lines: Line[] = [{ height: PAD_Y, paint: () => undefined }];
     const inner = CARD_WIDTH - 2 * PAD_X;
     const resolved = !!comment.resolved;
@@ -403,7 +411,12 @@ export class CommentColumn {
       const left = PAD_X + indent;
       const width = inner - indent;
       const name = this.names.get(source.author) ?? source.author;
-      lines.push({
+      const date = source.date ? new Date(source.date) : null;
+      const dateText = date && !Number.isNaN(date.getTime()) ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : "";
+      const dateFont: FontSpec = { family: UI_FONT, size: 11, bold: false, italic: false };
+      if (!this.authors) {
+        if (dateText) lines.push({ height: LINE_HEIGHT + 4, paint: (drawer, x, y) => this.text(drawer, dateText, dateFont, "#5f6368", x + left, y + 12) });
+      } else lines.push({
         height: AVATAR + 6,
         paint: (drawer, x, y) => {
           drawer.ops.push(`q ${rgb(source === comment ? color : avatarColor(source.author))} rg ${circle(drawer, x + left + AVATAR / 2, y + AVATAR / 2, AVATAR / 2)} f Q`);
@@ -413,11 +426,9 @@ export class CommentColumn {
           this.text(drawer, initials, initialsFont, "#ffffff", x + left + AVATAR / 2 - iw / 2, y + AVATAR / 2 + 3.5);
           const author = name || (indent ? "Reply" : "Comment");
           const authorFont: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: true, italic: false };
-          const date = source.date ? new Date(source.date) : null;
-          const dateText = date && !Number.isNaN(date.getTime()) ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : "";
           const textX = x + left + AVATAR + 8;
           this.text(drawer, this.clip(author, authorFont, width - AVATAR - 8), authorFont, fg, textX, y + (dateText ? 10 : 16));
-          if (dateText) this.text(drawer, dateText, { family: UI_FONT, size: 11, bold: false, italic: false }, "#5f6368", textX, y + 22);
+          if (dateText) this.text(drawer, dateText, dateFont, "#5f6368", textX, y + 22);
         },
       });
       const font: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: false, italic: false };
@@ -455,7 +466,7 @@ export class CommentColumn {
     };
     thread(comment, 10);
     lines.push({ height: PAD_Y, paint: () => undefined });
-    return { id: comment.id, color, lines };
+    return { id: comment.id, color, lines, leaderAt: PAD_Y + (this.authors ? AVATAR : LINE_HEIGHT) / 2 };
   }
 
   private text(drawer: PageDrawer, text: string, font: FontSpec, color: string, x: number, baseline: number): void {
@@ -535,10 +546,12 @@ function initialsOf(author: string, initials?: string): string {
   return ((parts[0][0] ?? "") + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
 }
 
-/** Stable per-author avatar color, the DOM renderer's palette. */
+/** The DOM renderer's avatar palette. */
+const AVATAR_COLORS = ["#1a73e8", "#188038", "#a50e0e", "#8430ce", "#007b83", "#b06000"];
+
+/** Stable per-author avatar color, the DOM renderer's. */
 function avatarColor(author: string): string {
-  const palette = ["#1a73e8", "#188038", "#a50e0e", "#8430ce", "#007b83", "#b06000"];
   let h = 0;
   for (let i = 0; i < author.length; i++) h = (h * 31 + author.charCodeAt(i)) | 0;
-  return palette[Math.abs(h) % palette.length];
+  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }
