@@ -325,6 +325,31 @@ describe("renderDocxToPdf with markup", () => {
     expect(text).toContain("Inserted");
   });
 
+  it("marks the end of a change inside a word with a hairline bar in clear space, which moves no text in a plain print", async () => {
+    // "two (2" struck, then "three (3" inserted, then ")": two changes end inside the word.
+    const del = (text: string): string => `<w:del w:id="21" ${ADA}><w:r><w:delText xml:space="preserve">${text}</w:delText></w:r></w:del>`;
+    const ins = (text: string): string => `<w:ins w:id="22" ${ADA}>${t(text)}</w:ins>`;
+    const adjacent = docx(p(t("It continues for "), del("two (2"), ins("three (3"), t(") years.")));
+    // The same words, the first pair unchanged: no change ends after "(2".
+    const unchanged = docx(p(t("It continues for two (2"), ins("three (3"), t(") years.")));
+    const red = (ops: string): number[] => [...ops.matchAll(/^1 0 0 rg\nBT\n\/F\d+ [\d.]+ Tf\n1 0 0 1 ([\d.]+) [\d.]+ Tm/gm)].map((m) => Number(m[1]));
+    const bars = (ops: string): number[] => [...ops.matchAll(/^q 0\.75 w 1 0 0 RG ([\d.]+) [\d.]+ m ([\d.]+) [\d.]+ l S Q$/gm)].map((m) => Number(m[1]));
+    const a = await render(adjacent, true);
+    const b = await render(unchanged, true);
+    // One hairline bar per change, no heavier one.
+    expect(bars(a.ops)).toHaveLength(2);
+    expect(a.ops).not.toMatch(/^q 1\.5 w 1 0 0 RG/m);
+    // "three" starts 3 px (2.25 pt) further right than with no change ending before it, and the bar is in the middle of that space.
+    const threeA = red(a.ops).find((x) => x > bars(a.ops)[0])!;
+    const threeB = red(b.ops)[0];
+    expect(threeA - threeB).toBeCloseTo(2.25, 2);
+    expect(threeA - bars(a.ops)[0]).toBeCloseTo(1.125, 2);
+    // Without markup the deleted words and the space are gone: the line is the final text.
+    const plain = await render(adjacent, false);
+    const plainUnchanged = await render(docx(p(t("It continues for "), t("three (3"), t(") years."))), false);
+    expect(plain.ops.replace(/\[<[0-9a-f]+>\] TJ/g, "")).toBe(plainUnchanged.ops.replace(/\[<[0-9a-f]+>\] TJ/g, ""));
+  });
+
   it("gives the authors Word's colors in the order they first appear, the ninth taking the first again", async () => {
     const authors = Array.from({ length: 9 }, (_, i) => `Author ${i}`);
     const paras = authors.map((author, i) => p(`<w:ins w:id="${i + 1}" w:author="${author}" w:date="2026-01-01T00:00:00Z">${t(`by ${author}`)}</w:ins>`)).join("");
