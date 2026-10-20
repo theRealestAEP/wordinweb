@@ -51,11 +51,14 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
     return id;
   };
   const nextId = (): number => ++docPrId;
+  const inCode = fieldCodePictures(reader);
 
   const special: ConvertHooks["special"] = (ch, cp, props, rPr, paragraphs) => {
     const rPrXml = rPr ? `<w:rPr>${rPr}</w:rPr>` : "";
     if (ch === 0x01) {
-      if (props.fData || props.picLocation === undefined || !streams.data) return undefined;
+      // A picture in a field's code (Word's QUOTE field keeps an equation's
+      // picture there and again in the result) shows only in the result.
+      if (props.fData || props.picLocation === undefined || !streams.data || inCode.has(cp)) return undefined;
       const picture = parseInlinePicture(streams.data, props.picLocation, { store: art, delayStream: streams.wordDocument });
       if (!picture || (!picture.image && !picture.shape)) return undefined;
       return `<w:r>${rPrXml}${inlinePictureXml(picture, { addMedia, nextId })}</w:r>`;
@@ -75,6 +78,21 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
   };
 
   return { special, parts: () => extra };
+}
+
+/** The CPs of the picture characters that sit in a field's code (between its begin and separator marks). */
+function fieldCodePictures(reader: DocReader): Set<number> {
+  const text = reader.pieces.text(0, Math.min(reader.pieces.end, reader.parts.end));
+  const out = new Set<number>();
+  const inCode: boolean[] = [];
+  for (let cp = 0; cp < text.length; cp++) {
+    const ch = text.charCodeAt(cp);
+    if (ch === 0x13) inCode.push(true);
+    else if (ch === 0x14) inCode[inCode.length - 1] = false;
+    else if (ch === 0x15) inCode.pop();
+    else if (ch === 0x01 && inCode[inCode.length - 1]) out.add(cp);
+  }
+  return out;
 }
 
 /** The document's OfficeArt (fcDggInfo of the Table stream), with the BLIP store's pictures read from the WordDocument stream. */

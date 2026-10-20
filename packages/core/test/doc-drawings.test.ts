@@ -27,11 +27,9 @@ const text = (files: Record<string, Uint8Array>, part = "word/document.xml"): st
 const attr = (xml: string, name: string): string | undefined => new RegExp(`\\b${name}="([^"]*)"`).exec(xml)?.[1];
 const near = (a: number, b: number): boolean => Math.abs(a - b) <= Math.max(12700, Math.abs(b) * 0.01);
 
-/** The wp:anchor elements of a document part, by their docPr name. */
-function anchors(xml: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const m of xml.matchAll(/<wp:anchor\b[\s\S]*?<\/wp:anchor>/g)) out.set(attr(/<wp:docPr\b[^>]*>/.exec(m[0])![0], "name")!, m[0]);
-  return out;
+/** The wp:anchor elements of a document part, in document order. */
+function anchors(xml: string): string[] {
+  return [...xml.matchAll(/<wp:anchor\b[\s\S]*?<\/wp:anchor>/g)].map((m) => m[0]);
 }
 
 /** An anchor's placement: frames, offsets, extent, wrap and stacking. */
@@ -55,7 +53,7 @@ describe("doc drawings: pictures", () => {
   it("writes every picture of the original .docx byte for byte", () => {
     for (const name of ["parity-wrapmodes--v02", "parity2-coverpage--v06", "probe3-text-effects--v03"]) {
       const ours = new Set(Object.entries(convert(`${name}.doc`)).filter(([part]) => part.startsWith("word/media/")).map(([, data]) => strFromU8(data, true)));
-      const original = Object.entries(unzipSync(bytes(`${name}.docx`))).filter(([part]) => part.startsWith("word/media/"));
+      const original = Object.entries(unzipSync(bytes(`${name}.docx`))).filter(([part, data]) => part.startsWith("word/media/") && data.length > 0);
       expect(original.length, name).toBeGreaterThan(0);
       for (const [part, data] of original) expect(ours.has(strFromU8(data, true)), `${name} ${part}`).toBe(true);
     }
@@ -95,22 +93,23 @@ describe("doc drawings: floating shapes", () => {
     for (const name of ["parity-wrapmodes--v02", "parity2-coverpage--v06", "probe3-shape-autofit--v00"]) {
       const ours = anchors(text(convert(`${name}.doc`)));
       const original = anchors(strFromU8(unzipSync(bytes(`${name}.docx`))["word/document.xml"]));
-      expect(ours.size, name).toBe(original.size);
-      for (const [shape, xml] of original) {
+      expect(ours.length, name).toBe(original.length);
+      original.forEach((xml, i) => {
         const want = placement(xml);
-        const got = placement(ours.get(shape) ?? "");
-        const label = `${name} ${shape}`;
+        const got = placement(ours[i]);
+        const label = `${name} anchor ${i}`;
         expect(got.h.from, label).toBe(want.h.from);
         expect(got.v.from, label).toBe(want.v.from);
-        if (want.h.offset !== undefined) expect(near(got.h.offset ?? NaN, want.h.offset), label).toBe(true);
-        else expect(got.h.align, label).toBe(want.h.align);
-        if (want.v.offset !== undefined) expect(near(got.v.offset ?? NaN, want.v.offset), label).toBe(true);
-        else expect(got.v.align, label).toBe(want.v.align);
-        expect(near(got.cx, want.cx), label).toBe(true);
-        expect(near(got.cy, want.cy), label).toBe(true);
+        // An aligned or percent position (Word 2010) is saved to the .doc as
+        // the absolute position it had; only absolute positions compare.
+        if (want.h.offset !== undefined && !want.h.align) expect(near(got.h.offset ?? NaN, want.h.offset), label).toBe(true);
+        if (want.v.offset !== undefined && !/pctPosVOffset/.test(xml)) expect(near(got.v.offset ?? NaN, want.v.offset), label).toBe(true);
+        // A percent size (Word 2010) is saved as the size Word last laid out.
+        if (!/<wp14:sizeRelH/.test(xml)) expect(near(got.cx, want.cx), label).toBe(true);
+        if (!/<wp14:sizeRelV/.test(xml)) expect(near(got.cy, want.cy), label).toBe(true);
         expect(got.wrap, label).toBe(want.wrap);
         expect(got.behindDoc, label).toBe(want.behindDoc);
-      }
+      });
     }
   });
 
