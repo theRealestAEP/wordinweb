@@ -308,6 +308,27 @@ function commentPairs(original: DocxDocument, revised: DocxDocument, order: { or
   return keys;
 }
 
+/** Whether an element named `name` is anywhere under `el`. */
+function has(el: XmlElement, name: string): boolean {
+  return el.children.some((c) => localName(c.name) === name || has(c, name));
+}
+
+/**
+ * Every w:fldSimple under `el` rewritten in place as the runs Word writes
+ * for the same field: begin, the instruction, separate, the result, end.
+ */
+function fieldsInRuns(el: XmlElement): void {
+  const w = el.name.slice(0, el.name.length - localName(el.name).length);
+  const run = (inner: XmlElement): XmlElement => ({ name: `${w}r`, attrs: {}, children: [inner], text: "" });
+  const fldChar = (type: string): XmlElement => run({ name: `${w}fldChar`, attrs: { "w:fldCharType": type }, children: [], text: "" });
+  el.children = el.children.flatMap((c) => {
+    fieldsInRuns(c);
+    if (localName(c.name) !== "fldSimple") return [c];
+    const instr: XmlElement = { name: `${w}instrText`, attrs: { "xml:space": "preserve" }, children: [], text: c.attrs["w:instr"] ?? "" };
+    return [fldChar("begin"), run(instr), fldChar("separate"), ...c.children, fldChar("end")];
+  });
+}
+
 /** The comment reference ids under `root`, in document order. */
 function commentRefs(root: XmlElement): string[] {
   const out: string[] = [];
@@ -1687,6 +1708,15 @@ function commentPieceId(el: XmlElement): string | undefined {
 function comparePair(oEl: XmlElement, rEl: XmlElement, ctx: Ctx): void {
   const partChanged = refersToChangedPart(oEl, ctx);
   if (!partChanged && sameXml(oEl, rEl)) return;
+
+  // A field written whole (w:fldSimple) on one side and in runs (w:fldChar,
+  // w:instrText) on the other is the same field to a reader: both are read
+  // in runs. The original is only read, so its runs are a copy.
+  if ((has(oEl, "fldSimple") && has(rEl, "fldChar")) || (has(rEl, "fldSimple") && has(oEl, "fldChar"))) {
+    oEl = cloneXml(oEl);
+    fieldsInRuns(oEl);
+    fieldsInRuns(rEl);
+  }
 
   if (ctx.formatting) alignParagraphProps(rEl, child(rEl, "pPr"), child(oEl, "pPr"), ctx);
 

@@ -9,6 +9,7 @@ import { DocxDocument } from "../../core/src/docx.js";
 import { compareDocuments } from "../../core/src/edit/compare/index.js";
 import { collectRevisions } from "../../core/src/edit/suggest.js";
 import { AUTHOR, DATE } from "../../core/test/compare-helpers.js";
+import { makeDocx, wrapDocument } from "../../core/test/helpers.js";
 import { compareFiles } from "../src/compare.js";
 import { CompareError } from "../src/errors.js";
 
@@ -96,5 +97,30 @@ describe("comments numbered otherwise", () => {
     expect(Object.values(revisions).reduce((a, b) => a + b, 0)).toBe(0);
     const result = compareDocuments(DocxDocument.load(new Uint8Array(readFileSync(original))), DocxDocument.load(renumbered()), options);
     expect(collectRevisions(result).length).toBe(0);
+  });
+});
+
+describe("a field written whole or in runs", () => {
+  const body = (field: string): Uint8Array =>
+    makeDocx({ "word/document.xml": wrapDocument(`<w:p><w:r><w:t xml:space="preserve">Author: </w:t></w:r>${field}<w:r><w:t xml:space="preserve"> signed.</w:t></w:r></w:p>`) });
+  const result = (text: string): string => `<w:r><w:rPr><w:i/></w:rPr><w:t>${text}</w:t></w:r>`;
+  const whole = (text: string): Uint8Array => body(`<w:fldSimple w:instr=" AUTHOR \\* MERGEFORMAT ">${result(text)}</w:fldSimple>`);
+  const inRuns = (text: string): Uint8Array =>
+    body(`<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> AUTHOR \\* MERGEFORMAT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>${result(text)}<w:r><w:fldChar w:fldCharType="end"/></w:r>`);
+  /** The revisions compareDocuments finds, after checking compareFiles agrees on whether there are any. */
+  const count = async (a: Uint8Array, b: Uint8Array): Promise<number> => {
+    writeFileSync(join(dir, "field-a.docx"), a);
+    writeFileSync(join(dir, "field-b.docx"), b);
+    const { revisions } = await compareFiles(join(dir, "field-a.docx"), join(dir, "field-b.docx"), join(dir, "field-result.docx"), options);
+    const inMemory = collectRevisions(compareDocuments(DocxDocument.load(a), DocxDocument.load(b), options)).length;
+    expect(Object.values(revisions).reduce((x, y) => x + y, 0) > 0).toBe(inMemory > 0);
+    return inMemory;
+  };
+
+  it("is the same field when its instruction and result are", async () => {
+    expect(await count(whole("Jordan Rivera"), inRuns("Jordan Rivera"))).toBe(0);
+    expect(await count(inRuns("Jordan Rivera"), whole("Jordan Rivera"))).toBe(0);
+    // A result that changed is still a change.
+    expect(await count(whole("Jordan Rivera"), inRuns("Sam Lee"))).toBeGreaterThan(0);
   });
 });
