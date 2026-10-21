@@ -102,6 +102,7 @@ const EMFPLUS = 0x2b464d45;
 const EMFPLUS_OBJECT = 0x4008;
 const EMFPLUS_DRAWIMAGE = 0x401a;
 const EMFPLUS_DRAWIMAGEPOINTS = 0x401b;
+const EMFPLUS_DRAWDRIVERSTRING = 0x4036;
 const EMFPLUS_IMAGE = 5;
 /** EMF+ records that draw and that emf-converter skips ([MS-EMFPLUS] 2.3.4): Clear, FillRegion,
  * FillClosedCurve, DrawClosedCurve, DrawCurve, DrawBeziers, StrokeFillPath. */
@@ -110,7 +111,8 @@ const EMFPLUS_UNPLAYED = new Set([0x4009, 0x4013, 0x4016, 0x4017, 0x4018, 0x4019
 /**
  * Throw for an EMF cut short (a record that runs past the end, or records
  * that stop before EMR_EOF) or with an EMF+ drawing record emf-converter
- * skips (an EMF+ Dual file's EMF records are not played either), and take from `budget` each bitmap
+ * skips, including a DrawDriverString with fewer than GlyphCount positions
+ * (an EMF+ Dual file's EMF records are not played either), and take from `budget` each bitmap
  * emf-converter decodes whole, before it runs: the DIB of a BITBLT or a
  * STRETCHDIBITS ([MS-EMF] 2.3.1), and an EMF+ bitmap image object
  * ([MS-EMFPLUS] 2.2.2.2). The converter allocates their pixels from the
@@ -149,6 +151,10 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
         const dataSize = view.getUint32(at + 8, true);
         if (plusSize < 12) break;
         if (EMFPLUS_UNPLAYED.has(plusType)) throw new Error("an EMF+ drawing record emf-converter skips");
+        if (plusType === EMFPLUS_DRAWDRIVERSTRING) {
+          const count = dataSize >= 16 ? view.getUint32(at + 24, true) : 0;
+          if (dataSize < 16 + 2 * count + 8 * count) throw new Error("an EMF+ DrawDriverString with fewer than GlyphCount positions");
+        }
         if (plusType === EMFPLUS_DRAWIMAGE || plusType === EMFPLUS_DRAWIMAGEPOINTS) images++;
         else if (plusType === EMFPLUS_OBJECT) {
           let data = at + 12;

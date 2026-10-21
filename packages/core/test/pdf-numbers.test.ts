@@ -106,6 +106,15 @@ describe("RecordingCanvas", () => {
     expect(canvas.dropped).toBe(1);
   });
 
+  it("leaves out an image with its right edge out of reach", () => {
+    const canvas = new RecordingCanvas(100, 50, fonts, resources());
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage({ pixels: ctx.createImageData(1, 1), width: 1, height: 1 }, 1900, 0, 200, 1);
+    expect(canvas.dropped).toBe(1);
+    expect(canvas.images).toEqual([]);
+    expect(canvas.ops).toEqual([]);
+  });
+
   it("clamps a clip out of reach to it", () => {
     const canvas = new RecordingCanvas(100, 50, fonts, resources());
     const ctx = canvas.getContext("2d")!;
@@ -121,6 +130,20 @@ describe("RecordingCanvas", () => {
     ctx.moveTo(-4000, 0);
     ctx.lineTo(4000, 0);
     ctx.lineTo(0, 50);
+    ctx.clip();
+    expect(canvas.dropped).toBe(1);
+    expect(canvas.ops).toEqual([]);
+  });
+
+  it("leaves out a clip out of reach with a slanted closing edge", () => {
+    const canvas = new RecordingCanvas(100, 50, fonts, resources());
+    const ctx = canvas.getContext("2d")!;
+    ctx.moveTo(-4000, 0);
+    ctx.lineTo(100, 0);
+    ctx.lineTo(100, 50);
+    ctx.closePath();
+    ctx.lineTo(-4000, 50);
+    ctx.closePath();
     ctx.clip();
     expect(canvas.dropped).toBe(1);
     expect(canvas.ops).toEqual([]);

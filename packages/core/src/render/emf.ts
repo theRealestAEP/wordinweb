@@ -258,9 +258,11 @@ function rewritePlusRecord({ type, flags, bytes }: EmfPlusRecord): Uint8Array {
     // BrushId, DriverStringOptionsFlags, MatrixPresent, GlyphCount, Glyphs, GlyphPos, TransformMatrix.
     const count = view.getUint32(24, true);
     const glyphsEnd = 28 + count * 2;
-    const end = glyphsEnd + count * 8 + (view.getUint32(20, true) ? 24 : 0);
-    if (count % 2 === 0 || end > bytes.length) return bytes;
-    const padded = new Uint8Array(end + 2);
+    const end = 12 + view.getUint32(8, true);
+    if (count % 2 === 0 || glyphsEnd > end || end > bytes.length) return bytes;
+    // The record keeps a size of a multiple of 4: the converter finds the
+    // next records' glyph positions from their offsets in the file.
+    const padded = new Uint8Array(Math.ceil((end + 2) / 4) * 4);
     padded.set(bytes.subarray(0, glyphsEnd));
     padded.set(bytes.subarray(glyphsEnd, end), glyphsEnd + 2);
     const out = new DataView(padded.buffer);

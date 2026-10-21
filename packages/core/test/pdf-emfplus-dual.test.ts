@@ -74,6 +74,19 @@ describe("an EMF+ DrawDriverString", () => {
     expect(canvas!.ops.join("\n")).toMatch(/ 20 30 Tm <[0-9a-f]+> Tj/);
   });
 
+  it("keeps the records after a padded one on a 4-byte boundary", async () => {
+    // As Office writes them: two bytes of padding at the end of each record's data.
+    const padded = (text: string, x: number, y: number): [number, number, Uint8Array] => {
+      const [type, flags, data] = emfPlusDriverString(text, x, y);
+      const out = new Uint8Array(data.length + 2);
+      out.set(data);
+      return [type, flags, out];
+    };
+    const bytes = emf([emfPlus([emfPlusFont(0, 10), padded("Sales", 20, 30), padded("Obligations", 40, 45)])]);
+    const ops = (await convertMetafile("emf", bytes, fonts, resources()))!.ops.join("\n");
+    expect(ops).toMatch(/ 20 30 Tm /);
+    expect(ops).toMatch(/ 40 45 Tm /);
+  });
 });
 
 describe("an EMF+ Dual file", () => {
@@ -114,6 +127,27 @@ describe("an EMF+ Dual file", () => {
     const beziers: [number, number, Uint8Array] = [0x4019, 0, new Uint8Array(4 + 4 * 8)];
     new DataView(beziers[2].buffer).setUint32(0, 4, true);
     expect(await convertMetafile("emf", emf([emfPlus([beziers], true), [2, 0, 0, 99, 49, 4, 10, 10, 20, 40, 80, 40, 90, 10]]), fonts, resources())).toBeNull();
+  });
+
+  it("gives no picture for a DrawDriverString with only its first glyph position", async () => {
+    const text = "ABC";
+    const data = new Uint8Array(16 + text.length * 2 + 8);
+    const v = new DataView(data.buffer);
+    v.setUint32(0, 0xff000000, true);
+    v.setUint32(4, 0x1 | 0x4, true); // CmapLookup and RealizedAdvance
+    v.setUint32(12, text.length, true);
+    [...text].forEach((c, i) => v.setUint16(16 + i * 2, c.charCodeAt(0), true));
+    v.setFloat32(22, 20, true);
+    v.setFloat32(26, 30, true);
+    // A label the converter draws makes skipping ABC leave a partial picture.
+    const font = emfPlusFont(0, 10);
+    const label = emfPlusDriverString("Labels", 20, 10);
+    const bytes = emf([emfPlus([font, label, [0x4036, 0x8000, data]], true), extTextOut(text, 20, 30)]);
+    const padded = new Uint8Array(data.length + 2);
+    padded.set(data.subarray(0, 22));
+    padded.set(data.subarray(22), 24);
+    expect(prepareEmf(bytes)).toEqual(emf([emfPlus([font, label, [0x4036, 0x8000, padded]], true)]));
+    expect(await convertMetafile("emf", bytes, fonts, resources())).toBeNull();
   });
 
   it("leaves an EMF+ Only file's EMF records as they are", () => {

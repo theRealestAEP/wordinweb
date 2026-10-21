@@ -427,7 +427,11 @@ export class RecordingContext {
     let start: string[] | null = null;
     let last: string[] | null = null;
     for (const op of this.path) {
-      if (op === "h") continue;
+      if (op === "h") {
+        if (start && last && !level(last, start)) return false;
+        last = start;
+        continue;
+      }
       const point = op.split(" ");
       if (point.length !== 3) return false;
       if (point[2] === "m") {
@@ -567,7 +571,7 @@ export class RecordingContext {
   private place(image: SampleImage | { jpeg: Uint8Array }, dx: number, dy: number, dw: number, dh: number): void {
     // The image's unit square onto its destination, in canvas pixels.
     const m = multiply(this.state.ctm, [dw, 0, 0, dh, dx, dy]);
-    if (!this.keep(this.fits(...m, m[4] + m[2], m[5] + m[3]))) return;
+    if (!this.keep(this.fits(...m, m[4] + m[0], m[5] + m[1], m[4] + m[2], m[5] + m[3], m[4] + m[0] + m[2], m[5] + m[1] + m[3]))) return;
     const index = this.canvas.images.length;
     this.canvas.images.push(image);
     const ops = ["q"];
