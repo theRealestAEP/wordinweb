@@ -55,6 +55,10 @@ export interface DocParseContext extends ParseContext {
     open: Map<string, Run[]>;
     byName: Map<string, Run[]>;
   };
+  /** Printed markup: the blocks are in a deleted table row, which stays in
+   * its table with its text struck through on the lines, so no deletion in
+   * it goes to a balloon of its own (the row's balloon stands for them). */
+  inDeletedRow?: boolean;
 }
 
 /**
@@ -307,12 +311,12 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
         para.markRevisionColor = ctx.revisionColor(author);
         const change: Revision = { id: `mark-${para.markRevision}:${attr(mark, "id") ?? ""}`, kind: para.markRevision, author, date: attr(mark, "date"), label: deleted ? "Deleted" : "Inserted" };
         // A deleted mark prints in its balloon as Word's pilcrow ("Deleted: ¶").
-        if (deleted) change.deleted = [{ text: "¶", props: {} }];
+        if (deleted && !ctx.inDeletedRow) change.deleted = [{ text: "¶", props: {} }];
         para.markChanges = [change];
       }
     }
   }
-  if (ctx.revisionColor) {
+  if (ctx.revisionColor && !ctx.inDeletedRow) {
     const runs = runsOf(para);
     moveDeletionsToBalloons(runs);
     const mark = para.markChanges?.[0];
@@ -3089,7 +3093,10 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     // deletion — Word removes it entirely (real.docx: a fully-deleted caption
     // table otherwise leaves a 200px border/grip skeleton with no text).
     if (ctx.revisionView !== "markup" && child(child(tr, "trPr"), "del")) continue;
-    const row = parseRow(tr, ctx);
+    // A deleted row stays in its table, its text on its lines, struck
+    // through: its paragraphs keep their deleted text (inDeletedRow).
+    const rowDeleted = !!ctx.revisionColor && !!child(child(tr, "trPr"), "del");
+    const row = parseRow(tr, rowDeleted ? { ...ctx, inDeletedRow: true } : ctx);
     rows.push(row);
     if (!ctx.revisionColor) continue;
     // Printed markup: a tracked row insertion or deletion marks the row's
@@ -3108,7 +3115,6 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
         // writes as inserted or deleted with the row. A deleted row stays
         // in the table, its text on its lines, struck through.
         run.changes = [...(run.changes ?? []).filter((c) => c.kind !== change.kind), change];
-        delete run.inBalloon;
       }
     }
     const trPrChange = child(trPr, "trPrChange");

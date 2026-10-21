@@ -378,6 +378,20 @@ describe("renderDocxToPdf with markup", () => {
     expect(last(marked.pdf)).toBeCloseTo(last(plain.pdf) as number, 0);
   });
 
+  it.skipIf(!hasPdftotext)("keeps a deleted row's text on its lines, a cell's deleted paragraph mark included: one balloon for the row", async () => {
+    const del = (id: number, text: string): string => `<w:del w:id="${id}" ${BOB}><w:r><w:delText>${text}</w:delText></w:r></w:del>`;
+    const row =
+      `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:del w:id="1" ${BOB}/></w:trPr><w:tc><w:p><w:pPr><w:rPr><w:del w:id="2" ${BOB}/></w:rPr></w:pPr>${del(3, "First line of the cell.")}</w:p><w:p>${del(4, "Second line of the cell.")}</w:p></w:tc></w:tr></w:tbl>`;
+    const { pdf } = await render(docx(row, p(t("After."))), true);
+    const page = bodyText(pdf);
+    expect(page).toContain("First line of the cell. Second line of the cell.");
+    const text = pdfText(pdf);
+    expect(text.split("Bob Editor")).toHaveLength(2);
+    expect(text).toContain("Bob Editor Deleted row");
+    expect(text).not.toContain("¶");
+  });
+
   it.skipIf(!hasPdftotext)("balloons the body's final section change beside the last paragraph, on the last page", async () => {
     const changed = SECT.replace("</w:sectPr>", `<w:sectPrChange w:id="9" ${BOB}><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:sectPrChange></w:sectPr>`);
     const table = (cell: string): string => `<w:tbl><w:tblPr><w:tblW w:w="5000" w:type="pct"/></w:tblPr><w:tblGrid><w:gridCol w:w="4680"/><w:gridCol w:w="4680"/></w:tblGrid><w:tr><w:tc>${p(t("Cell one"))}</w:tc><w:tc>${cell}</w:tc></w:tr></w:tbl>`;
