@@ -2714,18 +2714,6 @@ class Engine {
     page.headerHeight = headerH;
     page.footerHeight = footerH;
 
-    if (sp.marginTop >= 0) {
-      // An all-empty-paragraph header charges its measured height like any
-      // other: us-courts-answer (compat 11, empty header, headerDistance 48px
-      // = marginTop 48px) puts Word's caption row top at 70.87 = 48 + the
-      // empty paragraph's full 18.55px default-12pt line + tcMar 3.87 + the
-      // 8pt glyph offset, to 0.1pt. The flat 7pt this branch used to charge
-      // carried no probe and was canceling against the hidden-SEQ strut
-      // oversizing the caption line (see inline.ts solidSpans).
-      page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
-      page.bandTop = page.bodyTop;
-      page.headerGrown = page.bodyTop > sp.marginTop;
-    }
     // w:docGrid: a section opening under a lines grid starts AT the body top.
     // Word reserves no grid rows for it (probe-docgrid, six sections: Word's
     // first line sits at 98.90 against a 96.00 body top under every pitch in
@@ -2747,6 +2735,23 @@ class Engine {
         sp.pageHeight - sp.marginBottom,
         footer ? sp.pageHeight - sp.footerDistance - footerH : sp.pageHeight,
       );
+    }
+
+    if (sp.marginTop >= 0) {
+      // An all-empty-paragraph header charges its measured height like any
+      // other: us-courts-answer (compat 11, empty header, headerDistance 48px
+      // = marginTop 48px) puts Word's caption row top at 70.87 = 48 + the
+      // empty paragraph's full 18.55px default-12pt line + tcMar 3.87 + the
+      // 8pt glyph offset, to 0.1pt. The flat 7pt this branch used to charge
+      // carried no probe and was canceling against the hidden-SEQ strut
+      // oversizing the caption line (see inline.ts solidSpans).
+      const headerBottom = headerH > 0 ? sp.headerDistance + headerH : 0;
+      // Reserve one default body line after the footer sets the body bottom.
+      // An oversized header may overlap the body; body text must keep flowing.
+      const minBodyHeight = this.measurer.metrics(fontOf(this.doc.styles.defaultRPr, "Calibri")).lineHeight;
+      page.bodyTop = Math.min(Math.max(sp.marginTop, headerBottom), page.bodyBottom - minBodyHeight);
+      page.bandTop = page.bodyTop;
+      page.headerGrown = page.bodyTop > sp.marginTop;
     }
 
     this.pages.push(page);
