@@ -2161,6 +2161,66 @@ describe("layout engine", () => {
     expect(textItem(measured, "AFTER").lineTop).toBeGreaterThanOrEqual(measuredCell.bottom);
   });
 
+  it("runs vertical text in a merged cell along the whole merged height", () => {
+    // GovDocs1 039756 (B13): the first row is 12pt exact and the merge is
+    // 212pt tall. The text used the first row as its line length and broke
+    // into two-letter lines.
+    const heading = "Pickup practices conducted to preclude contamination";
+    const table = (dir: string) =>
+      `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="600"/><w:gridCol w:w="1400"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:hRule="exact" w:val="240"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge w:val="restart"/><w:textDirection w:val="${dir}"/></w:tcPr>${p(heading)}</w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr>${p("x")}</w:tc></w:tr>` +
+      `<w:tr><w:trPr><w:trHeight w:val="4000"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge/><w:textDirection w:val="${dir}"/></w:tcPr><w:p/></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="1400" w:type="dxa"/></w:tcPr>${p("y")}</w:tc></w:tr></w:tbl>`;
+    for (const dir of ["btLr", "tbRl"]) {
+      const { result } = layout({ "word/document.xml": wrapDocument(table(dir) + p("AFTER")) });
+      const lines = result.pages[0].items.filter(
+        (i): i is Extract<typeof i, { kind: "text" }> => i.kind === "text" && i.rotate !== undefined,
+      );
+      expect(lines.map((i) => i.text).join("").replace(/\s/g, "")).toBe(heading.replace(/\s/g, ""));
+      // 4240tw = 282px of line length holds the heading on one or two lines.
+      expect(new Set(lines.map((i) => i.lineTop)).size).toBeLessThanOrEqual(2);
+      // The rotated lines stay inside the 600tw (40px) first column.
+      const x = textItem(result, "x");
+      for (const line of lines) {
+        const pivotX = line.x + line.rotate!.ox;
+        const top = line.glyphTop ?? line.lineTop;
+        const across = [top, top + line.lineHeight].map((y) => pivotX - (y - (top + line.rotate!.oy)) * Math.sin((line.rotate!.deg * Math.PI) / 180));
+        expect(Math.max(...across)).toBeLessThan(x.x);
+      }
+    }
+  });
+
+  it("numbers a list once around a merged vertical cell laid out again", () => {
+    const numbering =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:numbering ${W_NS}><w:abstractNum w:abstractNumId="1">` +
+      `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>` +
+      `</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
+    const item = (text: string) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const table =
+      `<w:tbl><w:tblPr><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="600"/><w:gridCol w:w="3000"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:hRule="exact" w:val="240"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge w:val="restart"/><w:textDirection w:val="btLr"/></w:tcPr>${item("rot")}</w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${item("side")}</w:tc></w:tr>` +
+      `<w:tr><w:trPr><w:trHeight w:val="3000"/></w:trPr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="600" w:type="dxa"/><w:vMerge/><w:textDirection w:val="btLr"/></w:tcPr><w:p/></w:tc>` +
+      `<w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${p("y")}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(table + item("after")),
+      "word/numbering.xml": numbering,
+    });
+    const labels = result.pages[0].items
+      .filter((i) => i.kind === "text" && /^\d+\.$/.test(i.text))
+      .map((i) => (i.kind === "text" ? i.text : ""));
+    expect([...labels].sort()).toEqual(["1.", "2.", "3."]);
+  });
+
   it("autofits columns to content when the grid is a placeholder", () => {
     // Junk grid (100 twips per column, like generator output) + 100% width:
     // Word ignores the grid and sizes columns by content.
@@ -5341,6 +5401,439 @@ describe("floating table flow and overlap", () => {
       expect(topOf(prevented, "B")).toBeGreaterThan(topOf(prevented, "A") + 10);
       expect(intersects(rects(prevented)[0], rects(prevented)[1])).toBe(false);
     }
+  });
+
+  it("draws a picture in a floating table above a later overlapping one", () => {
+    // render-eval probe3-table-exotics--v05: Word shows the picture in table
+    // A's cell whole over table B, whose cells cover the rest of A.
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="762000" cy="762000"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="762000" cy="762000"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const withPicture = floatingTable("A", "allow").replace("<w:p><w:r><w:t>A</w:t></w:r></w:p>", picture);
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("Intro") + withPicture + floatingTable("B", "allow", 1700) + p("Tail")),
+      "word/_rels/document.xml.rels":
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>` +
+        `</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    const items = result.pages[0].items;
+    const image = items.find((item) => item.kind === "image");
+    const sheetB = items.filter((item) => item.kind === "rect" && item.fill === "#ffffff")[1];
+    if (image?.kind !== "image" || sheetB?.kind !== "rect") throw new Error("missing picture or table B");
+    // Table B's sheet overlaps the picture, and the picture is on the upper layer.
+    expect(sheetB.y).toBeLessThan(image.y + image.height);
+    expect(image.front).toBe(true);
+    expect(sheetB.front).toBeUndefined();
+  });
+});
+
+describe("nested table taller than the page", () => {
+  const smallSection =
+    `<w:sectPr><w:pgSz w:w="7000" w:h="3360"/>` +
+    `<w:pgMar w:top="750" w:right="750" w:bottom="750" w:left="750"/></w:sectPr>`;
+  const tallNestedRow = (cellProps: string, borders = "") => {
+    const paragraphs = Array.from({ length: 12 }, (_, i) => p(`Line${i}`,
+      `<w:pPr><w:spacing w:line="450" w:lineRule="exact"/></w:pPr>`,
+    )).join("");
+    return layout({
+      "word/document.xml": wrapDocument(
+        `<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc>` +
+        `<w:tbl><w:tblPr>${borders}</w:tblPr><w:tblGrid/><w:tr>` +
+        `<w:tc><w:tcPr>${cellProps}</w:tcPr>${paragraphs}</w:tc>` +
+        `</w:tr></w:tbl><w:p/></w:tc></w:tr></w:tbl>` + smallSection,
+      ),
+    }).result;
+  };
+  const expectVisibleLines = (result: ReturnType<typeof layoutDocument>) => {
+    const lines = result.pages.flatMap((page) => page.items.filter((item) =>
+      item.kind === "text" && item.text.trim(),
+    ));
+    for (let i = 0; i < 12; i++) {
+      expect(lines.filter((item) => item.kind === "text" && item.text === `Line${i}`)).toHaveLength(1);
+    }
+    for (const page of result.pages) {
+      const text = page.items.filter((item) => item.kind === "text" && item.text.trim());
+      if (text[0]?.kind === "text") expect(text[0].lineTop).toBeLessThan(page.bodyTop + 30);
+      for (const item of text) {
+        if (item.kind === "text") {
+          expect(item.lineTop).toBeGreaterThanOrEqual(page.bodyTop);
+          expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  };
+
+  it("splits a nested cell fill at the page cut before positioning the continuation", () => {
+    // 089704: the full-height background anchored the continuation at y=0.
+    const result = tallNestedRow(`<w:shd w:fill="FFFFFF"/>`);
+    expectVisibleLines(result);
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "rect" && item.role === "table-fill") {
+          expect(item.y).toBeGreaterThanOrEqual(page.bodyTop);
+          expect(item.y + item.height).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  });
+
+  it("splits nested vertical rules at the page cut before positioning the continuation", () => {
+    const result = tallNestedRow("", `<w:tblBorders>` +
+      `<w:left w:val="single" w:sz="6"/><w:right w:val="single" w:sz="6"/>` +
+      `</w:tblBorders>`);
+    expectVisibleLines(result);
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "edge" && item.x1 === item.x2) {
+          expect(Math.min(item.y1, item.y2)).toBeGreaterThanOrEqual(page.bodyTop);
+          expect(Math.max(item.y1, item.y2)).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  });
+
+  it("splits text inside a nested row whose horizontal rules span more than a page", () => {
+    // 090092: a nested description row exceeds the full page body height.
+    const result = tallNestedRow("", `<w:tblBorders>` +
+      `<w:top w:val="single" w:sz="6"/><w:bottom w:val="single" w:sz="6"/>` +
+      `</w:tblBorders>`);
+    expectVisibleLines(result);
+  });
+
+  // GovDocs1 086826 and 089704 (doc97-check-d B9): the outer row never split,
+  // because the nested cells' paragraph numbers collided and the row split
+  // took two nested rows for one paragraph. Its rows ran off the page.
+  it("splits the outer row and continues the nested rows on the next page", () => {
+    const tall = `<w:tr><w:trPr><w:trHeight w:val="9690"/></w:trPr><w:tc><w:p/></w:tc></w:tr>`;
+    const body =
+      p("Before") +
+      `<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tbl><w:tblPr/><w:tblGrid/>` +
+      tall + tall + `<w:tr><w:tc>${p("Closing Ceremony")}</w:tc></w:tr>` +
+      `</w:tbl><w:p/></w:tc></w:tr></w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(result.pages.length).toBe(2);
+    expect(pageText(result, 1)).toContain("Closing");
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "text" && item.text.trim()) {
+          expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  });
+});
+
+describe("repeated header rows", () => {
+  const cell = (body: string) => `<w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${body}</w:tc>`;
+  const table = (header: string, rows: string[]) =>
+    `<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>` +
+    `<w:tr><w:trPr><w:tblHeader/></w:trPr>${cell(header)}</w:tr>` +
+    rows.map((r) => `<w:tr>${cell(r)}</w:tr>`).join("") +
+    `</w:tbl>`;
+  const count = (result: ReturnType<typeof layoutDocument>, text: string) =>
+    result.pages.reduce((n, page) => n + page.items.filter((i) => i.kind === "text" && i.text === text).length, 0);
+  const smallSection =
+    `<w:sectPr><w:pgSz w:w="7000" w:h="3300"/>` +
+    `<w:pgMar w:top="750" w:right="750" w:bottom="750" w:left="750"/></w:sectPr>`;
+  const line25 = (text: string) => p(text,
+    `<w:pPr><w:spacing w:before="0" w:after="0" w:line="375" w:lineRule="exact"/></w:pPr>`);
+  const smallRow = (cells: string[], props = "") =>
+    `<w:tr><w:trPr>${props}</w:trPr>` +
+    cells.map((body) => `<w:tc><w:tcPr><w:tcW w:w="2750" w:type="dxa"/></w:tcPr>${body}</w:tc>`).join("") +
+    `</w:tr>`;
+  const smallTable = (rows: string[]) =>
+    `<w:tbl><w:tblPr><w:tblW w:w="5500" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="2750"/><w:gridCol w:w="2750"/></w:tblGrid>${rows.join("")}</w:tbl>`;
+  const header50 = () => smallRow([line25("HEAD"), line25("")],
+    `<w:tblHeader/><w:trHeight w:val="750" w:hRule="exact"/>`);
+
+  it("reserves a leading image's full height before repeating the header", () => {
+    const image =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="238125" cy="762000"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="238125" cy="762000"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([line25("BODY"), line25("")]), smallRow([line25("TEXT"), image]),
+      ]) + smallSection),
+      "word/_rels/document.xml.rels":
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>` +
+        `</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    expect(result.pages).toHaveLength(2);
+    expect(pageText(result, 0)).toBe("HEADBODY");
+    expect(pageText(result, 1)).toBe("TEXT");
+    const picture = result.pages[1].items.find((item) => item.kind === "image");
+    if (picture?.kind !== "image") throw new Error("missing image");
+    expect(picture.height).toBeCloseTo(80, 3);
+    expect(picture.y + picture.height).toBeLessThanOrEqual(result.pages[1].bodyBottom);
+  });
+
+  it("splits a three-line row below the repeated header", () => {
+    // Below the header the row is at the top of its page: it cannot move on,
+    // so it splits at any line, and every page keeps the header.
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([line25("BODY"), line25("")]),
+        smallRow([line25("ONE") + line25("TWO") + line25("THREE"), line25("")]),
+      ]) + smallSection),
+    });
+    expect(pageText(result, 0)).toBe("HEADBODY");
+    for (let i = 1; i < result.pages.length; i++) expect(pageText(result, i).startsWith("HEAD")).toBe(true);
+    for (const text of ["ONE", "TWO", "THREE"]) expect(count(result, text)).toBe(1);
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "text") expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+      }
+    }
+  });
+
+  it("moves a cantSplit row after a non-leading tblHeader row to the next page", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([line25("BODY"), line25("")]),
+        smallRow([line25("LATE"), line25("")], `<w:tblHeader/>`),
+        smallRow([line25("KEEP1") + line25("KEEP2"), line25("")], `<w:cantSplit/>`),
+      ]) + smallSection),
+    });
+    expect(result.pages).toHaveLength(2);
+    expect(pageText(result, 0)).toBe("HEADBODYLATE");
+    expect(pageText(result, 1)).toBe("HEADKEEP1KEEP2");
+    expect(count(result, "LATE")).toBe(1);
+  });
+
+  it("keeps visible content in the first part of a forced split below a header", () => {
+    const nested =
+      `<w:tbl><w:tblPr><w:tblBorders>` +
+      `<w:top w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/>` +
+      `</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2750"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:val="1200" w:hRule="exact"/></w:trPr>` +
+      `<w:tc>${line25("NESTED")}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([nested + line25("ONE") + line25("TWO") + line25("THREE"), line25("")]),
+      ]) + smallSection),
+    });
+    // The part on the first page holds visible text with the nested table,
+    // not only the nested table's top border.
+    expect(result.pages[0].items.some((item) => item.kind === "edge")).toBe(true);
+    expect(pageText(result, 0)).toContain("HEADNESTED");
+    expect(count(result, "NESTED")).toBe(1);
+  });
+
+  // GovDocs1 073543: header rows taller than the page repeated on every new
+  // page and pushed each body row on again: 4005 pages.
+  it("stops repeating header rows that leave no room for a body row", () => {
+    const header = Array.from({ length: 40 }, (_, i) => p(`head${i}`)).join("");
+    const rows = Array.from({ length: 5 }, (_, i) => p(`body${i}`));
+    const { result } = layout({ "word/document.xml": wrapDocument(table(header, rows)) });
+    expect(result.pages.length).toBeLessThanOrEqual(3);
+    expect(count(result, "head0")).toBe(1);
+    for (let i = 0; i < 5; i++) expect(count(result, `body${i}`)).toBe(1);
+  });
+
+  // GovDocs1 048972: a row of text and empty paragraphs, taller than the
+  // page, under a header: 50 pages of the header alone, then the row ran off
+  // the page.
+  it("splits a tall row under the header even when only empty paragraphs move", () => {
+    const tall = p("B") + "<w:p/>".repeat(60);
+    const { result } = layout({ "word/document.xml": wrapDocument(table(p("F"), [tall])) });
+    expect(result.pages.length).toBe(2);
+    expect(pageText(result, 0)).toBe("FB");
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "text") expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 1);
+      }
+    }
+  });
+});
+
+describe("floating table taller than the page", () => {
+  // GovDocs1 026283 (B5): a text-anchored floating table of ~2,000 rows printed
+  // its first page and lost the rest. Word breaks a floating table across
+  // pages like an inline table.
+  const tallFloat = (tblpPr: string, rows: string[], header = "") =>
+    `<w:tbl><w:tblPr><w:tblpPr ${tblpPr}/>` +
+    `<w:tblW w:w="9000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>` +
+    (header
+      ? `<w:tr><w:trPr><w:tblHeader/></w:trPr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${p(header)}</w:tc></w:tr>`
+      : "") +
+    rows.join("") +
+    `</w:tbl>`;
+  const row = (paras: string[], trPr = "") =>
+    `<w:tr>${trPr ? `<w:trPr>${trPr}</w:trPr>` : ""}<w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>` +
+    paras.map((t) => p(t)).join("") +
+    `</w:tc></w:tr>`;
+  const num = (i: number) => String(i).padStart(3, "0");
+  const find = (result: ReturnType<typeof layoutDocument>, text: string) => {
+    for (let pi = 0; pi < result.pages.length; pi++) {
+      const item = result.pages[pi].items.find((i) => i.kind === "text" && i.text === text);
+      if (item?.kind === "text") return { page: pi, item };
+    }
+    throw new Error(`missing ${text}`);
+  };
+
+  it("continues the rows on the next pages at the same tblpPr x, with the header repeated", () => {
+    const rows = Array.from({ length: 120 }, (_, i) => row([`row${num(i + 1)}`]));
+    const body =
+      p("Before") +
+      tallFloat(`w:horzAnchor="margin" w:vertAnchor="text" w:tblpX="360" w:tblpY="300"`, rows, "HEAD") +
+      p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(result.pages.length).toBeGreaterThanOrEqual(3);
+    const first = find(result, "row001");
+    for (let i = 1; i <= 120; i++) {
+      const hit = find(result, `row${num(i)}`);
+      expect(hit.item.x).toBeCloseTo(first.item.x, 1);
+      expect(hit.item.lineTop + hit.item.lineHeight).toBeLessThanOrEqual(result.pages[hit.page].bodyBottom + 1);
+    }
+    const last = find(result, "row120");
+    for (let pi = 1; pi <= last.page; pi++) {
+      const texts = result.pages[pi].items.filter((i) => i.kind === "text");
+      expect(texts[0]?.kind === "text" && texts[0].text).toBe("HEAD");
+    }
+    // The text after the table goes to the page of the table's last part,
+    // below that part (the table spans the column, so nothing fits beside).
+    const after = find(result, "After");
+    expect(after.page).toBe(last.page);
+    expect(after.item.lineTop).toBeGreaterThanOrEqual(last.item.lineTop + last.item.lineHeight - 0.01);
+  });
+
+  it("keeps a cantSplit row whole when the table breaks", () => {
+    const lines = (i: number) => ["a", "b", "c", "d", "e"].map((s) => `r${num(i)}${s}`);
+    const rows = Array.from({ length: 30 }, (_, i) => row(lines(i + 1), "<w:cantSplit/>"));
+    const body = tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows) + p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(result.pages.length).toBeGreaterThanOrEqual(2);
+    for (let i = 1; i <= 30; i++) {
+      const pages = lines(i).map((t) => find(result, t).page);
+      expect(new Set(pages).size).toBe(1);
+    }
+  });
+
+  it("starts a page-anchored table's later parts at the body top", () => {
+    const rows = Array.from({ length: 80 }, (_, i) => row([`row${num(i + 1)}`]));
+    const body =
+      p("Before") +
+      tallFloat(`w:horzAnchor="page" w:vertAnchor="page" w:tblpX="1800" w:tblpY="2880"`, rows) +
+      p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const first = find(result, "row001");
+    expect(first.page).toBe(0);
+    expect(first.item.lineTop).toBeGreaterThanOrEqual(192 - 0.01);
+    const last = find(result, "row080");
+    expect(last.page).toBeGreaterThan(0);
+    const firstOnPage2 = result.pages[1].items.find((i) => i.kind === "text");
+    expect(firstOnPage2?.kind === "text" && firstOnPage2.lineTop).toBeLessThan(result.pages[1].bodyTop + 20);
+    expect(firstOnPage2?.kind === "text" && firstOnPage2.x).toBeCloseTo(first.item.x, 1);
+  });
+
+  it("continues a margin-anchored table in the next column of a two-column section", () => {
+    const rows = Array.from({ length: 40 }, (_, i) =>
+      `<w:tr><w:trPr><w:trHeight w:val="500"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${p(`row${num(i + 1)}`)}</w:tc></w:tr>`,
+    );
+    const table =
+      `<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="text"/>` +
+      `<w:tblW w:w="3000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>${rows.join("")}</w:tbl>`;
+    const sectPr = `<w:sectPr><w:cols w:num="2" w:space="720"/></w:sectPr>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(table + p("After") + sectPr) });
+    const first = find(result, "row001");
+    const last = find(result, "row040");
+    expect(last.page).toBe(first.page);
+    // 4320tw columns with a 720tw gap: the second part starts 5040tw (336px)
+    // to the right.
+    expect(last.item.x - first.item.x).toBeCloseTo(336, 0);
+
+    // Started in column 2 (at the margin, as tblpPr says), the table
+    // continues on the next page inside the sheet, not one column-width left
+    // of it.
+    const late = layout({
+      "word/document.xml": wrapDocument(`<w:p><w:r><w:br w:type="column"/></w:r></w:p>` + table + p("After") + sectPr),
+    }).result;
+    for (let i = 1; i <= 40; i++) expect(find(late, `row${num(i)}`).item.x).toBeGreaterThan(90);
+  });
+
+  it("puts the pictures of a broken floating table on the front layer", () => {
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="762000" cy="762000"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="762000" cy="762000"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const rows = Array.from({ length: 60 }, (_, i) => row([`row${num(i + 1)}`]));
+    rows.push(`<w:tr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${picture}</w:tc></w:tr>`);
+    const { result } = layout({
+      "word/document.xml": wrapDocument(tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows)),
+      "word/_rels/document.xml.rels":
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>` +
+        `</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    const image = result.pages.flatMap((page) => page.items).find((item) => item.kind === "image");
+    expect(result.pages.length).toBeGreaterThan(1);
+    expect(image?.kind === "image" && image.front).toBe(true);
+  });
+
+  it("numbers list paragraphs in a broken floating table once", () => {
+    const numbering =
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+      `<w:numbering ${W_NS}><w:abstractNum w:abstractNumId="1">` +
+      `<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl>` +
+      `</w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>`;
+    const item = (text: string) =>
+      `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const rows = Array.from({ length: 80 }, (_, i) =>
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${item(`row${num(i + 1)}`)}</w:tc></w:tr>`,
+    );
+    const { result } = layout({
+      "word/document.xml": wrapDocument(tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows)),
+      "word/numbering.xml": numbering,
+    });
+    const labels = result.pages.flatMap((page) =>
+      page.items.filter((i) => i.kind === "text" && /^\d+\.$/.test(i.text)).map((i) => (i.kind === "text" ? i.text : "")),
+    );
+    expect(labels[0]).toBe("1.");
+    expect(labels[labels.length - 1]).toBe("80.");
+  });
+
+  it("keeps a later tblOverlap=never table off the last part", () => {
+    const rows = Array.from({ length: 80 }, (_, i) => row([`row${num(i + 1)}`]));
+    const second =
+      `<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpY="1440"/>` +
+      `<w:tblOverlap w:val="never"/><w:tblW w:w="9000" w:type="dxa"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>${row(["SECOND"])}</w:tbl>`;
+    const body =
+      tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows).replace(
+        "<w:tblW",
+        `<w:tblOverlap w:val="never"/><w:tblW`,
+      ) +
+      second +
+      p("After");
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    const last = find(result, "row080");
+    const other = find(result, "SECOND");
+    expect(other.page).toBe(last.page);
+    expect(other.item.lineTop).toBeGreaterThanOrEqual(last.item.lineTop + last.item.lineHeight - 0.01);
   });
 });
 

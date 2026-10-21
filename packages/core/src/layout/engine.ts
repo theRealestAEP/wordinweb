@@ -916,6 +916,9 @@ class Engine {
   private styleRefSeen = new WeakSet<object>();
   /** List counters per abstractNumId. */
   private counters = new Map<number, number[]>();
+  /** List counters as they stood when each vertically merged rotated cell was
+   * first laid out, so its second layout at the merged height numbers alike. */
+  private mergedRotatedCounters = new WeakMap<object, { counters: Map<number, number[]>; seen: Set<number> }>();
   /** numIds already referenced once (their startOverride restart has fired). */
   private seenNumIds = new Set<number>();
   /** Floating-image exclusion rects per page (page coords). */
@@ -8904,13 +8907,16 @@ class Engine {
     return lead;
   }
 
-  private placeTable(tbl: Table): void {
+  /** Lay a table into the flow and return where its last part starts. A
+   * floating table that breaks across pages comes here with `floatX`, its
+   * left edge on the current page, and the cursor at its top. */
+  private placeTable(tbl: Table, floatX?: () => number): { page: InternalPage; top: number } {
     // Floating (tblpPr) tables leave the flow entirely: absolute position,
     // body text wraps around the float rect. Page/margin-anchored ones were
     // usually pre-placed by layoutBlocks so earlier text already wrapped.
-    if (tbl.props.floating) {
+    if (tbl.props.floating && !floatX) {
       this.placeFloatingTable(tbl);
-      return;
+      return { page: this.cur, top: this.y };
     }
     this.clearBannerSlot();
     this.lastParaSpacingAfter = 0;
@@ -8945,6 +8951,7 @@ class Engine {
     // continuation row painted at column 1's x, overlapping the first row). A
     // page split keeps the same colX, so single-column tables are unaffected.
     const computeX0 = () => {
+      if (floatX) return floatX();
       const cw = this.colWidth;
       if (tbl.props.alignment === "center") return this.colX + (cw - tableWidth) / 2;
       // w:bidiVisual (RTL table) hugs the right margin unless explicitly aligned.
@@ -8971,7 +8978,7 @@ class Engine {
     // Lay out all rows up front so vertically-merged cells can be sized across
     // their spanned rows rather than inflating their starting row.
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
-    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows, widths);
     const tableHeight =
       (s2 || this.rowTopLead(tbl, 0)) +
       rowHeights.reduce((sum, height) => sum + height, 0) +
@@ -8981,8 +8988,9 @@ class Engine {
     // A normal table cannot wrap beside a floating exclusion rectangle. If
     // its footprint would intersect one, Word moves the whole table below the
     // float (benchmark-edited: the inline fixed-width table follows the moved
-    // page-anchored table instead of painting through it).
-    for (let guard = 0; guard < 20; guard++) {
+    // page-anchored table instead of painting through it). A floating table
+    // keeps its own position.
+    for (let guard = 0; guard < 20 && !floatX; guard++) {
       const hit = (this.floats.get(this.cur) ?? []).find(
         (rect) =>
           this.y < rect.y1 &&
@@ -9009,6 +9017,10 @@ class Engine {
     let segPage = this.cur;
     let segHasRows = false;
     let segLastLaid = laidRows[0];
+    // Where the body rows start on a page whose only content above them is
+    // this table's header rows. A row there is at the top of its page: it
+    // never moves on and leaves the header rows alone.
+    let belowRepeatedHeaders = -Infinity;
     let moveEmitted = false;
     const markTableStart = () => {
       if (moveEmitted) return;
@@ -9031,6 +9043,7 @@ class Engine {
     // the first row. The matching bottom half is added after the final row.
     // Separated-border tables advance 2*spacing instead (outline to first
     // cell box).
+    const startsAtTop = this.pageIsEmptyAtCursor();
     if (tbl.rows.length > 0) this.y += s2 || this.rowTopLead(tbl, 0);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
@@ -9038,11 +9051,41 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
 
+    // The least room in which the row can start on a page: all of it when it
+    // cannot split, else the first cut, from the top, that splitLaidRow
+    // accepts (two lines of a cell, a paragraph's widow lines, whole
+    // pictures and nested-row bands all follow from its rules).
+    const firstLineNeed = (row: TableRow, laid: (typeof laidRows)[number], height: number): number => {
+      if (
+        row.props.cantSplit || row.props.heightRule === "exact" || row.props.tblHeader ||
+        row.cells.some((cell) => cell.props.vMerge || cell.props.textDirection)
+      ) return height;
+      const bottoms = laid.cells.flatMap((cell) =>
+        cell.items.map((it) =>
+          it.kind === "text" ? it.lineTop + it.lineHeight :
+          it.kind === "image" || it.kind === "rect" ? it.y + it.height :
+          it.kind === "edge" ? Math.max(it.y1, it.y2) : 0,
+        ),
+      );
+      const cuts = [...new Set(bottoms)].filter((b) => b > 0 && b < height).sort((a, b) => a - b);
+      for (const cut of cuts) {
+        // Splitting shifts the continuation's items, so try it on copies.
+        const probe = {
+          ...laid,
+          cells: laid.cells.map((cell) => ({ ...cell, items: cell.items.map((it) => ({ ...it })) })),
+        };
+        if (this.splitLaidRow(probe, cut, 0, true)) return cut;
+      }
+      return height;
+    };
+
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
       let laid = laidRows[ri];
       let rowHeight = rowHeights[ri];
-      const advance = () => {
+      // `need` is the room the row that continues on the next page needs
+      // there: all of it when it cannot split, else its first usable part.
+      const advance = (need: number) => {
         if (segHasRows && segmentBottom && segmentBottom.style !== "none") {
           this.cur.items.push({
             kind: "edge",
@@ -9078,7 +9121,13 @@ class Engine {
         // longtable header repeats at the same 25.0pt pitch on every page;
         // advancing by the bare content height ran each continuation page
         // 0.5pt high and drifted the 200-row grid a full row by page 9).
-        if (!row.props.tblHeader) {
+        // Word repeats the header rows only when a body row still fits
+        // below them. Header rows taller than the page would otherwise fill
+        // every new page and push the row on again (GovDocs1 073543 gave
+        // 4005 pages).
+        const headerH = headerRows.reduce((sum, hr) => sum + rowHeights[tbl.rows.indexOf(hr)], 0);
+        belowRepeatedHeaders = -Infinity;
+        if (!row.props.tblHeader && this.y + headerH + need <= this.bodyBottom + 0.01) {
           for (const hr of headerRows) {
             const hIdx = tbl.rows.indexOf(hr);
             const hLaid = this.layoutRow(tbl, hr, hIdx, widths);
@@ -9099,6 +9148,7 @@ class Engine {
             segLastLaid = hLaid;
             this.y += hH;
           }
+          if (headerRows.length > 0) belowRepeatedHeaders = this.y;
         }
       };
       // Word splits an ordinary row at the page boundary when both fragments
@@ -9146,7 +9196,8 @@ class Engine {
         // advance() and the split happens from the page top.
         const atColumnTop =
           this.pageIsEmptyAtCursor() ||
-          this.y <= this.cur.bodyTop + this.rowTopLead(tbl, ri) + 0.01;
+          this.y <= this.cur.bodyTop + this.rowTopLead(tbl, ri) + 0.01 ||
+          this.y <= belowRepeatedHeaders + 0.01;
         const cantSplitHolds =
           row.props.cantSplit === true &&
           (rowHeight <= this.cur.bodyBottom - this.cur.bodyTop + 0.01 || !atColumnTop);
@@ -9170,7 +9221,14 @@ class Engine {
         // The kept part leaves room for the first piece of the row's notes.
         const rowNotes = this.rowNoteHeight(laid);
         const noteRoom = Number.isFinite(rowNotes) ? rowNotes : 0;
-        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y - noteRoom, keepSlack) : null;
+        // A row at the top of its page, or taller than a page, gains nothing
+        // by moving on, so it splits even when a part holds only empty
+        // paragraphs (GovDocs1 048972: a row of text and empty paragraphs
+        // under a repeated header made 50 pages of headers alone, then ran
+        // off the page; 089704 and 086826: a nested table of tall empty rows
+        // ran off the page and its last rows were lost).
+        const mustSplit = atColumnTop || rowHeight > this.cur.bodyBottom - this.cur.bodyTop + 0.01;
+        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y - noteRoom, keepSlack, mustSplit) : null;
         if (parts) {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
@@ -9188,22 +9246,22 @@ class Engine {
             });
           }
           this.y += parts.top.height;
-          advance();
+          advance(firstLineNeed(row, parts.rest, parts.rest.height));
           laid = parts.rest;
           rowHeight = Math.max(laid.height, 0);
           continue;
         }
         // Nothing splittable: at the top of a page the row simply overflows
         // (old behavior); mid-page it moves whole and gets one more chance.
-        const topHalf = this.rowTopLead(tbl, ri);
-        if (this.pageIsEmptyAtCursor() || this.y <= this.cur.bodyTop + topHalf + 0.01) break;
-        advance();
+        if (atColumnTop) break;
+        advance(firstLineNeed(row, laid, rowHeight));
       }
       markTableStart();
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       segHasRows = true;
       segLastLaid = laid;
       this.y += rowHeight;
+      if (ri < headerRows.length && startsAtTop && segPage === this.cur) belowRepeatedHeaders = this.y;
       // Separated cell borders: 2*spacing of vertical air between each row's
       // cell boxes (matching the horizontal gap), so the row-to-row boundary
       // shows two rules with a gap rather than one shared rule.
@@ -9228,6 +9286,7 @@ class Engine {
     if (tbl.rows.length > 0) this.y += s2 || this.rowBottomLead(tbl, tbl.rows.length - 1);
     if (s2) this.paintTableOutline(this.cur, tbl, x0, segTop, this.y, tableWidth);
     this.emitTableGrips(tbl, segPage, x0, widths, segTop, this.y);
+    return { page: segPage, top: segTop };
   }
 
   /** Outer table outline box for a separated-cell-border table (w:tblCellSpacing):
@@ -9277,7 +9336,7 @@ class Engine {
     const tableWidth = gridW + s2 * (widths.length + 1);
 
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths));
-    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows, widths);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -9289,16 +9348,7 @@ class Engine {
     const tableHeight =
       topLead + rowHeights.reduce((a, b) => a + b, 0) + Math.max(0, nRows - 1) * s2 + botLead;
 
-    // Horizontal: page origin is the sheet edge, margin origin the left margin,
-    // text origin the current column x. Alignment keywords span the anchor box.
-    const contentW = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
-    const hOriginX = fl.hAnchor === "page" ? 0 : fl.hAnchor === "margin" ? sp.marginLeft : this.colX;
-    const hRefW = fl.hAnchor === "page" ? sp.pageWidth : fl.hAnchor === "margin" ? contentW : this.colWidth;
-    let x: number;
-    if (fl.xAlign === "center") x = hOriginX + (hRefW - tableWidth) / 2;
-    else if (fl.xAlign === "right") x = hOriginX + hRefW - tableWidth;
-    else if (fl.xAlign === "left") x = hOriginX;
-    else x = hOriginX + (fl.x ?? 0);
+    let x = this.floatingTableX(tbl, tableWidth);
 
     const bodyH = sp.pageHeight - Math.abs(sp.marginTop) - Math.abs(sp.marginBottom);
     const vOriginY = fl.vAnchor === "page" ? 0 : fl.vAnchor === "margin" ? Math.abs(sp.marginTop) : this.y;
@@ -9339,6 +9389,21 @@ class Engine {
     return { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights };
   }
 
+  /** A floating table's left edge on the current page. Page origin is the
+   * sheet edge, margin origin the left margin, text origin the current column
+   * x. Alignment keywords span the anchor box. */
+  private floatingTableX(tbl: Table, tableWidth: number): number {
+    const fl = tbl.props.floating!;
+    const sp = this.cur.sp;
+    const contentW = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
+    const hOriginX = fl.hAnchor === "page" ? 0 : fl.hAnchor === "margin" ? sp.marginLeft : this.colX;
+    const hRefW = fl.hAnchor === "page" ? sp.pageWidth : fl.hAnchor === "margin" ? contentW : this.colWidth;
+    if (fl.xAlign === "center") return hOriginX + (hRefW - tableWidth) / 2;
+    if (fl.xAlign === "right") return hOriginX + hRefW - tableWidth;
+    if (fl.xAlign === "left") return hOriginX;
+    return hOriginX + (fl.x ?? 0);
+  }
+
   /** Register a floating table's square wrap rect on the current page so
    * paragraphs (including ones EARLIER in the flow) reflow around it — Word
    * reflows preceding content around a page/margin-anchored floating table. */
@@ -9361,16 +9426,30 @@ class Engine {
 
   /** Floating table (w:tblpPr): absolutely positioned against page/margin/
    * column origin, painted over an opaque white sheet, with body text wrapping
-   * square around it (leftFromText/… distances). Word does not split a floating
-   * table across pages, and the flow cursor is untouched — the table leaves the
-   * flow entirely, so earlier/later paragraphs on the page reflow around it. */
+   * square around it (leftFromText/… distances). The flow cursor is untouched
+   * — the table leaves the flow entirely, so earlier/later paragraphs on the
+   * page reflow around it. A table that runs past the page breaks across
+   * pages instead (see splitFloatingTable). */
   private placeFloatingTable(tbl: Table): void {
     const fl = tbl.props.floating!;
     this.ensureTableBorders(tbl);
     const page = this.cur;
+    const counters = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+    const seenNumIds = new Set(this.seenNumIds);
     const { x, y, tableWidth, tableHeight, topLead, widths, s2, laidRows, rowHeights } =
       this.floatingTableGeom(tbl);
     const nRows = tbl.rows.length;
+    // A text-anchored table may not pass the body bottom. A page- or margin-
+    // anchored table may sit in the bottom margin, so it breaks only when it
+    // runs off the sheet.
+    const limit = fl.vAnchor === "text" ? this.bodyBottom : page.sp.pageHeight;
+    if (y + tableHeight > limit + 0.01) {
+      // The split lays the rows out again: count their list numbers once.
+      this.counters = counters;
+      this.seenNumIds = seenNumIds;
+      this.splitFloatingTable(tbl, y, tableWidth);
+      return;
+    }
 
     // Opaque white sheet behind the footprint: Word hides flow text and any
     // earlier floating table under a floating table's own rectangle (the two
@@ -9398,6 +9477,7 @@ class Engine {
     this.cur = page;
     this.y = y + topLead;
     const gridW = widths.reduce((a, b) => a + b, 0);
+    const firstItem = page.items.length;
     for (let ri = 0; ri < nRows; ri++) {
       this.paintRow(tbl, tbl.rows[ri], ri, laidRows[ri], x, widths, rowHeights[ri]);
       this.y += rowHeights[ri];
@@ -9419,6 +9499,14 @@ class Engine {
         });
       }
     }
+    // Word draws the pictures of a floating table above a later floating
+    // table that overlaps it, although that table's cells and text cover this
+    // one's (render-eval probe3-table-exotics--v05: the picture inserted in
+    // table A's cell shows whole over table B).
+    for (let i = firstItem; i < page.items.length; i++) {
+      const item = page.items[i];
+      if (item.kind === "image") item.front = true;
+    }
     if (s2) this.paintTableOutline(page, tbl, x, y, y + tableHeight, tableWidth);
     // Column-resize grips over each vertical boundary of the floating table.
     this.emitTableGrips(tbl, page, x, widths, y, y + tableHeight);
@@ -9439,6 +9527,67 @@ class Engine {
       });
       this.floats.set(page, list);
       this.floatWrapRegistered.set(tbl, page);
+    }
+  }
+
+  /** A floating table that does not fit below its position breaks across
+   * pages like an inline table: the rows that do not fit continue at the body
+   * top of the next page, at the tblpPr horizontal position on that page, with
+   * the header rows repeated and w:cantSplit kept. Without
+   * w:allowTextAfterFloatingTableBreak (not read, so always off) Word puts the
+   * text after the table on the page of its last part only, where the text
+   * wraps around that part. */
+  private splitFloatingTable(tbl: Table, top: number, tableWidth: number): void {
+    const fl = tbl.props.floating!;
+    const startPage = this.cur;
+    const startCol = this.col;
+    const startColX = this.colX;
+    const startY = this.y;
+    const spacing = [this.lastParaSpacingAfter, this.lastParaAfterPad, this.lastParaWasEmpty] as const;
+    // A part that continues in a later column of a multi-column section moves
+    // with that column: on the first page from the column the table started
+    // in, on later pages from the first column. A text-anchored table follows
+    // the column already.
+    const floatX = () =>
+      this.floatingTableX(tbl, tableWidth) +
+      (fl.hAnchor === "text" ? 0 : this.colX - (this.cur === startPage ? startColX : this.cur.colXs[0]));
+    const firstPage = this.pages.indexOf(startPage);
+    const firstItem = startPage.items.length;
+    this.y = top;
+    const last = this.placeTable(tbl, floatX);
+    // Pictures on the front layer, as in placeFloatingTable.
+    for (const page of this.pages.slice(firstPage)) {
+      for (let i = page === startPage ? firstItem : 0; i < page.items.length; i++) {
+        const item = page.items[i];
+        if (item.kind === "image") item.front = true;
+      }
+    }
+    const x = floatX();
+    const list = this.floats.get(this.cur) ?? [];
+    list.push({
+      x0: x - fl.dist.l,
+      x1: x + tableWidth + fl.dist.r,
+      y0: last.top - fl.dist.t,
+      y1: this.y + fl.dist.b,
+      mode: "square",
+    });
+    this.floats.set(this.cur, list);
+    this.floatWrapRegistered.set(tbl, this.cur);
+    // Later floating tables avoid the last part (w:tblOverlap="never").
+    this.floatingTablePositions.set(tbl, {
+      page: this.cur,
+      x,
+      y: last.top,
+      width: tableWidth,
+      height: this.y - last.top,
+      allowOverlap: fl.allowOverlap,
+    });
+    if (this.cur === startPage && this.col === startCol) {
+      // The table fit after all: the flow goes on as if it had not been there.
+      this.y = startY;
+      [this.lastParaSpacingAfter, this.lastParaAfterPad, this.lastParaWasEmpty] = spacing;
+    } else {
+      this.y = this.columnStartY(this.col);
     }
   }
 
@@ -9495,9 +9644,10 @@ class Engine {
     this.col = 0;
     this.y = y;
     const frameTop = this.y;
+    const firstItem = fake.items.length;
     if (tbl.rows.length > 0) this.y += this.rowTopLead(tbl, 0);
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths, fields));
-    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows);
+    const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows, widths, fields);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
       const cl = laidRows[ri].cells.find((c) => c.cellIdx === key % 1000);
@@ -9527,6 +9677,14 @@ class Engine {
     // Nested tables are resizable too (the cover-letter layout puts every
     // user table inside a layout cell).
     if (tbl.src) this.emitTableGrips(tbl, fake, x0 + (tbl.props.indent ?? 0), widths, frameTop, this.y);
+    // paraSeq numbers the paragraphs of ONE cell. In the frame that holds
+    // this table, the numbers of its cells collide with each other and with
+    // the frame's own paragraphs, so a row split took separate nested rows
+    // for one paragraph and refused every cut (GovDocs1 086826, 089704).
+    for (let i = firstItem; i < fake.items.length; i++) {
+      const item = fake.items[i];
+      if (item.kind === "text") item.paraSeq = undefined;
+    }
     const endY = this.y;
     this.y = saveY;
     this.cur = saveCur;
@@ -9544,6 +9702,10 @@ class Engine {
     avail: number,
     /** Extra depth text glyphs may reach past the drawn cut (note fill band). */
     keepSlack = 0,
+    /** The row cannot move on (it is at the top of its page, or taller than
+     * a page): it may split at any line, and either part may hold only empty
+     * lines, but the part that stays needs a line of a cell that goes on. */
+    mustSplit = false,
   ): { top: typeof laid; rest: typeof laid } | null {
     if (avail < 12) return null;
     const bottomOf = (it: PageItem): number =>
@@ -9583,7 +9745,14 @@ class Engine {
         if (hRules.length < 2 || top < hRules[0] - 0.5 || bottom > hRules[hRules.length - 1] + 0.5) {
           return undefined;
         }
-        for (const r of hRules) if (r >= bottom - 0.5) return r;
+        let bandTop = hRules[0];
+        for (const r of hRules) {
+          if (r <= top + 0.5) bandTop = r;
+          if (r >= bottom - 0.5) {
+            // A nested row taller than a page must split at its text lines.
+            return r - bandTop <= this.cur.bodyBottom - this.cur.bodyTop + 0.5 ? r : undefined;
+          }
+        }
         return undefined;
       };
       const keeps = (it: PageItem) => {
@@ -9685,9 +9854,10 @@ class Engine {
           it.kind === "path" ||
           it.kind === "wordart",
       );
+    const hasLine = (items: PageItem[]) => items.some((it) => it.kind === "text");
     if (
-      !partitions.some(({ keep }) => hasVisibleContent(keep)) ||
-      !partitions.some(({ rest }) => hasVisibleContent(rest))
+      !partitions.some(({ keep, rest }) => hasVisibleContent(keep) || (mustSplit && hasLine(keep) && rest.length > 0)) ||
+      (!mustSplit && !partitions.some(({ rest }) => hasVisibleContent(rest)))
     ) {
       return null;
     }
@@ -9704,8 +9874,10 @@ class Engine {
 
     // Keep a two-line boundary when text in the same cell continues. This is
     // why parity2-nestedtables moves its three-line rows whole instead of
-    // leaving one line on the next page.
+    // leaving one line on the next page. A row that cannot move on splits
+    // at any line.
     if (
+      !mustSplit &&
       partitions.some(({ keep, rest }) => {
         const keptLines = lineTops(keep).length;
         const restLines = lineTops(rest).length;
@@ -9765,6 +9937,36 @@ class Engine {
     for (const { cell, trailing, grips, keep, rest } of partitions) {
       const flowItems = cell.items.filter((it) => it.kind !== "grip");
       const keepTop = flowItems.length > 0 ? Math.min(...flowItems.map(topOf)) : 0;
+      // Nested cell fills and vertical rules span the text cut. Give each
+      // fragment its own piece before finding the continuation's anchor;
+      // a full-height decoration would hold that anchor above the cut.
+      const spanningPaint = new Set(flowItems.filter((it) =>
+        topOf(it) < cutH && bottomOf(it) > cutH && (
+          (it.kind === "rect" && it.role === "table-fill") ||
+          (it.kind === "edge" && it.role === "table-rule" && Math.abs(it.x1 - it.x2) < 0.01)
+        ),
+      ));
+      if (spanningPaint.size > 0) {
+        const kept = new Set(keep);
+        const remaining = new Set(rest);
+        keep.length = 0;
+        rest.length = 0;
+        // Preserve paint order so the cell background stays behind its text.
+        for (const it of flowItems) {
+          if (spanningPaint.has(it)) {
+            if (it.kind === "rect") {
+              keep.push({ ...it, height: cutH - it.y });
+              rest.push({ ...it, y: cutH, height: it.y + it.height - cutH });
+            } else if (it.kind === "edge") {
+              keep.push({ ...it, y1: topOf(it), y2: cutH });
+              rest.push({ ...it, y1: cutH, y2: bottomOf(it) });
+            }
+          } else {
+            if (kept.has(it)) keep.push(it);
+            if (remaining.has(it)) rest.push(it);
+          }
+        }
+      }
       // Word re-applies the row's top inset when a row RESUMES on the next
       // page: staging-grid4's continuation pages both place the first
       // "deep row N" line at the same offset the row's ORIGINAL first line
@@ -9842,6 +10044,8 @@ class Engine {
   private computeRowHeights(
     tbl: Table,
     laidRows: { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number }[]; height: number }[],
+    widths: number[],
+    fields?: FieldContext,
   ): { heights: number[]; spanPaint: Map<number, number> } {
     const n = tbl.rows.length;
     const heights = new Array<number>(n).fill(0);
@@ -9874,6 +10078,24 @@ class Engine {
         avail = m.height;
       }
       spanPaint.set(m.ri * 1000 + m.ci, avail);
+      // Vertical text in a merged cell runs along the whole merged height, not
+      // the first row's (GovDocs1 039756: a btLr heading over a 12pt first row
+      // broke into two-letter lines). Lay the cell out again at that length.
+      const cell = tbl.rows[m.ri].cells[m.ci];
+      const dir = cell.props.textDirection;
+      if (dir === "btLr" || dir === "tbRl") {
+        const { counters, seenNumIds } = this;
+        const start = this.mergedRotatedCounters.get(cell);
+        if (start) {
+          this.counters = new Map(Array.from(start.counters, ([k, v]) => [k, [...v]]));
+          this.seenNumIds = new Set(start.seen);
+        }
+        const again = this.layoutRow(tbl, tbl.rows[m.ri], m.ri, widths, fields, new Map([[m.ci, avail]]));
+        this.counters = counters;
+        this.seenNumIds = seenNumIds;
+        const cells = laidRows[m.ri].cells;
+        cells[cells.findIndex((c) => c.cellIdx === m.ci)] = again.cells[m.ci];
+      }
     }
     return { heights, spanPaint };
   }
@@ -9884,6 +10106,9 @@ class Engine {
     rowIdx: number,
     widths: number[],
     fields?: FieldContext,
+    /** Full height of a vertically merged rotated cell, by cell index. Only
+     * these cells are laid out. */
+    mergedHeights?: Map<number, number>,
   ): { cells: { items: PageItem[]; height: number; x: number; width: number; cellIdx: number; spanHeight?: number; rotated?: boolean }[]; height: number } {
     const defaults = this.cellMarginsOf(tbl, false);
     // Side INSETS from the cell's grid boundaries. Left: the cell's own
@@ -9956,7 +10181,7 @@ class Engine {
         cells[ci] = { items: [], height: 0, x, width: w, cellIdx: ci };
         continue;
       }
-      if (cell.props.textDirection) continue;
+      if (cell.props.textDirection || mergedHeights) continue;
       const innerWidth = Math.max(4, w - (m.left ?? 0) - (m.right ?? 0));
       const { items, height } = this.layoutFrame(
         cell.blocks,
@@ -9978,12 +10203,22 @@ class Engine {
       const cell = row.cells[ci];
       const dir = cell.props.textDirection;
       if ((dir !== "btLr" && dir !== "tbRl") || cell.props.vMerge === "continue") continue;
+      if (mergedHeights && !mergedHeights.has(ci)) continue;
+      if (cell.props.vMerge === "restart" && !mergedHeights) {
+        this.mergedRotatedCounters.set(cell, {
+          counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
+          seen: new Set(this.seenNumIds),
+        });
+      }
       const { x, width: w, margins: m } = geometry[ci];
+      const mergedHeight = mergedHeights?.get(ci);
       const frameWidth = Math.max(
         4,
-        row.props.heightRule === "exact"
-          ? (row.props.height ?? measuredContentH)
-          : Math.max(row.props.heightRule === "auto" ? 0 : (row.props.height ?? 0), measuredContentH),
+        mergedHeight !== undefined
+          ? mergedHeight - (m.top ?? 0) - (m.bottom ?? 0)
+          : row.props.heightRule === "exact"
+            ? (row.props.height ?? measuredContentH)
+            : Math.max(row.props.heightRule === "auto" ? 0 : (row.props.height ?? 0), measuredContentH),
       );
       const { items, height: frameHeight } = this.layoutFrame(
         cell.blocks,
