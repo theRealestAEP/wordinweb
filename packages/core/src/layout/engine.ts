@@ -3893,8 +3893,12 @@ class Engine {
       const np = this.doc.effectiveParaProps(after);
       const lines = breakParagraph(this.doc, this.measurer, after, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, LOOKAHEAD_BREAK).lines;
       const top = this.y + Math.max(this.lastParaSpacingAfter, np.spacingBefore ?? 0) - this.lastParaSpacingAfter;
-      if (np.pageBreakBefore || leadingBreakOf(after)?.type === "page") this.newPage(false);
-      else if (lines.length > 0 && top + openingHeight(lines, np) > this.bodyBottom + 0.25) this.nextColumn();
+      if (np.pageBreakBefore || leadingBreakOf(after)?.type === "page") {
+        this.newPage(false);
+        // This page stands for the follower's leading break: placeParagraph
+        // does not break again (see openedForLeadingBreak).
+        this.cur.openedForLeadingBreak = true;
+      } else if (lines.length > 0 && top + openingHeight(lines, np) > this.bodyBottom + 0.25) this.nextColumn();
     }
     this.placeFrame(group, fr);
   }
@@ -4904,9 +4908,9 @@ class Engine {
           break;
         }
         // A page or column break sends this paragraph's boxes, and those of
-        // the paragraphs after it, to a later page. A frame found above
-        // still goes by the frame pass below, which stops at a page break.
-        if (this.doc.effectiveParaProps(blk).pageBreakBefore || hasHardBreak(blk)) break;
+        // the paragraphs after it, to a later page. A frame paragraph is out
+        // of the flow: the frame pass below decides about its breaks.
+        if (this.blockFrame(blk)?.w === undefined && (this.doc.effectiveParaProps(blk).pageBreakBefore || hasHardBreak(blk))) break;
         for (const s of this.collectAnchors(blk)) {
           if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
           if ("behind" in s && s.behind) continue;
@@ -9228,7 +9232,10 @@ class Engine {
         // off the page; 089704 and 086826: a nested table of tall empty rows
         // ran off the page and its last rows were lost).
         const mustSplit = atColumnTop || rowHeight > this.cur.bodyBottom - this.cur.bodyTop + 0.01;
-        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y - noteRoom, keepSlack, mustSplit) : null;
+        let parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y - noteRoom, keepSlack, mustSplit) : null;
+        // A row that cannot move on splits even when its notes leave no room
+        // for a line: the notes then continue on the next page.
+        if (!parts && canSplit && mustSplit && noteRoom > 0) parts = this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack, mustSplit);
         if (parts) {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);

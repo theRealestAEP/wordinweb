@@ -302,6 +302,39 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     expect(texts(pages[0].items).map((i) => i.text)).toContain("FirstPage");
   });
 
+  it("keeps a page-anchored caption and its follower together after a leading page break run", () => {
+    const page = `<w:framePr w:w="3000" w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="1500" w:y="2000"/>`;
+    const pages = layoutPages(
+      `<w:p><w:r><w:t>FirstPage</w:t></w:r></w:p>` +
+        framed("Caption", page) +
+        `<w:p><w:r><w:br w:type="page"/><w:t>Follower</w:t></w:r></w:p>` +
+        SECTION,
+    );
+
+    expect(pages).toHaveLength(2);
+    expect(texts(pages[0].items).map((i) => i.text)).toEqual(["FirstPage"]);
+    expect(texts(pages[1].items).map((i) => i.text)).toContain("Caption");
+    expect(texts(pages[1].items).map((i) => i.text)).toContain("Follower");
+  });
+
+  it("places the intro below both frames when the first frame has a trailing page break", () => {
+    const first = `<w:framePr w:w="3000" w:h="600" w:hRule="exact" w:wrap="notBeside" w:vAnchor="page" w:hAnchor="margin" w:x="0" w:y="1440"/>`;
+    const second = `<w:framePr w:w="4000" w:h="1200" w:hRule="exact" w:wrap="notBeside" w:vAnchor="page" w:hAnchor="margin" w:x="0" w:y="1440"/>`;
+    const pages = layoutPages(
+      `<w:p><w:r><w:t>Intro</w:t></w:r></w:p>` +
+        framed(`FirstFrame</w:t><w:br w:type="page"/><w:t>`, first) +
+        framed("SecondFrame", second) +
+        BODY +
+        SECTION,
+    );
+    const items = pages[0].items;
+    const intro = line(items, "Intro");
+
+    expect(pages).toHaveLength(1);
+    expect(intro.lineTop).toBeGreaterThanOrEqual(line(items, "FirstFrame").lineTop + 600 * TW - 0.01);
+    expect(intro.lineTop).toBeGreaterThanOrEqual(line(items, "SecondFrame").lineTop + 1200 * TW - 0.01);
+  });
+
   it("does not stretch a table's fill in an exact-height frame", () => {
     const exact = `<w:framePr w:w="4000" w:h="3000" w:hRule="exact" w:wrap="around" w:vAnchor="text" w:hAnchor="page" w:x="1494" w:y="0"/>`;
     const table =

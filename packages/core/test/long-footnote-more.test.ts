@@ -263,6 +263,31 @@ describe("more long footnotes", () => {
     expect(notePages[0].index).toBe(referencePages[0].index);
   });
 
+  it("splits a row below a repeated header when its footnote leaves no room for a cut", () => {
+    // The 200px body has only 60px left below the 140px repeated header.
+    // Twelve 15px lines fit a fresh body, so splitting relies on treating
+    // the position below repeated headers as the column top.
+    const section = `<w:sectPr><w:pgSz w:w="12240" w:h="3600"/><w:pgMar w:top="300" w:bottom="300" w:left="1440" w:right="1440"/></w:sectPr>`;
+    const cellPr = `<w:tcPr><w:tcW w:w="9360" w:type="dxa"/></w:tcPr>`;
+    const header = `<w:tr><w:trPr><w:tblHeader/><w:trHeight w:val="2100" w:hRule="exact"/></w:trPr><w:tc>${cellPr}${para("Repeated header")}</w:tc></w:tr>`;
+    const rowText = (para("Row reference", true) + paragraphs("Row", 11))
+      .replaceAll(SPACING, `<w:spacing w:before="0" w:after="0" w:line="225" w:lineRule="exact"/>`);
+    const row = `<w:tr><w:tc>${cellPr}${rowText}</w:tc></w:tr>`;
+    const table = `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid>${header}${row}</w:tbl>`;
+    const result = lay(documentBytes(table + section, paragraphs("Note", 4)));
+    const rowPages = result.pages.map((page) => lines(page).filter((line) => line.text.startsWith("Row")));
+
+    expect(rowPages.flat().filter((line) => /^Row \d{3}$/.test(line.text)).map((line) => line.text)).toEqual(labels("Row", 11));
+    expect(rowPages.flat().filter((line) => line.text.startsWith("Row reference"))).toHaveLength(1);
+    expect(noteLabels(result.pages).flat()).toEqual(labels("Note", 4));
+    for (const page of result.pages) {
+      for (const line of lines(page)) {
+        expect(line.bottom, `${line.text}: bottom on page ${page.index}`).toBeLessThanOrEqual(page.bodyBottom + 0.5);
+      }
+    }
+    expect(rowPages.filter((rows) => rows.length > 0).length).toBeGreaterThan(1);
+  });
+
   it("keeps the text of three bordered 400px note rows inside page body boxes", () => {
     const borders = ["top", "bottom", "left", "right", "insideH"].map((side) =>
       `<w:${side} w:val="single" w:sz="8" w:color="43729D"/>`).join("");
