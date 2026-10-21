@@ -5045,8 +5045,13 @@ class Engine {
       // simulated (not read from the live cursor) — after a planned break the
       // next segment starts a fresh page by construction.
       let onPartialPage = !this.pageIsEmptyAtCursor();
+      // A line's floatYOffset pushes it below a float on the page it was
+      // broken against. The line that opens a new column or page leaves that
+      // float behind, so it takes no offset there (as emitLines does).
+      let freshColumn = false;
       for (let li = 0; li < lines.length; li++) {
-        simY += lines[li].floatYOffset ?? 0;
+        if (!freshColumn) simY += lines[li].floatYOffset ?? 0;
+        freshColumn = false;
         if (simOnCurrentPage) {
           const targetY = this.bannerLineY(simY, lines[li].fitHeight, simCol);
           if (targetY > simY + 0.01) {
@@ -5084,6 +5089,7 @@ class Engine {
           breaks.add(0);
           segStart = 0;
           nextSimColumn();
+          freshColumn = true;
           onPartialPage = false;
           li = -1;
           continue;
@@ -5116,6 +5122,7 @@ class Engine {
           breaks.add(breakAt);
           segStart = breakAt;
           nextSimColumn();
+          freshColumn = true;
           onPartialPage = false;
           // Re-simulate from the break line.
           li = breakAt - 1;
@@ -5216,6 +5223,12 @@ class Engine {
               (this.customNoteBannerFit ? CUSTOM_NOTE_BANNER_OVERHANG : 0) +
               0.01) &&
         !this.pageIsEmptyAtCursor();
+      // The line's floatYOffset is against a float on the page it was broken
+      // for; a line moved to a new column or page leaves that float behind
+      // (govdocs 000759: a moved heading kept the offset of a full-page
+      // figure and opened its new page 600px down).
+      const pageBefore = this.cur;
+      const colBefore = this.col;
       if ((planned || overflow) && li > fragStartLine) {
         closeFragment(li, false);
         this.nextColumn();
@@ -5233,6 +5246,7 @@ class Engine {
         if (li === 0) this.y += borderPadTop;
         startFragment(li);
       }
+      if (this.cur !== pageBefore || this.col !== colBefore) floatOffset = 0;
       // A planned/live column transition can open the pre-banner slot after
       // the first check above. Keep the line there only when it fits whole.
       floatOffset = clearBannerForLine(line, li, floatOffset);
