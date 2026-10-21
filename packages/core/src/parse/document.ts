@@ -2875,12 +2875,12 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   // deeper in) — leave them to their own table.
   if (props.styleId) {
     const nRows = rows.length;
-    const nCols =
-      grid.length ||
-      rows.reduce((m, r) => Math.max(m, r.cells.reduce((a, c) => a + c.props.gridSpan, 0)), 0);
+    const nCols = Math.max(grid.length, ...rows.map((r) =>
+      (r.props.gridBefore ?? 0) + r.cells.reduce((a, c) => a + c.props.gridSpan, 0) + (r.props.gridAfter ?? 0),
+    ));
     for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
       const row = rows[rowIdx];
-      let colStart = 0;
+      let colStart = row.props.gridBefore ?? 0;
       for (const cell of row.cells) {
         const colSpan = cell.props.gridSpan;
         for (const block of cell.blocks) {
@@ -2920,6 +2920,15 @@ function parseRow(tr: XmlElement, ctx: DocParseContext): TableRow {
   const trPr = child(tr, "trPr");
   const props: TableRowProps = {};
   if (trPr) {
+    props.gridBefore = intAttr(child(trPr, "gridBefore"), "val");
+    props.gridAfter = intAttr(child(trPr, "gridAfter"), "val");
+    for (const [name, key] of [["wBefore", "widthBefore"], ["wAfter", "widthAfter"]] as const) {
+      const width = child(trPr, name);
+      if (width && (attr(width, "type") ?? "dxa") === "dxa") {
+        const value = intAttr(width, "w");
+        if (value !== undefined) props[key] = twipsToPx(value);
+      }
+    }
     const height = child(trPr, "trHeight");
     if (height) {
       const val = intAttr(height, "val");

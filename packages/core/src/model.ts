@@ -945,6 +945,12 @@ export interface TableCell {
 }
 
 export interface TableRowProps {
+  /** Empty grid columns before/after the row's cells. */
+  gridBefore?: number;
+  gridAfter?: number;
+  /** Preferred widths in px of the omitted columns (wBefore/wAfter). */
+  widthBefore?: number;
+  widthAfter?: number;
   /** px; undefined = auto */
   height?: number;
   heightRule?: "auto" | "atLeast" | "exact";

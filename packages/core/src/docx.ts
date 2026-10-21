@@ -2376,7 +2376,7 @@ export class DocxDocument {
       const floor = 600;
       const widths = new Array<number>(columns.length).fill(floor);
       for (const row of table.rows) {
-        let column = 0;
+        let column = row.props.gridBefore ?? 0;
         for (const cell of row.cells) {
           const span = Math.max(1, Math.min(cell.props.gridSpan, columns.length - column));
           const demand = Math.max(floor * span, textLength(cell.blocks) * 100 + 300);
