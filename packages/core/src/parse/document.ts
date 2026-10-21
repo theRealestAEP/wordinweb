@@ -1752,6 +1752,7 @@ function parseDrawing(
       return v !== undefined ? emuToPx(v) : dflt;
     };
     const anchorAttr = bodyPr ? attr(bodyPr, "anchor") : undefined;
+    const vert = attr(bodyPr, "vert");
     // a:prstTxWarp — a WordArt preset text warp (arch/wave/chevron/circle):
     // bend the shape's text onto the preset envelope instead of flowing it.
     // "textNoShape" is the identity (no warp) and is treated as absent.
@@ -1825,11 +1826,16 @@ function parseDrawing(
         vRel: relOf(posV),
         hAlign: alignOf(posH),
         vAlign: vAlignOf(posV),
-        blocks: txbxContent ? parseBlocks(txbxContent, ctx) : [],
+        // Word uses the blank paragraph's mark size (GovDocs 092399).
+        // Reuse the walk's blocks so its caret anchor keeps that formatting.
+        blocks: texts[0]?.blocks ?? [],
         ...(textboxChainId !== undefined ? { chainId: textboxChainId, chainSeq: textboxChainSeq ?? 0 } : {}),
         ...(fill ? { fill } : {}),
         ...(strokeColor ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 0.75) } } : {}),
         textAnchor: anchorAttr === "ctr" ? "middle" : anchorAttr === "b" ? "bottom" : anchorAttr === "t" ? "top" : undefined,
+        vert: vert === "vert270" ? "vert270"
+          : vert === "vert" || vert === "eaVert" || vert === "wordArtVert" || vert === "wordArtVertRtl" || vert === "mongolianVert"
+            ? "vert" : undefined,
         insets: {
           l: insetOf("lIns", 9.6) + gL,
           t: insetOf("tIns", 4.8) + gT,
@@ -1864,7 +1870,6 @@ function parseDrawing(
   // loses that space and collapses front-matter pages.
   if (!anchor && textboxEl && texts.length <= 1) {
     const spPr = child(textboxEl, "spPr");
-    const txbxContent = findDescendant(child(textboxEl, "txbx")!, "txbxContent");
     const lnEl = child(spPr, "ln");
     const strokeColor = lnEl && !child(lnEl, "noFill") ? fillColorOf(lnEl) : undefined;
     const fill = fillColorOf(spPr) ?? styleFillOf(textboxEl);
@@ -1881,7 +1886,7 @@ function parseDrawing(
       lines: [],
       images: [],
       textbox: {
-        blocks: txbxContent ? parseBlocks(txbxContent, ctx) : [],
+        blocks: texts[0]?.blocks ?? [],
         ...(fill ? { fill } : {}),
         ...(strokeColor
           ? { stroke: { color: strokeColor, weight: Math.max(emuToPx(intAttr(lnEl, "w") ?? 0), 0.75) } }
@@ -2634,7 +2639,9 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
         const ta = style.get("v-text-anchor");
         const rotation = parseFloat(style.get("rotation") ?? "0") || 0;
         const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
-        const vmlInsets = parseVmlInset(findDescendant(el, "textbox")?.attrs["inset"]);
+        const textbox = findDescendant(el, "textbox");
+        const vmlInsets = parseVmlInset(textbox?.attrs["inset"]);
+        const textboxStyle = parseVmlStyle(textbox?.attrs["style"]);
         out.push({
           kind: "anchor",
           shape: {
@@ -2657,6 +2664,9 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
             pctWidthRel: relOf(style.get("mso-width-relative")),
             pctHeightRel: relOf(style.get("mso-height-relative")),
             textAnchor: ta === "middle" ? "middle" : ta === "bottom" ? "bottom" : undefined,
+            vert: textboxStyle.get("layout-flow") === "vertical"
+              ? textboxStyle.get("mso-layout-flow-alt") === "bottom-to-top" ? "vert270" : "vert"
+              : undefined,
             ...(rotation ? { rotation } : {}),
             z: zIndex,
             ...(zIndex < 0 ? { behind: true } : {}),

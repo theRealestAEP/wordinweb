@@ -442,6 +442,8 @@ export interface ShapeTextbox {
   pctHeightRel?: "page" | "margin";
   /** Vertical anchoring of the text INSIDE the box (v-text-anchor). */
   textAnchor?: "top" | "middle" | "bottom";
+  /** Text direction: clockwise top-to-bottom or counter-clockwise bottom-to-top. */
+  vert?: "vert" | "vert270";
   /** How body text flows around a DrawingML textbox (wp:wrap*). */
   wrap?: WrapMode;
   /** behindDoc: paint under the body text, never displace it. */

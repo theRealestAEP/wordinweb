@@ -407,6 +407,7 @@ interface LayoutSnapshot {
   lnLastPage: InternalPage | undefined;
   lnResetEpoch: number;
   lastRealPage: InternalPage | null;
+  consumedAnchors: Set<Shape>;
 }
 
 /** Engine state captured at a clean page top, enough to resume block layout
@@ -726,6 +727,11 @@ export class Prescan {
   private readonly bmNumbered = new Map<string, boolean>();
   private readonly refs: { field: FieldContent; ordinal: number; target: string; position: boolean; number: boolean }[] = [];
   private readonly notes: { type: "footnote" | "endnote"; id: number; section: number; customMark?: string }[] = [];
+  /** Linked text-box chains (wps:txbx/@id, wps:linkedTxbx) by chain id: the
+   * story (the seq-0 box's blocks) and each box's text height by chainSeq.
+   * A box finds where its part of the story starts from the boxes before it
+   * in the chain, whatever order the anchors are laid out in. */
+  readonly textboxChains = new Map<string, { blocks?: Block[]; capacities: Map<number, number> }>();
   private ordinal = 0;
   private section = 0;
 
@@ -768,6 +774,10 @@ export class Prescan {
           }
           continue;
         }
+        if (rc.kind === "anchor" && rc.shape.type === "textbox" && rc.shape.chainId !== undefined) {
+          this.visitChainBox(rc.shape);
+          continue;
+        }
         if (rc.kind !== "field") continue;
         const parts = rc.instruction.trim().split(/\s+/);
         if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
@@ -782,6 +792,18 @@ export class Prescan {
         if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
       }
     }
+  }
+
+  private visitChainBox(shape: Extract<Shape, { type: "textbox" }>): void {
+    let chain = this.textboxChains.get(shape.chainId!);
+    if (!chain) {
+      chain = { capacities: new Map() };
+      this.textboxChains.set(shape.chainId!, chain);
+    }
+    const seq = shape.chainSeq ?? 0;
+    if (seq === 0) chain.blocks = shape.blocks;
+    const ins = shape.insets ?? TEXTBOX_INSETS;
+    chain.capacities.set(seq, shape.height - ins.t - ins.b);
   }
 
   /** The blocks visited from here on belong to the next section. */
@@ -814,6 +836,26 @@ export class Prescan {
       numbers.set(note.id, note.customMark ?? (note.type === "footnote" ? ++fnCounter : ++enCounter));
     }
   }
+}
+
+/** Default text box insets px (bodyPr lIns/tIns/rIns/bIns: 0.1in, 0.05in). */
+const TEXTBOX_INSETS = { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+
+/** Where the part of a linked chain's story that follows a box starts: the
+ * top of the first line past the box bottom (story Y, frame-local), or
+ * Infinity when the story ends in the box. `start` is where the box's part
+ * starts and `capacity` its text height. The box always takes the first line
+ * of its part, clipped at its bottom when the box is shorter than the line:
+ * Word places at least one line in a box rather than leave it empty. */
+function chainBoxEnd(items: PageItem[], start: number, capacity: number): number {
+  let firstTop = Infinity;
+  for (const it of items) if (it.kind === "text" && it.lineTop >= start - 0.5) firstTop = Math.min(firstTop, it.lineTop);
+  let end = Infinity;
+  for (const it of items) {
+    if (it.kind !== "text" || it.lineTop <= firstTop + 0.5) continue;
+    if (it.lineTop - start + it.lineHeight > capacity + 0.5) end = Math.min(end, it.lineTop);
+  }
+  return end;
 }
 
 function prescanDocument(doc: DocxDocument): Prescan {
@@ -882,9 +924,8 @@ class Engine {
   /** Resolved floating-table footprints. Omitted tblOverlap permits overlap;
    * `never` tables are shifted below earlier colliding floating tables. */
   private floatingTablePositions = new Map<Table, { page: InternalPage; x: number; y: number; width: number; height: number; allowOverlap: boolean }>();
-  /** Linked text-box chains (wps:linkedTxbx): the seq-0 box records its story
-   * and the frame-local Y at which it overflowed, so later boxes continue it. */
-  private textboxChains = new Map<string, { blocks: Block[]; consumedY: number }>();
+  /** Linked text-box chains, from the prescan (Prescan.textboxChains). */
+  private textboxChains = new Map<string, { blocks?: Block[]; capacities: Map<number, number> }>();
   /** Note id → display number or custom mark, assigned in document order pre-layout. */
   private footnoteNumbers = new Map<number, number | string>();
   private endnoteNumbers = new Map<number, number | string>();
@@ -1247,6 +1288,8 @@ class Engine {
   private adoptPrescan(prescan: Prescan): void {
     this.footnoteNumbers = prescan.footnoteNumbers;
     this.endnoteNumbers = prescan.endnoteNumbers;
+    // A copy: the chains of headers and footers are added as they are laid out.
+    this.textboxChains = new Map(prescan.textboxChains);
     this.seqAssigned = prescan.seq;
     this.seqCounters = new Map(prescan.seqCounters);
     this.refFieldPosition = prescan.refPosition;
@@ -2910,6 +2953,7 @@ class Engine {
       lnLastPage: this.lnLastPage,
       lnResetEpoch: this.lnResetEpoch,
       lastRealPage: this.lastRealPage,
+      consumedAnchors: new Set(this.consumedAnchors),
     };
   }
 
@@ -2953,6 +2997,7 @@ class Engine {
     this.lnLastPage = s.lnLastPage;
     this.lnResetEpoch = s.lnResetEpoch;
     this.lastRealPage = s.lastRealPage;
+    this.consumedAnchors = new Set(s.consumedAnchors);
   }
 
   private nextColumn(): void {
@@ -3932,8 +3977,14 @@ class Engine {
 
   /** Shapes already emitted by a preceding paragraph's lookahead (Word's
    * anchor reflow: the float keeps its first-pass position while earlier
-   * lines move below it). */
-  private consumedAnchors = new WeakSet<Shape>();
+   * lines move below it). A section's measure pass consumes them too, so the
+   * set is part of the layout snapshot: restoring the items a lookahead drew
+   * without restoring the set left the shape drawn nowhere (GovDocs 083839:
+   * a square-wrapped box in a balanced 3-column section). */
+  private consumedAnchors = new Set<Shape>();
+  /** Set by emitAnchors when it moved a paragraph-positioned object up to
+   * keep it on the page (see keepOnPage). */
+  private anchorPushedUp = false;
 
   /** Frame paragraphs already placed by a preceding paragraph's lookahead
    * (page/margin-anchored frames reflow earlier content around them). */
@@ -4518,7 +4569,12 @@ class Engine {
     // anchor before its space-before. The offset itself then places the shape
     // alongside the text (IEEE's biography portrait: 12.6pt posOffset plus a
     // 12pt paragraph gap must not count that gap twice).
+    this.anchorPushedUp = false;
     emitParaAnchors(this.y);
+    // Only this paragraph's own paragraph-positioned objects move it: the
+    // lookaheads below draw other paragraphs' objects, and line-relative
+    // objects are placed from line tops before the paragraph is paginated.
+    const ownAnchorsPushedUp = this.anchorPushedUp;
     let broken = breakNow(paraTopEstimate);
 
     // relH="character"/relV="line" shapes: Word places them from the
@@ -4676,6 +4732,10 @@ class Engine {
           s.vRel === "margin" ? this.sp.marginTop + s.y :
           anchorTop + s.y;
         const d = s.wrap === "square" && "dist" in s && s.dist ? s.dist : { t: 0, b: 0 };
+        // A paragraph-positioned box that would run past the page bottom is
+        // left to its own paragraph, which takes it to the next page (see
+        // keepOnPage in emitAnchors).
+        if (s.vRel === "text" && top + h > this.sp.pageHeight + 0.5) return false;
         return top - d.t <= paraBottom + 0.25 && top + h + d.b >= paraTopEstimate - 0.25;
       });
       if (hits.length > 0) {
@@ -4961,6 +5021,12 @@ class Engine {
       emitCharLineAnchors(paraTopEstimate);
       lines = broken.lines;
     };
+
+    // An object of this paragraph that would run past the page bottom moves
+    // to the next page with the paragraph, as LibreOffice lays the GovDocs
+    // .doc files (026966's sidebar, 074645's biography box). At a page top
+    // there is nowhere better: the object stays, moved up (keepOnPage).
+    if (ownAnchorsPushedUp && !this.pageIsEmptyAtCursor()) restartOnNextColumn(spacingBefore);
 
     // keepLines: skip short shared columns until the paragraph fits. At a
     // fresh page top the empty-cursor guard lets oversized content progress.
@@ -5312,7 +5378,9 @@ class Engine {
       // next segment starts a fresh page by construction.
       let onPartialPage = !this.pageIsEmptyAtCursor();
       for (let li = 0; li < lines.length; li++) {
-        simY += lines[li].floatYOffset ?? 0;
+        // A line that starts a new column leaves its float's push behind,
+        // as the emit loop below does.
+        if (!(breaks.has(li) && li === segStart)) simY += lines[li].floatYOffset ?? 0;
         if (simOnCurrentPage) {
           const targetY = this.bannerLineY(simY, lines[li].fitHeight, simCol);
           if (targetY > simY + 0.01) {
@@ -5497,16 +5565,24 @@ class Engine {
         !postTablePageBreak &&
         (balancing
           ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
-          : this.y + (pageBreakOnlyDemand ?? line.fitHeight) >
+          : this.y + floatOffset + (pageBreakOnlyDemand ?? line.fitHeight) >
             this.bodyBottom - pendingNotes +
               (this.customNoteBannerFit ? CUSTOM_NOTE_BANNER_OVERHANG : 0) +
               0.01) &&
         !this.pageIsEmptyAtCursor();
-      if ((planned || overflow) && li > fragStartLine) {
+      // A line pushed below a float that leaves too little room goes to the
+      // next column whole (it used to be placed past the page bottom). The
+      // float's push belongs to the page the line leaves: carried along, it
+      // opened a blank band at the top of the next page (GovDocs 071877,
+      // doc97-check-c bug 7).
+      const movesOn = (planned || overflow) && li > fragStartLine;
+      const movesWhole = !movesOn && ((planned && li === 0) || (breaks.has(0) && li === 0 && !this.pageIsEmptyAtCursor()));
+      if (movesOn || movesWhole || overflow) floatOffset = 0;
+      if (movesOn) {
         closeFragment(li, false);
         this.nextColumn();
         startFragment(li);
-      } else if ((planned && li === 0) || (breaks.has(0) && li === 0 && !this.pageIsEmptyAtCursor())) {
+      } else if (movesWhole) {
         this.nextColumn();
         // A paragraph moved whole to a page top drops its spacing-before
         // but KEEPS the border reserve - the rule + gap still paint above
@@ -5911,7 +5987,7 @@ class Engine {
               { kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b },
             ]));
           }
-          const ins = tb.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+          const ins = tb.insets ?? TEXTBOX_INSETS;
           // Horizontally the shape stroke STRADDLES the shape edge (half in, half
           // out), so only HALF the border eats into the text on each side — the
           // usable WIDTH shrinks by bw (not 2*bw) and the left origin sits at
@@ -6784,6 +6860,20 @@ class Engine {
       const d = `M0 0 H${width} V${height} H0 Z${shape.revision.struck ? ` M0 ${height / 2} H${width}` : ""}`;
       page.items.push({ kind: "path", x, y, width, height, d, viewW: width, viewH: height, stroke: { color: shape.revision.color, width: 1.5 }, ...(rotate ? { rotate } : {}), front: true, z: shape.z });
     };
+    // A body object positioned from its paragraph or line never runs past the
+    // page bottom: its top moves up until it fits (or to the page top when it
+    // is taller than the page), and placeParagraph moves the paragraph to the
+    // next page when it can. Nothing past the page edge is printed, so the
+    // part below it was lost (GovDocs 026966, 029456, 036752: tall boxes
+    // anchored near the page bottom). Word's own rule is not established
+    // here; LibreOffice moves the anchor paragraph and the object to the next
+    // page in the .doc files.
+    const keepOnPage = (shape: Shape, y: number, height: number): number => {
+      if (page.physIndex === -1 || (shape.vRel !== "text" && shape.vRel !== "line")) return y;
+      if (y + height <= sp.pageHeight + 0.5) return y;
+      this.anchorPushedUp = true;
+      return Math.max(0, sp.pageHeight - height);
+    };
 
     for (const shape of shapes) {
       if (shape.type === "image") {
@@ -6809,6 +6899,7 @@ class Engine {
           else if (shape.vAlign === "bottom") y = oy + baseH - shape.height;
           else y = oy;
         }
+        y = keepOnPage(shape, y, shape.height);
         page.items.push({
           kind: "image",
           x: x - fx,
@@ -6854,6 +6945,7 @@ class Engine {
         if (shape.vAlign === "center") oy = originY(shape.vRel) + (baseH - shape.height) / 2;
         else if (shape.vAlign === "bottom") oy = originY(shape.vRel) + baseH - shape.height;
         else if (shape.vAlign === "top") oy = originY(shape.vRel);
+        oy = keepOnPage(shape, oy, shape.height);
         const centerX = ox - fx + shape.width / 2;
         const centerY = oy - fy + shape.height / 2;
         const rotate = shape.rotation
@@ -6899,14 +6991,16 @@ class Engine {
           this.emitDrawingText(ts, ox - fx, oy - fy, page, fields, !shape.behind, rotate, shape.z);
         }
         revisionFrame(shape, ox - fx, oy - fy, shape.width, shape.height, rotate?.(ox - fx, oy - fy));
-        // FRAME stories only: a wrapped art shape excludes its band like a
-        // text box does. probe-headeranchor2 (Word-exported twice, byte
-        // identical): a wrapTopAndBottom bar in a header puts the body top
-        // exactly at the bar's bottom (+distB) at both 40pt and 72pt extents,
-        // and hftemplates p3/p4 lay the header's own line below their
-        // page-positioned bars. Body flow ignores art wrap, as before - no
-        // body-flow fixture measures a wrapped art shape.
-        if (page.physIndex === -1 && shape.wrap && shape.wrap !== "none") {
+        // A wrapped art shape excludes its band like a text box does.
+        // probe-headeranchor2 (Word-exported twice, byte identical): a
+        // wrapTopAndBottom bar in a header puts the body top exactly at the
+        // bar's bottom (+distB) at both 40pt and 72pt extents, and
+        // hftemplates p3/p4 lay the header's own line below their
+        // page-positioned bars. The body flow does the same: break-table's
+        // br_smallTB_br (GovDocs, doc97-check-d) anchors a top-and-bottom
+        // rectangle 12pt above an empty paragraph, and the text after it
+        // was drawn over the rectangle.
+        if (shape.wrap && shape.wrap !== "none") {
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           const list = this.floats.get(page) ?? [];
           list.push({
@@ -7005,8 +7099,8 @@ class Engine {
         // a:spAutoFit — grow the box height to exactly fit the laid text plus
         // the top/bottom insets (the stored cy is only Word's cached value and
         // drifts from our text metrics; Word recomputes it to the content).
-        if (shape.autofitHeight) {
-          const aIns = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
+        if (shape.autofitHeight && !shape.vert) {
+          const aIns = shape.insets ?? TEXTBOX_INSETS;
           const countersSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
           const seenSnapshot = new Set(this.seenNumIds);
           const measured = this.layoutFrame(shape.blocks, Math.max(width - aIns.l - aIns.r, 1), fields);
@@ -7020,6 +7114,7 @@ class Engine {
         let oy = originY(shape.vRel) + shape.y;
         if (shape.pctY !== undefined) oy = originY(shape.vRel) + shape.pctY * pageH;
         if (shape.vAlign) oy = alignV(originY(shape.vRel), shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom, height, shape.vAlign);
+        oy = keepOnPage(shape, oy, height);
 
         // allowOverlap="0": slide the box right past any earlier overlapping
         // box so they don't overlap (Word's overlap avoidance).
@@ -7113,23 +7208,43 @@ class Engine {
           ]));
         }
         // Text insets (bodyPr lIns/tIns/rIns/bIns), default 0.1in/0.05in.
-        const ins = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
-        // Linked text-box chain: a continuation box (chainSeq>0) renders its
-        // chain's story starting where the previous box overflowed; the content
-        // box records that overflow point so the next box picks it up. Both
-        // boxes share a width, so one layout serves the whole chain.
-        const chain =
-          shape.chainId !== undefined ? this.textboxChains.get(shape.chainId) : undefined;
-        const isContinuation = shape.chainSeq !== undefined && shape.chainSeq > 0;
-        const storyBlocks = isContinuation && chain ? chain.blocks : shape.blocks;
-        // Content above skipTopY (frame-local) was shown by earlier boxes.
-        const skipTopY = isContinuation && chain ? chain.consumedY : 0;
+        const ins = shape.insets ?? TEXTBOX_INSETS;
+        // Vertical captions (GovDocs 045416 / m21) use the inset-adjusted
+        // HEIGHT as their line length. Keep the insets on the box axes:
+        // t/b shorten lines, l/r bound the rotated frame's cross axis.
+        // Keep the authored extent for vertical autofit boxes.
+        // Linked text-box chain: every box lays out the chain's whole story at
+        // its own width and shows the part the boxes before it in the chain
+        // leave over (their text heights come from the prescan), so the order
+        // the anchors are laid out in does not matter: GovDocs 032370 anchors
+        // one chain's boxes as seq 0, 2, 1 and another's as 1, 0. The prescan
+        // walks the body only; a chain in a header or footer is recorded here
+        // as its boxes are laid out.
+        // Vertical linked boxes use only their own story; chaining remains
+        // on the horizontal path until rotated overflow is supported.
+        const chainId = shape.vert ? undefined : shape.chainId;
+        let chain = chainId !== undefined ? this.textboxChains.get(chainId) : undefined;
+        if (chainId !== undefined && !chain) {
+          chain = { capacities: new Map() };
+          this.textboxChains.set(chainId, chain);
+        }
+        if (chain && !shape.chainSeq && !chain.blocks) chain.blocks = shape.blocks;
+        if (chain && !chain.capacities.has(shape.chainSeq ?? 0)) chain.capacities.set(shape.chainSeq ?? 0, height - ins.t - ins.b);
+        const isContinuation = chainId !== undefined && shape.chainSeq !== undefined && shape.chainSeq > 0;
+        const storyBlocks = isContinuation ? (chain?.blocks ?? shape.blocks) : shape.blocks;
         // A chained box clips at its bottom (overflow flows to the next box)
         // even without noAutofit.
-        const chained = shape.chainId !== undefined;
-        const capacity = height - ins.t - ins.b;
-        const innerWidth = Math.max(width - ins.l - ins.r, 1);
+        const chained = chainId !== undefined;
+        const capacity = shape.vert ? width - ins.l - ins.r : height - ins.t - ins.b;
+        const innerWidth = Math.max(shape.vert ? height - ins.t - ins.b : width - ins.l - ins.r, 1);
         const inner = this.layoutFrame(storyBlocks, innerWidth, fields, { x: ox + ins.l, y: oy + ins.t });
+        // Content above skipTopY (frame-local) was shown by earlier boxes in
+        // the chain; Infinity: the story ended before this box.
+        let skipTopY = 0;
+        for (let seq = 0; chained && seq < (shape.chainSeq ?? 0) && skipTopY !== Infinity; seq++) {
+          const before = chain?.capacities.get(seq);
+          if (before !== undefined) skipTopY = chainBoxEnd(inner.items, skipTopY, before);
+        }
         // a:prstTxWarp — the shape's text is bent onto a preset envelope filling
         // the box, not flowed as ordinary lines. Reuse the frame's resolved font
         // and color (theme/style resolution already applied), then hand the box
@@ -7181,18 +7296,33 @@ class Engine {
           }
           continue;
         }
+        let innerLeft = ox + ins.l;
         let innerTop = oy + ins.t;
-        if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
-        else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
-        // Record the overflow point for the next box in the chain (seq-0 box).
-        if (shape.chainId !== undefined && !isContinuation) {
-          let cut = Infinity;
-          for (const it of inner.items) {
-            if (it.kind !== "text") continue;
-            if (it.lineTop + it.lineHeight > capacity + 0.5) cut = Math.min(cut, it.lineTop);
-          }
-          this.textboxChains.set(shape.chainId, { blocks: storyBlocks, consumedY: cut });
+        let clipTop = oy;
+        let clipBottom = oy + height;
+        let textRotate = rotate;
+        if (shape.vert) {
+          // Like btLr/tbRl table cells, rotate the horizontal frame. Express
+          // its origin about the box center so a:xfrm rot adds to the text
+          // angle and still rotates the fill, outline and text together.
+          const direction = shape.vert === "vert" ? 1 : -1;
+          const cx = ox + width / 2;
+          const cy = oy + height / 2;
+          const insetCx = ox + ins.l + capacity / 2;
+          const insetCy = oy + ins.t + innerWidth / 2;
+          innerLeft = cx + direction * (insetCy - cy) - innerWidth / 2;
+          innerTop = cy - direction * (insetCx - cx) - capacity / 2;
+          clipTop = innerTop;
+          clipBottom = innerTop + capacity;
+          if (shape.textAnchor === "middle") innerTop += (capacity - inner.height) / 2;
+          else if (shape.textAnchor === "bottom") innerTop += capacity - inner.height;
+          textRotate = (itemX, itemY) => ({ deg: direction * 90 + (shape.rotation ?? 0), ox: cxc - itemX, oy: cyc - itemY });
+        } else {
+          if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
+          else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
         }
+        // Lines from chainEnd on flow into the next box in the chain.
+        const chainEnd = chained ? chainBoxEnd(inner.items, skipTopY, capacity) : Infinity;
         // Every text box keeps a full-box hit target, including Word's
         // transparent/borderless VML text boxes. It is emitted before the
         // story text so glyph clicks can enter text editing while blank parts
@@ -7224,9 +7354,18 @@ class Engine {
         // A noAutofit line past the box bottom is not painted, but the story
         // is still editable, so it keeps its geometry in page.hiddenText —
         // otherwise a caret pushed onto that line (Enter on the last line that
-        // fits) has no binding to sit on and vanishes.
-        for (const it of inner.items) {
+        // fits) has no binding to sit on and vanishes. Word hides such a line
+        // whole (probe-shapefit's B3 box shows two lines and no part of the
+        // third), except the box's first line: in a box shorter than one line
+        // it is painted clipped to the box (TextItem.clip), so a one-line
+        // label (the SF-424 form in GovDocs 042652) is not an empty box.
+        let firstLineTop = Infinity;
+        for (const it of inner.items) if (it.kind === "text") firstLineTop = Math.min(firstLineTop, it.lineTop);
+        // A continuation box whose story ended in an earlier box stays empty.
+        const storyItems = skipTopY === Infinity ? [] : inner.items;
+        for (const it of storyItems) {
           let clipped = false;
+          let partial = false;
           if (it.kind === "text") {
             if (shape.wordArtOpacity !== undefined) it.opacity = shape.wordArtOpacity;
             if (independentStory && shape.srcDrawing) it.textboxStory = shape.srcDrawing;
@@ -7234,18 +7373,28 @@ class Engine {
             // content-bottom] window (overflow flows to the next box, which
             // paints them and owns their caret); a plain noAutofit box clips
             // at the box bottom edge with nowhere else for the line to go.
-            if (chained && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; continue; }
-            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) { clippedLines++; clipped = true; }
+            if (chained && it.lineTop >= chainEnd - 0.5) { clippedLines++; continue; }
+            if (chained && it.lineTop >= skipTopY - 0.5 && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; partial = true; }
+            if (!chained && shape.clipText && innerTop + it.lineTop + it.lineHeight > clipBottom + 0.5) {
+              clippedLines++;
+              if (it.lineTop <= firstLineTop + 0.5 && innerTop + it.lineTop < clipBottom - 0.5) partial = true;
+              else clipped = true;
+            }
             // Content above skipTopY was PAINTED by an earlier box in the
             // chain, so skipping it here hides nothing.
             if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
           }
-          offsetItem(it, ox + ins.l - fx, innerTop - skipTopY - fy);
-          if (rotate && (it.kind === "text" || it.kind === "rect")) {
+          offsetItem(it, innerLeft - fx, innerTop - skipTopY - fy);
+          if (partial && it.kind === "text") {
+            const top = clipTop - fy;
+            const bottom = clipBottom - fy;
+            it.clip = it.clip ? { top: Math.max(it.clip.top, top), bottom: Math.min(it.clip.bottom, bottom) } : { top, bottom };
+          }
+          if (textRotate && (it.kind === "text" || it.kind === "rect")) {
             const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
-            it.rotate = rotate(it.x, iy);
-          } else if (rotate && it.kind === "edge") {
-            it.rotate = rotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
+            it.rotate = textRotate(it.x, iy);
+          } else if (textRotate && it.kind === "edge") {
+            it.rotate = textRotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
           }
           if (behind && (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit")) it.behind = true;
           if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
@@ -7493,36 +7642,70 @@ class Engine {
     const footer = this.doc.footers.get(page.footerRel ?? "");
     if (footer && footer.blocks.length > 0) {
       const overlayPageFrame = this.pageFieldFrameOverlay(footer);
-      // Two passes: the frame's page position depends on its own height,
-      // which anchored-shape resolution needs up front.
-      let snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-      let seenSnapshot = new Set(this.seenNumIds);
-      const measured = this.layoutFrame(footer.blocks, contentWidth, fields, undefined, false, overlayPageFrame);
-      this.counters = snapshot;
-      this.seenNumIds = seenSnapshot;
-      const legacyPageFrame =
+      // Numbering runs on through the footer's pieces and is restored after
+      // the whole footer, as when the footer is laid out in one piece.
+      const footerCounters = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      const footerSeen = new Set(this.seenNumIds);
+      const place = (blocks: Block[], x: number, y: number, width: number) => {
+        this.hfMarginVTop = page.bodyTop;
+        const { items } = this.layoutFrame(blocks, width, fields, { x, y }, false, overlayPageFrame);
+        this.hfMarginVTop = null;
+        for (const it of items) offsetItem(it, x, y);
+        page.items.push(...items);
+      };
+      // Before compatibility mode 15, a footer paragraph framed to the page
+      // (w:framePr vAnchor="page") sits at its frame's page Y, and the rest of
+      // the footer stacks up from the footer distance without it. us-courts-
+      // answer's 'Page N of M' frame lands on Word's 763.9pt; GovDocs 030685
+      // (a framed logo, then five address lines) printed the address lines
+      // below the page when the whole footer hung down from the frame.
+      const legacyPageFrame = (block: Block) =>
         this.doc.compatibilityMode < 15 &&
-        footer.blocks.some(
-          (block) =>
-            block.type === "paragraph" &&
-            this.doc.effectiveParaProps(block).frame?.vAnchor === "page",
-        );
-      const top =
-        sp.pageHeight -
-        sp.footerDistance -
-        (legacyPageFrame ? 0 : measured.height);
-      snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-      seenSnapshot = new Set(this.seenNumIds);
-      this.hfMarginVTop = page.bodyTop;
-      const { items } = this.layoutFrame(footer.blocks, contentWidth, fields, {
-        x: hfOriginX,
-        y: top,
-      }, false, overlayPageFrame);
-      this.hfMarginVTop = null;
-      this.counters = snapshot;
-      this.seenNumIds = seenSnapshot;
-      for (const it of items) offsetItem(it, hfOriginX, top);
-      page.items.push(...items);
+        block.type === "paragraph" &&
+        this.doc.effectiveParaProps(block).frame?.vAnchor === "page";
+      const flow = footer.blocks.filter((block) => !legacyPageFrame(block));
+      // Two passes: the flow's top depends on its own height, which
+      // anchored-shape resolution needs up front.
+      let flowTop = 0;
+      if (flow.length > 0) {
+        const measured = this.layoutFrame(flow, contentWidth, fields, undefined, false, overlayPageFrame);
+        this.counters = new Map(Array.from(footerCounters, ([k, v]) => [k, [...v]]));
+        this.seenNumIds = new Set(footerSeen);
+        flowTop = sp.pageHeight - sp.footerDistance - measured.height;
+      }
+      // The flow and the frames are placed in document order, so numbering
+      // runs in that order. Consecutive paragraphs with the same frame
+      // properties share one frame and stack inside it.
+      const blocks = footer.blocks;
+      let flowPlaced = false;
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        if (block.type !== "paragraph" || !legacyPageFrame(block)) {
+          if (!flowPlaced) place(flow, hfOriginX, flowTop, contentWidth);
+          flowPlaced = true;
+          continue;
+        }
+        const frame = this.doc.effectiveParaProps(block).frame!;
+        const group: Block[] = [block];
+        while (i + 1 < blocks.length && legacyPageFrame(blocks[i + 1])) {
+          const next = blocks[i + 1];
+          if (next.type !== "paragraph" || JSON.stringify(this.doc.effectiveParaProps(next).frame) !== JSON.stringify(frame)) break;
+          group.push(next);
+          i++;
+        }
+        const fr = this.resolveFrame(frame);
+        const width = fr.w ?? contentWidth;
+        const [base, span] =
+          fr.hAnchor === "page" ? [0, sp.pageWidth] :
+          fr.hAnchor === "margin" ? [sp.marginLeft, sp.pageWidth - sp.marginLeft - sp.marginRight] :
+          [hfOriginX, contentWidth];
+        let x = base + fr.x;
+        if (fr.x === 0 && fr.xAlign === "center") x = base + (span - width) / 2;
+        else if (fr.x === 0 && (fr.xAlign === "right" || fr.xAlign === "outside")) x = base + span - width;
+        place(group, x, fr.y, width);
+      }
+      this.counters = footerCounters;
+      this.seenNumIds = footerSeen;
     }
   }
 
@@ -10629,6 +10812,7 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       item.x += dx;
       item.baseline += dy;
       item.lineTop += dy;
+      if (item.clip) item.clip = { top: item.clip.top + dy, bottom: item.clip.bottom + dy };
       if (item.glyphTop !== undefined) item.glyphTop += dy;
       if (item.caretClampX !== undefined) item.caretClampX += dx;
       break;

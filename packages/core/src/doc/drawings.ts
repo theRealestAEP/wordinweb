@@ -504,6 +504,8 @@ export interface DocDrawing {
   shapes: ArtRecord[];
   /** The record each spid lives in, including group children. */
   bySpid: Map<number, { record: ArtRecord; parents: ArtRecord[]; topLevel: ArtRecord; zIndex: number }>;
+  /** Text box stories with a continuation shape (lTxid sequence > 0). */
+  continuedTextBoxStories: Set<number>;
 }
 
 export interface DocOfficeArt {
@@ -548,11 +550,13 @@ export function parseOfficeArtContent(bytes: Uint8Array, offset = 0, length = by
 }
 
 function indexDrawing(bytes: Uint8Array, dgglbl: number, dg: ArtRecord): DocDrawing {
-  const drawing: DocDrawing = { dgglbl, shapes: [], bySpid: new Map() };
+  const drawing: DocDrawing = { dgglbl, shapes: [], bySpid: new Map(), continuedTextBoxStories: new Set() };
   const index = (rec: ArtRecord, parents: ArtRecord[], topLevel: ArtRecord, zIndex: number) => {
     if (rec.type === REC.SpContainer) {
       const fsp = findChild(bytes, rec, REC.FSP);
       if (fsp) drawing.bySpid.set(view(bytes).getInt32(fsp.start, true), { record: rec, parents, topLevel, zIndex });
+      const id = propNumber(shapeProps(bytes, rec), P.lTxid);
+      if (id !== undefined && (id & 0xffff) > 0) drawing.continuedTextBoxStories.add((id >> 16) - 1);
     } else if (rec.type === REC.SpgrContainer) {
       const children = childRecords(bytes, rec.start, rec.start + rec.length);
       for (const child of children) index(child, [...parents, rec], topLevel, zIndex);

@@ -17,6 +17,8 @@ export interface DrawingXmlOptions {
   textBoxContent?: (shape: DocShape) => string | undefined;
   /** Added to a text box story's number to make a linked chain's id unique in the document (header stories count apart). */
   textBoxIdBase?: number;
+  /** Stories with a shape that continues the first box's text. */
+  continuedTextBoxStories?: ReadonlySet<number>;
 }
 
 const NS =
@@ -201,7 +203,9 @@ function wspXml(shape: DocShape, frame: { x: number; y: number; cx: number; cy: 
     body = `<wps:linkedTxbx id="${chainId}" seq="${text.sequence}"/>`;
   } else if (isTextBox) {
     const content = shape.wordArt ? `<w:p><w:r><w:t xml:space="preserve">${escape(shape.wordArt.text)}</w:t></w:r></w:p>` : options.textBoxContent?.(shape) ?? "<w:p/>";
-    body = `<wps:txbx${text?.next ? ` id="${chainId}"` : ""}><w:txbxContent>${content}</w:txbxContent></wps:txbx>`;
+    // Word assigns a chain id when another shape continues the story
+    // (GovDocs 092639, 042652).
+    body = `<wps:txbx${text && options.continuedTextBoxStories?.has(text.story) ? ` id="${chainId}"` : ""}><w:txbxContent>${content}</w:txbxContent></wps:txbx>`;
   }
   const insets = text?.insets ?? { left: 91440, top: 45720, right: 91440, bottom: 45720 };
   const bodyPr =
