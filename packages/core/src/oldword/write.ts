@@ -12,8 +12,7 @@ import { ParaProps, RunProps, SectionProps, Tab, newParaProps, newSectionProps }
 import { symbolText } from "../pdf/dib.js";
 import { dibToWmf } from "./dibwmf.js";
 import { Block, HeaderKind, Inline, OldDocument, Paragraph, Picture, Run, Section } from "./model.js";
-
-const CP1252 = new TextDecoder("windows-1252");
+import { windows1252 as CP1252 } from "../windows1252.js";
 
 /**
  * The Far Eastern code pages, told by a font name the system wrote in
@@ -201,7 +200,7 @@ class WriteReader {
       const found = FAR_EAST.find(([label, words]) => words.test(new TextDecoder(label).decode(name)));
       if (found) codePage = found[0];
     }
-    const text = new TextDecoder(codePage);
+    const text = codePage === "windows-1252" ? CP1252 : new TextDecoder(codePage);
     for (const name of raw) {
       const decoded = text.decode(name);
       this.fonts.push(decoded);
@@ -448,7 +447,7 @@ class WriteReader {
 }
 
 /** How a font's character codes become text: the Symbol font's are its Unicode characters, a pictograph font's stay codes at U+F000, any other's are the document's code page. */
-function fontDecoder(name: string, text: TextDecoder): (raw: Uint8Array) => string {
+function fontDecoder(name: string, text: { decode(raw: Uint8Array): string }): (raw: Uint8Array) => string {
   if (/^symbol$/i.test(name)) return (raw) => symbolText(raw);
   if (/wingdings|webdings|dingbats|sorts/i.test(name)) return (raw) => Array.from(raw, (b) => String.fromCharCode(0xf000 + b)).join("");
   return (raw) => text.decode(raw);

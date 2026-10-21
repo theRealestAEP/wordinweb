@@ -1,4 +1,5 @@
 // Little-endian readers over the raw bytes, and the string tables of [MS-DOC] 2.2.4.
+import { windows1252 as cp1252 } from "../windows1252.js";
 
 export function u8(b: Uint8Array, at: number): number {
   return b[at];
@@ -25,8 +26,6 @@ export function utf16(b: Uint8Array, at: number, chars: number): string {
   for (let i = 0; i < chars && at + 2 * i + 1 < b.length; i++) out += String.fromCharCode(u16(b, at + 2 * i));
   return out;
 }
-
-const cp1252 = new TextDecoder("windows-1252");
 
 /** An STTB ([MS-DOC] 2.2.4): its strings and, per string, its extra data. */
 export function parseSttb(b: Uint8Array): { strings: string[]; extra: Uint8Array[] } {

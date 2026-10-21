@@ -5,6 +5,7 @@
 import { u16, u32 } from "./bytes.js";
 import type { Word6Fib } from "./fib.js";
 import { word6Grpprl } from "./word6.js";
+import { windows1252 as cp1252 } from "../windows1252.js";
 
 export interface Piece {
   /** The first CP of the piece and one past its last. */
@@ -28,7 +29,6 @@ const PRM0_SPRMS: Record<number, number> = {
   0x73: 0x2a53, 0x74: 0x0854, 0x75: 0x0855, 0x76: 0x0856, 0x78: 0x2640, 0x7b: 0x2a90, 0x7c: 0x2a86, 0x7e: 0x2443,
 };
 
-const cp1252 = new TextDecoder("windows-1252");
 /** Each byte as the character of the same code (the Encoding Standard's "latin1" is Windows-1252). */
 const bytesDecoder = {
   decode(bytes: Uint8Array): string {

@@ -12,8 +12,8 @@ import { newSectionProps } from "../doc/sprm.js";
 import { symbolText } from "../pdf/dib.js";
 import { Inline, OldDocument, Picture } from "./model.js";
 import { Char, DocProps, Entry, Fib, Sprm, Word2Reader, popcount } from "./word2.js";
+import { windows1252 as CP1252 } from "../windows1252.js";
 
-const CP1252 = new TextDecoder("windows-1252");
 const CP1252_CHARS: string[] = Array.from({ length: 256 }, (_, i) => CP1252.decode(Uint8Array.of(i)));
 
 /** The operand sizes of Word for Windows 2.0's sprms. */

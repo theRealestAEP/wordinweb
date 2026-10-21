@@ -3,6 +3,7 @@ import { FontSet } from "./fonts.js";
 import { Resources } from "./resources.js";
 import { decodeDib, symbolText } from "./dib.js";
 import { BitmapBudget } from "./images.js";
+import { windows1252 } from "../windows1252.js";
 
 /**
  * A WMF played onto a RecordingCanvas, record by record, as [MS-WMF]
@@ -751,9 +752,10 @@ class WmfPlayer {
 
 function decodeText(raw: Uint8Array, charset: number): string {
   try {
-    return new TextDecoder(CHARSETS[charset] ?? "windows-1252").decode(raw);
+    const encoding = CHARSETS[charset] ?? "windows-1252";
+    return encoding === "windows-1252" ? windows1252.decode(raw) : new TextDecoder(encoding).decode(raw);
   } catch {
-    return new TextDecoder("windows-1252").decode(raw);
+    return windows1252.decode(raw);
   }
 }
 
