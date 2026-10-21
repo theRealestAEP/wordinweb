@@ -165,7 +165,7 @@ describe("a compatibility-mode 11 footer that starts with a page-anchored frame 
   const settings =
     `<?xml version="1.0"?><w:settings ${W}><w:compat><w:compatSetting w:name="compatibilityMode" ` +
     `w:uri="http://schemas.microsoft.com/office/word" w:val="11"/></w:compat></w:settings>`;
-  const load = () =>
+  const load = (footerXml = footer) =>
     DocxDocument.load(
       makeDocx({
         "word/document.xml": wrapDocument(
@@ -175,7 +175,7 @@ describe("a compatibility-mode 11 footer that starts with a page-anchored frame 
         "word/_rels/document.xml.rels":
           `<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
           `<Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`,
-        "word/footer1.xml": footer,
+        "word/footer1.xml": footerXml,
         "word/settings.xml": settings,
       }),
     );
@@ -192,6 +192,18 @@ describe("a compatibility-mode 11 footer that starts with a page-anchored frame 
     const logo = at("L");
     expect(logo.lineTop).toBeCloseTo(13537 / 15, 0);
     expect(logo.x).toBeCloseTo(5945 / 15, 0);
+  });
+
+  it("stacks paragraphs that share a frame, and aligns the frame by xAlign", () => {
+    const framePr = `<w:framePr w:w="1440" w:vAnchor="page" w:hAnchor="margin" w:xAlign="right" w:y="13537"/>`;
+    const framed = (text: string) => `<w:p><w:pPr>${framePr}</w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const doc = load(`<?xml version="1.0"?><w:ftr ${W}>${framed("NAME")}${framed("PLACE")}<w:p><w:r><w:t>FLOW</w:t></w:r></w:p></w:ftr>`);
+    const page = texts(layoutDocument(doc, { measurer }).pages[0].items);
+    const at = (word: string) => page.find((t) => t.text === word)!;
+    expect(at("NAME").lineTop).toBeCloseTo(13537 / 15, 0);
+    expect(at("PLACE").lineTop).toBeCloseTo(at("NAME").lineTop + at("NAME").lineHeight, 0);
+    // Right-aligned in the margin box: the 1in frame ends at the right margin (720px).
+    expect(at("NAME").x).toBeCloseTo(720 - 96, 0);
   });
 
   it("draws the footer lines inside the page in the DOM renderer", () => {

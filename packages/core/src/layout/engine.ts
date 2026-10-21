@@ -7093,7 +7093,11 @@ class Engine {
             if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
           }
           offsetItem(it, innerLeft - fx, innerTop - skipTopY - fy);
-          if (partial && it.kind === "text") it.clip = { top: clipTop - fy, bottom: clipBottom - fy };
+          if (partial && it.kind === "text") {
+            const top = clipTop - fy;
+            const bottom = clipBottom - fy;
+            it.clip = it.clip ? { top: Math.max(it.clip.top, top), bottom: Math.min(it.clip.bottom, bottom) } : { top, bottom };
+          }
           if (textRotate && (it.kind === "text" || it.kind === "rect")) {
             const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
             it.rotate = textRotate(it.x, iy);
@@ -7343,14 +7347,14 @@ class Engine {
     const footer = this.doc.footers.get(page.footerRel ?? "");
     if (footer && footer.blocks.length > 0) {
       const overlayPageFrame = this.pageFieldFrameOverlay(footer);
+      // Numbering runs on through the footer's pieces and is restored after
+      // the whole footer, as when the footer is laid out in one piece.
+      const footerCounters = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
+      const footerSeen = new Set(this.seenNumIds);
       const place = (blocks: Block[], x: number, y: number, width: number) => {
-        const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        const seenSnapshot = new Set(this.seenNumIds);
         this.hfMarginVTop = page.bodyTop;
         const { items } = this.layoutFrame(blocks, width, fields, { x, y }, false, overlayPageFrame);
         this.hfMarginVTop = null;
-        this.counters = snapshot;
-        this.seenNumIds = seenSnapshot;
         for (const it of items) offsetItem(it, x, y);
         page.items.push(...items);
       };
@@ -7375,13 +7379,33 @@ class Engine {
         this.seenNumIds = seenSnapshot;
         place(flow, hfOriginX, sp.pageHeight - sp.footerDistance - measured.height, contentWidth);
       }
-      for (const block of footer.blocks) {
-        if (block.type === "paragraph" && legacyPageFrame(block)) {
-          const fr = this.resolveFrame(this.doc.effectiveParaProps(block).frame!);
-          const x = fr.hAnchor === "page" ? fr.x : fr.hAnchor === "margin" ? sp.marginLeft + fr.x : hfOriginX + fr.x;
-          place([block], x, fr.y, fr.w ?? contentWidth);
+      // Consecutive paragraphs with the same frame properties share one frame
+      // and stack inside it.
+      const blocks = footer.blocks;
+      for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        if (block.type !== "paragraph" || !legacyPageFrame(block)) continue;
+        const frame = this.doc.effectiveParaProps(block).frame!;
+        const group: Block[] = [block];
+        while (i + 1 < blocks.length && legacyPageFrame(blocks[i + 1])) {
+          const next = blocks[i + 1];
+          if (next.type !== "paragraph" || JSON.stringify(this.doc.effectiveParaProps(next).frame) !== JSON.stringify(frame)) break;
+          group.push(next);
+          i++;
         }
+        const fr = this.resolveFrame(frame);
+        const width = fr.w ?? contentWidth;
+        const [base, span] =
+          fr.hAnchor === "page" ? [0, sp.pageWidth] :
+          fr.hAnchor === "margin" ? [sp.marginLeft, sp.pageWidth - sp.marginLeft - sp.marginRight] :
+          [hfOriginX, contentWidth];
+        let x = base + fr.x;
+        if (fr.x === 0 && fr.xAlign === "center") x = base + (span - width) / 2;
+        else if (fr.x === 0 && (fr.xAlign === "right" || fr.xAlign === "outside")) x = base + span - width;
+        place(group, x, fr.y, width);
       }
+      this.counters = footerCounters;
+      this.seenNumIds = footerSeen;
     }
   }
 
@@ -10339,6 +10363,7 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       item.x += dx;
       item.baseline += dy;
       item.lineTop += dy;
+      if (item.clip) item.clip = { top: item.clip.top + dy, bottom: item.clip.bottom + dy };
       if (item.glyphTop !== undefined) item.glyphTop += dy;
       if (item.caretClampX !== undefined) item.caretClampX += dx;
       break;
