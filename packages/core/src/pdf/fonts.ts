@@ -538,7 +538,7 @@ export interface ShapedRun {
   text: string;
   /** The run reads right to left: its glyphs stand in reverse of its text. */
   rtl: boolean;
-  /** The text each glyph stands for, for the ToUnicode map ("" for none). */
+  /** Each cluster's source text on its first glyph; "" on its remaining glyphs. */
   unicode: string[];
   /** Each glyph's offset from its pen position, px: x carries the width scale as the advances do, y is up. */
   xOffsets: number[];
@@ -810,33 +810,12 @@ export class FontSet {
         });
       }
       const end = ends.get(cluster)!;
-      const cps = [...shown.slice(cluster, end)];
-      if (group.some((g) => g.gid === 0) && shown.slice(cluster, end).trim()) for (const cp of cps) this.missingCodePoints.add(cp.codePointAt(0) as number);
-      // The text each glyph stands for: its own code point when it is the
-      // cmap's glyph for one of the cluster's, or of their decomposition
-      // (a reordered vowel sign; the two marks Thai sara am becomes) and
-      // not a glyph two letters share (Arial's heh and heh doachashmee);
-      // the cluster's other code points shared out over the rest, in
-      // order, the last of them taking what remains (a ligature, a
-      // precomposed letter a font composes from its parts).
-      const expanded = new Set([...cps.join("").normalize("NFKD")].map((ch) => ch.codePointAt(0) as number));
-      const own = group.map((g) => {
-        const cp = g.gid ? face.codePointOf(g.gid) : undefined;
-        return cp !== undefined && expanded.has(cp) ? cp : undefined;
-      });
-      const claimed = new Set(own.filter((cp): cp is number => cp !== undefined));
-      const rest = cps.filter((ch) => !claimed.has(ch.codePointAt(0) as number));
-      const free = own.filter((cp) => cp === undefined).length;
-      let taken = 0;
+      const source = shown.slice(cluster, end);
+      if (group.some((g) => g.gid === 0) && source.trim()) for (const cp of source) this.missingCodePoints.add(cp.codePointAt(0) as number);
+      // Source text belongs to the cluster. Glyph IDs can represent
+      // ligatures, decompositions or different sequences in different uses.
       group.forEach((g, k) => {
-        let unicode: string;
-        if (own[k] !== undefined) unicode = String.fromCodePoint(own[k]);
-        else {
-          unicode = taken === free - 1 ? rest.slice(taken).join("") : (rest[taken] ?? "");
-          taken++;
-          // A reader reverses what it reads of a right-to-left script letter by letter: a ligature's letters are stored reversed so they come out in order.
-          if (script.rtl && unicode.length > 1) unicode = [...unicode].reverse().join("");
-        }
+        const unicode = k === 0 ? source : "";
         run.gids.push(g.gid);
         run.advances.push(g.advance * unit);
         run.codePoints.push(unicode ? (unicode.codePointAt(0) as number) : 0);

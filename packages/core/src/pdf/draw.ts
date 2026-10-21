@@ -585,13 +585,9 @@ export class PageDrawer {
    * TJ shift on the baseline or its own Tm when raised (a mark). The laid
    * letter spacing (`spacing` per UTF-16 unit) goes after each cluster, or,
    * when HarfBuzz marked places for them, as kashida: tatweel glyphs
-   * stretched to share the spacing out, as Word elongates the joins. A
-   * left-to-right run's logical text is its ActualText, so the PDF's text
-   * extracts in reading order whatever the glyphs' order and number
-   * (Indic reordering, ligatures). A right-to-left run has none: a text
-   * extractor reverses what it reads of an RTL script itself (as it must
-   * for Word's PDFs), and the glyphs' own ToUnicode entries, visual order
-   * and all, are what it reverses right.
+   * stretched to share the spacing out, as Word elongates the joins.
+   * Each cluster's ActualText carries its source text, covering all its
+   * glyphs and any elongation inserted after it for justification.
    */
   private showShaped(ops: string[], run: GlyphRun, shaped: ShapedRun, font: EmbeddedFont, size: number, sy: number, spacing: number, stretch: number, widthScale: number, skew: number, x: number, y0: number): number {
     const face = run.face.face;
@@ -601,7 +597,6 @@ export class PageDrawer {
     const tatweel = spacing > 0 && places > 0 ? face.glyphId(0x0640) : 0;
     const tatweelWidth = tatweel ? face.advance(tatweel) * unit : 0;
     const kashida = tatweelWidth > 0 ? (spacing * shaped.text.length) / places : 0;
-    if (!shaped.rtl) ops.push(`/Span << /ActualText <feff${utf16Hex(shaped.text)}> >> BDC`);
     let pen = 0;
     /** Where the next glyph shows unless shifted, while a TJ is open. */
     let at = 0;
@@ -616,8 +611,12 @@ export class PageDrawer {
       open = false;
     };
     for (let i = 0; i < run.gids.length; i++) {
+      // Text extractors reverse RTL text from its visual order, including
+      // the characters within an ActualText span.
+      const unicode = shaped.rtl ? [...shaped.unicode[i]].reverse().join("") : shaped.unicode[i];
+      if (i === 0 || shaped.units[i - 1] > 0) ops.push(`/Span << /ActualText <feff${utf16Hex(unicode)}> >> BDC`);
       const gid = run.gids[i];
-      const cid = font.cid(gid, shaped.unicode[i]).toString(16).padStart(4, "0");
+      const cid = font.cid(gid, unicode).toString(16).padStart(4, "0");
       const xOffset = shaped.xOffsets[i] / widthScale;
       const yOffset = shaped.yOffsets[i];
       if (yOffset !== 0) {
@@ -641,12 +640,15 @@ export class PageDrawer {
       pen += run.advances[i] / widthScale;
       if (kashida && shaped.tatweelAfter[i]) {
         flush();
-        ops.push(`${num(stretch * 100 * (kashida / tatweelWidth))} Tz`, tm(pen, 0), `<${font.cid(tatweel, 0x0640).toString(16).padStart(4, "0")}> Tj`, `${num(stretch * 100)} Tz`);
+        ops.push(`${num(stretch * 100 * (kashida / tatweelWidth))} Tz`, tm(pen, 0), `<${font.cid(tatweel, 0).toString(16).padStart(4, "0")}> Tj`, `${num(stretch * 100)} Tz`);
         pen += kashida;
       } else if (!kashida) pen += spacing * shaped.units[i];
+      if (shaped.units[i] > 0) {
+        flush();
+        ops.push("EMC");
+      }
     }
     flush();
-    if (!shaped.rtl) ops.push("EMC");
     return x + pen * stretch;
   }
 
