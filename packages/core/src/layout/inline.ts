@@ -4496,11 +4496,12 @@ function formatDatePicture(d: Date, picture: string): string {
   const hasAmPm = /am\/pm/i.test(picture);
   // No /i flag: case is semantic (M=month, m=minute; H=24h, h=12h).
   return picture.replace(
-    /'[^']*'|yyyy|yy|MMMM|MMM|MM|M|dddd|ddd|dd|d|HH|H|hh|h|mm|m|ss|s|am\/pm|AM\/PM|Am\/Pm/g,
+    /'[^']*'|yyyy|yy|y|MMMM|MMM|MM|M|dddd|ddd|dd|d|HH|H|hh|h|mm|m|ss|s|am\/pm|AM\/PM|Am\/Pm/g,
     (tok) => {
       if (tok.startsWith("'")) return tok.slice(1, -1); // quoted literal
       switch (tok) {
         case "yyyy": return String(d.getFullYear());
+        case "y":
         case "yy": return pad(d.getFullYear() % 100);
         case "MMMM": return DP_MONTHS[d.getMonth()];
         case "MMM": return DP_MONTHS[d.getMonth()].slice(0, 3);

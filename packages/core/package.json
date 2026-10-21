@@ -24,6 +24,10 @@
     "./pdf": {
       "types": "./dist/pdf/render.d.ts",
       "import": "./dist/pdf/render.js"
+    },
+    "./docx-only": {
+      "types": "./dist/docx-only.d.ts",
+      "import": "./dist/docx-only.js"
     }
   },
   "bin": {

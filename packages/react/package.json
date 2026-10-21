@@ -27,6 +27,10 @@
     "./collab": {
       "types": "./dist/collab.d.ts",
       "import": "./dist/collab.js"
+    },
+    "./docx-only": {
+      "types": "./dist/docx-only.d.ts",
+      "import": "./dist/docx-only.js"
     }
   },
   "files": [
