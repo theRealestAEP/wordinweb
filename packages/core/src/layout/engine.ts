@@ -9107,7 +9107,14 @@ class Engine {
         if (hRules.length < 2 || top < hRules[0] - 0.5 || bottom > hRules[hRules.length - 1] + 0.5) {
           return undefined;
         }
-        for (const r of hRules) if (r >= bottom - 0.5) return r;
+        let bandTop = hRules[0];
+        for (const r of hRules) {
+          if (r <= top + 0.5) bandTop = r;
+          if (r >= bottom - 0.5) {
+            // A nested row taller than a page must split at its text lines.
+            return r - bandTop <= this.cur.bodyBottom - this.cur.bodyTop + 0.5 ? r : undefined;
+          }
+        }
         return undefined;
       };
       const keeps = (it: PageItem) => {
@@ -9292,6 +9299,36 @@ class Engine {
     for (const { cell, trailing, grips, keep, rest } of partitions) {
       const flowItems = cell.items.filter((it) => it.kind !== "grip");
       const keepTop = flowItems.length > 0 ? Math.min(...flowItems.map(topOf)) : 0;
+      // Nested cell fills and vertical rules span the text cut. Give each
+      // fragment its own piece before finding the continuation's anchor;
+      // a full-height decoration would hold that anchor above the cut.
+      const spanningPaint = new Set(flowItems.filter((it) =>
+        topOf(it) < cutH && bottomOf(it) > cutH && (
+          (it.kind === "rect" && it.role === "table-fill") ||
+          (it.kind === "edge" && it.role === "table-rule" && Math.abs(it.x1 - it.x2) < 0.01)
+        ),
+      ));
+      if (spanningPaint.size > 0) {
+        const kept = new Set(keep);
+        const remaining = new Set(rest);
+        keep.length = 0;
+        rest.length = 0;
+        // Preserve paint order so the cell background stays behind its text.
+        for (const it of flowItems) {
+          if (spanningPaint.has(it)) {
+            if (it.kind === "rect") {
+              keep.push({ ...it, height: cutH - it.y });
+              rest.push({ ...it, y: cutH, height: it.y + it.height - cutH });
+            } else if (it.kind === "edge") {
+              keep.push({ ...it, y1: topOf(it), y2: cutH });
+              rest.push({ ...it, y1: cutH, y2: bottomOf(it) });
+            }
+          } else {
+            if (kept.has(it)) keep.push(it);
+            if (remaining.has(it)) rest.push(it);
+          }
+        }
+      }
       // Word re-applies the row's top inset when a row RESUMES on the next
       // page: staging-grid4's continuation pages both place the first
       // "deep row N" line at the same offset the row's ORIGINAL first line

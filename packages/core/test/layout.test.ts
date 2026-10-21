@@ -5416,6 +5416,78 @@ describe("floating table flow and overlap", () => {
 });
 
 describe("nested table taller than the page", () => {
+  const smallSection =
+    `<w:sectPr><w:pgSz w:w="7000" w:h="3360"/>` +
+    `<w:pgMar w:top="750" w:right="750" w:bottom="750" w:left="750"/></w:sectPr>`;
+  const tallNestedRow = (cellProps: string, borders = "") => {
+    const paragraphs = Array.from({ length: 12 }, (_, i) => p(`Line${i}`,
+      `<w:pPr><w:spacing w:line="450" w:lineRule="exact"/></w:pPr>`,
+    )).join("");
+    return layout({
+      "word/document.xml": wrapDocument(
+        `<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc>` +
+        `<w:tbl><w:tblPr>${borders}</w:tblPr><w:tblGrid/><w:tr>` +
+        `<w:tc><w:tcPr>${cellProps}</w:tcPr>${paragraphs}</w:tc>` +
+        `</w:tr></w:tbl><w:p/></w:tc></w:tr></w:tbl>` + smallSection,
+      ),
+    }).result;
+  };
+  const expectVisibleLines = (result: ReturnType<typeof layoutDocument>) => {
+    const lines = result.pages.flatMap((page) => page.items.filter((item) =>
+      item.kind === "text" && item.text.trim(),
+    ));
+    for (let i = 0; i < 12; i++) {
+      expect(lines.filter((item) => item.kind === "text" && item.text === `Line${i}`)).toHaveLength(1);
+    }
+    for (const page of result.pages) {
+      const text = page.items.filter((item) => item.kind === "text" && item.text.trim());
+      if (text[0]?.kind === "text") expect(text[0].lineTop).toBeLessThan(page.bodyTop + 30);
+      for (const item of text) {
+        if (item.kind === "text") {
+          expect(item.lineTop).toBeGreaterThanOrEqual(page.bodyTop);
+          expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  };
+
+  it("splits a nested cell fill at the page cut before positioning the continuation", () => {
+    // 089704: the full-height background anchored the continuation at y=0.
+    const result = tallNestedRow(`<w:shd w:fill="FFFFFF"/>`);
+    expectVisibleLines(result);
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "rect" && item.role === "table-fill") {
+          expect(item.y).toBeGreaterThanOrEqual(page.bodyTop);
+          expect(item.y + item.height).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  });
+
+  it("splits nested vertical rules at the page cut before positioning the continuation", () => {
+    const result = tallNestedRow("", `<w:tblBorders>` +
+      `<w:left w:val="single" w:sz="6"/><w:right w:val="single" w:sz="6"/>` +
+      `</w:tblBorders>`);
+    expectVisibleLines(result);
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "edge" && item.x1 === item.x2) {
+          expect(Math.min(item.y1, item.y2)).toBeGreaterThanOrEqual(page.bodyTop);
+          expect(Math.max(item.y1, item.y2)).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  });
+
+  it("splits text inside a nested row whose horizontal rules span more than a page", () => {
+    // 090092: a nested description row exceeds the full page body height.
+    const result = tallNestedRow("", `<w:tblBorders>` +
+      `<w:top w:val="single" w:sz="6"/><w:bottom w:val="single" w:sz="6"/>` +
+      `</w:tblBorders>`);
+    expectVisibleLines(result);
+  });
+
   // GovDocs1 086826 and 089704 (doc97-check-d B9): the outer row never split,
   // because the nested cells' paragraph numbers collided and the row split
   // took two nested rows for one paragraph. Its rows ran off the page.
