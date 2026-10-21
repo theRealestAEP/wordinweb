@@ -27,7 +27,7 @@ const IMAGE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relatio
 const DEFAULT_EXTENSIONS = new Set(["png", "jpeg", "jpg", "gif", "bmp", "tiff", "emf", "wmf"]);
 
 /** The hooks that write a .doc's pictures and shapes into the converted package. */
-export function drawingHooks(reader: DocReader): ConvertHooks {
+export function drawingHooks(reader: DocReader, writeMedia?: (name: string, image: ArtImage, size: number) => void): ConvertHooks {
   const { streams, fib, parts: starts } = reader;
   const art = documentArt(reader);
   const anchors = new Map<number, { fspa: DocFspa; header: boolean }>();
@@ -46,13 +46,17 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
   const mediaIds = new Map<string, string>();
   let docPrId = 0;
   const addMedia = (image: ArtImage): string => {
-    const key = `${image.type}:${image.data.length}:${fnv(image.data)}`;
+    const bytes = writeMedia && image.borrowData ? image.borrowData() : image.data;
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 0x01000193) >>> 0;
+    const key = `${image.type}:${bytes.length}:${hash.toString(16)}`;
     let id = mediaIds.get(key);
     if (id) return id;
     const n = mediaIds.size + 1;
     const name = `media/image${n}.${image.ext}`;
     id = `rIdDocImage${n}`;
-    extra.files[`word/${name}`] = image.data;
+    if (writeMedia) writeMedia(`word/${name}`, image, bytes.length);
+    else extra.files[`word/${name}`] = bytes;
     extra.documentRels.push({ id, type: IMAGE_REL, target: name });
     if (!DEFAULT_EXTENSIONS.has(image.ext)) extra.contentTypes.push({ partName: `/word/${name}`, contentType: image.contentType });
     mediaIds.set(key, id);
@@ -128,10 +132,4 @@ export function textBoxRange(reader: DocReader, text: DocTextBox, header: boolea
   const end = stories.cps[text.story + 1];
   // The story's last character is its guard paragraph mark.
   return { start: base + start, end: base + Math.max(start, end - 1) };
-}
-
-function fnv(bytes: Uint8Array): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < bytes.length; i++) h = Math.imul(h ^ bytes[i], 0x01000193) >>> 0;
-  return h.toString(16);
 }

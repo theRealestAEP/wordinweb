@@ -147,6 +147,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   let hasChanges = false;
   const authors = options.authors !== false;
   const opened = await openStreamingDocument(typeof source === "string" ? fileSource(source) : source, {
+    borrowMedia: true,
     markup: options.markup,
     authors: options.authors,
     onBlock: (block, index) => {
