@@ -8609,7 +8609,7 @@ class Engine {
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       segHasRows = true;
       this.y += rowHeight;
-      if (row.props.tblHeader && startsAtTop && segPage === this.cur) belowRepeatedHeaders = this.y;
+      if (ri < headerRows.length && startsAtTop && segPage === this.cur) belowRepeatedHeaders = this.y;
       // Separated cell borders: 2*spacing of vertical air between each row's
       // cell boxes (matching the horizontal gap), so the row-to-row boundary
       // shows two rules with a gap rather than one shared rule.
@@ -9018,7 +9018,8 @@ class Engine {
     avail: number,
     /** Extra depth text glyphs may reach past the drawn cut (note fill band). */
     keepSlack = 0,
-    /** The row is at the top of its page: a part may hold only empty lines. */
+    /** The row is at the top of its page: the part that moves on may hold
+     * only empty lines. */
     atPageTop = false,
   ): { top: typeof laid; rest: typeof laid } | null {
     if (avail < 12) return null;
@@ -9162,9 +9163,8 @@ class Engine {
           it.kind === "wordart",
       );
     if (
-      !atPageTop &&
-      (!partitions.some(({ keep }) => hasVisibleContent(keep)) ||
-        !partitions.some(({ rest }) => hasVisibleContent(rest)))
+      !partitions.some(({ keep }) => hasVisibleContent(keep)) ||
+      (!atPageTop && !partitions.some(({ rest }) => hasVisibleContent(rest)))
     ) {
       return null;
     }
