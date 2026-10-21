@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { BITMAP_BYTES } from "../src/pdf/images.js";
-import { emfDib, grayPng, pictBitmap, pictureDocx, pngHeader, wmfDib } from "./pictures.js";
+import { emfDib, grayPng, noisePng, pictBitmap, pictureDocx, pngHeader, wmfDib } from "./pictures.js";
 
 // The picture budgets (pdf/images.ts): a picture's decoders hold at most
 // BITMAP_BYTES of pixels (64 MB, 16,777,216 pixels of RGBA), taken before
@@ -72,6 +72,16 @@ function render(name: string): Promise<Outcome> {
 }
 
 describe("picture limits", () => {
+  it("streams a 2100 x 1500 RGB noise PNG within 200 MB of the control's peak RSS", async () => {
+    writeFileSync(join(dir, "PNG noise.docx"), pictureDocx("png", noisePng(2100, 1500)));
+    const outcome = await render("PNG noise");
+    console.info("2100 x 1500 RGB noise PNG:", JSON.stringify(outcome));
+    expect(outcome.unsupportedImages).toEqual([]);
+    expect(outcome.pages).toBe(outcome.controlPages);
+    expect(outcome.rssRiseMB).toBeLessThan(200);
+    expect(outcome.arrayBuffersRiseMB).toBeLessThan(100);
+  }, 60_000);
+
   it("draws a bitmap up to the budget, and refuses one over it before it is allocated", async () => {
     // One at a time, so no two renders share the machine.
     const names = Object.keys(files).filter((name) => name !== "no picture");

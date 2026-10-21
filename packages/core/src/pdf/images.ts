@@ -1,5 +1,7 @@
-import { Unzlib, Zlib } from "fflate";
+import { Zlib } from "fflate";
+import { createInflate, crc32, inflateSync } from "node:zlib";
 import { decodeTiff } from "../render/tiff.js";
+import { decodeDib } from "./dib.js";
 import { PdfWriter } from "./writer.js";
 
 /** A picture part of the document as an image XObject. */
@@ -42,16 +44,15 @@ export class BitmapBudget {
     this.left -= bytes;
   }
 }
-/** Compressed PNG bytes per inflater push (each inflates to a megabyte or so at most). */
-const INFLATE_STEP = 1024;
 
 /**
  * Write a picture part as an image XObject, from its bytes a piece at a
  * time: a JPEG passes through as DCTDecode once its frame header gives the
  * size, a PNG streams through the decoder into Flate samples with an SMask
  * for its alpha, a TIFF (render/tiff.ts) and a GIF are decoded and written
- * the same way. Null for a format not read here (BMP, SVG), an image over
- * the budgets, or one cut short or malformed, which the page draws as an
+ * the same way. BMP/DIB uses its palette through dib.ts. Null for a format
+ * not read here (SVG), an image over the budgets, or one cut short or
+ * malformed, which the page draws as an
  * empty frame; EMF and WMF go through metafile.ts instead.
  */
 export async function writeImage(
@@ -63,7 +64,7 @@ export async function writeImage(
   const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
   if (ext === "jpg" || ext === "jpeg" || ext === "jpe") return writeJpeg(writer, size, pieces);
   if (ext === "png") return writePng(writer, pieces);
-  if (ext !== "tif" && ext !== "tiff" && ext !== "gif") return null;
+  if (ext !== "tif" && ext !== "tiff" && ext !== "gif" && ext !== "bmp" && ext !== "dib") return null;
   if (size > PICTURE_BYTES) return null;
   const bytes = new Uint8Array(size);
   let at = 0;
@@ -71,6 +72,22 @@ export async function writeImage(
     bytes.set(piece, at);
     at += piece.length;
   }))) return null;
+  if (ext === "bmp" || ext === "dib") {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const bmp = bytes[0] === 0x42 && bytes[1] === 0x4d;
+    if (ext === "bmp" && (!bmp || bytes.length < 14)) return null;
+    const budget = new BitmapBudget();
+    try {
+      const end = bmp ? view.getUint32(2, true) : bytes.length;
+      if (end < 12 || end > bytes.length) return null;
+      const dib = decodeDib(view, bmp ? 14 : 0, end, budget, bmp ? view.getUint32(10, true) : undefined);
+      if (!dib) return null;
+      budget.take(dib.width, dib.height);
+      return writeSamples(writer, splitRgba(dib.rgba, dib.width, dib.height));
+    } catch {
+      return null;
+    }
+  }
   if (ext === "gif") {
     const gif = decodeGif(bytes);
     return gif ? writeSamples(writer, gif) : null;
@@ -252,8 +269,13 @@ interface PngHeader {
 class PngChunks {
   private buffer: Uint8Array = new Uint8Array(0);
   private remaining = 0;
+  private length = 0;
   private type = "";
   private started = false;
+  private sawHeader = false;
+  private sawData = false;
+  private checksum = 0;
+  private crc: Uint8Array = new Uint8Array(4);
   readonly header: PngHeader = { width: 0, height: 0, bitDepth: 8, colorType: 0, interlaced: false, palette: null, trns: null };
   done = false;
 
@@ -263,58 +285,70 @@ class PngChunks {
   ) {}
 
   push(piece: Uint8Array): void {
-    if (this.done) return;
     let at = 0;
     if (!this.started) {
-      // The signature, then chunks.
-      this.buffer = concat([this.buffer, piece], this.buffer.length + piece.length);
+      const take = Math.min(8 - this.buffer.length, piece.length);
+      this.buffer = concat([this.buffer, piece.subarray(0, take)], this.buffer.length + take);
+      at = take;
       if (this.buffer.length < 8) return;
-      if (this.buffer[0] !== 0x89 || this.buffer[1] !== 0x50 || this.buffer[2] !== 0x4e || this.buffer[3] !== 0x47) throw new Error("not a PNG");
+      if (!this.buffer.every((b, i) => b === [137, 80, 78, 71, 13, 10, 26, 10][i])) throw new Error("not a PNG");
       this.started = true;
-      piece = this.buffer.subarray(8);
       this.buffer = new Uint8Array(0);
     }
-    while (at < piece.length && !this.done) {
+    while (at < piece.length) {
+      if (this.done) throw new Error("PNG data after IEND");
       if (this.remaining === 0) {
-        // A chunk header: length and type, 8 bytes, which may straddle pieces.
-        const need = 8 - this.buffer.length;
-        const take = piece.subarray(at, at + need);
+        const take = piece.subarray(at, at + 8 - this.buffer.length);
         this.buffer = concat([this.buffer, take], this.buffer.length + take.length);
         at += take.length;
         if (this.buffer.length < 8) return;
-        const v = new DataView(this.buffer.buffer, this.buffer.byteOffset, 8);
-        this.remaining = v.getUint32(0) + 4;
-        this.type = String.fromCharCode(this.buffer[4], this.buffer[5], this.buffer[6], this.buffer[7]);
+        this.length = new DataView(this.buffer.buffer, this.buffer.byteOffset, 8).getUint32(0);
+        this.remaining = this.length + 4;
+        this.type = String.fromCharCode(...this.buffer.subarray(4));
+        this.checksum = crc32(this.buffer.subarray(4));
         this.buffer = new Uint8Array(0);
-        if (this.type === "IDAT" && this.onHeader) {
-          const onHeader = this.onHeader;
-          this.onHeader = null;
-          onHeader(this.header);
+        if (!this.sawHeader && this.type !== "IHDR") throw new Error("PNG must start with IHDR");
+        if (this.type === "IHDR" && (this.sawHeader || this.length !== 13)) throw new Error("invalid PNG header");
+        if (this.type === "PLTE" && (this.sawData || !this.length || this.length > 768 || this.length % 3)) throw new Error("invalid PNG palette");
+        if (this.type === "tRNS" && (this.sawData || this.length > 256)) throw new Error("invalid PNG transparency");
+        if (this.type === "IEND" && (this.length || !this.sawData)) throw new Error("invalid PNG end");
+        if (this.type === "IDAT") {
+          this.sawData = true;
+          if (this.onHeader) {
+            const onHeader = this.onHeader;
+            this.onHeader = null;
+            onHeader(this.header);
+          }
         }
-        if (this.type === "IEND") this.done = true;
         continue;
       }
-      // The chunk's data (the last 4 of `remaining` are its CRC).
-      const dataLeft = this.remaining - 4;
-      const take = piece.subarray(at, at + Math.min(this.remaining, piece.length - at));
-      at += take.length;
-      this.remaining -= take.length;
-      const data = take.subarray(0, Math.min(take.length, Math.max(0, dataLeft)));
+      const dataLeft = Math.max(0, this.remaining - 4);
+      const n = Math.min(this.remaining, piece.length - at);
+      const data = piece.subarray(at, at + Math.min(n, dataLeft));
+      this.checksum = crc32(data, this.checksum);
       if (this.type === "IDAT") {
         if (data.length) this.onData(data);
       } else if (this.type === "IHDR" || this.type === "PLTE" || this.type === "tRNS") {
-        if (this.buffer.length + data.length <= 1024 + 12) this.buffer = concat([this.buffer, data], this.buffer.length + data.length);
+        this.buffer = concat([this.buffer, data], this.buffer.length + data.length);
       }
+      const crcBytes = piece.subarray(at + data.length, at + n);
+      this.crc.set(crcBytes, 4 - Math.min(4, this.remaining));
+      at += n;
+      this.remaining -= n;
       if (this.remaining === 0) {
-        if (this.type === "IHDR" && this.buffer.length >= 13) {
+        if (new DataView(this.crc.buffer).getUint32(0) !== this.checksum) throw new Error("PNG CRC mismatch");
+        if (this.type === "IHDR") {
           const v = new DataView(this.buffer.buffer, this.buffer.byteOffset, this.buffer.byteLength);
           this.header.width = v.getUint32(0);
           this.header.height = v.getUint32(4);
           this.header.bitDepth = this.buffer[8];
           this.header.colorType = this.buffer[9];
           this.header.interlaced = this.buffer[12] === 1;
+          if (this.buffer[10] || this.buffer[11] || this.buffer[12] > 1) throw new Error("invalid PNG compression, filter or interlace");
+          this.sawHeader = true;
         } else if (this.type === "PLTE") this.header.palette = this.buffer;
         else if (this.type === "tRNS") this.header.trns = this.buffer;
+        else if (this.type === "IEND") this.done = true;
         this.buffer = new Uint8Array(0);
       }
     }
@@ -324,6 +358,10 @@ class PngChunks {
 /** How a PNG row's samples become 8-bit color and alpha. */
 function pngConverter(h: PngHeader): { channels: number; gray: boolean; hasAlpha: boolean; convert: (row: Uint8Array, width: number, color: Uint8Array, alpha: Uint8Array) => void } {
   const { bitDepth, colorType, palette, trns } = h;
+  const depths: Record<number, number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+  if (!depths[colorType]?.includes(bitDepth)) throw new Error("invalid PNG color type or depth");
+  if (colorType === 3 && (!palette || palette.length > 3 * (1 << bitDepth))) throw new Error("PNG needs a palette");
+  if (trns && ((colorType === 0 && trns.length !== 2) || (colorType === 2 && trns.length !== 6) || (colorType === 3 && trns.length > palette!.length / 3) || colorType === 4 || colorType === 6)) throw new Error("invalid PNG transparency");
   const channels = colorType === 0 ? 1 : colorType === 2 ? 3 : colorType === 3 ? 1 : colorType === 4 ? 2 : 4;
   const gray = colorType === 0 || colorType === 4;
   const hasAlpha = colorType === 4 || colorType === 6 || trns !== null;
@@ -346,6 +384,7 @@ function pngConverter(h: PngHeader): { channels: number; gray: boolean; hasAlpha
       if (colorType === 3) {
         const index = channel(row, px, 0);
         if (palette) {
+          if (index * 3 + 2 >= palette.length) throw new Error("PNG palette index exceeds its table");
           color[px * 3] = palette[index * 3];
           color[px * 3 + 1] = palette[index * 3 + 1];
           color[px * 3 + 2] = palette[index * 3 + 2];
@@ -378,7 +417,7 @@ interface PngOut {
   height: number;
   /** The writer's offset where the stream's data began. */
   start: number;
-  deflate: Zlib;
+  deflate: Zlib | null;
   alpha: Uint8Array | null;
   rows: number;
 }
@@ -397,173 +436,205 @@ async function writePng(writer: PdfWriter, pieces: Pieces): Promise<WrittenImage
   let failed: Error | null = null;
   let whole: Uint8Array[] | null = null;
   let wholeBytes = 0;
-  // Set at the first IDAT, once the header is known.
   let out: PngOut | null = null;
   const current = (): PngOut | null => out;
-  let inflater: Unzlib | null = null;
+  let inflater: ReturnType<typeof createInflate> | null = null;
+  let inflateDone: Promise<void> | null = null;
+  let compressedBytes = 0;
+  let pendingBytes = 0;
+  let passthrough = false;
+  const compressed: Uint8Array[] = [];
   const chunks = new PngChunks(
     (h) => {
       if (!h.width || !h.height) throw new Error("PNG has no size");
       const { channels, gray, hasAlpha, convert } = pngConverter(h);
       const budget = new BitmapBudget();
       if (h.interlaced) {
-        // Adam7 scatters each pass over the image: decoded whole, its
-        // inflated rows and its samples and alpha, within the budget.
-        budget.take(h.width, h.height, (channels * h.bitDepth) / 8 + (gray ? 1 : 3) + 1 + 1);
+        takeWholePng(h, budget);
         whole = [];
         return;
       }
-      // Streamed, any size up to STREAMED_PIXELS is averaged down: the rows
-      // it keeps (about 32 bytes a pixel of one row) and the output's alpha plane count.
       if (h.width * h.height > STREAMED_PIXELS) throw new Error("PNG over the pixels a picture may stream");
-      budget.take(h.width, 1, 32);
       const k = shrinkFactor(h.width, h.height);
       const width = Math.ceil(h.width / k);
       const height = Math.ceil(h.height / k);
-      if (hasAlpha) budget.take(width, height, 1);
       const samples = gray ? 1 : 3;
       const stride = Math.ceil((h.width * channels * h.bitDepth) / 8);
       const bpp = Math.max(1, (channels * h.bitDepth) >> 3);
+      // PDF's PNG predictor reads the original filtered RGB/gray rows.
+      // Validate them as they stream, and embed IDAT without re-compressing.
+      passthrough = k === 1 && !hasAlpha && h.bitDepth === 8 && (h.colorType === 0 || h.colorType === 2);
+      budget.take(stride + 1, 1, 2);
+      if (!passthrough) budget.take(h.width, 1, samples + 1);
+      if (k > 1) budget.take(width, 1, (samples + 2) * 4 + samples);
+      if (hasAlpha) budget.take(width, height, 1);
       const objNum = writer.allocate();
       const lengthNum = writer.allocate();
       const maskNum = hasAlpha ? writer.allocate() : null;
-      const deflate = new Zlib((data) => {
+      const deflate = passthrough ? null : new Zlib((data) => {
         chain = chain.then(() => writer.write(data));
       });
-      const o = { objNum, lengthNum, maskNum, width, height, start: 0, deflate, alpha: hasAlpha ? new Uint8Array(width * height) : null, rows: 0 };
+      const o: PngOut = { objNum, lengthNum, maskNum, width, height, start: 0, deflate, alpha: hasAlpha ? new Uint8Array(width * height) : null, rows: 0 };
       out = o;
+      const predictor = passthrough ? ` /DecodeParms << /Predictor 15 /Colors ${samples} /BitsPerComponent 8 /Columns ${width} >>` : "";
       chain = chain
-        .then(() => writer.beginStream(objNum, `/Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /${gray ? "DeviceGray" : "DeviceRGB"} /BitsPerComponent 8 /Filter /FlateDecode${maskNum ? ` /SMask ${maskNum} 0 R` : ""}`, { ref: lengthNum }))
-        .then(() => {
-          o.start = writer.offset;
-        });
-      // Row assembly: a filter byte and `stride` bytes per row.
-      let pending: Uint8Array = new Uint8Array(0);
-      let previous: Uint8Array = new Uint8Array(stride);
-      const color = new Uint8Array(h.width * samples);
-      const alpha = new Uint8Array(h.width);
-      // Averaging over k x k blocks into one output row.
-      const sums = new Uint32Array(width * samples);
-      const alphaSums = new Uint32Array(width);
-      const counts = new Uint32Array(width);
+        .then(() => writer.beginStream(objNum, `/Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /${gray ? "DeviceGray" : "DeviceRGB"} /BitsPerComponent 8 /Filter /FlateDecode${predictor}${maskNum ? ` /SMask ${maskNum} 0 R` : ""}`, { ref: lengthNum }))
+        .then(() => { o.start = writer.offset; });
+      const row = new Uint8Array(stride + 1);
+      const previous = new Uint8Array(stride);
+      const color = new Uint8Array(passthrough ? 0 : h.width * samples);
+      const alpha = new Uint8Array(passthrough ? 0 : h.width);
+      const sums = new Uint32Array(k > 1 ? width * samples : 0);
+      const alphaSums = new Uint32Array(k > 1 ? width : 0);
+      const counts = new Uint32Array(k > 1 ? width : 0);
+      const outRow = new Uint8Array(k > 1 ? width * samples : 0);
       let sourceRow = 0;
       let inBlock = 0;
-      const emitRow = (): void => {
-        const outRow = new Uint8Array(width * samples);
-        for (let x = 0; x < width; x++) {
-          const n = counts[x] || 1;
-          for (let c = 0; c < samples; c++) outRow[x * samples + c] = Math.round(sums[x * samples + c] / n);
-          if (o.alpha) o.alpha[o.rows * width + x] = Math.round(alphaSums[x] / n);
-        }
-        sums.fill(0);
-        alphaSums.fill(0);
-        counts.fill(0);
-        o.rows++;
-        deflate.push(outRow, false);
-      };
-      const takeRow = (line: Uint8Array): void => {
-        convert(line, h.width, color, alpha);
-        if (k === 1) {
+      const takeRow = (): void => {
+        if (sourceRow >= h.height) throw new Error("PNG data inflates past its rows");
+        const line = row.subarray(1);
+        unfilter(row[0], line, previous, bpp);
+        previous.set(line);
+        if (passthrough) {
           o.rows++;
-          deflate.push(color.slice(), false);
-          if (o.alpha) o.alpha.set(alpha, (o.rows - 1) * width);
-          return;
+        } else {
+          convert(line, h.width, color, alpha);
+          if (k === 1) {
+            o.deflate!.push(color, false);
+            if (o.alpha) o.alpha.set(alpha, o.rows * width);
+            o.rows++;
+          } else {
+            for (let sx = 0; sx < h.width; sx++) {
+              const x = Math.floor(sx / k);
+              for (let c = 0; c < samples; c++) sums[x * samples + c] += color[sx * samples + c];
+              alphaSums[x] += alpha[sx];
+              counts[x]++;
+            }
+            if (++inBlock === k || sourceRow + 1 === h.height) {
+              for (let x = 0; x < width; x++) {
+                for (let c = 0; c < samples; c++) outRow[x * samples + c] = Math.round(sums[x * samples + c] / counts[x]);
+                if (o.alpha) o.alpha[o.rows * width + x] = Math.round(alphaSums[x] / counts[x]);
+              }
+              o.deflate!.push(outRow, false);
+              o.rows++;
+              sums.fill(0);
+              alphaSums.fill(0);
+              counts.fill(0);
+              inBlock = 0;
+            }
+          }
         }
-        for (let sx = 0; sx < h.width; sx++) {
-          const x = Math.floor(sx / k);
-          for (let c = 0; c < samples; c++) sums[x * samples + c] += color[sx * samples + c];
-          alphaSums[x] += alpha[sx];
-          counts[x]++;
-        }
-        if (++inBlock === k || sourceRow + 1 === h.height) {
-          emitRow();
-          inBlock = 0;
-        }
+        sourceRow++;
       };
-      inflater = new Unzlib((data) => {
-        const buffer = pending.length ? concat([pending, data], pending.length + data.length) : data;
-        let at = 0;
-        while (buffer.length - at >= 1 + stride && sourceRow < h.height && o.rows <= height) {
-          // Unfiltered in place: the row stays a view of the inflated data.
-          const line = buffer.subarray(at + 1, at + 1 + stride);
-          unfilter(buffer[at], line, previous, bpp);
-          at += 1 + stride;
-          takeRow(line);
-          previous = line;
-          sourceRow++;
+      // Native zlib keeps a fixed output buffer and validates the stream's
+      // end and Adler checksum. Each write is awaited before reading more.
+      inflater = createInflate();
+      const stream = inflater;
+      inflateDone = new Promise<void>((resolve) => {
+        stream.on("error", (error) => { failed = error; resolve(); });
+        stream.on("end", resolve);
+      });
+      stream.on("data", (data: Buffer) => {
+        if (failed) return;
+        try {
+          for (let at = 0; at < data.length;) {
+            const n = Math.min(row.length - pendingBytes, data.length - at);
+            row.set(data.subarray(at, at + n), pendingBytes);
+            pendingBytes += n;
+            at += n;
+            if (pendingBytes === row.length) {
+              takeRow();
+              pendingBytes = 0;
+            }
+          }
+        } catch (error) {
+          failed = error as Error;
+          stream.destroy(failed);
         }
-        pending = buffer.slice(at);
       });
     },
     (data) => {
       if (whole) {
+        if (wholeBytes + data.length > PICTURE_BYTES) throw new PictureTooLarge("PNG compressed data exceeds the picture byte budget");
         whole.push(data.slice());
         wholeBytes += data.length;
-        return;
-      }
-      // Inflated a little at a time: a run of one color inflates a
-      // thousandfold, and the inflater hands out each push's output whole.
-      for (let at = 0; at < data.length; at += INFLATE_STEP) inflater?.push(data.subarray(at, at + INFLATE_STEP));
+      } else compressed.push(data);
     },
   );
-  const found = await pieces((piece) => {
+  // Zip inflation can deliver several pieces before awaiting their promises.
+  // Serialize their parsing and native zlib writes as well as PDF writes.
+  let reading = Promise.resolve();
+  const found = await pieces((piece) => reading = reading.then(async () => {
     if (failed) return;
     try {
       chunks.push(piece);
-    } catch (error) {
-      failed = error as Error;
-    }
-    return chain;
-  });
+      for (const data of compressed) {
+        if (failed) break;
+        compressedBytes += data.length;
+        if (passthrough) chain = chain.then(() => writer.write(data));
+        await Promise.race([
+          new Promise<void>((resolve, reject) => inflater!.write(data, (error) => error ? reject(error) : resolve())),
+          inflateDone!,
+        ]);
+        await chain;
+      }
+    } catch (error) { failed = error as Error; }
+    compressed.length = 0;
+    await chain;
+  }));
+  await reading;
+  if (inflater) {
+    (inflater as ReturnType<typeof createInflate>).end();
+    await inflateDone;
+  }
   await chain;
-  // A PNG cut short: no IEND, or fewer rows than its header gives.
-  const short = !chunks.done || (out !== null && (out as PngOut).rows < (out as PngOut).height);
-  if (!found || failed || (!out && !whole) || short) {
-    const o = current();
+  const o = current();
+  const unusedData = inflater && (inflater as ReturnType<typeof createInflate>).bytesWritten !== compressedBytes;
+  if (!found || failed || unusedData || !chunks.done || (!o && !whole) || (o && (o.rows !== o.height || pendingBytes))) {
     if (o) {
-      // The objects were reserved: null objects keep the table whole.
+      const length = writer.offset - o.start;
       await writer.endStream();
-      await writer.object(o.lengthNum, "0");
+      await writer.object(o.lengthNum, String(length));
       if (o.maskNum) await writer.object(o.maskNum, "null");
     }
     return null;
   }
   if (whole) {
-    const h = chunks.header;
-    let raw: Uint8Array;
     try {
-      raw = inflateWhole(concat(whole, wholeBytes), interlacedBytes(h));
-    } catch {
-      // Data that does not inflate, or inflates past the rows the header gives.
-      return null;
-    }
-    const image = decodePngRows(h, raw);
-    return image ? writeSamples(writer, image) : null;
+      const h = chunks.header;
+      const raw = inflateWhole(concat(whole, wholeBytes), interlacedBytes(h));
+      const image = decodePngRows(h, raw);
+      return image ? writeSamples(writer, image) : null;
+    } catch { return null; }
   }
-  const o = current() as PngOut;
-  o.deflate.push(new Uint8Array(0), true);
+  const image = o!;
+  image.deflate?.push(new Uint8Array(0), true);
   await chain;
-  const length = writer.offset - o.start;
+  const length = writer.offset - image.start;
   await writer.endStream();
-  await writer.object(o.lengthNum, String(length));
-  if (o.maskNum && o.alpha) {
-    await writer.deflatedStream(o.maskNum, `/Type /XObject /Subtype /Image /Width ${o.width} /Height ${o.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, o.alpha);
+  await writer.object(image.lengthNum, String(length));
+  if (image.maskNum && image.alpha) {
+    await writer.deflatedStream(image.maskNum, `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8`, image.alpha);
   }
-  return { objNum: o.objNum, width: o.width, height: o.height };
+  return { objNum: image.objNum, width: image.width, height: image.height };
 }
 
 /** Inflate `data` whole: at most `limit` bytes, the rows the header
  * gives; data that inflates to more is stopped there. */
-function inflateWhole(data: Uint8Array, limit = Infinity): Uint8Array {
-  const parts: Uint8Array[] = [];
-  let total = 0;
-  const inflater = new Unzlib((chunk) => {
-    total += chunk.length;
-    if (total > limit) throw new Error("PNG data inflates past its rows");
-    parts.push(chunk);
-  });
-  for (let at = 0; at < data.length; at += INFLATE_STEP) inflater.push(data.subarray(at, at + INFLATE_STEP), at + INFLATE_STEP >= data.length);
-  return concat(parts, total);
+function inflateWhole(data: Uint8Array, limit: number): Uint8Array {
+  return inflateSync(data, { maxOutputLength: limit });
+}
+
+/** Reserve the inflated rows, output planes and row scratch before decoding. */
+function takeWholePng(h: PngHeader, budget: BitmapBudget): number {
+  if (h.width * h.height > PIXEL_BUDGET) throw new PictureTooLarge("PNG over the pixels an image may embed");
+  const { channels, gray, hasAlpha } = pngConverter(h);
+  const rawBytes = h.interlaced ? interlacedBytes(h) : h.height * (1 + Math.ceil(h.width * channels * h.bitDepth / 8));
+  // inflateSync holds output chunks while assembling the returned buffer.
+  budget.take(rawBytes, 1, 2);
+  budget.take(h.width, h.height, (gray ? 1 : 3) + (hasAlpha ? 1 : 0));
+  budget.take(Math.ceil(h.width * channels * h.bitDepth / 8) + h.width * ((gray ? 1 : 3) + 1), 1, 1);
+  return rawBytes;
 }
 
 /** The inflated bytes of an interlaced PNG: each pass's rows, a filter byte before each. */
@@ -584,21 +655,18 @@ const ADAM7 = [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2,
 /** A PNG decoded whole from its chunks and inflated rows: every color type
  * and bit depth, interlaced or not. For tests, and interlaced images. */
 export function decodePng(bytes: Uint8Array): SampleImage | null {
-  let data: Uint8Array[] = [];
+  const data: Uint8Array[] = [];
   let total = 0;
   const chunks = new PngChunks(() => undefined, (d) => {
-    data.push(d.slice());
+    data.push(d);
     total += d.length;
   });
   try {
     chunks.push(bytes);
-  } catch {
-    return null;
-  }
-  if (!chunks.header.width || !chunks.header.height) return null;
-  const image = decodePngRows(chunks.header, inflateWhole(concat(data, total)));
-  data = [];
-  return image;
+    if (!chunks.done || !chunks.header.width || !chunks.header.height) return null;
+    const limit = takeWholePng(chunks.header, new BitmapBudget());
+    return decodePngRows(chunks.header, inflateWhole(concat(data, total), limit));
+  } catch { return null; }
 }
 
 function decodePngRows(h: PngHeader, raw: Uint8Array): SampleImage | null {
@@ -606,22 +674,22 @@ function decodePngRows(h: PngHeader, raw: Uint8Array): SampleImage | null {
   const { channels, gray, hasAlpha, convert } = pngConverter(h);
   const samples = gray ? 1 : 3;
   const out = new Uint8Array(width * height * samples);
-  const alpha = new Uint8Array(width * height);
-  alpha.fill(255);
+  const alpha = hasAlpha ? new Uint8Array(width * height) : null;
   const bpp = Math.max(1, (channels * bitDepth) >> 3);
   const passes = h.interlaced ? ADAM7 : [[0, 0, 1, 1]];
   let offset = 0;
+  const initialPrevious = new Uint8Array(Math.ceil(width * channels * bitDepth / 8));
+  const color = new Uint8Array(width * samples);
+  const rowAlpha = new Uint8Array(width);
   for (const [x0, y0, dx, dy] of passes) {
     const passWidth = Math.ceil((width - x0) / dx);
     const passHeight = Math.ceil((height - y0) / dy);
     if (passWidth <= 0 || passHeight <= 0) continue;
     const stride = Math.ceil((passWidth * channels * bitDepth) / 8);
-    let previous: Uint8Array = new Uint8Array(stride);
-    const color = new Uint8Array(passWidth * samples);
-    const rowAlpha = new Uint8Array(passWidth);
+    let previous: Uint8Array = initialPrevious.subarray(0, stride);
     for (let row = 0; row < passHeight; row++) {
       if (offset + 1 + stride > raw.length) return null;
-      const line = raw.slice(offset + 1, offset + 1 + stride);
+      const line = raw.subarray(offset + 1, offset + 1 + stride);
       unfilter(raw[offset], line, previous, bpp);
       offset += 1 + stride;
       convert(line, passWidth, color, rowAlpha);
@@ -629,17 +697,19 @@ function decodePngRows(h: PngHeader, raw: Uint8Array): SampleImage | null {
       for (let px = 0; px < passWidth; px++) {
         const x = x0 + px * dx;
         for (let c = 0; c < samples; c++) out[(y * width + x) * samples + c] = color[px * samples + c];
-        alpha[y * width + x] = rowAlpha[px];
+        if (alpha) alpha[y * width + x] = rowAlpha[px];
       }
       previous = line;
     }
   }
-  return { width, height, gray, samples: out, alpha: hasAlpha ? alpha : null };
+  return offset === raw.length ? { width, height, gray, samples: out, alpha } : null;
 }
 
 function unfilter(filter: number, line: Uint8Array, previous: Uint8Array, bpp: number): void {
   const n = line.length;
   switch (filter) {
+    case 0:
+      break;
     case 1:
       for (let i = bpp; i < n; i++) line[i] = (line[i] + line[i - bpp]) & 255;
       break;
@@ -661,6 +731,8 @@ function unfilter(filter: number, line: Uint8Array, previous: Uint8Array, bpp: n
         line[i] = (line[i] + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c)) & 255;
       }
       break;
+    default:
+      throw new Error("invalid PNG row filter");
   }
 }
 

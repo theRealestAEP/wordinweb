@@ -179,7 +179,11 @@ function* records(view: DataView, start: number): Generator<{ fn: number; params
     const length = view.getUint32(offset, true) * 2;
     if (length < 6 || offset + length > view.byteLength) throw new Error("WMF record runs past the end");
     const fn = view.getUint16(offset + 4, true);
-    if (fn === META_EOF) return;
+    if (fn === META_EOF) {
+      if (length !== 6) throw new Error("invalid WMF end record");
+      return;
+    }
+    if ((fn === META_SETWINDOWORG || fn === META_SETWINDOWEXT) && length < 10) throw new Error("short WMF window record");
     yield { fn, params: offset + 6, end: offset + length };
     offset += length;
   }
@@ -188,7 +192,7 @@ function* records(view: DataView, start: number): Generator<{ fn: number; params
 /** The WMF drawn onto a canvas of its frame, or null for bytes that are not
  * one. A WMF cut short, or with a record or bitmap this does not read, or
  * over `budget`, throws: no part of it is drawn. */
-export function convertWmf(input: Uint8Array, fonts: FontSet, resources: Resources, budget: BitmapBudget): RecordingCanvas | null {
+export function convertWmf(input: Uint8Array, fonts: FontSet, resources: Resources, budget: BitmapBudget, frame?: { width: number; height: number }): RecordingCanvas | null {
   let bytes = input;
   let placeable: { left: number; top: number; width: number; height: number; inch: number } | null = null;
   if (bytes.length >= 22 && new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true) === PLACEABLE_KEY) {
@@ -200,7 +204,8 @@ export function convertWmf(input: Uint8Array, fonts: FontSet, resources: Resourc
   if (bytes.length < 18) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const start = view.getUint16(2, true) * 2;
-  if (start < 18) return null;
+  if (start !== 18 || ![1, 2].includes(view.getUint16(0, true))) return null;
+  if (view.getUint32(6, true) * 2 > bytes.length) return null;
 
   // The window at the first drawing record sizes the canvas.
   let org: [number, number] = placeable ? [placeable.left, placeable.top] : [0, 0];
@@ -208,9 +213,10 @@ export function convertWmf(input: Uint8Array, fonts: FontSet, resources: Resourc
   const initial = { org, ext };
   for (const { fn, params } of records(view, start)) {
     if (fn === META_SETWINDOWORG) org = [view.getInt16(params + 2, true), view.getInt16(params, true)];
-    else if (fn === META_SETWINDOWEXT) ext = [view.getInt16(params + 2, true), view.getInt16(params, true)];
+    else if (fn === META_SETWINDOWEXT && view.getInt16(params + 2, true) && view.getInt16(params, true)) ext = [view.getInt16(params + 2, true), view.getInt16(params, true)];
     else if (DRAWING.has(fn)) break;
   }
+  if (!ext && frame) ext = [frame.width, frame.height];
   if (!ext || !ext[0] || !ext[1]) return null;
   const width = Math.abs(ext[0]);
   const height = Math.abs(ext[1]);

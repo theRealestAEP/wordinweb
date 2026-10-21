@@ -199,14 +199,14 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   const pictures = new Map<string, { picture: Picture; xobjects: string[] } | null>();
   const unsupportedImages = new Set<string>();
 
-  const loadPicture = async (part: string): Promise<{ picture: Picture; xobjects: string[] } | null> => {
+  const loadPicture = async (part: string, frame: { width: number; height: number }): Promise<{ picture: Picture; xobjects: string[] } | null> => {
     const size = opened.mediaSize(part);
     if (size === undefined) return null;
     const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
     if (ext === "emf" || ext === "wmf" || ext === "pict") {
       if (size > PICTURE_BYTES) return null;
       const bytes = await opened.media(part);
-      const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources));
+      const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources, frame));
       if (!canvas) return null;
       // The bitmaps the metafile drew become XObjects, named in its operators.
       const names: string[] = [];
@@ -271,7 +271,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       if (item.kind !== "image" || shown.has(item.part)) continue;
       let loaded = pictures.get(item.part);
       if (loaded === undefined) {
-        loaded = await loadPicture(item.part);
+        loaded = await loadPicture(item.part, item);
         pictures.set(item.part, loaded);
         if (!loaded) unsupportedImages.add(item.part);
       }
