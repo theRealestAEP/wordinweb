@@ -238,6 +238,7 @@ export function compareContext(
   onIssue: () => void = () => {},
   commentOrder: { original: string[]; revised: string[] } = { original: [], revised: [] },
 ): Ctx {
+  merged.makePlainDocument();
   return {
     doc: merged,
     original,

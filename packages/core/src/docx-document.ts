@@ -2453,6 +2453,45 @@ export class DocxDocument {
     }
   }
 
+  /** Make a comparison result a plain Word document, including its saved package. */
+  makePlainDocument(): void {
+    const macroTypes = new Set([
+      "application/vnd.ms-office.vbaProject",
+      "application/vnd.ms-word.vbaData+xml",
+      "application/vnd.ms-word.keyMapCustomizations+xml",
+      "application/vnd.ms-word.attachedToolbars",
+    ]);
+    const macroRelationships = new Set(["vbaProject", "wordVbaData", "keyMapCustomizations", "attachedToolbars"]);
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    const parts = new Set(["vbaProject.bin", "vbaData.xml", "customizations.xml"].map((name) => docDir + name));
+    for (const item of this.contentTypesRoot?.children ?? []) {
+      if (macroTypes.has(item.attrs.ContentType) && item.attrs.PartName) parts.add(item.attrs.PartName.slice(1));
+    }
+    if (this.relsRoot) {
+      this.relsRoot.children = this.relsRoot.children.filter((rel) => {
+        const type = rel.attrs.Type ?? "";
+        const target = rel.attrs.TargetMode === "External" ? null : resolvePartPath(this.docPart, rel.attrs.Target ?? "");
+        if (!macroRelationships.has(type.slice(type.lastIndexOf("/") + 1)) && !(target && parts.has(target))) return true;
+        if (target) parts.add(target);
+        this.documentRels.delete(rel.attrs.Id);
+        return false;
+      });
+    }
+    if (this.contentTypesRoot) {
+      this.contentTypesRoot.children = this.contentTypesRoot.children.filter((item) => {
+        if (macroTypes.has(item.attrs.ContentType) || parts.has((item.attrs.PartName ?? "").slice(1))) return false;
+        if (item.attrs.PartName === `/${this.docPart}`) {
+          item.attrs.ContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+        }
+        return true;
+      });
+    }
+    for (const part of parts) {
+      delete this.pkg.raw()[part];
+      delete this.pkg.raw()[relsPathFor(part)];
+    }
+  }
+
   /**
    * The package's parts as save() writes them, before they are zipped: a
    * writer that streams the zip to disk (compare-cli) takes them one at a
