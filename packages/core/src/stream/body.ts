@@ -8,13 +8,14 @@ import { Relationships, parseRelationships, relsPathFor } from "../parse/rels.js
 import { defaultSectionProps, parseSectionProps } from "../parse/section.js";
 import { XmlElement, attr, child, countElements, localName, parseXml } from "../xml.js";
 import { DOCUMENT_LIMITS, XML_PART, ZipBudget, holdXmlCounts, mainDocumentPart } from "../zip.js";
-import { docToDocx } from "../doc/hooks.js";
+import { docPackageFiles } from "../doc/hooks.js";
+import { MetafileWorkspace } from "../doc/officeart.js";
 import { isOleFile } from "../doc/streams.js";
 import { FORMAT_HEAD_BYTES, otherFormat } from "../formats.js";
 import { isOldWordFile, oldWordToDocx } from "../oldword/hooks.js";
 import { scanBody } from "./scan.js";
 import { ByteSource, bytesSource } from "./source.js";
-import { ZipEntry, ZipIndex } from "./zip.js";
+import { PackagePart, PartsIndex, ZipEntry, ZipIndex } from "./zip.js";
 
 /** A document whose body stays out of memory: the engine reads its blocks
  * through `doc.sections`, which parse them from the deflated body as it goes
@@ -85,11 +86,12 @@ export interface OpenStreamingOptions {
   /** With markup: false gives every author's changes one color, red
    * (FromFilesOptions.revisionAuthors). Default true. */
   authors?: boolean;
+  /** The PDF writer consumes each picture before reading the next one. */
+  borrowMedia?: boolean;
 }
 
 export async function openStreamingDocument(source: ByteSource, options: OpenStreamingOptions = {}): Promise<StreamingDocument> {
-  source = await asDocxSource(source);
-  const zip = await ZipIndex.open(source);
+  const zip = await openPackage(source, options.borrowMedia);
   const mimetype = zip.entries.has("mimetype") ? await zip.text("mimetype") : undefined;
   if (mimetype?.startsWith("application/vnd.oasis.opendocument")) throw new Error("unsupported format: an OpenDocument file");
   // Every XML part's size, from the directory, is held to what Package
@@ -340,7 +342,7 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
 }
 
 /**
- * The source as a .docx: a Word 97-2003 .doc (an OLE compound file with a
+ * Open the source's package parts: a Word 97-2003 .doc (an OLE compound file with a
  * WordDocument stream) is read whole and converted (doc/hooks.ts), as is a
  * document in one of the oldest Word formats (oldword/hooks.ts); a file
  * that is another format altogether is refused from its first bytes, before
@@ -348,16 +350,21 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
  * holds something else by the converter: a password-protected .docx, an
  * Excel or PowerPoint file.
  */
-async function asDocxSource(source: ByteSource): Promise<ByteSource> {
+async function openPackage(source: ByteSource, borrowMedia = false): Promise<ZipIndex | PartsIndex> {
   const size = await source.size();
   const head = await source.read(0, Math.min(size, FORMAT_HEAD_BYTES));
-  if (isOldWordFile(head)) return bytesSource(oldWordToDocx(await source.read(0, size)));
+  if (isOldWordFile(head)) return ZipIndex.open(bytesSource(oldWordToDocx(await source.read(0, size))));
   const other = otherFormat(head);
   if (other) throw new Error(`unsupported format: ${other}`);
-  if (!isOleFile(head)) return source;
+  if (!isOleFile(head)) return ZipIndex.open(source);
   // The whole file: the directory that names its streams can be at its end.
-  // docToDocx refuses a compound file that holds no Word 97-2003 document.
-  return bytesSource(docToDocx(await source.read(0, size)));
+  // Keep compressed BLIPs in the package and expand each only for PDF writing.
+  const media: Record<string, PackagePart> = {};
+  const workspace: MetafileWorkspace = { buffer: new Uint8Array(0), data: new Uint8Array(0) };
+  const files = docPackageFiles(await source.read(0, size), (name, image, size) => {
+    media[name] = { size, read: () => borrowMedia && image.borrowData ? image.borrowData(workspace) : image.data };
+  });
+  return new PartsIndex({ ...files, ...media });
 }
 
 /**
@@ -552,6 +559,12 @@ class BodyStore {
 /** Give each field occurrence in `block` the key the Prescan's memos use for it. */
 function keyFields(block: Block, index: number, keys: WeakMap<object, string>): void {
   let n = 0;
+  const keyField = (field: FieldContent): void => {
+    keys.set(field, `${index}:${n++}`);
+    for (const part of field.instructionParts ?? []) {
+      if (typeof part !== "string") keyField(part);
+    }
+  };
   const visit = (b: Block): void => {
     if (b.type !== "paragraph") {
       for (const row of b.rows) for (const cell of row.cells) for (const nested of cell.blocks) visit(nested);
@@ -559,7 +572,7 @@ function keyFields(block: Block, index: number, keys: WeakMap<object, string>): 
     }
     for (const c of b.children) {
       const runs = c.type === "run" ? [c] : c.runs;
-      for (const r of runs) for (const rc of r.content) if (rc.kind === "field") keys.set(rc as FieldContent, `${index}:${n++}`);
+      for (const r of runs) for (const rc of r.content) if (rc.kind === "field") keyField(rc);
     }
   };
   visit(block);

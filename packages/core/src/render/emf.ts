@@ -1,6 +1,11 @@
 /**
  * EMF records rewritten into ones emf-converter draws ([MS-EMF] 2.3).
  *
+ * For GDI pictures, rclFrame (0.01 mm) and the recording device's pixels
+ * per millimeter define the picture box. The converter's bounds become
+ * that frame's size; viewport origins are translated by its device origin.
+ * This keeps the same frame mapping in the browser and the PDF renderer.
+ *
  * A BITBLT or STRETCHBLT with no source bitmap and the PATCOPY raster
  * operation fills its destination rectangle with the current brush (a
  * PatBlt). Word writes page backgrounds, bands and gradient steps this way;
@@ -137,18 +142,82 @@ function hasEmfPlus(view: DataView): boolean {
   return false;
 }
 
-/** The EMF with the records above rewritten; the same bytes when it has none. */
+/** The EMF prepared for the picture's frame and for emf-converter's GDI player. */
 export function prepareEmf(bytes: Uint8Array): Uint8Array {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.length < 88 || view.getUint32(0, true) !== EMR_HEADER) return bytes;
   if (hasEmfPlus(view)) return prepareEmfPlus(bytes, view);
+  return mapEmfFrame(prepareGdiRecords(bytes, view));
+}
+
+/** Map the physical frame to the canvas, keeping GDI coordinates in device pixels. */
+function mapEmfFrame(bytes: Uint8Array): Uint8Array {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // rclFrame is in 0.01 mm; szlDevice and szlMillimeters describe the recording device.
+  const deviceX = view.getInt32(72, true);
+  const deviceY = view.getInt32(76, true);
+  const mmX = view.getInt32(80, true);
+  const mmY = view.getInt32(84, true);
+  if (deviceX <= 0 || deviceY <= 0 || mmX <= 0 || mmY <= 0) return bytes;
+  const left = Math.round(view.getInt32(24, true) * deviceX / (mmX * 100));
+  const top = Math.round(view.getInt32(28, true) * deviceY / (mmY * 100));
+  const width = Math.round((view.getInt32(32, true) - view.getInt32(24, true)) * deviceX / (mmX * 100));
+  const height = Math.round((view.getInt32(36, true) - view.getInt32(28, true)) * deviceY / (mmY * 100));
+  if (width <= 0 || height <= 0) return bytes;
+  if (left === 0 && top === 0 && view.getInt32(8, true) === 0 && view.getInt32(12, true) === 0 && view.getInt32(16, true) === width && view.getInt32(20, true) === height) return bytes;
+
+  const headerSize = view.getUint32(4, true);
+  const header = bytes.slice(0, headerSize);
+  const out = new DataView(header.buffer);
+  [0, 0, width, height].forEach((value, i) => out.setInt32(8 + i * 4, value, true));
+  const parts: Uint8Array[] = [header];
+  if (left !== 0 || top !== 0) {
+    // Explicit mapping records replace the converter's bounds-relative mapping.
+    // Start with GDI's device origin and rebase every viewport origin to the frame.
+    const origin = record(EMR_SETVIEWPORTORGEX, 16);
+    origin.view.setInt32(8, -left, true);
+    origin.view.setInt32(12, -top, true);
+    parts.push(origin.bytes);
+  }
+  // Retain the player's default 1:1 extents when the canvas size changes.
+  // Later records can replace either extent independently.
+  const boundsWidth = view.getInt32(16, true) - view.getInt32(8, true);
+  const boundsHeight = view.getInt32(20, true) - view.getInt32(12, true);
+  if (boundsWidth > 0 && boundsHeight > 0 && (width !== boundsWidth || height !== boundsHeight)) {
+    for (const type of [EMR_SETWINDOWEXTEX, EMR_SETVIEWPORTEXTEX]) {
+      const extent = record(type, 16);
+      extent.view.setInt32(8, boundsWidth, true);
+      extent.view.setInt32(12, boundsHeight, true);
+      parts.push(extent.bytes);
+    }
+  }
+  for (let at = headerSize; at + 8 <= bytes.length; ) {
+    const type = view.getUint32(at, true);
+    const size = view.getUint32(at + 4, true);
+    if (size < 8 || at + size > bytes.length) break;
+    let part = bytes.subarray(at, at + size);
+    if (type === EMR_SETVIEWPORTORGEX && size >= 16) {
+      part = part.slice();
+      const origin = new DataView(part.buffer);
+      origin.setInt32(8, origin.getInt32(8, true) - left, true);
+      origin.setInt32(12, origin.getInt32(12, true) - top, true);
+    }
+    parts.push(part);
+    at += size;
+    if (type === EMR_EOF) break;
+  }
+  return assemble(parts, parts.length);
+}
+
+/** Repair GDI records in the original device coordinate system. */
+function prepareGdiRecords(bytes: Uint8Array, view: DataView): Uint8Array {
   // emf-converter starts the extents at the bounds' size: one unit, one pixel.
   let windowExtX = view.getInt32(16, true) - view.getInt32(8, true);
   let windowExtY = view.getInt32(20, true) - view.getInt32(12, true);
   let viewportExtX = windowExtX;
   let viewportExtY = windowExtY;
-  let windowOrgX = view.getInt32(8, true);
-  let windowOrgY = view.getInt32(12, true);
+  let windowOrgX = 0;
+  let windowOrgY = 0;
   let viewportOrgX = 0;
   let viewportOrgY = 0;
   let viewportExtentSet = false;

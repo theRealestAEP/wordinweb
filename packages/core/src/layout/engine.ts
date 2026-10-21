@@ -40,6 +40,7 @@ import {
   fontOf,
   leadingBreakOf,
   resolveField,
+  resolveFieldInstruction,
   setBreakCacheWindowed,
   starNumberFormat,
 } from "./inline.js";
@@ -59,6 +60,14 @@ import {
 import { joinBoxBorders } from "./border-edges.js";
 
 const INITIAL_MODEL_WINDOW_PAGES = 12;
+
+/** Preserve small bleeds; bring substantially off-page anchors back into view. */
+function anchorPositionOnPage(position: number, size: number, pageSize: number): number {
+  if (size >= pageSize) return 0;
+  const overflow = Math.max(-position, position + size - pageSize);
+  if (overflow < size / 4) return position;
+  return Math.max(0, Math.min(position, pageSize - size));
+}
 
 /** Break options for a lookahead simulation. These sites sum line heights to
  * decide whether a following block fits, and never paint what they break, so
@@ -492,6 +501,7 @@ export interface IncrData {
   modelVersion: number;
   seqCounters: Map<string, number>;
   seqAssigned: FieldMemo<string>;
+  setBookmarks: Map<string, FieldContent>;
   refFieldPosition: FieldMemo<"above" | "below">;
   refFieldParaNumber: FieldMemo<string>;
   /** Mail-merge record this layout painted (mergeRecordKey; "" for none).
@@ -722,6 +732,7 @@ export class Prescan {
   readonly refPosition: FieldMemo<"above" | "below">;
   readonly refParaNumber: FieldMemo<string>;
   readonly seqCounters = new Map<string, number>();
+  readonly setBookmarks = new Map<string, FieldContent>();
   readonly footnoteNumbers = new Map<number, number | string>();
   readonly endnoteNumbers = new Map<number, number | string>();
   /** Each bookmark's first-seen paragraph ordinal, and whether that paragraph carries list numbering. */
@@ -781,17 +792,7 @@ export class Prescan {
           continue;
         }
         if (rc.kind !== "field") continue;
-        const parts = rc.instruction.trim().split(/\s+/);
-        if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
-          assignSeq(this.seq, this.seqCounters, parts[1], rc, rc.instruction.trim());
-        }
-        // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
-        // "above"/"below" instead of the bookmark's page number.
-        const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
-        if (!m) continue;
-        const position = /\\p(\s|$)/i.test(m[2]);
-        const number = /\\r(\s|$)/i.test(m[2]);
-        if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
+        this.visitField(rc);
       }
     }
   }
@@ -806,6 +807,24 @@ export class Prescan {
     if (seq === 0) chain.blocks = shape.blocks;
     const ins = shape.insets ?? TEXTBOX_INSETS;
     chain.capacities.set(seq, shape.height - ins.t - ins.b);
+  }
+
+  private visitField(field: FieldContent): void {
+    for (const part of field.instructionParts ?? []) {
+      if (typeof part !== "string") this.visitField(part);
+    }
+    const parts = field.instruction.trim().split(/\s+/);
+    if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
+      assignSeq(this.seq, this.seqCounters, parts[1], field, field.instruction.trim());
+    }
+    const set = /^\s*SET\s+(?:"([^"]+)"|([^\s\\]+))/i.exec(field.instruction);
+    if (set) this.setBookmarks.set(set[1] ?? set[2], field);
+    // Both REF and PAGEREF honour \p (position).
+    const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(field.instruction);
+    if (!m) return;
+    const position = /\\p(\s|$)/i.test(m[2]);
+    const number = /\\r(\s|$)/i.test(m[2]);
+    if (position || number) this.refs.push({ field, ordinal: this.ordinal, target: m[1], position, number });
   }
 
   /** The blocks visited from here on belong to the next section. */
@@ -1297,6 +1316,7 @@ class Engine {
     this.textboxChains = new Map(prescan.textboxChains);
     this.seqAssigned = prescan.seq;
     this.seqCounters = new Map(prescan.seqCounters);
+    this.setBookmarks = prescan.setBookmarks;
     this.refFieldPosition = prescan.refPosition;
     this.refFieldParaNumber = prescan.refParaNumber;
   }
@@ -1507,6 +1527,7 @@ class Engine {
         modelVersion: this.doc.modelVersion,
         seqCounters: this.seqCounters,
         seqAssigned: this.seqAssigned,
+        setBookmarks: this.setBookmarks,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
         mergeKey: mergeRecordKey(this.mergeRecord),
@@ -2282,6 +2303,7 @@ class Engine {
 
     this.seqCounters = new Map(inc.seqCounters);
     this.seqAssigned = inc.seqAssigned;
+    this.setBookmarks = inc.setBookmarks;
     this.refFieldPosition = inc.refFieldPosition;
     this.refFieldParaNumber = inc.refFieldParaNumber;
 
@@ -2460,6 +2482,7 @@ class Engine {
         modelVersion: this.doc.modelVersion,
         seqCounters: this.seqCounters,
         seqAssigned: this.seqAssigned,
+        setBookmarks: this.setBookmarks,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
         mergeKey: mergeRecordKey(this.mergeRecord),
@@ -2714,18 +2737,6 @@ class Engine {
     page.headerHeight = headerH;
     page.footerHeight = footerH;
 
-    if (sp.marginTop >= 0) {
-      // An all-empty-paragraph header charges its measured height like any
-      // other: us-courts-answer (compat 11, empty header, headerDistance 48px
-      // = marginTop 48px) puts Word's caption row top at 70.87 = 48 + the
-      // empty paragraph's full 18.55px default-12pt line + tcMar 3.87 + the
-      // 8pt glyph offset, to 0.1pt. The flat 7pt this branch used to charge
-      // carried no probe and was canceling against the hidden-SEQ strut
-      // oversizing the caption line (see inline.ts solidSpans).
-      page.bodyTop = Math.max(sp.marginTop, headerH > 0 ? sp.headerDistance + headerH : 0);
-      page.bandTop = page.bodyTop;
-      page.headerGrown = page.bodyTop > sp.marginTop;
-    }
     // w:docGrid: a section opening under a lines grid starts AT the body top.
     // Word reserves no grid rows for it (probe-docgrid, six sections: Word's
     // first line sits at 98.90 against a 96.00 body top under every pitch in
@@ -2747,6 +2758,23 @@ class Engine {
         sp.pageHeight - sp.marginBottom,
         footer ? sp.pageHeight - sp.footerDistance - footerH : sp.pageHeight,
       );
+    }
+
+    if (sp.marginTop >= 0) {
+      // An all-empty-paragraph header charges its measured height like any
+      // other: us-courts-answer (compat 11, empty header, headerDistance 48px
+      // = marginTop 48px) puts Word's caption row top at 70.87 = 48 + the
+      // empty paragraph's full 18.55px default-12pt line + tcMar 3.87 + the
+      // 8pt glyph offset, to 0.1pt. The flat 7pt this branch used to charge
+      // carried no probe and was canceling against the hidden-SEQ strut
+      // oversizing the caption line (see inline.ts solidSpans).
+      const headerBottom = headerH > 0 ? sp.headerDistance + headerH : 0;
+      // Reserve one default body line after the footer sets the body bottom.
+      // An oversized header may overlap the body; body text must keep flowing.
+      const minBodyHeight = this.measurer.metrics(fontOf(this.doc.styles.defaultRPr, "Calibri")).lineHeight;
+      page.bodyTop = Math.min(Math.max(sp.marginTop, headerBottom), page.bodyBottom - minBodyHeight);
+      page.bandTop = page.bodyTop;
+      page.headerGrown = page.bodyTop > sp.marginTop;
     }
 
     this.pages.push(page);
@@ -3191,19 +3219,26 @@ class Engine {
    * SEQ fields inside the range resolve to their document-order value (the
    * pre-pass in run() assigns them before any REF is laid out). */
   private refResolving = new Set<string>();
+  private setBookmarks = new Map<string, FieldContent>();
   private refBookmarkText(name: string): string | undefined {
+    const set = this.setBookmarks.get(name);
     const runs = this.doc.refBookmarks?.get(name);
-    if (!runs) return undefined; // bookmark not captured — keep the field cache
+    if (!set && !runs) return undefined; // bookmark not captured — keep the field cache
     // A captured but zero-length range is a real (empty) bookmark: Word's REF
     // recompute shows nothing for it, so return "" (NOT undefined, which would
     // fall back to the stale cache — probe3-index-xrefs' `tbl_c1` is an empty
     // bookmark whose cache still reads "Table 1").
-    if (runs.length === 0) return "";
+    if (!set && runs?.length === 0) return "";
     if (this.refResolving.has(name)) return undefined; // circular REF chain
     this.refResolving.add(name);
     try {
+      if (set) {
+        const instruction = resolveFieldInstruction(set.instruction, this.fieldCtx(), set);
+        const value = /^\s*SET\s+(?:"[^"]+"|[^\s\\]+)\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instruction);
+        return value?.[1] ?? value?.[2] ?? "";
+      }
       let out = "";
-      for (const run of runs) {
+      for (const run of runs ?? []) {
         for (const rc of run.content) {
           if (rc.kind === "text") out += rc.text;
           else if (rc.kind === "field") out += resolveField(rc.instruction, rc.cachedResult, this.fieldCtx(), rc);
@@ -3889,7 +3924,7 @@ class Engine {
   private placeFrameStart(first: Block, fr: ResolvedFrame, siblings: Block[] | undefined, index: number | undefined): void {
     const group = this.frameGroup(first, siblings, index);
     const after = siblings && index !== undefined ? siblings[index + group.length] : undefined;
-    if ((fr.vAnchor === "page" || fr.vAnchor === "margin") && after?.type === "paragraph" && !this.pageIsEmptyAtCursor()) {
+    if (fr.yAlign !== "inline" && (fr.vAnchor === "page" || fr.vAnchor === "margin") && after?.type === "paragraph" && !this.pageIsEmptyAtCursor()) {
       const np = this.doc.effectiveParaProps(after);
       const lines = breakParagraph(this.doc, this.measurer, after, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, LOOKAHEAD_BREAK).lines;
       const top = this.y + Math.max(this.lastParaSpacingAfter, np.spacingBefore ?? 0) - this.lastParaSpacingAfter;
@@ -4144,18 +4179,22 @@ class Engine {
     const sp = this.sp;
     const contentW = Math.max(8, fr.w ?? 0);
     const ox = this.frameOriginX(fr, contentW);
-    // Vertical origin (frame top) from the anchor.
+    // Inline-y frames start at the flow cursor, overriding vAnchor and y.
     let oy: number;
-    switch (fr.vAnchor) {
-      case "page":
-        oy = fr.y;
-        break;
-      case "margin":
-        oy = sp.marginTop + fr.y;
-        break;
-      default:
-        oy = this.y + fr.y; // text / paragraph travel with the current cursor
-        break;
+    if (fr.yAlign === "inline") {
+      oy = this.y;
+    } else {
+      switch (fr.vAnchor) {
+        case "page":
+          oy = fr.y;
+          break;
+        case "margin":
+          oy = sp.marginTop + fr.y;
+          break;
+        default:
+          oy = this.y + fr.y; // text / paragraph travel with the current cursor
+          break;
+      }
     }
     const laid = this.layoutFrame(blocks, contentW, this.fieldCtx(), { x: ox, y: oy });
     const height =
@@ -4175,6 +4214,7 @@ class Engine {
       else if (fr.yAlign === "bottom") oy = bottom - height;
       else oy = top;
     }
+    oy = anchorPositionOnPage(oy, height, sp.pageHeight);
     // Word paints an exact/atLeast frame's paragraph box to the FRAME's height,
     // not the content height: probe2-dropcaps-frames' pull-quote (h=1000tw
     // exact, two lines of text) fills and rules the whole 50pt box, leaving
@@ -4235,13 +4275,13 @@ class Engine {
     }
   }
 
-  /** A paragraph's positioned frame when it rides with the text (vAnchor text or paragraph) and has a width. */
+  /** A paragraph's positioned frame when it rides with the text and has a width. */
   private textFrame(block: Block | undefined): ResolvedFrame | undefined {
     if (block?.type !== "paragraph") return undefined;
     const props = this.doc.effectiveParaProps(block);
     if (!props.frame || props.dropCap) return undefined;
     const fr = this.resolveFrame(props.frame);
-    return fr.w !== undefined && (fr.vAnchor === "text" || fr.vAnchor === "paragraph") ? fr : undefined;
+    return fr.w !== undefined && (fr.yAlign === "inline" || fr.vAnchor === "text" || fr.vAnchor === "paragraph") ? fr : undefined;
   }
 
   /** The positioned frame a block belongs to: a paragraph's own framePr (a
@@ -4284,7 +4324,7 @@ class Engine {
     if (!block || this.consumedFrames.has(block)) return undefined;
     if (this.continuesFrame(prev, block)) return undefined;
     const fr = this.blockFrame(block);
-    if (fr?.w === undefined || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
+    if (fr?.w === undefined || fr.yAlign === "inline" || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
     if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return undefined;
     return fr;
   }
@@ -4307,7 +4347,7 @@ class Engine {
     for (let i = index; i < siblings.length; i++) {
       const fr = this.textFrame(siblings[i]);
       if (!fr) return false;
-      if (fr.h !== undefined && this.y + fr.y + fr.h > this.bodyBottom + 0.01) return true;
+      if (fr.h !== undefined && this.y + (fr.yAlign === "inline" ? 0 : fr.y) + fr.h > this.bodyBottom + 0.01) return true;
     }
     return false;
   }
@@ -4361,7 +4401,7 @@ class Engine {
       else if (fr.xAlign === "right" || fr.xAlign === "outside") ox = base + span - contentW;
       else ox = base;
     }
-    return ox;
+    return anchorPositionOnPage(ox, contentW, sp.pageWidth);
   }
 
   /** A full-width `wrap="notBeside"` frame banner at the top of a multi-column
@@ -7014,19 +7054,26 @@ class Engine {
       const d = `M0 0 H${width} V${height} H0 Z${shape.revision.struck ? ` M0 ${height / 2} H${width}` : ""}`;
       page.items.push({ kind: "path", x, y, width, height, d, viewW: width, viewH: height, stroke: { color: shape.revision.color, width: 1.5 }, ...(rotate ? { rotate } : {}), front: true, z: shape.z });
     };
-    // A body object positioned from its paragraph or line never runs past the
-    // page bottom: its top moves up until it fits (or to the page top when it
-    // is taller than the page), and placeParagraph moves the paragraph to the
-    // next page when it can. Nothing past the page edge is printed, so the
-    // part below it was lost (GovDocs 026966, 029456, 036752: tall boxes
-    // anchored near the page bottom). Word's own rule is not established
-    // here; LibreOffice moves the anchor paragraph and the object to the next
-    // page in the .doc files.
-    const keepOnPage = (shape: Shape, y: number, height: number): number => {
-      if (page.physIndex === -1 || (shape.vRel !== "text" && shape.vRel !== "line")) return y;
-      if (y + height <= sp.pageHeight + 0.5) return y;
-      this.anchorPushedUp = true;
-      return Math.max(0, sp.pageHeight - height);
+    // Work in page coordinates before emitting paint, hit targets and wrap
+    // bounds. Measurement-only frames have no page origin yet.
+    const keepOnPage = (shape: Shape, x: number, y: number, width: number, height: number): { x: number; y: number } => {
+      if (page.physIndex === -1 && !frameOrigin) return { x, y };
+      if (shape.type !== "line") {
+        const background = shape.behind && (
+          (x <= 0 && x + width >= sp.pageWidth) ||
+          (y <= 0 && y + height >= sp.pageHeight)
+        );
+        const watermark = (shape.type === "textbox" && shape.behind && shape.wordArt) ||
+          (shape.type === "image" && (shape.washout || (shape.behind && shape.hAlign === "center" && shape.vAlign === "center")));
+        if (background || watermark) return { x, y };
+      }
+      const nextY = anchorPositionOnPage(y, height, sp.pageHeight);
+      // Preserve paragraph pagination for body anchors that pass the bottom
+      // edge, including those whose small bleed keeps their authored offset.
+      if (page.physIndex !== -1 && (shape.vRel === "text" || shape.vRel === "line") && y + height > sp.pageHeight + 0.5) {
+        this.anchorPushedUp = true;
+      }
+      return { x: anchorPositionOnPage(x, width, sp.pageWidth), y: nextY };
     };
 
     for (const shape of shapes) {
@@ -7053,7 +7100,7 @@ class Engine {
           else if (shape.vAlign === "bottom") y = oy + baseH - shape.height;
           else y = oy;
         }
-        y = keepOnPage(shape, y, shape.height);
+        ({ x, y } = keepOnPage(shape, x, y, shape.width, shape.height));
         page.items.push({
           kind: "image",
           x: x - fx,
@@ -7099,7 +7146,7 @@ class Engine {
         if (shape.vAlign === "center") oy = originY(shape.vRel) + (baseH - shape.height) / 2;
         else if (shape.vAlign === "bottom") oy = originY(shape.vRel) + baseH - shape.height;
         else if (shape.vAlign === "top") oy = originY(shape.vRel);
-        oy = keepOnPage(shape, oy, shape.height);
+        ({ x: ox, y: oy } = keepOnPage(shape, ox, oy, shape.width, shape.height));
         const centerX = ox - fx + shape.width / 2;
         const centerY = oy - fy + shape.height / 2;
         const rotate = shape.rotation
@@ -7171,8 +7218,13 @@ class Engine {
         continue;
       }
       if (shape.type === "line") {
-        const ox = originX(shape.hRel);
-        const oy = originY(shape.vRel);
+        let ox = originX(shape.hRel);
+        let oy = originY(shape.vRel);
+        const left = Math.min(shape.x1, shape.x2);
+        const top = Math.min(shape.y1, shape.y2);
+        const position = keepOnPage(shape, ox + left, oy + top, Math.abs(shape.x2 - shape.x1), Math.abs(shape.y2 - shape.y1));
+        ox = position.x - left;
+        oy = position.y - top;
         const x1 = ox + shape.x1 - fx;
         const y1 = oy + shape.y1 - fy;
         const x2 = ox + shape.x2 - fx;
@@ -7270,7 +7322,6 @@ class Engine {
         let oy = originY(shape.vRel) + shape.y;
         if (shape.pctY !== undefined) oy = originY(shape.vRel) + shape.pctY * pageH;
         if (shape.vAlign) oy = alignV(originY(shape.vRel), shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom, height, shape.vAlign);
-        oy = keepOnPage(shape, oy, height);
 
         // allowOverlap="0": slide the box right past any earlier overlapping
         // box so they don't overlap (Word's overlap avoidance).
@@ -7286,6 +7337,7 @@ class Engine {
             if (!moved) break;
           }
         }
+        ({ x: ox, y: oy } = keepOnPage(shape, ox, oy, width, height));
         placedRects.push({ x0: ox, x1: ox + width, y0: oy, y1: oy + height });
 
         // Rotate the whole box (fill + border + text) about its center.

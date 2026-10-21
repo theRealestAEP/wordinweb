@@ -9,8 +9,8 @@
  * Transitional once, as its bytes are read, and nothing downstream knows
  * the difference; whatever is saved or compared is written as Transitional.
  *
- * The rewrite walks the part's tags and touches attribute values only:
- * text content is never read. Every reader of a package goes through here:
+ * The rewrite maps tags, attributes and DrawingML percentage elements,
+ * preserving document text. Every reader of a package goes through here:
  * DocxDocument.load (a package in memory), the streaming reader
  * (stream/body.ts, the PDF renderer) and compare-cli's input reader.
  */
@@ -61,6 +61,14 @@ const TEXT_DIRECTION: Record<string, string> = { tb: "lrTb", rl: "tbRl", lr: "bt
 
 /** Prefixes of the DrawingML family, whose measures are EMUs and whose percentages are thousandths. */
 const DRAWING_PREFIXES = new Set(["a", "wp", "pic", "wpg", "wps", "wpc", "dgm", "cdr", "lc", "xdr", "dsp"]);
+
+/** Drawing position and size percentages stored as element text, in thousandths. */
+const PERCENTAGE_ELEMENTS = new Set(["wp14:pctPosHOffset", "wp14:pctPosVOffset", "wp14:pctWidth", "wp14:pctHeight"]);
+
+function hasPercentageText(state: RewriteState): boolean {
+  const parent = state.stack[state.stack.length - 1];
+  return state.strict === true && parent !== undefined && PERCENTAGE_ELEMENTS.has(parent.name);
+}
 
 /**
  * A Strict attribute value as Transitional writes it, by the element and
@@ -148,8 +156,8 @@ function rewriteStartTag(tag: string, state: RewriteState): { tag: string; name:
 }
 
 /**
- * Rewrite the complete tags in `text`; `rest` is the start of a tag the text
- * ends inside, to go before the next piece.
+ * Rewrite complete tags and percentage values in `text`; retain an unfinished
+ * tag or percentage value in `rest` for the next piece.
  */
 export function rewriteTags(text: string, state: RewriteState): { out: string; rest: string } {
   const pieces: string[] = [];
@@ -158,7 +166,10 @@ export function rewriteTags(text: string, state: RewriteState): { out: string; r
   while (i < n) {
     const lt = text.indexOf("<", i);
     if (lt === -1) break;
-    pieces.push(text.slice(i, lt));
+    const content = text.slice(i, lt);
+    pieces.push(hasPercentageText(state)
+      ? content.replace(/^(\s*)(-?\d+(?:\.\d+)?)%(\s*)$/, (_whole, before: string, value: string, after: string) => `${before}${Math.round(Number(value) * 1000)}${after}`)
+      : content);
     const c = text[lt + 1];
     let end: number;
     if (c === "?") {
@@ -187,6 +198,8 @@ export function rewriteTags(text: string, state: RewriteState): { out: string; r
     }
     i = end;
   }
+  // A percentage can span chunks, so hold its text until the closing tag.
+  if (hasPercentageText(state)) return { out: pieces.join(""), rest: text.slice(i) };
   pieces.push(text.slice(i));
   return { out: pieces.join(""), rest: "" };
 }

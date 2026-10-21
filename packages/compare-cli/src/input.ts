@@ -2,7 +2,7 @@ import { Hash, createHash } from "node:crypto";
 import { closeSync, openSync, readSync, fstatSync } from "node:fs";
 import { join } from "node:path";
 import { DocxDocument } from "../../core/src/docx.js";
-import { DEFAULT_XML_LIMITS, XmlElement, child, cyrb53, localName, parseXml, serializeXml } from "../../core/src/xml.js";
+import { DEFAULT_XML_LIMITS, XmlElement, child, cyrb53, localName, parseXml, rejectXmlDeclarations, serializeXml } from "../../core/src/xml.js";
 import { acceptAllRevisions, collectRevisions } from "../../core/src/edit/suggest.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
 import { ROW_LEVEL, blockFingerprint, rowFingerprint, sectionReferences } from "../../core/src/edit/compare/index.js";
@@ -154,7 +154,10 @@ export async function readInput(zip: ZipReader, side: Side, dir: string): Promis
       if (entry.name === docPart || entry.name.endsWith("/")) continue;
       const empty = outlines.get(entry.name);
       if (empty) files[entry.name] = Buffer.from(empty.head + empty.tail, "utf8");
-      else files[entry.name] = held(entry) ? zip.read(entry) : Buffer.from(`${STUB}${side}\u0000${entry.name}`, "utf8");
+      else {
+        files[entry.name] = held(entry) ? zip.read(entry) : Buffer.from(`${STUB}${side}\u0000${entry.name}`, "utf8");
+        if (held(entry)) rejectXmlDeclarations(Buffer.from(files[entry.name]).toString("utf8"));
+      }
     }
     const skeleton: Buffer[] = [Buffer.from(range(0, bounds.contentStart))];
     for (let i = 0; i < names.length; i++) if (isSectPr(i)) skeleton.push(Buffer.from(range(starts[i], ends[i])));

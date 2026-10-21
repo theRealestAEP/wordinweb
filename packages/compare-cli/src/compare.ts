@@ -1,7 +1,7 @@
 import { WriteStream, closeSync, createWriteStream, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, statfsSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
+import { XmlParseError, XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
 import { histogramMatch } from "../../core/src/edit/compare/histogram.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
 import {
@@ -231,7 +231,8 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     }
     if (error instanceof CompareError) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    if (error instanceof PdfRenderError && (error.code === "unsupported_script" || error.code === "too_large")) throw new CompareError(error.code, message, undefined, { cause: error });
+    if (error instanceof XmlParseError) throw new CompareError("damaged", message, undefined, { cause: error });
+    if (error instanceof PdfRenderError && (error.code === "unsupported_script" || error.code === "too_large" || error.code === "damaged")) throw new CompareError(error.code, message, undefined, { cause: error });
     throw new CompareError(isDiskFull(error) ? "disk_full" : "failed", message, undefined, { cause: error });
   } finally {
     for (const store of stores) store.close();

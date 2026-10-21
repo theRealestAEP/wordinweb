@@ -1,5 +1,5 @@
 import { unzipSync, strFromU8 } from "fflate";
-import { DEFAULT_XML_LIMITS, countElements, parseXml } from "./xml.js";
+import { DEFAULT_XML_LIMITS, countElements, parseXml, rejectXmlDeclarations } from "./xml.js";
 
 /** Fixed mtime for every zip entry we write (2020-01-01T00:00:00Z). Without
  * it fflate stamps `new Date()` at 2-second DOS granularity, so two save()
@@ -137,6 +137,7 @@ export function holdXmlCounts(files: Record<string, Uint8Array>, docPart: string
   let blocks = 0;
   for (const [name, bytes] of Object.entries(files)) {
     if (!XML_PART.test(name)) continue;
+    rejectXmlDeclarations(strFromU8(bytes));
     const count = countElements(bytes);
     if (name === docPart) {
       if (count.elements > DOCUMENT_LIMITS.documentElements) throw new Error(`too large: ${name} holds ${count.elements} elements, over the ${DOCUMENT_LIMITS.documentElements} it may hold`);

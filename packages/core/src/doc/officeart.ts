@@ -312,6 +312,12 @@ export function fixed16(value: number): number {
 
 export type ArtImageType = "png" | "jpeg" | "emf" | "wmf" | "pict" | "bmp" | "tiff" | "gif";
 
+export interface MetafileWorkspace {
+  buffer: Uint8Array;
+  input?: object;
+  data: Uint8Array;
+}
+
 export interface ArtImage {
   type: ArtImageType;
   /** File extension for a media part. */
@@ -319,6 +325,8 @@ export interface ArtImage {
   contentType: string;
   /** The image bytes, ready to write as a file (a DIB gains a BMP header, a WMF a placeable header). */
   data: Uint8Array;
+  /** Temporary expanded view, valid until the next compressed metafile read. */
+  borrowData?: (workspace?: MetafileWorkspace) => Uint8Array;
   /** For metafiles: the picture size the metafile header gives, in EMU. */
   metafileSize?: { cx: number; cy: number };
 }
@@ -370,6 +378,10 @@ export function decodeBlip(bytes: Uint8Array, rec: ArtRecord): ArtImage | null {
   }
 }
 
+// Synchronous conversion shares one expansion. Each PDF render supplies
+// its own workspace to keep its picture valid across asynchronous writes.
+const metafileWorkspace: MetafileWorkspace = { buffer: new Uint8Array(0), data: new Uint8Array(0) };
+
 function decodeMetafile(bytes: Uint8Array, rec: ArtRecord, type: "emf" | "wmf" | "pict", twoUidInstance: number): ArtImage | null {
   const uids = rec.instance === twoUidInstance ? 2 : 1;
   const headerAt = rec.start + 16 * uids;
@@ -380,14 +392,43 @@ function decodeMetafile(bytes: Uint8Array, rec: ArtRecord, type: "emf" | "wmf" |
   const ptSize = { cx: v.getInt32(headerAt + 20, true), cy: v.getInt32(headerAt + 24, true) };
   const cbSave = v.getUint32(headerAt + 28, true);
   const compression = bytes[headerAt + 32];
-  let data = bytes.subarray(headerAt + 34, Math.min(end, headerAt + 34 + cbSave));
+  const data = bytes.subarray(headerAt + 34, Math.min(end, headerAt + 34 + cbSave));
   if (compression === 0) {
+    const input = {};
+    const borrowData = (workspace = metafileWorkspace): Uint8Array => {
+      if (workspace.input !== input) {
+        workspace.input = undefined;
+        // Grow from the actual output, so a damaged header's cb cannot
+        // force a large allocation. Subsequent pictures reuse the buffer.
+        let expanded: Uint8Array;
+        if (cb > workspace.buffer.length) expanded = unzlibSync(data);
+        else {
+          try {
+            expanded = unzlibSync(data, { out: workspace.buffer });
+          } catch {
+            // A stored deflate block can exceed a falsely small cb.
+            expanded = unzlibSync(data);
+          }
+        }
+        if (expanded.length > workspace.buffer.length) workspace.buffer = expanded;
+        workspace.data = expanded.subarray(0, cb);
+        workspace.input = input;
+      }
+      return workspace.data;
+    };
     try {
-      data = unzlibSync(data);
+      // Validate now, preserving the reader's null result for damaged BLIPs.
+      borrowData();
     } catch {
       return null;
     }
-    if (data.length > cb) data = data.subarray(0, cb);
+    return {
+      type, ...IMAGE_META[type], metafileSize: ptSize, borrowData,
+      get data() {
+        const expanded = unzlibSync(data);
+        return expanded.length > cb ? expanded.subarray(0, cb) : expanded;
+      },
+    };
   }
   // A WMF BLIP is a bare metafile (no placeable header), which is also what
   // Word writes to a .docx media part; the header's size is in `metafileSize`.

@@ -24,6 +24,41 @@ export const FETCH_BYTES = 1 << 20;
 /** The inflater takes this much input at a time, so each piece it gives is bounded too: deflate inflates at most 1032:1, so 16 MB at the very most (what an entry that outgrows its declared size can take before it is stopped), and about as much as the input for an image. */
 const INFLATE_INPUT = 16 << 10;
 
+/** Converted packages keep binary parts as views or readers, so media can
+ * stay compressed in its original BLIP until the renderer asks for it. */
+export type PackagePart = Uint8Array | { size: number; read(): Uint8Array };
+
+export class PartsIndex {
+  readonly entries = new Map<string, ZipEntry>();
+
+  constructor(private readonly files: Record<string, PackagePart>) {
+    for (const [name, part] of Object.entries(files)) {
+      const size = part instanceof Uint8Array ? part.length : part.size;
+      this.entries.set(name, { name, size, compressedSize: size, method: 0, headerOffset: 0 });
+    }
+  }
+
+  async raw(entry: ZipEntry): Promise<Uint8Array> {
+    return this.read(entry);
+  }
+
+  async read(entry: ZipEntry, limit = DEFAULT_ZIP_LIMITS.maxTotalUncompressed): Promise<Uint8Array> {
+    if (entry.size > limit) throw new Error(`too large: ${entry.name} is ${entry.size} bytes, over the ${limit} read whole`);
+    const part = this.files[entry.name];
+    return part instanceof Uint8Array ? part : part.read();
+  }
+
+  async pieces(entry: ZipEntry, onPiece: (piece: Uint8Array) => void | Promise<void>): Promise<void> {
+    const bytes = await this.read(entry);
+    for (let at = 0; at < bytes.length; at += FETCH_BYTES) await onPiece(bytes.subarray(at, at + FETCH_BYTES));
+  }
+
+  async text(name: string): Promise<string | undefined> {
+    const entry = this.entries.get(name);
+    return entry ? strFromU8(await this.read(entry, DEFAULT_XML_LIMITS.maxLength)) : undefined;
+  }
+}
+
 /**
  * A zip read through its central directory, an entry at a time, so a
  * document's small parts come in without its body: the browser twin of

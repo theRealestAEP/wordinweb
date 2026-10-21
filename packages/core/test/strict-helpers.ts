@@ -1,4 +1,23 @@
-import { strToU8, zipSync } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+
+/** Convert the namespace, direction and DrawingML percentage forms used by the PDF reductions to Strict. */
+export function toStrictPackage(docx: Uint8Array): Uint8Array {
+  const directions: Record<string, string> = { lrTb: "tb", tbRl: "rl", btLr: "lr", lrTbV: "tbV", tbRlV: "rlV", tbLrV: "lrV" };
+  const files = unzipSync(docx);
+  for (const name in files) {
+    if (!/\.(xml|rels)$/i.test(name)) continue;
+    const xml = strFromU8(files[name])
+      .replace(/http:\/\/schemas\.openxmlformats\.org\/(wordprocessingml|officeDocument|drawingml)\/2006\//g, "http://purl.oclc.org/ooxml/$1/")
+      .replace(/http:\/\/purl\.oclc\.org\/ooxml\/officeDocument\/(relationships\/)?(extended|custom)-properties/g, "http://purl.oclc.org/ooxml/officeDocument/$1$2Properties")
+      .replace(/(<w:textDirection\b[^>]*\bw:val=")([^"]+)(")/g, (_whole, before: string, direction: string, after: string) => before + (directions[direction] ?? direction) + after)
+      .replace(/(<wp14:(?:pctPosHOffset|pctPosVOffset|pctWidth|pctHeight)>)(-?\d+)(<\/wp14:[^>]+>)/g, (_whole, before: string, value: string, after: string) => `${before}${Number(value) / 1000}%${after}`)
+      .replace(/<(\/?)wp[sg]:/g, "<$1wp:")
+      .replace(/<(\/?)w:txbxContent/g, "<$1wne:txbxContent")
+      .replace("<w:document ", '<w:document xmlns:wne="http://schemas.microsoft.com/office/word/2006/wordml" ');
+    files[name] = strToU8(xml);
+  }
+  return zipSync(files);
+}
 
 /** A Strict Open XML document part: unit-carrying measures, Strict names and values, a Strict border side. */
 export const STRICT_DOCUMENT = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

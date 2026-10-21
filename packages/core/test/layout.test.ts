@@ -2632,6 +2632,42 @@ describe("layout engine", () => {
     expect(bodyItem.lineTop).toBeGreaterThanOrEqual(95);
   });
 
+  it.each([
+    { name: "80 header paragraphs taller than the page", header: p("HEADER").repeat(80) },
+    { name: "a header exactly as tall as the page", header: p("HEADER", '<w:pPr><w:spacing w:line="15840" w:lineRule="exact"/></w:pPr>') },
+    { name: "a header reaching the body bottom", header: p("HEADER", '<w:pPr><w:spacing w:line="14400" w:lineRule="exact"/></w:pPr>') },
+    { name: "a header leaving less than one body line", header: p("HEADER", '<w:pPr><w:spacing w:line="14385" w:lineRule="exact"/></w:pPr>') },
+  ])("preserves all body paragraphs under $name", ({ header }) => {
+    const body = ["First body paragraph", "Second body paragraph", "Third body paragraph"];
+    const { result } = layout({
+      "word/document.xml": wrapDocument(
+        body.map((text) => p(text)).join("") +
+          `<w:sectPr>
+            <w:headerReference xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" w:type="default" r:id="rIdH"/>
+            <w:pgSz w:w="12240" w:h="15840"/>
+            <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="0"/>
+          </w:sectPr>`,
+      ),
+      "word/_rels/document.xml.rels": `<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+</Relationships>`,
+      "word/header1.xml": `<?xml version="1.0"?><w:hdr ${W_NS}>${header}</w:hdr>`,
+    });
+
+    const bodyText: string[] = [];
+    for (const page of result.pages) {
+      expect(page.bodyBottom).toBeGreaterThan(page.bodyTop);
+      for (const item of page.items.slice(0, page.hfStart)) {
+        if (item.kind !== "text") continue;
+        bodyText.push(item.text);
+        expect(item.lineTop).toBeGreaterThanOrEqual(page.bodyTop);
+        expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+      }
+    }
+    expect(bodyText.join("")).toBe(body.join(""));
+  });
+
   it("resolves margin-relative header anchors from the grown body top", () => {
     // wild2-med-phase23 (PDF-pinned): the tall logo header grows past the
     // 72pt top margin, and Word resolves the anchor's vRel="margin"

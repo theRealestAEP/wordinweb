@@ -9,7 +9,7 @@ export type CompareErrorCode =
    * document. (A Word 6.0-2003 .doc is read: it is converted to a .docx
    * working file first.) */
   | "unsupported_format"
-  /** An input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed, a .doc whose tables are corrupt. */
+  /** An input is a .docx or .doc that cannot be read: a corrupt zip entry, malformed XML or forbidden XML declarations, a .doc whose tables are corrupt. */
   | "damaged"
   /** An input holds content Word prints that the compare does not read,
    * which the message names: a w:altChunk (a part in another format, such

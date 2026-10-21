@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { resolveField, type FieldContext } from "../src/layout/inline.js";
 import { DocxDocument } from "../src/docx.js";
-import { layoutDocument } from "../src/layout/engine.js";
+import { layoutDocument, layoutDocumentStream } from "../src/layout/engine.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
+import { openStreamingDocument } from "../src/stream/body.js";
+import { bytesSource } from "../src/stream/source.js";
 import { makeDocx, wrapDocument, W_NS } from "./helpers.js";
 
 const measurer = new ApproxMeasurer();
@@ -28,6 +30,18 @@ function field(instr: string, cached: string): string {
   );
 }
 
+function nestedField(before: string, nested: string, after: string, cached: string): string {
+  return (
+    `<w:r><w:fldChar w:fldCharType="begin"/></w:r>` +
+    `<w:r><w:instrText xml:space="preserve">${before}</w:instrText></w:r>` +
+    nested +
+    `<w:r><w:instrText xml:space="preserve">${after}</w:instrText></w:r>` +
+    `<w:r><w:fldChar w:fldCharType="separate"/></w:r>` +
+    `<w:r><w:t xml:space="preserve">${cached}</w:t></w:r>` +
+    `<w:r><w:fldChar w:fldCharType="end"/></w:r>`
+  );
+}
+
 function bodyText(body: string): string {
   const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body) }));
   const result = layoutDocument(doc, { measurer });
@@ -35,6 +49,114 @@ function bodyText(body: string): string {
     .flatMap((pg) => pg.items.filter((i) => i.kind === "text").map((i) => (i.kind === "text" ? i.text : "")))
     .join("");
 }
+
+describe("nested complex fields", () => {
+  it.each(["1", "9"])("hides SET and evaluates its nested SEQ with cache %s", (cached) => {
+    const set = nestedField("SET x ", field("SEQ table", cached), "", cached);
+    expect(bodyText(`<w:p>${set}${field("SEQ table", "9")}</w:p>`)).toBe("2");
+  });
+
+  it("REF reads the value assigned by SET", () => {
+    const set = nestedField("SET x ", field("SEQ table", "9"), "", "9");
+    expect(bodyText(`<w:p>${set}${field("REF x", "stale")}${field("SEQ table", "9")}</w:p>`)).toBe("12");
+  });
+
+  it("prints the stored IF result with a nested PAGE in its instruction", () => {
+    const conditional = nestedField("IF ", field("PAGE", "9"), ' = 1 "first" "other"', "first");
+    expect(bodyText(`<w:p>${conditional}</w:p>`)).toBe("first");
+  });
+
+  it("recomputes the outer REF from its evaluated instruction", () => {
+    const assignments = field('SET target "value"', "stale") + field('SET name "target"', "stale");
+    const reference = nestedField("REF ", field("REF name", "stale"), "", "stale");
+    expect(bodyText(`<w:p>${assignments}${reference}</w:p>`)).toBe("value");
+  });
+
+  it("keeps nested results in a hyperlink instruction out of body text", () => {
+    const link = nestedField('HYPERLINK "https://example.com/', field("SEQ table", "9"), '"', "link");
+    expect(bodyText(`<w:p>${link}${field("SEQ table", "9")}</w:p>`)).toBe("link2");
+  });
+
+  it("builds the hyperlink target from the evaluated nested field", () => {
+    const link = nestedField('HYPERLINK "https://example.com/', field("SEQ table", "9"), '"', "link");
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(`<w:p>${link}</w:p>`) }));
+    const items = layoutDocument(doc, { measurer }).pages.flatMap((page) => page.items);
+    expect(items.filter((item) => item.kind === "text").map((item) => item.href)).toEqual(["https://example.com/1"]);
+  });
+
+  it("preserves instruction text on both sides of a nested result", () => {
+    const set = nestedField('SET x "table ', field("SEQ table", "9"), ' caption"', "stale");
+    expect(bodyText(`<w:p>${set}${field("REF x", "stale")}</w:p>`)).toBe("table 1 caption");
+  });
+
+  it("keeps a nested hyperlink result inside the outer instruction", () => {
+    const set = nestedField('SET x "', field('HYPERLINK "https://example.com"', "value"), '"', "stale");
+    expect(bodyText(`<w:p>${set}${field("REF x", "stale")}</w:p>`)).toBe("value");
+  });
+
+  it("handles field markers and text that share a run", () => {
+    const set = nestedField("SET x ", field("SEQ table", "9"), "", "9");
+    const runs = (set + field("SEQ table", "9")).replaceAll("</w:r><w:r>", "");
+    expect(bodyText(`<w:p>${runs}</w:p>`)).toBe("2");
+  });
+
+  it.each([false, true])("preserves text after a nested field in a DATE result (shared run: %s)", (sharedRun) => {
+    const date = 'DATE \\@ "d/M/yyyy"';
+    let result = field(date, "").replace(
+      '<w:r><w:t xml:space="preserve"></w:t></w:r>',
+      field("NUMPAGES", "2") + '<w:r><w:t>romeo eight ten oscar quebec</w:t></w:r>',
+    );
+    if (sharedRun) {
+      result = result.replace(
+        '<w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="begin"/>',
+        '<w:fldChar w:fldCharType="separate"/><w:fldChar w:fldCharType="begin"/>',
+      );
+    }
+    const currentDate = bodyText(`<w:p>${field(date, "")}</w:p>`);
+    expect(bodyText(`<w:p>${result}</w:p>`)).toBe(`${currentDate}1romeo eight ten oscar quebec`);
+  });
+
+  it("keeps nested SEQ assignments stable across streamed layout passes", async () => {
+    const set = nestedField("SET x ", field("SEQ table", "9"), "", "9");
+    const body = `<w:p>${set}${field("REF x", "stale")}${field("SEQ table", "9")}</w:p>`;
+    const opened = await openStreamingDocument(bytesSource(makeDocx({ "word/document.xml": wrapDocument(body) })));
+    for (let pass = 0; pass < 2; pass++) {
+      let text = "";
+      await layoutDocumentStream(opened.doc, {
+        measurer,
+        prescan: opened.prescan,
+        onPage: (page) => {
+          text += page.items.map((item) => item.kind === "text" ? item.text : "").join("");
+        },
+      });
+      expect(text).toBe("12");
+    }
+  });
+
+  it("handles multiple levels of nesting and instruction text after them", () => {
+    const quote = nestedField("QUOTE ", field("SEQ table", "9"), "", "value");
+    const set = nestedField("SET x ", quote, "", "value");
+    expect(bodyText(`<w:p>${set}${field("REF x", "stale")}${field("SEQ table", "9")}</w:p>`)).toBe("value2");
+  });
+
+  it("keeps plain complex and simple fields unchanged", () => {
+    const simple = '<w:fldSimple w:instr="SEQ table"><w:r><w:t>9</w:t></w:r></w:fldSimple>';
+    expect(bodyText(`<w:p>${field("SEQ table", "9")}${simple}${field("PAGE", "9")}${field("UNKNOWN", "cached")}</w:p>`)).toBe("121cached");
+  });
+
+  it("hides a simple SET and exposes its value through REF", () => {
+    const set = '<w:fldSimple w:instr="SET x &quot;value&quot;"><w:r><w:t>stale</w:t></w:r></w:fldSimple>';
+    expect(bodyText(`<w:p>${set}${field("REF x", "stale")}</w:p>`)).toBe("value");
+  });
+
+  it("hides a SET result containing a nested field and trailing text", () => {
+    const set = field('SET x "value"', "stale").replace(
+      '<w:r><w:t xml:space="preserve">stale</w:t></w:r>',
+      field("NUMPAGES", "2") + '<w:r><w:t>hidden</w:t></w:r>',
+    );
+    expect(bodyText(`<w:p>${set}${field("REF x", "stale")}</w:p>`)).toBe("value");
+  });
+});
 
 describe("SEQ switches", () => {
   it.each(["\\r0", "\\r 0"])("%s resets the counter to zero", (reset) => {

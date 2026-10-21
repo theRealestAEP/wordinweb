@@ -75,6 +75,31 @@ describe("Strict Open XML namespaces", () => {
   });
 });
 
+describe("Strict DrawingML percentage text", () => {
+  const strict = `<w:document ${W} xmlns:wp14="http://schemas.microsoft.com/office/word/2010/wordprocessingDrawing"><wp14:pctPosHOffset>-2.3%</wp14:pctPosHOffset><wp14:pctPosVOffset>81.8%</wp14:pctPosVOffset><wp14:pctWidth>94.1%</wp14:pctWidth><wp14:pctHeight> 9.2% </wp14:pctHeight><w:t>漢字 94.1% 72pt</w:t></w:document>`;
+  const transitional = strict.replace("http://purl.oclc.org/ooxml/wordprocessingml/main", "http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+    .replace(">-2.3%<", ">-2300<").replace(">81.8%<", ">81800<").replace(">94.1%<", ">94100<").replace("> 9.2% <", "> 9200 <");
+
+  it("maps position and size values while preserving document text", () => {
+    expect(normalizeStrictXml(strict)).toBe(transitional);
+    const unchanged = strict.replace("http://purl.oclc.org/ooxml/wordprocessingml/main", "http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+    expect(normalizeStrictXml(unchanged)).toBe(unchanged);
+  });
+
+  it("maps values across every possible byte split", () => {
+    const bytes = strToU8(strict);
+    for (let at = 1; at < bytes.length; at++) {
+      const rewriter = new StrictRewriter();
+      const pieces = [rewriter.push(bytes.subarray(0, at)), rewriter.push(bytes.subarray(at)), rewriter.end()];
+      expect(pieces.map((piece) => strFromU8(piece)).join(""), `split at ${at}`).toBe(transitional);
+    }
+    const rewriter = new StrictRewriter();
+    const pieces = [...bytes].map((byte) => rewriter.push(new Uint8Array([byte])));
+    pieces.push(rewriter.end());
+    expect(pieces.map((piece) => strFromU8(piece)).join("")).toBe(transitional);
+  });
+});
+
 describe("StrictRewriter", () => {
   const bytes = strToU8(STRICT_DOCUMENT);
   const expected = normalizeStrictXml(STRICT_DOCUMENT);
