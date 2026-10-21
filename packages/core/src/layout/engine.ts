@@ -311,6 +311,9 @@ interface InternalPage {
   softTop: boolean;
   /** The header outgrew the nominal top margin and pushed bodyTop below it. */
   headerGrown?: boolean;
+  /** enterSection opened this page for the next section's opener, whose
+   * leading page break it stands for (see keepEmptyAfter). */
+  openedForLeadingBreak?: true;
   colXs: number[];
   colWidths: number[];
   hfStart?: number;
@@ -432,6 +435,7 @@ interface IncrState {
     bandTop: number;
     softTop: boolean;
     headerGrown?: boolean;
+    openedForLeadingBreak?: true;
     headerRel?: string;
     footerRel?: string;
     headerHeight: number;
@@ -1348,8 +1352,10 @@ class Engine {
       if (canContinue) {
         // This leading break will start a page. Create it before restoring the
         // carried after so placeParagraph does not clear the carry itself.
-        if (keepEmptyAfter) this.newPage(false);
-        else this.newBand();
+        if (keepEmptyAfter) {
+          this.newPage(false);
+          this.cur.openedForLeadingBreak = true;
+        } else this.newBand();
       } else this.newPage(true);
       if (prevSp !== null) {
         if (carryAfter !== this.lastParaSpacingAfter) this.lastParaAfterPad = 0;
@@ -1744,6 +1750,7 @@ class Engine {
           bandTop: p.bandTop,
           softTop: p.softTop,
           headerGrown: p.headerGrown,
+          openedForLeadingBreak: p.openedForLeadingBreak,
           headerRel: p.headerRel,
           footerRel: p.footerRel,
           headerHeight: p.headerHeight,
@@ -1862,6 +1869,7 @@ class Engine {
       softTop: ps.softTop,
       bodyBottom: ps.bodyBottom,
       headerGrown: ps.headerGrown,
+      openedForLeadingBreak: ps.openedForLeadingBreak,
       headerRel: ps.headerRel,
       footerRel: ps.footerRel,
       headerHeight: ps.headerHeight,
@@ -4270,7 +4278,15 @@ class Engine {
     const leadBreak = leadingBreakOf(para);
     const previousSpacingAfter = this.lastParaSpacingAfter;
     const previousAfterPad = this.lastParaAfterPad;
-    if ((props.pageBreakBefore || leadBreak?.type === "page") && !this.pageIsEmptyAtCursor()) {
+    // A page or column break run ends its page or column even when nothing is
+    // on it yet: Word leaves that page blank. w:pageBreakBefore on a paragraph
+    // already at the top of a page adds no page. enterSection may already
+    // have opened the page for this break (openedForLeadingBreak).
+    const leadPageBreak =
+      leadBreak?.type === "page" &&
+      !props.pageBreakBefore &&
+      !(this.cur.openedForLeadingBreak && this.pageIsEmptyAtCursor());
+    if (leadPageBreak || (props.pageBreakBefore && !this.pageIsEmptyAtCursor())) {
       this.newPage(false);
       // Legacy Word keeps the preceding paragraph's after-spacing in the
       // collapse chain across a leading inline page break. The opener gets
@@ -4280,7 +4296,7 @@ class Engine {
         this.lastParaAfterPad = previousAfterPad;
       }
       breakBeforeForced = true;
-    } else if (leadBreak?.type === "column" && !this.pageIsEmptyAtCursor()) {
+    } else if (leadBreak?.type === "column") {
       this.nextColumn();
       breakBeforeForced = true;
     }
