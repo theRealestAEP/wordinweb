@@ -157,10 +157,11 @@ describe("renderDocxToPdf", () => {
 
   it.skipIf(!hasPdftotext)("counts the pages it renders when a two-column section is too long for the page it would share", async () => {
     // Section 2 starts below the intro on page 1 (a continuous break) and
-    // balances before section 3's continuous break, but fills more than the
-    // rest of page 1, so it moves to page 2. The counting pass lays its
-    // lines without page items; it once took page 1 for empty, kept the
-    // section there, and counted one page fewer than the render drew.
+    // balances before section 3's continuous break. It fills more than the
+    // rest of page 1 and still starts there, as Word and LibreOffice lay it.
+    // When such a section moved to page 2, the counting pass (which lays its
+    // lines without page items) once took page 1 for empty, kept the section
+    // there, and counted one page fewer than the render drew.
     const words = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
     const footer = `<w:footerReference ${R_NS} w:type="default" r:id="rIdF"/>`;
     const page = `<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:header="720" w:footer="720"/>`;
@@ -178,10 +179,10 @@ describe("renderDocxToPdf", () => {
     const docx = makeDocx({ "word/document.xml": document, "word/footer1.xml": footerXml, "word/_rels/document.xml.rels": rels });
     const out = new HeldWritable(Infinity);
     const result = await renderDocxToPdf(bytesSource(docx), out);
-    expect([result.pages, result.countedPages]).toEqual([3, 3]);
+    expect([result.pages, result.countedPages]).toEqual([2, 2]);
     const text = pdfText(Buffer.concat(out.chunks));
-    expect(text.split("\f")[0]).not.toContain("1. Lorem");
-    expect(text).toContain("Sheet 3 of 3");
+    expect(text.split("\f")[0]).toContain("1. Lorem");
+    expect(text).toContain("Sheet 2 of 2");
   });
 
   it("maps glyphs back to Unicode through a ToUnicode CMap", async () => {

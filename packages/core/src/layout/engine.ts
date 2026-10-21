@@ -2742,14 +2742,16 @@ class Engine {
     }
 
     const snap = this.snapshot();
-    // A partial page is only "shared" when content sits above the cursor. When
-    // the section boundary landed on a fresh page (e.g. a preceding hard page
-    // break emptied the cursor to the page top), the multi-column section
-    // starts on THAT page rather than moving to yet another fresh page. The
-    // test reads the cursor, never the page's items: a streamed counting pass
-    // lays its lines without items, and must decide as the rendering pass
-    // does, or the two passes disagree on the page count (wild-multicolumn).
-    const sharedPartialPage = !this.pageIsEmptyAtCursor();
+    // A section too long for the rest of a shared page still starts there:
+    // Word fills the page's remaining band and flows on (word95-check-a:
+    // 133189 and 143726 start their 2-column sections under the 1-column
+    // text, as LibreOffice prints them). Columns too narrow to hold a glyph
+    // are the exception: Word starts wild-multicolumn's 2-column sections
+    // (w:space of 250in) on a fresh page, below an otherwise empty band.
+    // The test reads the cursor, never the page's items: a streamed counting
+    // pass lays its lines without items, and must decide as the rendering
+    // pass does, or the two passes disagree on the page count.
+    const sharedPartialPage = !this.pageIsEmptyAtCursor() && this.cur.colWidths.some((width) => width <= 0);
     // Measure pass from the current (possibly shared) position.
     this.beginMeasure();
     this.layoutBlocks(section.blocks);
