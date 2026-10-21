@@ -4310,10 +4310,12 @@ class Engine {
     // anchor before its space-before. The offset itself then places the shape
     // alongside the text (IEEE's biography portrait: 12.6pt posOffset plus a
     // 12pt paragraph gap must not count that gap twice).
-    // Set by this paragraph's own objects only: the lookaheads below leave a
-    // paragraph-positioned box that would be moved up to its own paragraph.
     this.anchorPushedUp = false;
     emitParaAnchors(this.y);
+    // Only this paragraph's own paragraph-positioned objects move it: the
+    // lookaheads below draw other paragraphs' objects, and line-relative
+    // objects are placed from line tops before the paragraph is paginated.
+    const ownAnchorsPushedUp = this.anchorPushedUp;
     let broken = breakNow(paraTopEstimate);
 
     // relH="character"/relV="line" shapes: Word places them from the
@@ -4765,8 +4767,7 @@ class Engine {
     // to the next page with the paragraph, as LibreOffice lays the GovDocs
     // .doc files (026966's sidebar, 074645's biography box). At a page top
     // there is nowhere better: the object stays, moved up (keepOnPage).
-    // The flag covers the line-relative objects emitted after the first break.
-    if (this.anchorPushedUp && !this.pageIsEmptyAtCursor()) restartOnNextColumn(spacingBefore);
+    if (ownAnchorsPushedUp && !this.pageIsEmptyAtCursor()) restartOnNextColumn(spacingBefore);
 
     // keepLines: move the whole paragraph if it would split but fits on a page.
     if (
@@ -7373,22 +7374,27 @@ class Engine {
         block.type === "paragraph" &&
         this.doc.effectiveParaProps(block).frame?.vAnchor === "page";
       const flow = footer.blocks.filter((block) => !legacyPageFrame(block));
+      // Two passes: the flow's top depends on its own height, which
+      // anchored-shape resolution needs up front.
+      let flowTop = 0;
       if (flow.length > 0) {
-        // Two passes: the flow's top depends on its own height, which
-        // anchored-shape resolution needs up front.
-        const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-        const seenSnapshot = new Set(this.seenNumIds);
         const measured = this.layoutFrame(flow, contentWidth, fields, undefined, false, overlayPageFrame);
-        this.counters = snapshot;
-        this.seenNumIds = seenSnapshot;
-        place(flow, hfOriginX, sp.pageHeight - sp.footerDistance - measured.height, contentWidth);
+        this.counters = new Map(Array.from(footerCounters, ([k, v]) => [k, [...v]]));
+        this.seenNumIds = new Set(footerSeen);
+        flowTop = sp.pageHeight - sp.footerDistance - measured.height;
       }
-      // Consecutive paragraphs with the same frame properties share one frame
-      // and stack inside it.
+      // The flow and the frames are placed in document order, so numbering
+      // runs in that order. Consecutive paragraphs with the same frame
+      // properties share one frame and stack inside it.
       const blocks = footer.blocks;
+      let flowPlaced = false;
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
-        if (block.type !== "paragraph" || !legacyPageFrame(block)) continue;
+        if (block.type !== "paragraph" || !legacyPageFrame(block)) {
+          if (!flowPlaced) place(flow, hfOriginX, flowTop, contentWidth);
+          flowPlaced = true;
+          continue;
+        }
         const frame = this.doc.effectiveParaProps(block).frame!;
         const group: Block[] = [block];
         while (i + 1 < blocks.length && legacyPageFrame(blocks[i + 1])) {
