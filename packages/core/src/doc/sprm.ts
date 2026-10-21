@@ -914,7 +914,8 @@ const TAB_LEADER: Record<number, string> = { 0: "none", 1: "dot", 2: "hyphen", 3
 const TEXT_ALIGN: Record<number, string> = { 0: "top", 1: "center", 2: "baseline", 3: "bottom", 4: "auto" };
 const WRAP: Record<number, string> = { 0: "auto", 1: "notBeside", 2: "around", 3: "none", 4: "tight", 5: "through" };
 const X_ALIGN: Record<number, string> = { 0xfffc: "center", 0xfff8: "right", 0xfff4: "inside", 0xfff0: "outside" };
-const Y_ALIGN: Record<number, string> = { 0xfffc: "top", 0xfff8: "center", 0xfff4: "bottom", 0xfff0: "inside", 0xffec: "outside" };
+// [MS-DOC] 2.6.2 sprmPDyaAbs: 0 is "inline" (the frame keeps its place in the text), not an offset of 0.
+const Y_ALIGN: Record<number, string> = { 0: "inline", 0xfffc: "top", 0xfff8: "center", 0xfff4: "bottom", 0xfff0: "inside", 0xffec: "outside" };
 
 /** A paragraph's pPr body (without the rPr of its mark or a sectPr, which the caller adds in their places). */
 export function pPrXml(p: ParaProps, ctx: XmlContext): { before: string; after: string } {
