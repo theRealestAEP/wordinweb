@@ -122,6 +122,90 @@ export function emfDib(width: number, height: number): Uint8Array {
   return emf([[76, ...blt, 40, width, height, 1 | (24 << 16), 0, 0, 0, 0, 0, 0, 0]]);
 }
 
+const EMFPLUS_VERSION = 0xdbc01002;
+
+/**
+ * An EMR_COMMENT record for emf() that holds EMF+ records ([MS-EMFPLUS]
+ * 2.3): an EmfPlusHeader (EMF+ Dual when `dual`, else EMF+ Only), each of
+ * `records` (type, flags, data bytes), and an EmfPlusEndOfFile.
+ */
+export function emfPlus(records: [number, number, Uint8Array][], dual = false): number[] {
+  const header = new Uint8Array(16);
+  new DataView(header.buffer).setUint32(0, EMFPLUS_VERSION, true);
+  new DataView(header.buffer).setUint32(8, 96, true);
+  new DataView(header.buffer).setUint32(12, 96, true);
+  const all: [number, number, Uint8Array][] = [[0x4001, dual ? 1 : 0, header], ...records, [0x4002, 0, new Uint8Array(0)]];
+  const total = all.reduce((sum, [, , data]) => sum + 12 + Math.ceil(data.length / 4) * 4, 0);
+  const bytes = new Uint8Array(total);
+  const v = new DataView(bytes.buffer);
+  let at = 0;
+  for (const [type, flags, data] of all) {
+    const size = 12 + Math.ceil(data.length / 4) * 4;
+    v.setUint16(at, type, true);
+    v.setUint16(at + 2, flags, true);
+    v.setUint32(at + 4, size, true);
+    v.setUint32(at + 8, data.length, true);
+    bytes.set(data, at + 12);
+    at += size;
+  }
+  const words = Array.from({ length: total / 4 }, (_, i) => v.getInt32(i * 4, true));
+  // EMR_COMMENT: data size, the "EMF+" signature, the records.
+  return [70, 4 + total, 0x2b464d45, ...words];
+}
+
+/** EMF+ pixel formats ([MS-EMFPLUS] 2.1.1.25). */
+export const PIXEL_FORMAT_32BPP_ARGB = 0x0026200a;
+export const PIXEL_FORMAT_8BPP_INDEXED = 0x00030803;
+
+/**
+ * An EmfPlusObject record for emfPlus(): image `id`, a bitmap of `width`
+ * x `height` in `format`, `stride` bytes a row, with the pixel `bits`.
+ */
+export function emfPlusPixelImage(id: number, width: number, height: number, stride: number, format: number, bits: Uint8Array): [number, number, Uint8Array] {
+  const data = new Uint8Array(28 + bits.length);
+  const v = new DataView(data.buffer);
+  // Image version and type 1 (bitmap); bitmap width, height, stride, format and type 1 (pixels).
+  [EMFPLUS_VERSION, 1, width, height, stride, format, 1].forEach((value, i) => v.setUint32(i * 4, value >>> 0, true));
+  data.set(bits, 28);
+  return [0x4008, (5 << 8) | id, data];
+}
+
+/** An EmfPlusObject record for emfPlus(): image `id`, a compressed bitmap (a PNG or a JPEG, say) of `width` x `height`. */
+export function emfPlusCompressedImage(id: number, width: number, height: number, file: Uint8Array): [number, number, Uint8Array] {
+  const data = new Uint8Array(28 + file.length);
+  const v = new DataView(data.buffer);
+  [EMFPLUS_VERSION, 1, width, height, 0, 0, 2].forEach((value, i) => v.setUint32(i * 4, value, true));
+  data.set(file, 28);
+  return [0x4008, (5 << 8) | id, data];
+}
+
+/** An EmfPlusObject record for emfPlus(): image `id`, a metafile that is the EMF `file`. */
+export function emfPlusMetafileImage(id: number, file: Uint8Array): [number, number, Uint8Array] {
+  const data = new Uint8Array(16 + file.length);
+  const v = new DataView(data.buffer);
+  // Image version and type 2 (metafile); metafile type 3 (EMF) and size.
+  [EMFPLUS_VERSION, 2, 3, file.length].forEach((value, i) => v.setUint32(i * 4, value, true));
+  data.set(file, 16);
+  return [0x4008, (5 << 8) | id, data];
+}
+
+/** An EmfPlusDrawImage record for emfPlus(): all of image `id`, `width` x `height` pixels, into the rectangle x, y, w, h. */
+export function emfPlusDrawImage(id: number, width: number, height: number, [x, y, w, h]: number[]): [number, number, Uint8Array] {
+  const data = new Uint8Array(40);
+  const v = new DataView(data.buffer);
+  // Image attributes id, source unit (pixels), source rectangle, destination rectangle.
+  v.setUint32(4, 2, true);
+  [0, 0, width, height, x, y, w, h].forEach((value, i) => v.setFloat32(8 + i * 4, value, true));
+  return [0x401a, id, data];
+}
+
+/** The little-endian bytes of 32-bit ARGB pixels (0xAARRGGBB): blue, green, red, alpha. */
+export function argbBits(pixels: number[]): Uint8Array {
+  const bits = new Uint8Array(pixels.length * 4);
+  pixels.forEach((pixel, i) => new DataView(bits.buffer).setUint32(i * 4, pixel >>> 0, true));
+  return bits;
+}
+
 function pngChunk(type: string, data: Uint8Array): Buffer {
   const head = Buffer.alloc(8);
   head.writeUInt32BE(data.length, 0);

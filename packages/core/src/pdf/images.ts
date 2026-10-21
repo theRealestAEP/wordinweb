@@ -200,7 +200,7 @@ function concat(pieces: Uint8Array[], total: number): Uint8Array {
 }
 
 /** The size and component count from a JPEG's SOF marker, once the bytes reach it. */
-function jpegFrame(bytes: Uint8Array): { width: number; height: number; components: number; adobe: boolean } | null {
+export function jpegFrame(bytes: Uint8Array): { width: number; height: number; components: number; adobe: boolean } | null {
   if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
   let at = 2;
   let adobe = false;

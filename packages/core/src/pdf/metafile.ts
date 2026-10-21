@@ -1,7 +1,7 @@
 import { prepareEmf } from "../render/emf.js";
-import { RecordingCanvas, withRecordingCanvas } from "./canvas.js";
+import { BitmapShim, RecordingCanvas, withRecordingCanvas } from "./canvas.js";
 import { FontSet } from "./fonts.js";
-import { BitmapBudget } from "./images.js";
+import { BitmapBudget, boundedRgba, decodePng, jpegFrame } from "./images.js";
 import { Resources } from "./resources.js";
 import { convertPict } from "./pict.js";
 import { convertWmf } from "./wmf.js";
@@ -10,9 +10,10 @@ import { convertWmf } from "./wmf.js";
  * An EMF, WMF or PICT picture as recorded operators: emf-converter (as the
  * browser renderer uses it) or the players in wmf.ts and pict.ts replayed onto a
  * RecordingCanvas. Null when the converter rejects the bytes, when the
- * picture is cut short or malformed, or when its bitmaps are over one
- * picture's BitmapBudget: the page draws an empty frame, and the picture
- * is listed as unsupported, rather than drawn in part.
+ * picture is cut short or malformed, when its bitmaps are over one
+ * picture's BitmapBudget, or when an EMF+ image it draws does not reach
+ * the canvas: the page draws an empty frame, and the picture is listed as
+ * unsupported, rather than drawn in part.
  */
 export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: FontSet, resources: Resources): Promise<RecordingCanvas | null> {
   const budget = new BitmapBudget();
@@ -29,14 +30,64 @@ export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: Fon
 }
 
 async function convertEmf(bytes: Uint8Array, fonts: FontSet, resources: Resources, budget: BitmapBudget): Promise<RecordingCanvas | null> {
-  checkEmf(bytes, budget);
+  const images = checkEmf(bytes, budget);
   const { convertEmfToDataUrl } = await import("emf-converter");
   const prepared = prepareEmf(bytes);
   const buffer = prepared.buffer.slice(prepared.byteOffset, prepared.byteOffset + prepared.byteLength) as ArrayBuffer;
   // The converter paints at 1:1 and then exports a PNG, which fails here
   // (no FileReader) after every record is recorded; the canvas is what counts.
-  const { canvas } = await withRecordingCanvas(fonts, resources, () => convertEmfToDataUrl(buffer, undefined, undefined, { dpiScale: 1 }).catch(() => null));
-  return canvas && canvas.ops.length > 0 ? canvas : null;
+  const { canvas } = await withRecordingCanvas(
+    fonts,
+    resources,
+    (blob) => emfPlusBitmap(blob, budget),
+    () => convertEmfToDataUrl(buffer, undefined, undefined, { dpiScale: 1 }).catch(() => null),
+  );
+  // The converter skips, with only a console warning, each EMF+ image it
+  // cannot draw: one emfPlusBitmap does not read, a pixel format its
+  // decoder does not read, an image that is a metafile, or an image object
+  // continued over several EMR_COMMENT records.
+  return canvas && canvas.ops.length > 0 && canvas.bitmapsDrawn >= images ? canvas : null;
+}
+
+/**
+ * An EMF+ image as emf-converter hands it to createImageBitmap, decoded:
+ * the BMP its decoder writes for a pixel bitmap (32 bits a pixel,
+ * BI_BITFIELDS, BGRA, bottom row first), a PNG, or a JPEG kept as it is. Throws for any other
+ * image (a GIF, a TIFF, another kind of BMP), which the converter then skips.
+ */
+async function emfPlusBitmap(blob: Blob, budget: BitmapBudget): Promise<BitmapShim> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // BI_BITFIELDS, as the converter writes it: a 32-bit BI_RGB BMP has a fourth byte that is often 0, not an alpha.
+  if (bytes.length >= 34 && bytes[0] === 0x42 && bytes[1] === 0x4d && view.getUint16(28, true) === 32 && view.getUint32(30, true) === 3) {
+    // Its pixels were taken from the budget by checkEmf.
+    const bits = view.getUint32(10, true);
+    const width = view.getInt32(18, true);
+    const height = view.getInt32(22, true);
+    if (width > 0 && height > 0 && bits + width * height * 4 <= bytes.length) {
+      const rgba = new Uint8ClampedArray(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        const row = bits + (height - 1 - y) * width * 4;
+        for (let x = 0; x < width; x++) {
+          const from = row + x * 4;
+          const to = (y * width + x) * 4;
+          rgba[to] = bytes[from + 2];
+          rgba[to + 1] = bytes[from + 1];
+          rgba[to + 2] = bytes[from];
+          rgba[to + 3] = bytes[from + 3];
+        }
+      }
+      return new BitmapShim(boundedRgba(rgba, width, height), width, height);
+    }
+  }
+  if (bytes.length >= 24 && view.getUint32(0) === 0x89504e47) {
+    budget.take(view.getUint32(16), view.getUint32(20));
+    const png = decodePng(bytes);
+    if (png) return new BitmapShim(png, png.width, png.height);
+  }
+  const jpeg = jpegFrame(bytes);
+  if (jpeg) return new BitmapShim({ jpeg: bytes }, jpeg.width, jpeg.height);
+  throw new Error("an EMF+ image this does not read");
 }
 
 const EMR_HEADER = 1;
@@ -45,7 +96,10 @@ const EMR_COMMENT = 70;
 const EMR_BITBLT = 76;
 const EMR_STRETCHDIBITS = 81;
 const EMFPLUS = 0x2b464d45;
+const EMFPLUS_HEADER = 0x4001;
 const EMFPLUS_OBJECT = 0x4008;
+const EMFPLUS_DRAWIMAGE = 0x401a;
+const EMFPLUS_DRAWIMAGEPOINTS = 0x401b;
 const EMFPLUS_IMAGE = 5;
 
 /**
@@ -55,18 +109,24 @@ const EMFPLUS_IMAGE = 5;
  * STRETCHDIBITS ([MS-EMF] 2.3.1), and an EMF+ bitmap image object
  * ([MS-EMFPLUS] 2.2.2.2). The converter allocates their pixels from the
  * sizes they give, up to 8192 x 8192.
+ *
+ * Gives back how many EMF+ images the EMF draws (its DrawImage and
+ * DrawImagePoints records), each of which must reach the canvas; none for
+ * an EMF+ Dual file, whose EMF records draw the picture again on their own.
  */
-function checkEmf(bytes: Uint8Array, budget: BitmapBudget): void {
+function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.length < 8 || view.getUint32(0, true) !== EMR_HEADER) throw new Error("not an EMF");
   /** Bytes of an EMF+ object continued over several records, still to come. */
   let continued = 0;
+  let images = 0;
+  let dual = false;
   for (let offset = 0; ; ) {
     if (offset + 8 > bytes.length) throw new Error("EMF ends before EMR_EOF");
     const type = view.getUint32(offset, true);
     const size = view.getUint32(offset + 4, true);
     if (size < 8 || offset + size > bytes.length) throw new Error("EMF record runs past the end");
-    if (type === EMR_EOF) return;
+    if (type === EMR_EOF) return dual ? 0 : images;
     // The record's BITMAPINFOHEADER: its width and height.
     const dib = (field: number): void => {
       const at = field + 8 <= size ? view.getUint32(offset + field, true) : 0;
@@ -82,7 +142,9 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): void {
         const plusSize = view.getUint32(at + 4, true);
         const dataSize = view.getUint32(at + 8, true);
         if (plusSize < 12) break;
-        if (plusType === EMFPLUS_OBJECT) {
+        if (plusType === EMFPLUS_HEADER) dual = (flags & 1) !== 0;
+        else if (plusType === EMFPLUS_DRAWIMAGE || plusType === EMFPLUS_DRAWIMAGEPOINTS) images++;
+        else if (plusType === EMFPLUS_OBJECT) {
           let data = at + 12;
           if (flags & 0x8000) {
             // A continued object: its first record gives the total size, then the object.
