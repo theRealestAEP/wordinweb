@@ -3731,6 +3731,9 @@ class Engine {
    * without restoring the set left the shape drawn nowhere (GovDocs 083839:
    * a square-wrapped box in a balanced 3-column section). */
   private consumedAnchors = new Set<Shape>();
+  /** Set by emitAnchors when it moved a paragraph-positioned object up to
+   * keep it on the page (see keepOnPage). */
+  private anchorPushedUp = false;
 
   /** Frame paragraphs already placed by a preceding paragraph's lookahead
    * (page/margin-anchored frames reflow earlier content around them). */
@@ -4307,7 +4310,9 @@ class Engine {
     // anchor before its space-before. The offset itself then places the shape
     // alongside the text (IEEE's biography portrait: 12.6pt posOffset plus a
     // 12pt paragraph gap must not count that gap twice).
+    this.anchorPushedUp = false;
     emitParaAnchors(this.y);
+    const ownAnchorsPushedUp = this.anchorPushedUp;
     let broken = breakNow(paraTopEstimate);
 
     // relH="character"/relV="line" shapes: Word places them from the
@@ -4465,6 +4470,10 @@ class Engine {
           s.vRel === "margin" ? this.sp.marginTop + s.y :
           anchorTop + s.y;
         const d = s.wrap === "square" && "dist" in s && s.dist ? s.dist : { t: 0, b: 0 };
+        // A paragraph-positioned box that would run past the page bottom is
+        // left to its own paragraph, which takes it to the next page (see
+        // keepOnPage in emitAnchors).
+        if (s.vRel === "text" && top + h > this.sp.pageHeight + 0.5) return false;
         return top - d.t <= paraBottom + 0.25 && top + h + d.b >= paraTopEstimate - 0.25;
       });
       if (hits.length > 0) {
@@ -4750,6 +4759,12 @@ class Engine {
       emitCharLineAnchors(paraTopEstimate);
       lines = broken.lines;
     };
+
+    // An object of this paragraph that would run past the page bottom moves
+    // to the next page with the paragraph, as LibreOffice lays the GovDocs
+    // .doc files (026966's sidebar, 074645's biography box). At a page top
+    // there is nowhere better: the object stays, moved up (keepOnPage).
+    if (ownAnchorsPushedUp && !this.pageIsEmptyAtCursor()) restartOnNextColumn(spacingBefore);
 
     // keepLines: move the whole paragraph if it would split but fits on a page.
     if (
@@ -5265,16 +5280,24 @@ class Engine {
         !postTablePageBreak &&
         (balancing
           ? (balBottomBased ? this.y + line.fitHeight : this.y) > this.bodyBottom + 0.01
-          : this.y + (pageBreakOnlyDemand ?? line.fitHeight) >
+          : this.y + floatOffset + (pageBreakOnlyDemand ?? line.fitHeight) >
             this.bodyBottom - pendingNotes +
               (this.customNoteBannerFit ? CUSTOM_NOTE_BANNER_OVERHANG : 0) +
               0.01) &&
         !this.pageIsEmptyAtCursor();
-      if ((planned || overflow) && li > fragStartLine) {
+      // A line pushed below a float that leaves too little room goes to the
+      // next column whole (it used to be placed past the page bottom). The
+      // float's push belongs to the page the line leaves: carried along, it
+      // opened a blank band at the top of the next page (GovDocs 071877,
+      // doc97-check-c bug 7).
+      const movesOn = (planned || overflow) && li > fragStartLine;
+      const movesWhole = !movesOn && ((planned && li === 0) || (breaks.has(0) && li === 0 && !this.pageIsEmptyAtCursor()));
+      if (movesOn || movesWhole || overflow) floatOffset = 0;
+      if (movesOn) {
         closeFragment(li, false);
         this.nextColumn();
         startFragment(li);
-      } else if ((planned && li === 0) || (breaks.has(0) && li === 0 && !this.pageIsEmptyAtCursor())) {
+      } else if (movesWhole) {
         this.nextColumn();
         // A paragraph moved whole to a page top drops its spacing-before
         // but KEEPS the border reserve - the rule + gap still paint above
@@ -6548,6 +6571,20 @@ class Engine {
       const d = `M0 0 H${width} V${height} H0 Z${shape.revision.struck ? ` M0 ${height / 2} H${width}` : ""}`;
       page.items.push({ kind: "path", x, y, width, height, d, viewW: width, viewH: height, stroke: { color: shape.revision.color, width: 1.5 }, ...(rotate ? { rotate } : {}), front: true, z: shape.z });
     };
+    // A body object positioned from its paragraph or line never runs past the
+    // page bottom: its top moves up until it fits (or to the page top when it
+    // is taller than the page), and placeParagraph moves the paragraph to the
+    // next page when it can. Nothing past the page edge is printed, so the
+    // part below it was lost (GovDocs 026966, 029456, 036752: tall boxes
+    // anchored near the page bottom). Word's own rule is not established
+    // here; LibreOffice moves the anchor paragraph and the object to the next
+    // page in the .doc files.
+    const keepOnPage = (shape: Shape, y: number, height: number): number => {
+      if (page.physIndex === -1 || (shape.vRel !== "text" && shape.vRel !== "line")) return y;
+      if (y + height <= sp.pageHeight + 0.5) return y;
+      this.anchorPushedUp = true;
+      return Math.max(0, sp.pageHeight - height);
+    };
 
     for (const shape of shapes) {
       if (shape.type === "image") {
@@ -6573,6 +6610,7 @@ class Engine {
           else if (shape.vAlign === "bottom") y = oy + baseH - shape.height;
           else y = oy;
         }
+        y = keepOnPage(shape, y, shape.height);
         page.items.push({
           kind: "image",
           x: x - fx,
@@ -6618,6 +6656,7 @@ class Engine {
         if (shape.vAlign === "center") oy = originY(shape.vRel) + (baseH - shape.height) / 2;
         else if (shape.vAlign === "bottom") oy = originY(shape.vRel) + baseH - shape.height;
         else if (shape.vAlign === "top") oy = originY(shape.vRel);
+        oy = keepOnPage(shape, oy, shape.height);
         const centerX = ox - fx + shape.width / 2;
         const centerY = oy - fy + shape.height / 2;
         const rotate = shape.rotation
@@ -6786,6 +6825,7 @@ class Engine {
         let oy = originY(shape.vRel) + shape.y;
         if (shape.pctY !== undefined) oy = originY(shape.vRel) + shape.pctY * pageH;
         if (shape.vAlign) oy = alignV(originY(shape.vRel), shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom, height, shape.vAlign);
+        oy = keepOnPage(shape, oy, height);
 
         // allowOverlap="0": slide the box right past any earlier overlapping
         // box so they don't overlap (Word's overlap avoidance).

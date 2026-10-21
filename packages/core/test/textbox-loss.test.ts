@@ -282,3 +282,69 @@ describe("a square-wrapped box in a balanced 3-column section (GovDocs 083839)",
     expect(rendered.bindings.some((b) => b.el.textContent === "BOXTEXT")).toBe(true);
   });
 });
+
+describe("a tall box anchored near the page bottom (GovDocs 026966, 029456, 074645, 071877)", () => {
+  // Letter page 1056px, body 96..960px. 40 filler lines of 16.9px end near
+  // 770px; the anchor paragraph comes next with a 5.3in (509px) box at
+  // offset 0 from it. The box ran past the page bottom, and nothing below
+  // the page edge is printed.
+  const filler = (n: number) => Array.from({ length: n }, (_, i) => para(`filler${i}`)).join("");
+  const lines = Array.from({ length: 25 }, (_, i) => para(`boxline${i}`)).join("");
+  const tall = (wrap: string, cy = 4846320) =>
+    box({ x: 4572000, y: 0, cx: 2743200, cy, from: "paragraph", story: `<wps:txbx><w:txbxContent>${lines}</w:txbxContent></wps:txbx>` })
+      .replace("<wp:wrapNone/>", wrap)
+      .replace("<a:noAutofit/>", "");
+  const anchored = (wrap: string, cy?: number) => `<w:p>${tall(wrap, cy)}<w:r><w:t>ANCHOR</w:t></w:r></w:p>${para("AFTER")}`;
+
+  const shown = (result: ReturnType<typeof layoutDocument>, text: string) =>
+    result.pages.flatMap((pg, n) => texts(pg.items).filter((t) => t.text === text).map((t) => ({ page: n + 1, t, height: pg.height })));
+
+  for (const wrap of ['<wp:wrapSquare wrapText="bothSides"/>', "<wp:wrapTopAndBottom/>"]) {
+    it(`moves the anchor paragraph and its box to the next page (${wrap.slice(4, 18)})`, () => {
+      const { result } = layout(filler(40) + anchored(wrap));
+      const [anchor] = shown(result, "ANCHOR");
+      expect(anchor.page).toBe(2);
+      for (let i = 0; i < 25; i++) {
+        const [line] = shown(result, `boxline${i}`);
+        expect(line.page).toBe(2);
+        expect(line.t.lineTop + line.t.lineHeight).toBeLessThanOrEqual(line.height);
+      }
+    });
+  }
+
+  it("keeps a box taller than the room below a page-top anchor on the page, moved up", () => {
+    // 11in box: taller than the page; it sits at the page top.
+    const { result } = layout(anchored('<wp:wrapSquare wrapText="bothSides"/>', 10058400));
+    const hit = result.pages[0].items.find((i) => i.kind === "drawingHit")!;
+    if (hit.kind !== "drawingHit") throw new Error("no box");
+    expect(hit.y).toBe(0);
+  });
+
+  it("starts the next page at its top after a top-and-bottom box that pushed a line off the page", () => {
+    // The box fits on page 1 below its anchor but leaves no room under it
+    // for AFTER, which used to land on page 2 below a blank band as tall as
+    // the push.
+    // doc97-check-c box30: the anchor at about 603px, the 349px box 70px
+    // below it, so the box ends at about 1022px, below the body bottom.
+    const box30 = tall("<wp:wrapTopAndBottom/>", 3324225).replace(
+      '<wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset>',
+      '<wp:positionV relativeFrom="paragraph"><wp:posOffset>669290</wp:posOffset>',
+    );
+    const { result } = layout(filler(30) + `<w:p>${box30}<w:r><w:t>ANCHOR</w:t></w:r></w:p>${para("AFTER")}`);
+    const [after] = shown(result, "AFTER");
+    expect(after.page).toBe(2);
+    // Page 2 starts at the body top, and AFTER sits in the flow there.
+    const tops = texts(result.pages[1].items).map((t) => t.lineTop);
+    expect(Math.min(...tops)).toBeCloseTo(96, 0);
+    expect(after.t.lineTop).toBeLessThan(96 + 2 * after.t.lineHeight);
+  });
+
+  it("draws the moved box inside the page in the DOM renderer", () => {
+    const { doc, result } = layout(filler(40) + anchored('<wp:wrapSquare wrapText="bothSides"/>'));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const rendered = renderToDom(doc, result, container);
+    const last = rendered.bindings.map((b) => b.el).find((e) => e.textContent === "boxline24")!;
+    expect(parseFloat(last.style.top)).toBeLessThan(1056);
+  });
+});
