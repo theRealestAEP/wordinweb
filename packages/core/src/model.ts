@@ -381,6 +381,9 @@ export interface FieldContent {
   kind: "field";
   /** Raw field instruction, e.g. ` PAGE \\* MERGEFORMAT `. */
   instruction: string;
+  /** Instruction text and nested fields in source order. `instruction` uses
+   * their stored results; layout evaluates these parts to build the code. */
+  instructionParts?: (string | FieldContent)[];
   /** Last cached result text from the file, used for unsupported fields. */
   cachedResult: string;
   /** When this field is a legacy FORMCHECKBOX, the source `w:checkBox` element
@@ -888,6 +891,8 @@ export interface Hyperlink {
   type: "hyperlink";
   href?: string;
   anchor?: string;
+  /** Complex HYPERLINK whose target contains nested fields. */
+  field?: FieldContent;
   runs: Run[];
 }
 

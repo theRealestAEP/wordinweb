@@ -40,6 +40,7 @@ import {
   fontOf,
   leadingBreakOf,
   resolveField,
+  resolveFieldInstruction,
   setBreakCacheWindowed,
   starNumberFormat,
 } from "./inline.js";
@@ -452,6 +453,7 @@ export interface IncrData {
   modelVersion: number;
   seqCounters: Map<string, number>;
   seqAssigned: FieldMemo<string>;
+  setBookmarks: Map<string, FieldContent>;
   refFieldPosition: FieldMemo<"above" | "below">;
   refFieldParaNumber: FieldMemo<string>;
   /** Mail-merge record this layout painted (mergeRecordKey; "" for none).
@@ -679,6 +681,7 @@ export class Prescan {
   readonly refPosition: FieldMemo<"above" | "below">;
   readonly refParaNumber: FieldMemo<string>;
   readonly seqCounters = new Map<string, number>();
+  readonly setBookmarks = new Map<string, FieldContent>();
   readonly footnoteNumbers = new Map<number, number | string>();
   readonly endnoteNumbers = new Map<number, number | string>();
   /** Each bookmark's first-seen paragraph ordinal, and whether that paragraph carries list numbering. */
@@ -729,19 +732,27 @@ export class Prescan {
           continue;
         }
         if (rc.kind !== "field") continue;
-        const parts = rc.instruction.trim().split(/\s+/);
-        if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
-          assignSeq(this.seq, this.seqCounters, parts[1], rc, rc.instruction.trim());
-        }
-        // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
-        // "above"/"below" instead of the bookmark's page number.
-        const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
-        if (!m) continue;
-        const position = /\\p(\s|$)/i.test(m[2]);
-        const number = /\\r(\s|$)/i.test(m[2]);
-        if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
+        this.visitField(rc);
       }
     }
+  }
+
+  private visitField(field: FieldContent): void {
+    for (const part of field.instructionParts ?? []) {
+      if (typeof part !== "string") this.visitField(part);
+    }
+    const parts = field.instruction.trim().split(/\s+/);
+    if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
+      assignSeq(this.seq, this.seqCounters, parts[1], field, field.instruction.trim());
+    }
+    const set = /^\s*SET\s+(?:"([^"]+)"|([^\s\\]+))/i.exec(field.instruction);
+    if (set) this.setBookmarks.set(set[1] ?? set[2], field);
+    // Both REF and PAGEREF honour \p (position).
+    const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(field.instruction);
+    if (!m) return;
+    const position = /\\p(\s|$)/i.test(m[2]);
+    const number = /\\r(\s|$)/i.test(m[2]);
+    if (position || number) this.refs.push({ field, ordinal: this.ordinal, target: m[1], position, number });
   }
 
   /** The blocks visited from here on belong to the next section. */
@@ -1204,6 +1215,7 @@ class Engine {
     this.endnoteNumbers = prescan.endnoteNumbers;
     this.seqAssigned = prescan.seq;
     this.seqCounters = new Map(prescan.seqCounters);
+    this.setBookmarks = prescan.setBookmarks;
     this.refFieldPosition = prescan.refPosition;
     this.refFieldParaNumber = prescan.refParaNumber;
   }
@@ -1401,6 +1413,7 @@ class Engine {
         modelVersion: this.doc.modelVersion,
         seqCounters: this.seqCounters,
         seqAssigned: this.seqAssigned,
+        setBookmarks: this.setBookmarks,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
         mergeKey: mergeRecordKey(this.mergeRecord),
@@ -2172,6 +2185,7 @@ class Engine {
 
     this.seqCounters = new Map(inc.seqCounters);
     this.seqAssigned = inc.seqAssigned;
+    this.setBookmarks = inc.setBookmarks;
     this.refFieldPosition = inc.refFieldPosition;
     this.refFieldParaNumber = inc.refFieldParaNumber;
 
@@ -2350,6 +2364,7 @@ class Engine {
         modelVersion: this.doc.modelVersion,
         seqCounters: this.seqCounters,
         seqAssigned: this.seqAssigned,
+        setBookmarks: this.setBookmarks,
         refFieldPosition: this.refFieldPosition,
         refFieldParaNumber: this.refFieldParaNumber,
         mergeKey: mergeRecordKey(this.mergeRecord),
@@ -3045,19 +3060,26 @@ class Engine {
    * SEQ fields inside the range resolve to their document-order value (the
    * pre-pass in run() assigns them before any REF is laid out). */
   private refResolving = new Set<string>();
+  private setBookmarks = new Map<string, FieldContent>();
   private refBookmarkText(name: string): string | undefined {
+    const set = this.setBookmarks.get(name);
     const runs = this.doc.refBookmarks?.get(name);
-    if (!runs) return undefined; // bookmark not captured — keep the field cache
+    if (!set && !runs) return undefined; // bookmark not captured — keep the field cache
     // A captured but zero-length range is a real (empty) bookmark: Word's REF
     // recompute shows nothing for it, so return "" (NOT undefined, which would
     // fall back to the stale cache — probe3-index-xrefs' `tbl_c1` is an empty
     // bookmark whose cache still reads "Table 1").
-    if (runs.length === 0) return "";
+    if (!set && runs?.length === 0) return "";
     if (this.refResolving.has(name)) return undefined; // circular REF chain
     this.refResolving.add(name);
     try {
+      if (set) {
+        const instruction = resolveFieldInstruction(set.instruction, this.fieldCtx(), set);
+        const value = /^\s*SET\s+(?:"[^"]+"|[^\s\\]+)\s+(?:"([^"]*)"|([^\s\\]+))/i.exec(instruction);
+        return value?.[1] ?? value?.[2] ?? "";
+      }
       let out = "";
-      for (const run of runs) {
+      for (const run of runs ?? []) {
         for (const rc of run.content) {
           if (rc.kind === "text") out += rc.text;
           else if (rc.kind === "field") out += resolveField(rc.instruction, rc.cachedResult, this.fieldCtx(), rc);

@@ -9,6 +9,7 @@ import {
   DrawingPath,
   DrawingLine,
   DrawingTextShape,
+  FieldContent,
   Hyperlink,
   ImageContent,
   ParaChild,
@@ -216,13 +217,13 @@ export function parseBlocks(container: XmlElement, ctx: DocParseContext): Block[
 
 // ---------- paragraphs ----------
 
-interface FieldState {
-  /** null when not inside a complex field. */
-  mode: "instr" | "result" | null;
+interface FieldFrame {
+  mode: "instr" | "result";
   instruction: string;
+  instructionParts: (string | FieldContent)[];
   cachedResult: string;
   /** Run that will carry the resulting field content. */
-  carrier: Run | null;
+  carrier: Run;
   /** HYPERLINK (and other verbatim) fields: the result runs render LIVE with
    * their own formatting (rStyle Hyperlink blue, i=0 …) instead of being
    * swallowed into cachedResult and repainted with the CARRIER run's props —
@@ -241,6 +242,8 @@ interface FieldState {
   beginEl?: XmlElement;
 }
 
+type FieldState = FieldFrame[];
+
 export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   const pPr = child(p, "pPr");
   const para: Paragraph = {
@@ -252,12 +255,12 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
   const sectPr = child(pPr, "sectPr");
   if (sectPr) para.sectionBreak = parseSectionProps(sectPr);
 
-  const field: FieldState = { mode: null, instruction: "", cachedResult: "", carrier: null };
+  const field: FieldState = [];
   const bookmarks: string[] = [];
   parseParaChildren(p, ctx, para.children, field, bookmarks);
   if (bookmarks.length > 0) para.bookmarks = bookmarks;
   // Unterminated field (shouldn't happen in valid files): flush as text
-  flushField(field);
+  while (field.length) flushField(field);
   // Word promotes a simple bare run-over-run fraction when it is the
   // paragraph's only visible content. The XML may still use m:oMath rather
   // than m:oMathPara (staging-tblextreme's standalone fraction), but it is
@@ -705,8 +708,9 @@ function parseParaChildren(
       if (run) run.srcParent = parent;
       // Keep empty runs that carry an open complex field: the field content
       // is appended to the carrier when fldChar end arrives.
-      if (run && (run.content.length > 0 || field.carrier === run)) {
-        const link = field.mode === "result" ? field.link : undefined;
+      if (run && (run.content.length > 0 || field.some((frame) => frame.carrier === run))) {
+        const current = field.at(-1);
+        const link = current?.mode === "result" ? current.link : undefined;
         if (link) {
           if (out[out.length - 1] !== link) out.push(link);
           link.runs.push(run);
@@ -806,7 +810,7 @@ function parseParaChildren(
     } else if (ln === "fldSimple") {
       const instruction = attr(el, "instr") ?? "";
       const inner: ParaChild[] = [];
-      const innerField: FieldState = { mode: null, instruction: "", cachedResult: "", carrier: null };
+      const innerField: FieldState = [];
       // The field's cached-result runs must not leak into open `_Ref`
       // bookmark captures — the synthesized field run below represents the
       // whole fldSimple (otherwise a caption's "Basas " + SEQ bookmark
@@ -899,24 +903,30 @@ function captureRefBookmarkRun(ctx: DocParseContext, run: Run): void {
   for (const runs of open.values()) runs.push(run);
 }
 
-function flushField(field: FieldState): void {
-  if (field.mode !== null && field.carrier && !field.live) {
-    field.carrier.content.push({
-      kind: "field",
-      instruction: field.instruction,
-      cachedResult: field.cachedResult,
-      ...(field.checkbox ? { checkbox: field.checkbox } : {}),
-      ...(field.beginEl ? { src: field.beginEl } : {}),
-    });
+function flushField(stack: FieldState): void {
+  const field = stack.pop();
+  if (!field) return;
+  const nested = field.instructionParts.some((part) => typeof part !== "string");
+  const content: FieldContent = {
+    kind: "field",
+    instruction: field.instruction,
+    cachedResult: field.cachedResult,
+    ...(nested ? { instructionParts: field.instructionParts } : {}),
+    ...(field.checkbox ? { checkbox: field.checkbox } : {}),
+    ...(field.beginEl ? { src: field.beginEl } : {}),
+  };
+  const parent = stack.at(-1);
+  if (parent?.mode === "instr") {
+    parent.instruction += content.cachedResult;
+    parent.instructionParts.push(content);
+  } else if (parent?.mode === "result" && !parent.live) {
+    parent.cachedResult += content.cachedResult;
+  } else if (!field.live || nested) {
+    // Live results keep their own runs; this field only evaluates the code.
+    if (field.live) content.cachedResult = "";
+    if (field.link && nested) field.link.field = content;
+    field.carrier.content.push(content);
   }
-  field.mode = null;
-  field.instruction = "";
-  field.cachedResult = "";
-  field.carrier = null;
-  field.live = false;
-  field.link = undefined;
-  field.checkbox = undefined;
-  field.beginEl = undefined;
 }
 
 /**
@@ -982,7 +992,7 @@ function decodeSymbolText(text: string, font?: string): string {
 function parseRun(
   r: XmlElement,
   ctx: DocParseContext,
-  field: FieldState,
+  stack: FieldState,
   suppressedObjects: ReadonlySet<XmlElement>,
 ): Run | null {
   const run: Run = {
@@ -1006,6 +1016,7 @@ function parseRun(
   let nonSymText = false;
 
   for (const el of r.children) {
+    const field = stack.at(-1);
     const ln = localName(el.name);
     switch (ln) {
       case "t": {
@@ -1019,8 +1030,8 @@ function parseRun(
         // (wild2-sci-ieee-2col's footnote regression when the two were
         // conflated).
         const text = decodeSymbolText(el.text, run.props.font).replace(/­/g, "‑");
-        if (field.mode === "result" && !field.live) field.cachedResult += text;
-        else if (field.mode !== "instr") {
+        if (field?.mode === "result" && !field.live) field.cachedResult += text;
+        else if (field?.mode !== "instr") {
           run.content.push({ kind: "text", text, srcT: el });
           if (text.length) nonSymText = true;
         }
@@ -1032,15 +1043,23 @@ function parseRun(
         break;
       }
       case "instrText":
-        if (field.mode === "instr") field.instruction += el.text;
+        if (field?.mode === "instr") {
+          field.instruction += el.text;
+          field.instructionParts.push(el.text);
+        }
         break;
       case "fldChar": {
         const type = attr(el, "fldCharType");
         if (type === "begin") {
-          flushField(field);
-          field.mode = "instr";
-          field.carrier = run;
-          field.beginEl = el;
+          const field: FieldFrame = {
+            mode: "instr",
+            instruction: "",
+            instructionParts: [],
+            cachedResult: "",
+            carrier: run,
+            beginEl: el,
+          };
+          stack.push(field);
           // Legacy form fields carry their display in the fldChar begin's
           // w:ffData, not a separate/result run. FORMCHECKBOX: a ballot box
           // (U+2610) or ballot-box-with-X (U+2612) from w:checkBox/w:checked.
@@ -1056,7 +1075,7 @@ function parseRun(
             const sel = intAttr(child(ddList, "result"), "val") ?? 0;
             field.cachedResult = attr(entries[sel], "val") ?? "";
           }
-        } else if (type === "separate") {
+        } else if (type === "separate" && field) {
           field.mode = "result";
           // HYPERLINK, TOC, BIBLIOGRAPHY and INDEX results are verbatim
           // styled content: let the result runs render themselves (their own
@@ -1067,30 +1086,15 @@ function parseRun(
           // would collapse one paragraph per entry into a single inline
           // string. (\b keeps INDEX from matching an XE mark, which has no
           // separate and never reaches here anyway.)
-          field.live = /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i.test(field.instruction);
-          const target = hyperlinkTarget(field.instruction);
+          const visible = stack.slice(0, -1).every((parent) => parent.mode === "result" && parent.live);
+          field.live = visible && /^\s*(HYPERLINK|TOC|BIBLIOGRAPHY|INDEX)\b/i.test(field.instruction);
+          const target = field.live ? hyperlinkTarget(field.instruction) : undefined;
           if (target) field.link = { type: "hyperlink", ...target, runs: [] };
         } else if (type === "end") {
-          if (!field.live) {
-            const carrier = field.carrier ?? run;
-            const content: RunContent = {
-              kind: "field",
-              instruction: field.instruction,
-              cachedResult: field.cachedResult,
-              ...(field.checkbox ? { checkbox: field.checkbox } : {}),
-              ...(field.beginEl ? { src: field.beginEl } : {}),
-            };
-            if (carrier === run) run.content.push(content);
-            else carrier.content.push(content);
-          }
-          field.mode = null;
-          field.instruction = "";
-          field.cachedResult = "";
-          field.link = undefined;
-          field.carrier = null;
-          field.live = false;
-          field.checkbox = undefined;
-          field.beginEl = undefined;
+          if (field) flushField(stack);
+          // Live fields can end in a later paragraph. Keep its field marker
+          // so ensureCaretAnchor preserves that paragraph's XML.
+          else run.content.push({ kind: "field", instruction: "", cachedResult: "" });
         }
         break;
       }
@@ -1132,7 +1136,7 @@ function parseRun(
         // A complex field can store an old picture in its instruction region
         // before fldChar separate. Word hides that copy and displays only the
         // field result after the separator.
-        if (field.mode !== "instr") run.content.push(...parseVmlPict(el, ctx));
+        if (field?.mode !== "instr") run.content.push(...parseVmlPict(el, ctx));
         break;
       case "object": {
         if (suppressedObjects.has(el)) break;
@@ -1168,7 +1172,7 @@ function parseRun(
             if (pictEl) run.content.push(...parseVmlPict(pictEl, ctx));
             else if (branch) {
               // Run content in the branch (text, a symbol) is read as the run's own.
-              const inner = parseRun({ ...r, children: [...children(r, "rPr"), ...branch.children] }, ctx, field, suppressedObjects);
+              const inner = parseRun({ ...r, children: [...children(r, "rPr"), ...branch.children] }, ctx, stack, suppressedObjects);
               if (inner) run.content.push(...inner.content);
             }
           }
@@ -1231,7 +1235,7 @@ function parseRun(
       case "ruby": {
         // The guide text and the base text: each part's runs as one run, in
         // its first run's formatting.
-        const fresh = (): FieldState => ({ mode: null, instruction: "", cachedResult: "", carrier: null });
+        const fresh = (): FieldState => [];
         const joined = (part: XmlElement | undefined): Run | null => {
           const runs = part ? children(part, "r").map((r) => parseRun(r, ctx, fresh(), suppressedObjects)) : [];
           if (!runs[0]) return null;
