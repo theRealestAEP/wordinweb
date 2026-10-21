@@ -4,6 +4,7 @@ import { FontSet } from "./fonts.js";
 import { SampleImage, boundedRgba } from "./images.js";
 import { Resources } from "./resources.js";
 import { num } from "./writer.js";
+import { showShaped } from "./text.js";
 
 /**
  * A Canvas 2D context that records PDF operators instead of painting: what
@@ -515,7 +516,14 @@ export class RecordingContext {
     for (const [i, run] of runs.entries()) {
       const embedded = this.canvas.resources.font(run.face.face);
       const [ox, oy] = origins[i];
-      ops.push(`/${embedded.name} ${num(font.size * scale)} Tf ${num(cos)} ${num(sin)} ${num(sin)} ${num(-cos)} ${num(ox)} ${num(oy)} Tm`);
+      ops.push(`/${embedded.name} ${num(font.size * scale)} Tf`);
+      const tm = (pen: number, yOffset: number): string =>
+        `${num(cos)} ${num(sin)} ${num(sin)} ${num(-cos)} ${num(ox + (pen * cos + yOffset * sin) * scale)} ${num(oy + (pen * sin - yOffset * cos) * scale)} Tm`;
+      if (run.shaped) {
+        showShaped(ops, run, run.shaped, embedded, font.size, 0, 1, 1, tm);
+        continue;
+      }
+      ops.push(tm(0, 0));
       let hex = "";
       run.gids.forEach((gid, i) => {
         hex += embedded.cid(gid, run.codePoints[i]).toString(16).padStart(4, "0");
