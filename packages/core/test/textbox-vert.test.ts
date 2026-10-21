@@ -70,6 +70,18 @@ function expectVertical(items: PageItem[], deg: number, bounds = { left: 96, top
 }
 
 describe("vertical anchored text boxes (GovDocs 045416)", () => {
+  it("brings a far-negative column-relative caption onto the page", () => {
+    // FSPA left = -7956 twips in GovDocs 045416, about -434px after
+    // adding the 96px column origin.
+    const drawing = box({ vert: "vert270" }).replace(
+      '<wp:positionH relativeFrom="page"><wp:posOffset>914400</wp:posOffset>',
+      '<wp:positionH relativeFrom="column"><wp:posOffset>-5052060</wp:posOffset>',
+    );
+    const { result } = layout(drawing);
+    expectVertical(result.pages[0].items, -90, { left: 0, top: 96, right: 48, bottom: 480 });
+    expect(result.pages[0].items.find((it) => it.kind === "drawingHit")).toMatchObject({ x: 0, y: 96, width: 48, height: 384 });
+  });
+
   it("lays out vert270 as one bottom-to-top line inside the box", () => {
     const { result } = layout(box({ vert: "vert270" }));
     expectVertical(result.pages[0].items, -90);
