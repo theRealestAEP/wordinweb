@@ -87,6 +87,27 @@ describe("compareFiles with a Word 97-2003 .doc", () => {
   });
 });
 
+describe("compareFiles with the oldest Word formats", () => {
+  // GovDocs1 documents (public domain): Word for the Macintosh 5.0 and Word for Windows 2.0.
+  const oldword = join(fixtures, "..", "oldword");
+
+  it("compares each with itself: no revisions", async () => {
+    for (const name of ["macword5-govdocs-000790.doc", "winword2-govdocs-474644.doc"]) {
+      const path = join(oldword, name);
+      const { revisions } = await compareFiles(path, path, join(dir, "old-same.docx"), options);
+      expect(Object.values(revisions).reduce((a, b) => a + b, 0)).toBe(0);
+    }
+  });
+
+  it("compares one with a .docx", async () => {
+    const mac = join(oldword, "macword5-govdocs-000271.doc");
+    const docx = join(fixtures, "parity-columns--v03.docx");
+    const { revisions } = await compareFiles(mac, docx, join(dir, "old-docx.docx"), options);
+    expect(revisions.insertion).toBeGreaterThan(0);
+    expect(revisions.deletion).toBeGreaterThan(0);
+  });
+});
+
 describe("comments numbered otherwise", () => {
   // The same document with every comment id raised by 100, as a .doc and the
   // .docx Word makes of it differ, and with a page break Word last rendered.

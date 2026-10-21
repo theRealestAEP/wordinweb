@@ -13,9 +13,10 @@ reject all of them to get the original.
 
 A Strict Open XML Document (ISO/IEC 29500 Strict) is read as Transitional,
 and RESULT.docx is written as Transitional either way. Either input may be
-a Word 97-2003 .doc (the binary format): it is converted to a .docx working
-file first, so a .doc can be compared with a .docx. The file's bytes decide,
-not its name.
+a Word 97-2003 .doc (the binary format), or a document of Word for the
+Macintosh 1.x-5.x, Word for Windows 1.x/2.0, Word for MS-DOS or Windows
+Write: it is converted to a .docx working file first, so a .doc can be
+compared with a .docx. The file's bytes decide, not its name.
 
 The body, the notes and the binary parts (images, embedded files) can be any
 size. The other parts (styles, numbering, headers, footers, charts, custom

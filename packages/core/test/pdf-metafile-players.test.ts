@@ -101,6 +101,10 @@ function pict(width: number, height: number, body: number[]): Uint8Array {
   // Opcodes start on even offsets.
   return new Uint8Array([...head, ...body, ...(body.length & 1 ? [0] : []), 0x00, 0xff]);
 }
+/** A version 1 PICT of `width` x `height`: one-byte opcodes `body`, then the end opcode unless `cut`. */
+function pictV1(width: number, height: number, body: number[], cut = false): Uint8Array {
+  return new Uint8Array([0, 0, 0, 0, 0, 0, height >> 8, height & 255, width >> 8, width & 255, 0x11, 0x01, ...body, ...(cut ? [] : [0xff])]);
+}
 const be16 = (value: number) => [(value >> 8) & 255, value & 255];
 const be32 = (value: number) => [...be16(value >>> 16), ...be16(value & 0xffff)];
 
@@ -227,6 +231,36 @@ describe("PICT player", () => {
     expect(ops).toContain("1 0 0 RG 2 w 2 J");
     expect(ops).toContain("2 2 m 10 2 l 10 7 l S");
     expect(ops).toMatch(/1 0 0 rg 0 0 m 9 0 l 0 9 l h f\*/);
+  });
+});
+
+describe("PICT player, version 1", () => {
+  it("draws a version 1 picture's shapes and text (one-byte opcodes, no padding)", async () => {
+    const body = [
+      0x31, 0, 0, 0, 0, 0, 5, 0, 10, // paintRect (0, 0) to (10, 5)
+      0x0d, 0, 9, // TxSize 9
+      0x28, 0, 8, 0, 1, 3, 0x41, 0x42, 0x43, // LongText at (1, 8): "ABC"
+    ];
+    let canvas: RecordingCanvas | null = null;
+    const texts = await drawnText(async () => (canvas = await convertMetafile("pict", pictV1(20, 10, body), fonts, resources())));
+    expect(canvas).not.toBeNull();
+    expect([canvas!.width, canvas!.height]).toEqual([20, 10]);
+    expect(canvas!.ops.join("\n")).toMatch(/0 0 m 10 0 l 10 5 l 0 5 l h f/);
+    expect(texts).toEqual(["ABC"]);
+  });
+
+  it("reports a version 1 picture cut short instead of drawing part of it", async () => {
+    const body = [0x31, 0, 0, 0, 0, 0, 5, 0, 10];
+    // No end opcode; a rectangle cut short; a reserved opcode's data longer than the picture.
+    expect((await convertMetafile("pict", pictV1(20, 10, body, true), fonts, resources())) === null).toBe(true);
+    expect((await convertMetafile("pict", pictV1(20, 10, [...body, 0x31, 0, 0]), fonts, resources())) === null).toBe(true);
+    expect((await convertMetafile("pict", pictV1(20, 10, [0xd0, 0x7f, 0xff, 0xff, 0xff]), fonts, resources())) === null).toBe(true);
+  });
+
+  it("reports a version 1 bitmap over the pixel budget before decoding it", async () => {
+    // BitsRect: rowBytes 2, bounds 0,0 to 8000 x 8000, no rows.
+    const body = [0x90, 0, 2, 0, 0, 0, 0, ...be16(8000), ...be16(8000), 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0];
+    expect((await convertMetafile("pict", pictV1(20, 10, body), fonts, resources())) === null).toBe(true);
   });
 });
 

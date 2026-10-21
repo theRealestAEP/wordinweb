@@ -43,6 +43,7 @@ import { CompareError, isDiskFull } from "./errors.js";
 import { docToDocx } from "../../core/src/doc/hooks.js";
 import { isOleFile } from "../../core/src/doc/streams.js";
 import { FORMAT_HEAD_BYTES, otherFormat } from "../../core/src/formats.js";
+import { isOldWordFile, oldWordToDocx } from "../../core/src/oldword/hooks.js";
 import { PdfRenderError } from "../../core/src/pdf/errors.js";
 import { renderDocxToPdf } from "../../core/src/pdf/render.js";
 import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
@@ -258,8 +259,9 @@ function openInput(path: string, side: Side, dir: string): ZipReader {
 
 /**
  * The .docx to read for an input: the input itself, or, for a Word
- * 6.0-2003 .doc, a working file it is converted to (core's doc/convert.ts;
- * the .doc and its .docx are in memory for the conversion). Another format
+ * 6.0-2003 .doc or a document in one of the oldest Word formats, a working
+ * file it is converted to (core's doc/convert.ts and oldword/; the input and
+ * its .docx are in memory for the conversion). Another format
  * (RTF, PDF, a password-protected document) is refused from its first
  * bytes as unsupported_format.
  */
@@ -272,12 +274,13 @@ function docxPathOf(path: string, side: Side, dir: string): string {
   } finally {
     closeSync(fd);
   }
-  const other = otherFormat(head);
+  const old = isOldWordFile(head);
+  const other = old ? undefined : otherFormat(head);
   if (other) throw new CompareError("unsupported_format", `${path}: ${other}`, side);
-  if (!isOleFile(head)) return path;
+  if (!isOleFile(head) && !old) return path;
   let docx: Uint8Array;
   try {
-    docx = docToDocx(readFileSync(path));
+    docx = old ? oldWordToDocx(readFileSync(path)) : docToDocx(readFileSync(path));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const unsupported = /^unsupported format: (.*)/.exec(message);

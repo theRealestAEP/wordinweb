@@ -11,6 +11,7 @@ import { DOCUMENT_LIMITS, XML_PART, ZipBudget, holdXmlCounts, mainDocumentPart }
 import { docToDocx } from "../doc/hooks.js";
 import { isOleFile } from "../doc/streams.js";
 import { FORMAT_HEAD_BYTES, otherFormat } from "../formats.js";
+import { isOldWordFile, oldWordToDocx } from "../oldword/hooks.js";
 import { scanBody } from "./scan.js";
 import { ByteSource, bytesSource } from "./source.js";
 import { ZipEntry, ZipIndex } from "./zip.js";
@@ -340,7 +341,8 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
 
 /**
  * The source as a .docx: a Word 97-2003 .doc (an OLE compound file with a
- * WordDocument stream) is read whole and converted (doc/hooks.ts); a file
+ * WordDocument stream) is read whole and converted (doc/hooks.ts), as is a
+ * document in one of the oldest Word formats (oldword/hooks.ts); a file
  * that is another format altogether is refused from its first bytes, before
  * the zip directory is looked for (formats.ts), and a compound file that
  * holds something else by the converter: a password-protected .docx, an
@@ -349,6 +351,7 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
 async function asDocxSource(source: ByteSource): Promise<ByteSource> {
   const size = await source.size();
   const head = await source.read(0, Math.min(size, FORMAT_HEAD_BYTES));
+  if (isOldWordFile(head)) return bytesSource(oldWordToDocx(await source.read(0, size)));
   const other = otherFormat(head);
   if (other) throw new Error(`unsupported format: ${other}`);
   if (!isOleFile(head)) return source;

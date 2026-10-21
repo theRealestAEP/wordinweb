@@ -1,6 +1,10 @@
 // The formats a .docx reader is handed instead of a .docx, told from their
 // first bytes, so the refusal names what the file is. A Word 6.0-2003 .doc
-// (an OLE compound file) is not among them: it is read (doc/).
+// (an OLE compound file) is not among them: it is read (doc/). Nor are the
+// oldest Word formats oldword/ reads (Word for the Macintosh 1.x, 3.0,
+// 4.0 and 5.x; Word for Windows 1.x and 2.0; Word for MS-DOS; Windows
+// Write): the callers ask oldword/ first, so the entries below name only
+// the variants it does not read.
 
 /** Enough of a file's start for every check here. */
 export const FORMAT_HEAD_BYTES = 1024;

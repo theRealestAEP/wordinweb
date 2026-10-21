@@ -38,6 +38,7 @@ import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
 import { extractOlePackage } from "./parse/ole.js";
 import { docPackageFiles } from "./doc/hooks.js";
 import { isOleFile } from "./doc/streams.js";
+import { isOldWordFile, oldWordPackageFiles } from "./oldword/hooks.js";
 import { isSourcesRoot } from "./citations.js";
 import {
   buildSmartArtColorsXml,
@@ -3145,10 +3146,11 @@ export class DocxDocument {
 
   /** A document from a .docx's bytes; a Strict Open XML package is read as
    * Transitional (strict.ts), and a Word 97-2003 .doc is converted on the way in
-   * (doc/convert.ts), unzipped parts and all. */
+   * (doc/convert.ts), unzipped parts and all, as is a document in one of the
+   * oldest Word formats (oldword/). */
   static load(data: ArrayBuffer | Uint8Array): DocxDocument {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
-    const pkg = isOleFile(bytes) ? Package.fromFiles(docPackageFiles(bytes)) : Package.from(bytes);
+    const pkg = isOleFile(bytes) ? Package.fromFiles(docPackageFiles(bytes)) : isOldWordFile(bytes) ? Package.fromFiles(oldWordPackageFiles(bytes)) : Package.from(bytes);
     normalizeStrictPackage(pkg.raw());
     // What the XML will cost once parsed, from its bytes, before any of it is.
     holdXmlCounts(pkg.raw(), mainDocumentPart(pkg.binary("_rels/.rels")));
