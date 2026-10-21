@@ -1691,9 +1691,13 @@ function parseDrawing(
 
   // DrawingML text box (wps:txbx): a floating shape with fill/stroke, text
   // content, wrap mode and (optionally) rotation - the modern equivalent of a
-  // VML v:shape text box. Groups with SEVERAL text boxes fall through to the
-  // composite-art paths below, which keep every box in place.
-  if (anchor && textboxEl && texts.length <= 1) {
+  // VML v:shape text box. This path draws the text box alone, at the full
+  // drawing extent. A group with SEVERAL text boxes, or with a picture, line
+  // or painted shape beside its text box (a Word 97 figure: picture plus
+  // caption box), falls through to the composite-art paths below, which keep
+  // every child in place.
+  const textboxOnly = texts.length <= 1 && images.length === 0 && lines.length === 0 && paths.length === 0;
+  if (anchor && textboxEl && textboxOnly) {
     const relOf = (el: XmlElement | undefined): AnchorRel => {
       const v = el ? attr(el, "relativeFrom") : undefined;
       return v === "page" ? "page"
@@ -1862,7 +1866,7 @@ function parseDrawing(
   // callout boxes in the wild-gatech thesis). Word reserves the extent's
   // vertical space in the flow; rendering it off-page (the VML fallback path)
   // loses that space and collapses front-matter pages.
-  if (!anchor && textboxEl && texts.length <= 1) {
+  if (!anchor && textboxEl && textboxOnly) {
     const spPr = child(textboxEl, "spPr");
     const txbxContent = findDescendant(child(textboxEl, "txbx")!, "txbxContent");
     const lnEl = child(spPr, "ln");
@@ -1892,15 +1896,22 @@ function parseDrawing(
     };
   }
 
-  // Anchored template art (multi-shape groups, freeform paths): absolute
-  // placement via the anchor, no text-flow participation.
+  // Anchored template art (multi-shape groups, freeform paths): placed via
+  // the anchor; text wraps around it per the anchor's wrap mode.
   if (anchor && (paths.length > 0 || lines.length > 0 || images.length > 1 || texts.length > 0)) {
     const docPr = child(anchor, "docPr");
     const docPrName = attr(docPr, "name") ?? "";
     const ink = attr(docPr, "descr") === "WordInWeb ink" || /^Ink(?:\s|$)/i.test(docPrName);
+    // character/line resolve against the anchor run's pen position and line,
+    // as for a text box (a Word 97 figure group in a SHAPE field).
     const rel = (el: XmlElement | undefined): AnchorRel => {
       const v = el ? attr(el, "relativeFrom") : undefined;
-      return v === "page" ? "page" : v === "margin" ? "margin" : v === "column" ? "column" : "text";
+      return v === "page" ? "page"
+        : v === "margin" ? "margin"
+        : v === "column" ? "column"
+        : v === "character" ? "char"
+        : v === "line" ? "line"
+        : "text";
     };
     // positionH/V may appear twice (mc:Choice with wp14 percent offsets +
     // mc:Fallback with a plain posOffset) - merge across all copies.
@@ -1949,9 +1960,9 @@ function parseDrawing(
         vRel: rel(posV),
         hAlign,
         vAlign,
-        // Wrap mode + distances, acted on only inside frame stories
-        // (probe-headeranchor2: a wrapTopAndBottom bar in a header sets the
-        // body top to its bottom edge; body flow ignores art wrap as before).
+        // Wrap mode + distances: text wraps around the art as around a text
+        // box (probe-headeranchor2: a wrapTopAndBottom bar in a header sets
+        // the body top to its bottom edge).
         wrap: child(anchor, "wrapNone")
           ? "none"
           : child(anchor, "wrapTopAndBottom")
@@ -2470,6 +2481,10 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
   const walk = (el: XmlElement) => {
     const ln = localName(el.name);
     if (ln === "shapetype") return; // template definition, not an instance
+    if (ln === "group") {
+      out.push(parseVmlGroup(el, ctx));
+      return;
+    }
     if (ln === "line") {
       const style = parseVmlStyle(el.attrs["style"]);
       const from = (el.attrs["from"] ?? "0,0").split(",");
@@ -2701,6 +2716,133 @@ export function parseVmlPict(pict: XmlElement, ctx: DocParseContext): RunContent
   };
   for (const c of pict.children) walk(c);
   return out;
+}
+
+/**
+ * A VML v:group (a Word 97 figure: picture plus caption text box). The
+ * children's left/top/width/height are in the group's coordinate space
+ * (coordorigin, coordsize), which maps onto the group's box; a nested group
+ * maps its own space onto its box the same way. Pictures, text boxes and
+ * lines paint in place as one drawing: anchored when the group is
+ * position:absolute, inline otherwise.
+ */
+function parseVmlGroup(group: XmlElement, ctx: DocParseContext): AnchorContent | DrawingContent {
+  const images: DrawingImage[] = [];
+  const lines: DrawingLine[] = [];
+  const texts: DrawingTextShape[] = [];
+  // VML vectors separate their two numbers with a comma or with spaces.
+  const pair = (raw: string | undefined, dflt: number): [number, number] => {
+    const [a, b] = (raw ?? "").trim().split(/\s*,\s*|\s+/).map((v) => parseFloat(v));
+    return [Number.isFinite(a) ? a : dflt, Number.isFinite(b) ? b : dflt];
+  };
+  // (bx, by, bw, bh): the group's box in px, relative to the outer group.
+  const walk = (g: XmlElement, bx: number, by: number, bw: number, bh: number): void => {
+    const [ox, oy] = pair(attr(g, "coordorigin"), 0);
+    const [cw, ch] = pair(attr(g, "coordsize"), 1000);
+    const kx = cw ? bw / cw : 1;
+    const ky = ch ? bh / ch : 1;
+    const toX = (v: number): number => bx + (v - ox) * kx;
+    const toY = (v: number): number => by + (v - oy) * ky;
+    for (const el of g.children) {
+      const ln = localName(el.name);
+      if (ln === "shapetype") continue; // template definition, not an instance
+      const style = parseVmlStyle(el.attrs["style"]);
+      const num = (key: string): number => parseFloat(style.get(key) ?? "0") || 0;
+      const x = toX(num("left"));
+      const y = toY(num("top"));
+      const width = num("width") * kx;
+      const height = num("height") * ky;
+      if (ln === "group") {
+        walk(el, x, y, width, height);
+        continue;
+      }
+      if (ln === "line") {
+        const [x1, y1] = pair(el.attrs["from"], 0);
+        const [x2, y2] = pair(el.attrs["to"], 0);
+        const dashRaw = findDescendant(el, "stroke")?.attrs["dashstyle"]?.toLowerCase() ?? "";
+        lines.push({
+          x1: toX(x1),
+          y1: toY(y1),
+          x2: toX(x2),
+          y2: toY(y2),
+          color: el.attrs["strokecolor"] ?? "#000000",
+          weight: vmlLength(el.attrs["strokeweight"]) || 1,
+          style: dashRaw.includes("dot") ? "dotted" : dashRaw && dashRaw !== "solid" ? "dashed" : "single",
+        });
+        continue;
+      }
+      // v:image names its picture itself; a picture shape holds v:imagedata.
+      const imageEl = ln === "image" ? el : findDescendant(el, "imagedata");
+      const rid = imageEl ? attr(imageEl, "id") : undefined;
+      const rel = rid ? ctx.rels.get(rid) : undefined;
+      if (rel && !rel.external) {
+        images.push({ part: rel.target, x, y, width, height });
+        continue;
+      }
+      // A text box, or a plain shape with a fill or outline, paints as a box
+      // (as a standalone absolute shape does in parseVmlPict).
+      const txbx = findDescendant(el, "txbxContent");
+      const fillRaw = el.attrs["fillcolor"];
+      const fill = el.attrs["filled"] === "f" ? undefined : fillRaw ? fillRaw.split(" ")[0] : undefined;
+      const strokeColor = el.attrs["strokecolor"];
+      const stroked = el.attrs["stroked"] !== "f" && strokeColor !== undefined;
+      if (txbx || fill || stroked) {
+        const ta = style.get("v-text-anchor");
+        texts.push({
+          x,
+          y,
+          width,
+          height,
+          blocks: txbx ? parseBlocks(txbx, ctx) : [],
+          ...(fill ? { fill } : {}),
+          ...(stroked ? { stroke: { color: strokeColor.split(" ")[0], weight: vmlLength(el.attrs["strokeweight"]) || 1 } } : {}),
+          insets: parseVmlInset(findDescendant(el, "textbox")?.attrs["inset"]) ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 },
+          ...(ta === "middle" || ta === "bottom" ? { textAnchor: ta } : {}),
+        });
+      }
+    }
+  };
+  const style = parseVmlStyle(group.attrs["style"]);
+  const width = vmlLength(style.get("width"));
+  const height = vmlLength(style.get("height"));
+  walk(group, 0, 0, width, height);
+  if (style.get("position") !== "absolute") {
+    return { kind: "drawing", width, height, lines, images, ...(texts.length ? { texts } : {}) };
+  }
+  // The group's own w10:wrap (a child shape can carry one too).
+  const wrapType = attr(group.children.find((c) => localName(c.name) === "wrap"), "type");
+  const hAlignRaw = style.get("mso-position-horizontal");
+  const vAlignRaw = style.get("mso-position-vertical");
+  const zIndex = parseFloat(style.get("z-index") ?? "0") || 0;
+  return {
+    kind: "anchor",
+    shape: {
+      type: "art",
+      x: vmlLength(style.get("margin-left")),
+      y: vmlLength(style.get("margin-top")),
+      width,
+      height,
+      hRel: anchorRel(style.get("mso-position-horizontal-relative")),
+      vRel: anchorRel(style.get("mso-position-vertical-relative")),
+      hAlign: hAlignRaw === "center" ? "center" : hAlignRaw === "right" ? "right" : hAlignRaw === "left" ? "left" : undefined,
+      vAlign: vAlignRaw === "center" ? "center" : vAlignRaw === "bottom" ? "bottom" : vAlignRaw === "top" ? "top" : undefined,
+      // No w10:wrap: the group floats in front of the text.
+      wrap: wrapType === "topAndBottom" ? "topAndBottom" : wrapType && wrapType !== "none" ? "square" : "none",
+      dist: {
+        t: vmlLength(style.get("mso-wrap-distance-top")),
+        b: vmlLength(style.get("mso-wrap-distance-bottom")),
+        l: vmlLength(style.get("mso-wrap-distance-left")),
+        r: vmlLength(style.get("mso-wrap-distance-right")),
+      },
+      ...(zIndex < 0 ? { behind: true } : {}),
+      // The selection target, as for a standalone VML text box or picture.
+      srcDrawing: group,
+      lines,
+      images,
+      paths: [],
+      ...(texts.length ? { texts } : {}),
+    },
+  };
 }
 
 // ---------- tables ----------
