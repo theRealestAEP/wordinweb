@@ -317,12 +317,39 @@ interface InternalPage {
   openingFlowOverlapApplied?: boolean;
   openingColumnReserve?: number;
   /** Footnote content bound to each column, emitted above bodyBottom at the end. */
-  footnotes: { items: PageItem[]; height: number; column: number }[];
+  footnotes: PageNote[];
   footnoteH: number[];
   /** Column bands laid on this page, in order, for w:cols w:sep rules. A band
    * opens at newPage/newBand; bottoms[i] tracks column i's deepest glyph
    * bottom (baseline + descent) so the separator can span the band. */
   bands: ColumnBand[];
+}
+
+/** A footnote, or the part of one that continues from an earlier page, laid
+ * out as a frame at its column width (y from 0 at the part's top). */
+interface NotePart {
+  items: PageItem[];
+  height: number;
+  /** Heights at which the part may split, ascending. The last is `height`. */
+  cuts: number[];
+  /** The part continues a note that began in an earlier column or page. */
+  continued?: boolean;
+  /** The note's id, and the column width it was laid out at. */
+  id: number;
+  width: number;
+}
+
+/** A note part placed in one column's note area. `continued` marks the part
+ * of a note that began on an earlier page or column. */
+interface PageNote {
+  items: PageItem[];
+  height: number;
+  column: number;
+  /** The column's left edge and width when the note joined it: a later
+   * band on the page may change the page's columns. */
+  x: number;
+  width: number;
+  continued?: boolean;
 }
 
 interface ColumnBand {
@@ -345,7 +372,7 @@ interface LayoutSnapshot {
   colXs: number[];
   colWidths: number[];
   pageSp: SectionProps;
-  footnotes: { items: PageItem[]; height: number; column: number }[];
+  footnotes: PageNote[];
   footnoteH: number[];
   bands: ColumnBand[];
   bodyTop: number;
@@ -368,6 +395,7 @@ interface LayoutSnapshot {
   bookmarkPages: Map<string, string>;
   bookmarkPageIndices: Map<string, number>;
   placedFootnotes: Set<number>;
+  noteCarry: NotePart[];
   lnCounter: number;
   lnLastPage: InternalPage | undefined;
   lnResetEpoch: number;
@@ -567,6 +595,9 @@ const NOTE_SEP_RESERVE = 40;
  * the separator at 573.75pt and the final body glyph at 559.58pt; 26px puts
  * the web line-fit boundary at 558.45pt while keeping the note itself fixed. */
 const MULTI_COL_NOTE_SEP_RESERVE = 26;
+/** Share of the body height a column's note area may take. A longer note
+ * splits and continues on the next page. */
+const NOTE_AREA_SHARE = 0.9;
 /** Word's separator rule is a short line, 2in max. */
 const NOTE_SEP_LEN = 192;
 /** Extra leading between the ENDNOTE separator rule and the first endnote line.
@@ -850,7 +881,10 @@ class Engine {
   private endnoteNumbers = new Map<number, number | string>();
   private placedFootnotes = new Set<number>();
   /** Laid-out footnote content cache (id@width → frame). */
-  private noteCache = new Map<string, { items: PageItem[]; height: number }>();
+  private noteCache = new Map<string, NotePart>();
+  /** Note parts that did not fit in the current column's note area. They
+   * continue at the top of the next column's or page's note area. */
+  private noteCarry: NotePart[] = [];
   /** Resolved conditional table formats per style id (w:tblStylePr chain). */
   private condCache = new Map<string, ReturnType<typeof resolveTableConditional>>();
   /** Mark text for the note body currently being laid out. */
@@ -1146,6 +1180,7 @@ class Engine {
     }
     if (this.pages.length === 0) this.sp = sections[0]?.props ?? ({} as SectionProps);
     this.placeEndnotes();
+    this.flushNoteCarry();
     await this.flushPages(true);
     this.stream = null;
     return { totalPages: this.pages.length, bookmarks: this.bookmarkPages, bookmarkPageIndices: this.bookmarkPageIndices };
@@ -1380,6 +1415,7 @@ class Engine {
     }
     this.applyOpeningFlowOverlap();
     this.placeEndnotes();
+    this.flushNoteCarry();
     for (const page of this.pages) this.finishPage(page, this.pages.length);
     this.releaseDiscardedPages();
     const pages: LaidOutPage[] = this.pages.map((p) => laidOutPage(p));
@@ -2486,6 +2522,7 @@ class Engine {
       this.pages.length > 0 &&
       this.cur &&
       this.cur.items.length === 0 &&
+      this.cur.footnotes.length === 0 &&
       this.pageIsEmptyAtCursor() &&
       (baseSp.type === undefined || baseSp.type === "nextPage" || baseSp.type === "continuous")
     ) {
@@ -2649,6 +2686,7 @@ class Engine {
         this.balanceBottom = undefined;
       }
     }
+    this.placeNoteCarry();
   }
 
   /** Restart columns mid-page for a continuous section break. */
@@ -2818,6 +2856,7 @@ class Engine {
       bookmarkPages: new Map(this.bookmarkPages),
       bookmarkPageIndices: new Map(this.bookmarkPageIndices),
       placedFootnotes: new Set(this.placedFootnotes),
+      noteCarry: [...this.noteCarry],
       lnCounter: this.lnCounter,
       lnLastPage: this.lnLastPage,
       lnResetEpoch: this.lnResetEpoch,
@@ -2860,6 +2899,7 @@ class Engine {
     this.bookmarkPages = s.bookmarkPages;
     this.bookmarkPageIndices = s.bookmarkPageIndices;
     this.placedFootnotes = s.placedFootnotes;
+    this.noteCarry = [...s.noteCarry];
     this.lnCounter = s.lnCounter;
     this.lnLastPage = s.lnLastPage;
     this.lnResetEpoch = s.lnResetEpoch;
@@ -2876,7 +2916,10 @@ class Engine {
         this.cur.bannerTop !== undefined ? (this.cur.openingColumnReserve ?? 0) : 0;
       this.lastParaSpacingAfter = 0;
       this.lastParaAfterPad = 0;
-    this.lastParaAfterPad = 0;
+      // A page whose columns changed mid-page may hold notes laid at another
+      // width across this column's foot: a continued note waits for the
+      // next page there.
+      if (this.cur.bands.length === 1) this.placeNoteCarry();
     } else {
       this.newPage(false);
     }
@@ -2923,10 +2966,12 @@ class Engine {
     const bannerReserve = this.y >= this.cur.bandTop - 0.01 ? this.bannerSlotUsed : 0;
     // Balanced band: non-final columns stop at the balance target so the
     // columns even out; the final column falls back to the true bottom.
+    const noteBottom = this.cur.bodyBottom - this.footnoteReserve(this.cur, this.col);
     if (this.balanceBottom !== undefined && this.col + 1 < this.cur.colXs.length) {
-      return this.balanceBottom - bannerReserve;
+      // The column's own notes still bound it.
+      return Math.min(this.balanceBottom, noteBottom) - bannerReserve;
     }
-    return this.cur.bodyBottom - this.footnoteReserve(this.cur, this.col) - bannerReserve;
+    return noteBottom - bannerReserve;
   }
 
   /** Word balances the columns of a multi-column section that is followed by
@@ -3245,21 +3290,27 @@ class Engine {
     return formatNoteMark(n, this.sp.endnoteNumFmt ?? "lowerRoman");
   }
 
-  /** Bottom-of-body space held by this column's footnotes (separator included).
-   * Capped so a pathological footnote can't push bodyBottom above bodyTop. */
+  /** Body-fill reserve for the separator above a column's footnotes. */
   private noteSeparatorReserve(page: InternalPage): number {
     return page.colXs.length > 1 ? MULTI_COL_NOTE_SEP_RESERVE : NOTE_SEP_RESERVE;
   }
 
+  /** The most a column's note area may take, separator reserve included. The
+   * body keeps the rest of the page, so a long note continues on the next
+   * page and never pushes bodyBottom above bodyTop. */
+  private noteAreaCap(page: InternalPage): number {
+    return (page.bodyBottom - page.bodyTop) * NOTE_AREA_SHARE;
+  }
+
+  /** Bottom-of-body space held by this column's footnotes (separator included). */
   private footnoteReserve(page: InternalPage, column: number): number {
     const height = page.footnoteH[column] ?? 0;
     if (height === 0) return 0;
-    const full = this.noteSeparatorReserve(page) + height;
-    return Math.min(full, (page.bodyBottom - page.bodyTop) * 0.9);
+    return Math.min(this.noteSeparatorReserve(page) + height, this.noteAreaCap(page));
   }
 
   /** Footnote content laid out at the current column width (cached). */
-  private measureFootnote(id: number): { items: PageItem[]; height: number } {
+  private measureFootnote(id: number): NotePart {
     const width = this.colWidth;
     const key = `${id}@${Math.round(width)}`;
     let laid = this.noteCache.get(key);
@@ -3269,52 +3320,72 @@ class Engine {
       this.selfNoteMark = this.footnoteMark(id);
       const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
       const seenSnapshot = new Set(this.seenNumIds);
-      laid = this.layoutFrame(blocks, width, this.fieldCtx());
+      const frame = this.layoutFrame(blocks, width, this.fieldCtx());
       this.counters = snapshot;
       this.seenNumIds = seenSnapshot;
       this.selfNoteMark = prevSelf;
+      laid = { items: frame.items, height: frame.height, cuts: noteCuts(frame.items, frame.height), id, width };
       this.noteCache.set(key, laid);
     }
     return laid;
   }
 
+  /** The footnotes that these references bring, in order, without the ones
+   * a page already holds. */
+  private newNotes(refs: Iterable<{ noteId?: number }>): NotePart[] {
+    const seen = new Set<number>();
+    const notes: NotePart[] = [];
+    for (const { noteId } of refs) {
+      if (noteId === undefined || seen.has(noteId) || this.placedFootnotes.has(noteId)) continue;
+      if (!this.doc.footnotes.has(noteId)) continue;
+      seen.add(noteId);
+      notes.push(this.measureFootnote(noteId));
+    }
+    return notes;
+  }
+
+  /** The lowest point a body line may reach in a column whose notes already
+   * take `used` px, when the line brings `notes` with it. A note that does not
+   * fit whole splits, so the line needs room only for the earlier notes and
+   * the first piece of the last note. -Infinity when even that does not fit,
+   * or when a note in this column already continues on the next one: the
+   * line then moves to the next column or page. */
+  private noteLineLimit(page: InternalPage, used: number, notes: NotePart[], carrying: boolean): number {
+    if (carrying) return Number.NEGATIVE_INFINITY;
+    let need = used + notes[notes.length - 1].cuts[0];
+    for (const note of notes.slice(0, -1)) need += note.height;
+    const reserve = this.noteSeparatorReserve(page) + need;
+    if (reserve > this.noteAreaCap(page) + 0.01) return Number.NEGATIVE_INFINITY;
+    return page.bodyBottom - reserve;
+  }
+
+  /** How much higher than the current body bottom a line or row must end so
+   * that the footnotes it references can start on this page. */
+  private pendingNotesReserve(notes: NotePart[]): number {
+    if (notes.length === 0) return 0;
+    const page = this.cur;
+    const used = page.footnoteH[this.col] ?? 0;
+    const limit = this.noteLineLimit(page, used, notes, this.noteCarry.length > 0);
+    return page.bodyBottom - this.footnoteReserve(page, this.col) - limit;
+  }
+
   /** Extra bottom reserve this line would add if placed on the current page. */
   private pendingNoteHeight(line: LineBox): number {
-    let h = 0;
-    for (const span of line.spans) {
-      if (span.noteId === undefined || this.placedFootnotes.has(span.noteId)) continue;
-      if (!this.doc.footnotes.has(span.noteId)) continue;
-      h += this.measureFootnote(span.noteId).height;
-    }
-    if (h > 0 && (this.cur.footnoteH[this.col] ?? 0) === 0) {
-      h += this.noteSeparatorReserve(this.cur);
-    }
-    return h;
+    return this.pendingNotesReserve(this.newNotes(line.spans));
   }
 
   /** Unplaced-footnote reserve for a laid row (mirror of pendingNoteHeight
    * for body lines): a row referencing notes must fit above the space those
    * notes will claim. */
   private rowNoteHeight(laid: { cells: { items: PageItem[] }[] }): number {
-    let h = 0;
-    const seen = new Set<number>();
-    for (const cell of laid.cells) {
-      for (const it of cell.items) {
-        if (it.kind !== "text" || it.noteId === undefined) continue;
-        if (seen.has(it.noteId) || this.placedFootnotes.has(it.noteId)) continue;
-        if (!this.doc.footnotes.has(it.noteId)) continue;
-        seen.add(it.noteId);
-        h += this.measureFootnote(it.noteId).height;
-      }
-    }
-    if (h > 0 && (this.cur.footnoteH[this.col] ?? 0) === 0) {
-      h += this.noteSeparatorReserve(this.cur);
-    }
-    return h;
+    const refs = laid.cells.flatMap((cell) => cell.items.filter((it) => it.kind === "text"));
+    return this.pendingNotesReserve(this.newNotes(refs));
   }
 
-  /** Bind a footnote's content to the page carrying its reference line. */
-  private registerFootnote(id: number, page: InternalPage): void {
+  /** Bind a footnote's content to the page carrying its reference line, which
+   * ends at `refBottom`. A note that does not fit below that line splits, and
+   * the rest continues in the next column or page. */
+  private registerFootnote(id: number, page: InternalPage, refBottom: number): void {
     if (this.placedFootnotes.has(id) || !this.doc.footnotes.has(id)) return;
     // Lines emitted into frames (table cells) target a fake page; the real
     // page is the engine's current one.
@@ -3323,8 +3394,124 @@ class Engine {
     this.placedFootnotes.add(id);
     const laid = this.measureFootnote(id);
     const column = Math.min(this.col, target.colXs.length - 1);
-    target.footnotes.push({ ...laid, column });
-    target.footnoteH[column] = (target.footnoteH[column] ?? 0) + laid.height;
+    const room =
+      Math.min(this.noteAreaCap(target), target.bodyBottom - refBottom) - this.noteSeparatorReserve(target);
+    this.addNotePart(target, column, laid, room, false);
+  }
+
+  /** Put a note part in a column's note area, which holds at most `room` px
+   * of notes. A part that does not fit splits at a line, and what is left
+   * continues in the next column or page. With `force`, the column takes at
+   * least the part's first piece, so a continued note always moves on. */
+  private addNotePart(page: InternalPage, column: number, part: NotePart, room: number, force: boolean): void {
+    const used = page.footnoteH[column] ?? 0;
+    let keep: NotePart | undefined;
+    let rest: NotePart | undefined;
+    if (this.noteCarry.length > 0) {
+      // An earlier note already continues: later notes follow it.
+      rest = part;
+    } else if (part.height <= room - used + 0.01) {
+      keep = part;
+    } else {
+      const split = splitNote(part, room - used, force);
+      keep = split?.keep;
+      rest = split?.rest;
+      // A forced part with no line to split at stays whole: it is taller
+      // than any page can hold, and moving it on would add pages forever.
+      if (!split && force) keep = part;
+      else if (!split) rest = part;
+    }
+    if (keep) {
+      page.footnotes.push({
+        items: keep.items,
+        height: keep.height,
+        column,
+        x: page.colXs[column],
+        width: page.colWidths[column],
+        continued: keep.continued,
+      });
+      page.footnoteH[column] = used + keep.height;
+    }
+    if (rest) this.noteCarry.push(rest);
+  }
+
+  /** Start the current column's note area with the notes that continue from
+   * the previous column or page. */
+  private placeNoteCarry(): void {
+    if (this.noteCarry.length === 0) return;
+    const page = this.cur;
+    const parts = this.noteCarry;
+    this.noteCarry = [];
+    // The column starts at this.y: below a banner or an earlier band.
+    const room = Math.min(this.noteAreaCap(page), page.bodyBottom - this.y) - this.noteSeparatorReserve(page);
+    for (const part of parts) {
+      const fitted = Math.abs(part.width - this.colWidth) > 1 ? this.relayNotePart(part) : part;
+      this.addNotePart(page, this.col, fitted, room, (page.footnoteH[this.col] ?? 0) === 0);
+    }
+  }
+
+  /** A continued note part laid out again at the current column's width: the
+   * whole note at this width, from the first line that holds content the part
+   * still has to show. Text and pictures that an earlier column showed are
+   * left out; a text item that starts in shown text keeps only its rest. */
+  private relayNotePart(part: NotePart): NotePart {
+    // Source text still to show, by w:t, and the pictures still to show.
+    const left = new Map<XmlElement, [number, number][]>();
+    const pictures = new Set<XmlElement>();
+    for (const it of part.items) {
+      if (it.kind === "image" && it.src) pictures.add(it.src);
+      if (it.kind !== "text" || !it.src?.t) continue;
+      const ranges = left.get(it.src.t) ?? [];
+      ranges.push([it.src.offset, it.src.offset + it.text.length]);
+      left.set(it.src.t, ranges);
+    }
+    /** The first character of a text item still to show, or -1. */
+    const firstLeft = (it: TextItem): number => {
+      if (!it.src?.t) return -1;
+      const from = it.src.offset;
+      const to = from + it.text.length;
+      let first = -1;
+      for (const [a, b] of left.get(it.src.t) ?? []) {
+        if (a < to && b > from) {
+          const start = Math.max(a, from);
+          if (first === -1 || start < first) first = start;
+        }
+      }
+      return first;
+    };
+    const stillToShow = (it: PageItem): boolean =>
+      it.kind === "text" ? firstLeft(it) !== -1 : it.kind === "image" && !!it.src && pictures.has(it.src);
+    const full = this.measureFootnote(part.id);
+    let top = Number.POSITIVE_INFINITY;
+    for (const it of full.items) if (stillToShow(it)) top = Math.min(top, itemTop(it));
+    if (top === Number.POSITIVE_INFINITY) return part;
+    const items: PageItem[] = [];
+    for (const it of full.items) {
+      if (itemTop(it) < top - 0.5) continue;
+      const identified = (it.kind === "text" && !!it.src?.t) || (it.kind === "image" && !!it.src);
+      if (identified && !stillToShow(it)) continue;
+      const copy = { ...it };
+      if (copy.kind === "text" && copy.src) {
+        const skip = firstLeft(copy) - copy.src.offset;
+        if (skip > 0) {
+          const shift = this.measurer.width(copy.text.slice(0, skip), copy.font, copy.props.letterSpacing);
+          copy.text = copy.text.slice(skip);
+          copy.x += shift;
+          copy.width -= shift;
+          copy.src = { ...copy.src, offset: copy.src.offset + skip };
+        }
+      }
+      offsetItem(copy, 0, -top);
+      items.push(copy);
+    }
+    const height = full.height - top;
+    return { items, height, cuts: noteCuts(items, height), continued: true, id: part.id, width: full.width };
+  }
+
+  /** Fill further columns and pages until every continued note is placed
+   * (the body has ended). */
+  private flushNoteCarry(): void {
+    while (this.noteCarry.length > 0) this.nextColumn();
   }
 
   /** The post-passes that complete a page once no later block can touch it:
@@ -3345,28 +3532,38 @@ class Engine {
 
   private emitFootnoteArea(page: InternalPage): void {
     if (page.footnotes.length === 0) return;
-    for (let column = 0; column < page.colXs.length; column++) {
+    // Every column that holds notes, also one of an earlier band whose
+    // columns the page's last band no longer has.
+    const columns = Math.max(page.colXs.length, ...page.footnotes.map((note) => note.column + 1));
+    for (let column = 0; column < columns; column++) {
       const notes = page.footnotes.filter((note) => note.column === column);
       if (notes.length === 0) continue;
-      const x0 = page.colXs[column];
+      const x0 = notes[0].x;
+      const width = notes[0].width;
+      // A note area that opens with a continued note uses the continuation
+      // separator: Word draws it across the whole column.
+      const continued = notes[0].continued === true;
+      const separator = continued ? this.doc.footnoteContinuationSeparator : this.doc.footnoteSeparator;
       const separatorHeight =
-        this.doc.footnoteSeparator.length > 0
-          ? this.layoutFrame(this.doc.footnoteSeparator, page.colWidths[column], this.fieldCtx()).height
-          : NOTE_SEP_H;
+        separator.length > 0 ? this.layoutFrame(separator, width, this.fieldCtx()).height : NOTE_SEP_H;
+      const ruleLength = continued ? width : Math.min(NOTE_SEP_LEN, width);
       let y = page.bodyBottom - (page.footnoteH[column] ?? 0) - separatorHeight;
       page.items.push({
         kind: "edge",
         x1: x0,
         y1: y + NOTE_SEP_H * 0.6,
-        x2: x0 + Math.min(NOTE_SEP_LEN, page.colWidths[column]),
+        x2: x0 + ruleLength,
         y2: y + NOTE_SEP_H * 0.6,
         border: { style: "single", width: 0.75, color: "#000000", space: 0 },
       });
       y += separatorHeight;
       for (const note of notes) {
+        // Copies: the note cache keeps its frame coordinates for a later
+        // relayNotePart.
         for (const it of note.items) {
-          offsetItem(it, x0, y);
-          page.items.push(it);
+          const copy = { ...it };
+          offsetItem(copy, note.x, y);
+          page.items.push(copy);
         }
         y += note.height;
       }
@@ -4008,7 +4205,7 @@ class Engine {
         this.cur.colXs.length > 1 &&
         nextFrame.w > this.colWidth + 1
       ) {
-        for (const id of detachedFootnotes) this.registerFootnote(id, this.cur);
+        for (const id of detachedFootnotes) this.registerFootnote(id, this.cur, this.y);
         const markProps = this.doc.effectiveRunProps(para, props.markRunProps ?? {});
         this.cur.openingColumnReserve = this.measurer.metrics(
           fontOf(markProps, this.doc.styles.defaultRPr.font ?? "Calibri"),
@@ -5004,7 +5201,7 @@ class Engine {
       const updateBottom = () => {
         bottom =
           simOnCurrentPage && this.balanceBottom !== undefined && simCol + 1 < this.cur.colXs.length
-            ? this.balanceBottom - simBannerUsed
+            ? Math.min(this.balanceBottom, this.cur.bodyBottom - this.footnoteReserve(this.cur, simCol)) - simBannerUsed
             : this.cur.bodyBottom -
               (simOnCurrentPage ? this.footnoteReserve(this.cur, simCol) + simBannerUsed : 0);
       };
@@ -5015,19 +5212,14 @@ class Engine {
       // the plan can declare a paragraph tail fit that emission then breaks
       // WITHOUT widow control (phase23 p57: a 9-line paragraph with four
       // footnote refs split 8/1, stranding "MOJA." as a widow where Word
-      // pulls a second line along, 7/2).
+      // pulls a second line along, 7/2). A simulated note that does not fit
+      // splits like a live one (simCarrying): the column then takes no more
+      // notes.
       let simNotes = 0;
+      let simCarrying = false;
       const simNoted = new Set<number>();
-      const lineNoteHeights = (line: LineBox): number => {
-        let h = 0;
-        for (const span of line.spans) {
-          if (span.noteId === undefined) continue;
-          if (this.placedFootnotes.has(span.noteId) || simNoted.has(span.noteId)) continue;
-          if (!this.doc.footnotes.has(span.noteId)) continue;
-          h += this.measureFootnote(span.noteId).height;
-        }
-        return h;
-      };
+      const lineNotes = (line: LineBox): NotePart[] =>
+        this.newNotes(line.spans.filter((span) => span.noteId === undefined || !simNoted.has(span.noteId)));
       const markLineNotes = (line: LineBox) => {
         for (const span of line.spans) {
           if (span.noteId === undefined || this.placedFootnotes.has(span.noteId)) continue;
@@ -5036,6 +5228,7 @@ class Engine {
       };
       const nextSimColumn = () => {
         simNotes = 0;
+        simCarrying = false;
         simNoted.clear();
         if (simCol + 1 < this.cur.colXs.length) {
           simCol++;
@@ -5069,19 +5262,25 @@ class Engine {
         const simBalancing =
           simOnCurrentPage && this.balanceBottom !== undefined && simCol + 1 < this.cur.colXs.length;
         // Mirror emitLine's test: the line must clear the notes ALREADY
-        // claimed by earlier simulated lines (simNotes) plus its own
-        // (noteAdd), with the separator once the page gains its first note.
-        const noteAdd = lineNoteHeights(lines[li]);
+        // claimed by earlier simulated lines (simNotes) plus the first piece
+        // of its own, with the separator once the page gains its first note.
+        const notesHere = lineNotes(lines[li]);
         const baseNotes = simOnCurrentPage ? (this.cur.footnoteH[simCol] ?? 0) : 0;
-        const simSep =
-          simNotes + noteAdd > 0 && baseNotes === 0 ? this.noteSeparatorReserve(this.cur) : 0;
+        let noteBottom = Number.POSITIVE_INFINITY;
+        if (notesHere.length > 0) {
+          const carrying = simCarrying || (simOnCurrentPage && this.noteCarry.length > 0);
+          noteBottom = this.noteLineLimit(this.cur, baseNotes + simNotes, notesHere, carrying) - simBannerUsed;
+        } else if (simNotes > 0) {
+          const reserve = this.noteSeparatorReserve(this.cur) + baseNotes + simNotes;
+          noteBottom = this.cur.bodyBottom - Math.min(reserve, this.noteAreaCap(this.cur)) - simBannerUsed;
+        }
         const demand =
           pageBreakOnlyDemand ?? lines[li].fitHeight + (li === lines.length - 1 ? keepNextTail : 0);
         const overflowsHere =
           !postTablePageBreak &&
           (simBalancing
             ? simY > bottom + 0.01
-            : simY + demand > bottom - simNotes - noteAdd - simSep + paragraphOverhang + 0.01);
+            : simY + demand > Math.min(bottom, noteBottom) + paragraphOverhang + 0.01);
         // The paragraph's VERY FIRST line does not fit on the current partial
         // page: the whole paragraph moves to the next column/page. This is a
         // PHYSICAL fit, independent of widowControl — the emit loop moves line 0
@@ -5132,8 +5331,20 @@ class Engine {
           li = breakAt - 1;
           continue;
         }
+        if (notesHere.length > 0) {
+          const full = notesHere.reduce((h, note) => h + note.height, 0);
+          const room =
+            Math.min(this.noteAreaCap(this.cur), this.cur.bodyBottom - (simY + lines[li].fitHeight)) -
+            this.noteSeparatorReserve(this.cur) -
+            baseNotes;
+          if (simNotes + full > room + 0.01) {
+            simNotes = Math.max(simNotes, room);
+            simCarrying = true;
+          } else {
+            simNotes += full;
+          }
+        }
         simY += lines[li].height;
-        simNotes += noteAdd;
         markLineNotes(lines[li]);
       }
       return breaks;
@@ -5545,7 +5756,7 @@ class Engine {
       // Frame-laid lines (table cells) register at PAINT time instead: the
       // partition that ends up on the next page after a row split must bind
       // its notes there, not to the page current during cell layout.
-      if (span.noteId !== undefined && page.physIndex !== -1) this.registerFootnote(span.noteId, page);
+      if (span.noteId !== undefined && page.physIndex !== -1) this.registerFootnote(span.noteId, page, topY + line.fitHeight);
     }
     this.emitRunBorders(line, page, originX, topY, baseline);
     const strikes: StrikeRun[] = [];
@@ -8562,7 +8773,10 @@ class Engine {
         // strict cut (parity-rowsplit: a 2.4px overshoot moves).
         const keepSlack =
           this.rowNoteHeight(laid) > 0 || (this.cur.footnoteH[this.col] ?? 0) > 0 ? NOTE_SEP_H : 0;
-        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack) : null;
+        // The kept part leaves room for the first piece of the row's notes.
+        const rowNotes = this.rowNoteHeight(laid);
+        const noteRoom = Number.isFinite(rowNotes) ? rowNotes : 0;
+        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y - noteRoom, keepSlack) : null;
         if (parts) {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
@@ -9588,8 +9802,13 @@ class Engine {
         if (clip && it.kind === "text" && it.lineTop >= rowBottom - 0.01) continue;
         if (clip && it.kind === "text" && it.lineTop + it.lineHeight > rowBottom + 0.01) it.clip = { top: y, bottom: rowBottom };
         // Cell footnotes bind to the page painting this partition (split
-        // rows carry their references to the continuation page).
-        if (it.kind === "text" && it.noteId !== undefined) this.registerFootnote(it.noteId, page);
+        // rows carry their references to the continuation page). The note
+        // area starts below the whole row, as the row-fit test assumes; a
+        // split row's last line may reach NOTE_SEP_H into the separator band
+        // (keepSlack in the row loop).
+        if (it.kind === "text" && it.noteId !== undefined) {
+          this.registerFootnote(it.noteId, page, y + rowHeight - NOTE_SEP_H);
+        }
         page.items.push(it);
       }
 
@@ -10219,6 +10438,124 @@ function measuredTextWidth(items: PageItem[]): number {
   let widest = 0;
   for (const item of items) if (item.kind === "text") widest = Math.max(widest, item.x + item.width);
   return widest;
+}
+
+/** Top and bottom of an item's box (y down, page or frame px). */
+function itemTop(item: PageItem): number {
+  switch (item.kind) {
+    case "text":
+      return item.lineTop;
+    case "edge":
+    case "grip":
+      return Math.min(item.y1, item.y2);
+    default:
+      return item.y;
+  }
+}
+
+function itemBottom(item: PageItem): number {
+  switch (item.kind) {
+    case "text":
+      return item.lineTop + item.lineHeight;
+    case "edge":
+    case "grip":
+      return Math.max(item.y1, item.y2);
+    default:
+      return item.y + item.height;
+  }
+}
+
+/** Heights at which a laid note may split: the foot of a text line or of a
+ * table row rule that no other item crosses, with more content below it.
+ * Cell borders and fills cross every line of their row, so a table splits
+ * only between rows. A cut inside a paragraph must leave at least two of
+ * its lines on each side (widow and orphan control). The list ends with the
+ * note's full height. */
+function noteCuts(items: PageItem[], height: number): number[] {
+  const flow = items.filter((it) => it.kind !== "grip");
+  const boxes = flow.map((it) => ({ top: itemTop(it), bottom: itemBottom(it) }));
+  const candidates = new Set<number>();
+  // Row rules: a cut on one is between rows, where the widow rule does not
+  // apply (cell paragraphs of different rows share paraSeq numbers).
+  const rules = new Set<number>();
+  const paraLines = new Map<number, Set<number>>();
+  for (const it of flow) {
+    if (it.kind === "text") {
+      candidates.add(it.lineTop + it.lineHeight);
+      if (it.paraSeq !== undefined) {
+        const tops = paraLines.get(it.paraSeq) ?? new Set<number>();
+        tops.add(Math.round(it.lineTop * 100) / 100);
+        paraLines.set(it.paraSeq, tops);
+      }
+    } else if (it.kind === "edge" && Math.abs(it.y1 - it.y2) < 0.01) {
+      candidates.add(it.y1);
+      rules.add(it.y1);
+    }
+  }
+  const keepsWidowRule = (cut: number): boolean => {
+    for (const tops of paraLines.values()) {
+      let above = 0;
+      for (const top of tops) if (top < cut - 0.5) above++;
+      const below = tops.size - above;
+      if (above > 0 && below > 0 && (above < 2 || below < 2)) return false;
+    }
+    return true;
+  };
+  const cuts: number[] = [];
+  for (const cut of [...candidates].sort((a, b) => a - b)) {
+    if (cut <= 0.5 || cut >= height - 0.5) continue;
+    if (boxes.some((box) => box.top < cut - 0.5 && box.bottom > cut + 0.5)) continue;
+    if (!boxes.some((box) => box.top >= cut - 0.5)) continue;
+    if (!rules.has(cut) && !keepsWidowRule(cut)) continue;
+    cuts.push(cut);
+  }
+  cuts.push(height);
+  return cuts;
+}
+
+/** Split a note part at its deepest cut within `room`. The kept items stay as
+ * they are; the rest are copied and moved up to start at 0. With `force`, a
+ * part whose first piece does not fit still gives up that piece. Null when
+ * nothing fits. */
+function splitNote(part: NotePart, room: number, force: boolean): { keep: NotePart; rest: NotePart } | null {
+  let cut = 0;
+  for (const c of part.cuts) {
+    if (c < part.height - 0.01 && c <= room + 0.01) cut = c;
+  }
+  if (cut === 0 && force && part.cuts.length > 1) cut = part.cuts[0];
+  if (cut === 0) return null;
+  const keepItems: PageItem[] = [];
+  const restItems: PageItem[] = [];
+  let restTop = part.height;
+  for (const it of part.items) {
+    const top = itemTop(it);
+    if (top < cut - 0.5) {
+      keepItems.push(it);
+    } else {
+      // A row rule on the cut closes the kept rows and opens the rest.
+      if (it.kind === "edge" && Math.abs(it.y1 - it.y2) < 0.01 && Math.abs(it.y1 - cut) <= 0.5) keepItems.push(it);
+      restItems.push(it);
+      if (it.kind !== "grip") restTop = Math.min(restTop, top);
+    }
+  }
+  // The continued part starts at its first line: a paragraph gap at the cut
+  // stays behind.
+  const shift = Math.max(cut, restTop);
+  const moved = restItems.map((it) => {
+    const copy = { ...it };
+    offsetItem(copy, 0, -shift);
+    return copy;
+  });
+  return {
+    keep: { ...part, items: keepItems, height: cut, cuts: part.cuts.filter((c) => c <= cut + 0.01) },
+    rest: {
+      ...part,
+      items: moved,
+      height: part.height - shift,
+      cuts: part.cuts.filter((c) => c > shift + 0.01).map((c) => c - shift),
+      continued: true,
+    },
+  };
 }
 
 function offsetItem(item: PageItem, dx: number, dy: number): void {

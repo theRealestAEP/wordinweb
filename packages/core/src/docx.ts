@@ -225,6 +225,9 @@ export class DocxDocument {
   /** The separator paragraph controls the gap between its rule and the first
    * footnote. */
   readonly footnoteSeparator: Block[] = [];
+  /** The w:continuationSeparator footnote: it opens a note area that starts
+   * with a note continued from the previous page. */
+  readonly footnoteContinuationSeparator: Block[] = [];
   /** `_Ref` cross-reference bookmark ranges (name → captured runs). REF
    * fields re-render the referenced text from these — Word recomputes REF on
    * open, so the cached field result in the file is stale. */
@@ -588,6 +591,12 @@ export class DocxDocument {
         );
         if (separator) {
           this.footnoteSeparator.push(...parseBlocks(separator, { ...this.ctxBase, rels: partRels }));
+        }
+        const continuation = root.children.find(
+          (item) => localName(item.name) === "footnote" && attr(item, "type") === "continuationSeparator",
+        );
+        if (continuation) {
+          this.footnoteContinuationSeparator.push(...parseBlocks(continuation, { ...this.ctxBase, rels: partRels }));
         }
       } else {
         this.endnotesPart = rel.target;
