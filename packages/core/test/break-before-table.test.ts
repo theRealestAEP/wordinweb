@@ -398,4 +398,148 @@ describe("a break next to a table, a picture or a text box", () => {
       expect(redPages(pages)).toEqual([2]);
     });
   }
+
+  // Validator doc97-check-b #11 (046852.doc, minimal files m19 and m20).
+
+  // A page break at the start of the first paragraph leaves page 1 blank.
+  it("leaves a blank first page after a leading page break", () => {
+    const pages = layout(
+      '<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>TAILX</w:t></w:r></w:p>' + p("PAGETWO"),
+    );
+    expect(pages.length).toBe(2);
+    expect(pagesOfWords(pages, ["TAILX", "PAGETWO"])).toEqual([2, 2]);
+  });
+
+  // A pageBreakBefore setting on the first paragraph keeps its text on page 1.
+  it("keeps the first paragraph on page 1 with pageBreakBefore", () => {
+    const pages = layout('<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>TAILX</w:t></w:r></w:p>');
+    expect(pages.length).toBe(1);
+    expect(pagesOfWords(pages, ["TAILX"])).toEqual([1]);
+  });
+
+  // Each page break ends a page. The second break leaves page 2 blank.
+  it("keeps a leading page break after a paragraph that holds only a page break", () => {
+    const pages = layout(
+      p("AAA") + PAGE_BREAK_ONLY + '<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>BBB</w:t></w:r></w:p>',
+    );
+    expect(pages.length).toBe(3);
+    expect(pagesOfWords(pages, ["AAA", "BBB"])).toEqual([1, 3]);
+  });
+
+  // Two page breaks in separate runs leave one blank page between the words.
+  it("keeps two page breaks in separate runs in a paragraph that holds only breaks", () => {
+    const pages = layout(
+      p("AAA") + '<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:br w:type="page"/></w:r></w:p>' + p("BBB"),
+    );
+    expect(pages.length).toBe(3);
+    expect(pagesOfWords(pages, ["AAA", "BBB"])).toEqual([1, 3]);
+  });
+
+  // Two page breaks in one run leave one blank page between the words.
+  it("keeps two page breaks in one run in a paragraph that holds only breaks", () => {
+    const pages = layout(
+      p("AAA") + '<w:p><w:r><w:br w:type="page"/><w:br w:type="page"/></w:r></w:p>' + p("BBB"),
+    );
+    expect(pages.length).toBe(3);
+    expect(pagesOfWords(pages, ["AAA", "BBB"])).toEqual([1, 3]);
+  });
+
+  // Two page breaks before the text leave page 2 blank and put BBB on page 3.
+  it("keeps two leading page breaks before text in the same paragraph", () => {
+    const pages = layout(
+      p("AAA") + '<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>BBB</w:t></w:r></w:p>',
+    );
+    expect(pages.length).toBe(3);
+    expect(pagesOfWords(pages, ["AAA", "BBB"])).toEqual([1, 3]);
+  });
+
+  // A column break after an empty run ends column 1. OPEN starts in column 2 on page 1.
+  it("keeps a leading column break after an empty run in a two-column section", () => {
+    const pages = layout(
+      '<w:p><w:r><w:t/></w:r><w:r><w:br w:type="column"/></w:r><w:r><w:t>OPEN</w:t></w:r></w:p>' +
+        `<w:p><w:pPr><w:sectPr>${PGMAR}<w:cols w:num="2" w:space="720"/></w:sectPr></w:pPr></w:p>`,
+    );
+    expect(pagesOfWords(pages, ["OPEN"])).toEqual([1]);
+    const open = pages[0].items.find((it) => it.kind === "text" && it.text === "OPEN")!;
+    const leftMargin = 1800 / 15;
+    const textWidth = pages[0].width - 2 * leftMargin;
+    expect(open.x).toBeGreaterThan(leftMargin + textWidth / 2);
+  });
+
+  // In compatibility mode 14, a framed opener in a continuous section keeps its page break.
+  it("keeps a leading page break in a framed continuous-section opener in compatibility mode 14", () => {
+    const pages = layout(
+      p("OLD") +
+        `<w:p><w:pPr><w:sectPr>${PGMAR}</w:sectPr></w:pPr></w:p>` +
+        '<w:p><w:pPr><w:framePr w:w="1440" w:hAnchor="margin" w:vAnchor="text" w:wrap="none"/></w:pPr>' +
+        '<w:r><w:br w:type="page"/></w:r><w:r><w:t>OPEN</w:t></w:r></w:p>' +
+        `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PGMAR}</w:sectPr></w:pPr></w:p>`,
+      {
+        "word/settings.xml":
+          `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings ${NS}>` +
+          '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/></w:compat></w:settings>',
+      },
+    );
+    expect(pagesOfWords(pages, ["OLD", "OPEN"])).toEqual([1, 2]);
+  });
+
+  // In compatibility mode 14, a bottom-aligned continuous section keeps its opener's page break.
+  // OLD stays at the top of page 1.
+  it("keeps the preceding page at the top with a bottom-aligned continuous-section opener in compatibility mode 14", () => {
+    const body =
+      p("OLD") +
+      `<w:p><w:pPr><w:sectPr>${PGMAR}</w:sectPr></w:pPr></w:p>` +
+      '<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>OPEN</w:t></w:r></w:p>';
+    const parts = {
+      "word/settings.xml":
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings ${NS}>` +
+        '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/></w:compat></w:settings>',
+    };
+    const pages = layout(
+      body +
+        `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PGMAR}<w:vAlign w:val="bottom"/></w:sectPr></w:pPr></w:p>`,
+      parts,
+    );
+    const topAlignedPages = layout(
+      body + `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PGMAR}</w:sectPr></w:pPr></w:p>`,
+      parts,
+    );
+    expect(pagesOfWords(pages, ["OLD", "OPEN"])).toEqual([1, 2]);
+    const old = boxesOf(pages).find((b) => b.label === "OLD")!;
+    const topAlignedOld = boxesOf(topAlignedPages).find((b) => b.label === "OLD")!;
+    expect(Math.abs(old.y0 - topAlignedOld.y0)).toBeLessThanOrEqual(EPS);
+  });
+
+  // A rebuilt page keeps OPEN after a continuous section's leading page break.
+  // The window restores the state that records the opener's page break.
+  it("keeps a continuous-section opener on its page after rebuilding in compatibility mode 14", () => {
+    const body =
+      '<w:p><w:r>' + '<w:br w:type="page"/>'.repeat(21) + '</w:r></w:p>' +
+      p("OLD") +
+      `<w:p><w:pPr><w:sectPr>${PGMAR}</w:sectPr></w:pPr></w:p>` +
+      '<w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>OPEN</w:t></w:r></w:p>' +
+      `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PGMAR}</w:sectPr></w:pPr></w:p>`;
+    const doc = DocxDocument.load(
+      makeDocxWithMedia(
+        {
+          "word/document.xml":
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}>` +
+            `<w:body>${body}${SECT}</w:body></w:document>`,
+          "word/settings.xml":
+            `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:settings ${NS}>` +
+            '<w:compat><w:compatSetting w:name="compatibilityMode" w:uri="http://schemas.microsoft.com/office/word" w:val="14"/></w:compat></w:settings>',
+        },
+        {},
+      ),
+    );
+    const full = layoutDocument(doc, { measurer });
+    const [N] = pagesOfWords(full.pages, ["OPEN"]);
+    expect(N).toBeGreaterThan(0);
+
+    const windowed = layoutDocument(doc, { measurer, windowModel: true });
+    expect(windowed._window).toBeDefined();
+    windowed._window!.releaseExcept([]);
+    windowed._window!.materialize([N - 1]);
+    expect(pagesOfWords(windowed.pages, ["OPEN"])).toEqual([N]);
+  });
 });
