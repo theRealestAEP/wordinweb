@@ -14,7 +14,7 @@ import { NodeMeasurer } from "../src/pdf/measure.js";
 import { PdfRenderError } from "../src/pdf/errors.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
-import { W_NS, makeDocx } from "./helpers.js";
+import { W_NS, makeDocx, wrapDocument } from "./helpers.js";
 
 const R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
 
@@ -98,6 +98,45 @@ function pdfText(bytes: Buffer): string {
   writeFileSync(path, bytes);
   return execFileSync("pdftotext", ["-layout", path, "-"], { encoding: "utf8" });
 }
+
+describe.skipIf(!hasPdftotext)("custom note marks in PDFs", () => {
+  const note = (type: "footnote" | "endnote", id: number, text: string) =>
+    `<w:${type} w:id="${id}"><w:p><w:r><w:${type}Ref/></w:r><w:r><w:t xml:space="preserve"> ${text}</w:t></w:r></w:p></w:${type}>`;
+
+  function noteDocx(type: "footnote" | "endnote", body: string, notes: string): Uint8Array {
+    return makeDocx({
+      "word/document.xml": wrapDocument(body),
+      "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdN" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}s" Target="${type}s.xml"/></Relationships>`,
+      [`word/${type}s.xml`]: `<w:${type}s ${W_NS}>${notes}</w:${type}s>`,
+    });
+  }
+
+  it.each([
+    { type: "footnote" as const, mark: "*", markXml: "<w:t>*</w:t>", separateRun: false },
+    { type: "endnote" as const, mark: "**", markXml: "<w:t>**</w:t>", separateRun: false },
+    { type: "footnote" as const, mark: "α", markXml: '<w:sym w:font="Symbol" w:char="F061"/>', separateRun: true },
+  ])("prints a custom $type with mark '$mark' on the reference page", async ({ type, mark, markXml, separateRun }) => {
+    const body = para("FIRSTPAGE") + `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
+      `<w:p><w:r><w:t>REFERENCE</w:t></w:r><w:r><w:${type}Reference w:customMarkFollows="1" w:id="2"/>${separateRun ? "</w:r><w:r>" : ""}${markXml}</w:r></w:p>`;
+    const { bytes, pages } = await render(noteDocx(type, body, note(type, 2, "CUSTOMNOTE")));
+    expect(pages).toBe(2);
+    const sheets = pdfText(bytes).split("\f").map((text) => text.replace(/\s+/g, " ").trim());
+    expect(sheets[0]).toBe("FIRSTPAGE");
+    expect(sheets[1]).toBe(`REFERENCE${mark} ${mark} CUSTOMNOTE`);
+  });
+
+  it.each(["footnote", "endnote"] as const)("keeps automatic %s numbers around a custom mark", async (type) => {
+    const ref = (label: string, id: number, custom = false) =>
+      `<w:p><w:r><w:t>${label}</w:t></w:r><w:r><w:${type}Reference w:id="${id}"${custom ? ' w:customMarkFollows="1"' : ""}/>${custom ? "<w:t>*</w:t>" : ""}</w:r></w:p>`;
+    const body = ref("FIRSTREF", 7) + ref("CUSTOMREF", 2, true) + ref("SECONDREF", 4);
+    const notes = note(type, 2, "CUSTOMNOTE") + note(type, 4, "SECONDNOTE") + note(type, 7, "FIRSTNOTE");
+    const { bytes, pages } = await render(noteDocx(type, body, notes));
+    expect(pages).toBe(1);
+    const text = pdfText(bytes).replace(/\s+/g, " ").trim();
+    const [first, second] = type === "footnote" ? ["1", "2"] : ["i", "ii"];
+    expect(text).toBe(`FIRSTREF${first} CUSTOMREF* SECONDREF${second} ${first} FIRSTNOTE * CUSTOMNOTE ${second} SECONDNOTE`);
+  });
+});
 
 describe("renderDocxToPdf", () => {
   it("writes a PDF whose cross-reference table points at every object", async () => {
