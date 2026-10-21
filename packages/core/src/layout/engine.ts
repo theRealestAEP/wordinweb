@@ -8903,12 +8903,24 @@ class Engine {
     const startColX = this.colX;
     const startY = this.y;
     const spacing = [this.lastParaSpacingAfter, this.lastParaAfterPad, this.lastParaWasEmpty] as const;
-    // A part that continues in another column of a multi-column section moves
-    // with that column. A text-anchored table follows the column already.
+    // A part that continues in a later column of a multi-column section moves
+    // with that column: on the first page from the column the table started
+    // in, on later pages from the first column. A text-anchored table follows
+    // the column already.
     const floatX = () =>
-      this.floatingTableX(tbl, tableWidth) + (fl.hAnchor === "text" ? 0 : this.colX - startColX);
+      this.floatingTableX(tbl, tableWidth) +
+      (fl.hAnchor === "text" ? 0 : this.colX - (this.cur === startPage ? startColX : this.cur.colXs[0]));
+    const firstPage = this.pages.indexOf(startPage);
+    const firstItem = startPage.items.length;
     this.y = top;
     const last = this.placeTable(tbl, floatX);
+    // Pictures on the front layer, as in placeFloatingTable.
+    for (const page of this.pages.slice(firstPage)) {
+      for (let i = page === startPage ? firstItem : 0; i < page.items.length; i++) {
+        const item = page.items[i];
+        if (item.kind === "image") item.front = true;
+      }
+    }
     const x = floatX();
     const list = this.floats.get(this.cur) ?? [];
     list.push({

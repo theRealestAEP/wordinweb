@@ -5646,6 +5646,38 @@ describe("floating table taller than the page", () => {
     // 4320tw columns with a 720tw gap: the second part starts 5040tw (336px)
     // to the right.
     expect(last.item.x - first.item.x).toBeCloseTo(336, 0);
+
+    // Started in column 2 (at the margin, as tblpPr says), the table
+    // continues on the next page inside the sheet, not one column-width left
+    // of it.
+    const late = layout({
+      "word/document.xml": wrapDocument(`<w:p><w:r><w:br w:type="column"/></w:r></w:p>` + table + p("After") + sectPr),
+    }).result;
+    for (let i = 1; i <= 40; i++) expect(find(late, `row${num(i)}`).item.x).toBeGreaterThan(90);
+  });
+
+  it("puts the pictures of a broken floating table on the front layer", () => {
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="762000" cy="762000"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="762000" cy="762000"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const rows = Array.from({ length: 60 }, (_, i) => row([`row${num(i + 1)}`]));
+    rows.push(`<w:tr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${picture}</w:tc></w:tr>`);
+    const { result } = layout({
+      "word/document.xml": wrapDocument(tallFloat(`w:horzAnchor="margin" w:vertAnchor="text"`, rows)),
+      "word/_rels/document.xml.rels":
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>` +
+        `</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    const image = result.pages.flatMap((page) => page.items).find((item) => item.kind === "image");
+    expect(result.pages.length).toBeGreaterThan(1);
+    expect(image?.kind === "image" && image.front).toBe(true);
   });
 
   it("numbers list paragraphs in a broken floating table once", () => {
