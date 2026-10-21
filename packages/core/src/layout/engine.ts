@@ -7066,14 +7066,16 @@ class Engine {
           page.items.push(hit);
         }
         let clippedLines = 0;
-        // A noAutofit line that starts past the box bottom is not painted, but
-        // the story is still editable, so it keeps its geometry in
-        // page.hiddenText — otherwise a caret pushed onto that line (Enter on
-        // the last line that fits) has no binding to sit on and vanishes.
-        // A line that starts inside the box and crosses its bottom is painted
-        // clipped to the box (TextItem.clip), as Word paints it: a one-line
-        // label in a box a little shorter than its line height (the SF-424
-        // form in GovDocs 042652) shows its text, not an empty box.
+        // A noAutofit line past the box bottom is not painted, but the story
+        // is still editable, so it keeps its geometry in page.hiddenText —
+        // otherwise a caret pushed onto that line (Enter on the last line that
+        // fits) has no binding to sit on and vanishes. Word hides such a line
+        // whole (probe-shapefit's B3 box shows two lines and no part of the
+        // third), except the box's first line: in a box shorter than one line
+        // it is painted clipped to the box (TextItem.clip), so a one-line
+        // label (the SF-424 form in GovDocs 042652) is not an empty box.
+        let firstLineTop = Infinity;
+        for (const it of inner.items) if (it.kind === "text") firstLineTop = Math.min(firstLineTop, it.lineTop);
         // A continuation box whose story ended in an earlier box stays empty.
         const storyItems = skipTopY === Infinity ? [] : inner.items;
         for (const it of storyItems) {
@@ -7090,7 +7092,7 @@ class Engine {
             if (chained && it.lineTop >= skipTopY - 0.5 && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; partial = true; }
             if (!chained && shape.clipText && innerTop + it.lineTop + it.lineHeight > clipBottom + 0.5) {
               clippedLines++;
-              if (innerTop + it.lineTop < clipBottom - 0.5) partial = true;
+              if (it.lineTop <= firstLineTop + 0.5 && innerTop + it.lineTop < clipBottom - 0.5) partial = true;
               else clipped = true;
             }
             // Content above skipTopY was PAINTED by an earlier box in the

@@ -111,10 +111,12 @@ describe("vertical anchored text boxes (GovDocs 045416)", () => {
     expect(hit.rotate?.deg).toBe(30);
   });
 
-  it("clips overflow across the narrow axis and reports the text fit", () => {
+  it("hides overflow across the narrow axis and reports the text fit", () => {
     const { result } = layout(box({ vert: "vert270", story: ["FIRST", "SECOND", "THIRD", "FOURTH"].map(para).join("") }));
     const page = result.pages[0];
-    expect(texts(page.items).some((t) => t.clip !== undefined)).toBe(true);
+    // Lines past the first that cross the box edge are hidden whole, as in a
+    // horizontal box.
+    expect(texts(page.items).some((t) => t.text === "FIRST")).toBe(true);
     expect(page.hiddenText?.some((t) => t.text === "FOURTH")).toBe(true);
     const hit = page.items.find((it) => it.kind === "drawingHit");
     expect(hit?.kind === "drawingHit" && hit.textFit?.overflow).toBe(true);
