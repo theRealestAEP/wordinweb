@@ -53,6 +53,7 @@ import {
   LayoutWindow,
   LineEdgeItem,
   PageItem,
+  RectItem,
   TextItem,
 } from "./types.js";
 import { joinBoxBorders } from "./border-edges.js";
@@ -399,6 +400,7 @@ interface LayoutSnapshot {
   bannerSlotUsed: number;
   counters: Map<number, number[]>;
   seenNumIds: Set<number>;
+  consumedFrames: Set<object>;
   bookmarkPages: Map<string, string>;
   bookmarkPageIndices: Map<string, number>;
   placedFootnotes: Set<number>;
@@ -2945,6 +2947,7 @@ class Engine {
       bannerSlotUsed: this.bannerSlotUsed,
       counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
       seenNumIds: new Set(this.seenNumIds),
+      consumedFrames: new Set(this.consumedFrames),
       bookmarkPages: new Map(this.bookmarkPages),
       bookmarkPageIndices: new Map(this.bookmarkPageIndices),
       placedFootnotes: new Set(this.placedFootnotes),
@@ -2989,6 +2992,7 @@ class Engine {
     this.bannerSlotUsed = s.bannerSlotUsed;
     this.counters = s.counters;
     this.seenNumIds = s.seenNumIds;
+    this.consumedFrames = new Set(s.consumedFrames);
     this.bookmarkPages = s.bookmarkPages;
     this.bookmarkPageIndices = s.bookmarkPageIndices;
     this.placedFootnotes = s.placedFootnotes;
@@ -3853,9 +3857,43 @@ class Engine {
           ).lineHeight;
           this.y += paraProps.spacingAfter ?? 0; // phase23's 2 x 19.4
         }
-      } else {
+      } else if (!this.placeFramedTable(block, blocks, i)) {
         this.placeTable(block);
       }
+  }
+
+  /** A table inside a positioned frame (every cell paragraph carries the
+   * frame's framePr): it is laid inside the frame with the frame's other
+   * blocks. Returns false for a table in normal flow. */
+  private placeFramedTable(tbl: Table, siblings: Block[], index: number): boolean {
+    if (this.cur.physIndex === -1) return false;
+    const fr = this.blockFrame(tbl);
+    if (fr?.w === undefined) return false;
+    if (this.consumedFrames.has(tbl)) return true; // placed by a paragraph's lookahead
+    if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return false;
+    if (this.continuesFrame(siblings[index - 1], tbl)) return true;
+    this.flushBannerBand();
+    this.clearBannerSlot();
+    this.placeFrameStart(tbl, fr, siblings, index);
+    return true;
+  }
+
+  /** Place the frame that starts at `siblings[index]`. A page- or
+   * margin-anchored frame goes with the paragraph after it: when that
+   * paragraph's first line starts the next page, the frame goes there too
+   * (GovDocs 001876: a caption frame printed on the page before its chart's
+   * text, over a table). */
+  private placeFrameStart(first: Block, fr: ResolvedFrame, siblings: Block[] | undefined, index: number | undefined): void {
+    const group = this.frameGroup(first, siblings, index);
+    const after = siblings && index !== undefined ? siblings[index + group.length] : undefined;
+    if ((fr.vAnchor === "page" || fr.vAnchor === "margin") && after?.type === "paragraph" && !this.pageIsEmptyAtCursor()) {
+      const np = this.doc.effectiveParaProps(after);
+      const lines = breakParagraph(this.doc, this.measurer, after, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, LOOKAHEAD_BREAK).lines;
+      const top = this.y + Math.max(this.lastParaSpacingAfter, np.spacingBefore ?? 0) - this.lastParaSpacingAfter;
+      if (np.pageBreakBefore || leadingBreakOf(after)?.type === "page") this.newPage(false);
+      else if (lines.length > 0 && top + openingHeight(lines, np) > this.bodyBottom + 0.25) this.nextColumn();
+    }
+    this.placeFrame(group, fr);
   }
 
   // ---------- numbering ----------
@@ -3987,8 +4025,10 @@ class Engine {
   private anchorPushedUp = false;
 
   /** Frame paragraphs already placed by a preceding paragraph's lookahead
-   * (page/margin-anchored frames reflow earlier content around them). */
-  private consumedFrames = new WeakSet<object>();
+   * (page/margin-anchored frames reflow earlier content around them). Part
+   * of the layout snapshot, so a section that column balancing lays again
+   * places its frames again. */
+  private consumedFrames = new Set<object>();
 
   /** Line bounds callback honoring this page's floating-image exclusions.
    * `frame` overrides the target page and column box (table-cell frames:
@@ -4090,8 +4130,10 @@ class Engine {
    * anchor position (hAnchor/vAnchor + x/y), its content laid out at the frame
    * width, and a wrap float registered so surrounding body text flows around it
    * (staging-frames: page/margin/text-anchored callout boxes with wrap=around).
+   * `blocks` is the whole frame: adjacent blocks with equal frame properties
+   * (see frameGroup), stacked one under another inside it.
    */
-  private placeFrameParagraph(para: Paragraph, fr: ResolvedFrame): void {
+  private placeFrame(blocks: Block[], fr: ResolvedFrame): void {
     const sp = this.sp;
     const contentW = Math.max(8, fr.w ?? 0);
     const ox = this.frameOriginX(fr, contentW);
@@ -4108,38 +4150,64 @@ class Engine {
         oy = this.y + fr.y; // text / paragraph travel with the current cursor
         break;
     }
-    const laid = this.layoutFrame([para], contentW, this.fieldCtx(), { x: ox, y: oy });
+    const laid = this.layoutFrame(blocks, contentW, this.fieldCtx(), { x: ox, y: oy });
     const height =
       fr.hRule === "exact" && fr.h !== undefined
         ? fr.h
         : fr.hRule === "atLeast" && fr.h !== undefined
           ? Math.max(fr.h, laid.height)
           : laid.height;
+    // w:yAlign puts a page- or margin-anchored frame at the top, center or
+    // bottom of that area by its height, in place of w:y (Word 95 file
+    // 165082: an exact-height box at the bottom of the margin printed over
+    // the page's top text).
+    if ((fr.yAlign === "top" || fr.yAlign === "center" || fr.yAlign === "bottom") && (fr.vAnchor === "page" || fr.vAnchor === "margin")) {
+      const top = fr.vAnchor === "page" ? 0 : Math.abs(sp.marginTop);
+      const bottom = fr.vAnchor === "page" ? sp.pageHeight : sp.pageHeight - Math.abs(sp.marginBottom);
+      if (fr.yAlign === "center") oy = (top + bottom - height) / 2;
+      else if (fr.yAlign === "bottom") oy = bottom - height;
+      else oy = top;
+    }
     // Word paints an exact/atLeast frame's paragraph box to the FRAME's height,
     // not the content height: probe2-dropcaps-frames' pull-quote (h=1000tw
     // exact, two lines of text) fills and rules the whole 50pt box, leaving
-    // empty shaded space under the text. Stretch the paragraph decorations by
-    // the surplus: the full-width shading rect grows, the bottom rule moves
-    // down, and the side rules extend. Content items are untouched.
+    // empty shaded space under the text. Stretch the last paragraph's
+    // decorations by the surplus: its full-width shading rect grows, the
+    // bottom rule moves down, and the side rules extend. Content items,
+    // a table's fills and rules among them, are untouched.
     const surplus = height - laid.height;
     if (surplus > 0.5) {
+      const isSideRule = (it: PageItem): it is LineEdgeItem =>
+        it.kind === "edge" && !it.role && Math.abs(it.x1 - it.x2) < 0.01 && Math.abs(it.y1 - it.y2) >= 0.01;
+      const isFullRule = (it: PageItem): it is LineEdgeItem =>
+        it.kind === "edge" && !it.role && Math.abs(it.y1 - it.y2) < 0.01 && Math.abs(it.x2 - it.x1) >= contentW - 8;
+      const isFullRect = (it: PageItem): it is RectItem => it.kind === "rect" && !it.role && it.width >= contentW - 4;
+      let rectBottom = -Infinity;
+      let ruleY = -Infinity;
+      let sideBottom = -Infinity;
       for (const it of laid.items) {
-        if (it.kind === "rect" && it.width >= contentW - 4) {
+        if (isFullRect(it)) rectBottom = Math.max(rectBottom, it.y + it.height);
+        else if (isFullRule(it) && it.y1 > laid.height / 2) ruleY = Math.max(ruleY, it.y1);
+        else if (isSideRule(it)) sideBottom = Math.max(sideBottom, it.y2);
+      }
+      for (const it of laid.items) {
+        if (isFullRect(it) && Math.abs(it.y + it.height - rectBottom) < 0.01) {
           it.height += surplus;
-        } else if (it.kind === "edge") {
-          const horizontal = Math.abs(it.y1 - it.y2) < 0.01;
-          if (horizontal && it.y1 > laid.height / 2 && Math.abs(it.x2 - it.x1) >= contentW - 8) {
-            it.y1 += surplus;
-            it.y2 += surplus;
-          } else if (!horizontal && Math.abs(it.x1 - it.x2) < 0.01 && it.y2 - it.y1 >= laid.height * 0.5) {
-            it.y2 += surplus;
-          }
+        } else if (isFullRule(it) && Math.abs(it.y1 - ruleY) < 0.01) {
+          it.y1 += surplus;
+          it.y2 += surplus;
+        } else if (isSideRule(it) && Math.abs(it.y2 - sideBottom) < 0.01) {
+          it.y2 += surplus;
         }
       }
     }
+    // An exact height clips the frame: Word hides what passes the frame's
+    // bottom (probe2-dropcaps-frames--v05: the 50pt quote frame cuts its
+    // picture and shading off at its bottom edge, above "Body paragraph 2").
+    const clipBottom = fr.hRule === "exact" && fr.h !== undefined ? oy + height : undefined;
     for (const it of laid.items) {
       offsetItem(it, ox, oy);
-      this.cur.items.push(it);
+      if (clipBottom === undefined || clipToBottom(it, oy, clipBottom)) this.cur.items.push(it);
     }
     // wrap=around/auto/tight/through -> body wraps both sides (square);
     // notBeside -> body clears the frame vertically (topAndBottom); none -> no float.
@@ -4167,6 +4235,61 @@ class Engine {
     if (!props.frame || props.dropCap) return undefined;
     const fr = this.resolveFrame(props.frame);
     return fr.w !== undefined && (fr.vAnchor === "text" || fr.vAnchor === "paragraph") ? fr : undefined;
+  }
+
+  /** The positioned frame a block belongs to: a paragraph's own framePr (a
+   * drop cap is no such frame), or, for a table in normal flow, the framePr
+   * that every paragraph of its cells carries (a table inside a frame). */
+  private blockFrame(block: Block): ResolvedFrame | undefined {
+    if (block.type === "paragraph") {
+      const props = this.doc.effectiveParaProps(block);
+      return props.frame && !props.dropCap ? this.resolveFrame(props.frame) : undefined;
+    }
+    if (block.props.floating) return undefined;
+    let frame: ResolvedFrame | undefined;
+    for (const row of block.rows) {
+      for (const cell of row.cells) {
+        for (const b of cell.blocks) {
+          if (b.type !== "paragraph") return undefined;
+          const own = this.blockFrame(b);
+          if (!own || (frame && !sameFrame(frame, own))) return undefined;
+          frame = own;
+        }
+      }
+    }
+    return frame;
+  }
+
+  /** Whether `block` continues the frame of the block before it. Word stacks
+   * adjacent paragraphs with equal frame properties in ONE frame, one under
+   * another (ECMA-376 17.3.1.11 framePr); a section break ends the frame. */
+  private continuesFrame(prev: Block | undefined, block: Block): boolean {
+    if (!prev || (prev.type === "paragraph" && prev.sectionBreak)) return false;
+    const a = this.blockFrame(prev);
+    const b = a && this.blockFrame(block);
+    return !!a && !!b && sameFrame(a, b);
+  }
+
+  /** The frame that `block` starts when it is a page- or margin-anchored
+   * frame that wraps text and is not placed yet: Word flows the content
+   * before such a frame around it (staging-frames p1). */
+  private pageFrameAhead(block: Block | undefined, prev: Block | undefined): ResolvedFrame | undefined {
+    if (!block || this.consumedFrames.has(block)) return undefined;
+    if (this.continuesFrame(prev, block)) return undefined;
+    const fr = this.blockFrame(block);
+    if (fr?.w === undefined || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
+    if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return undefined;
+    return fr;
+  }
+
+  /** The blocks of the frame that starts at `siblings[index]`. */
+  private frameGroup(first: Block, siblings: Block[] | undefined, index: number | undefined): Block[] {
+    const group = [first];
+    if (!siblings || index === undefined || siblings[index] !== first) return group;
+    for (let i = index + 1; i < siblings.length && this.continuesFrame(siblings[i - 1], siblings[i]); i++) {
+      group.push(siblings[i]);
+    }
+    return group;
   }
 
   /** Whether a frame of the run of text-riding frame paragraphs from `index`
@@ -4332,6 +4455,8 @@ class Engine {
           this.placeBannerFrame(para, fr, props.spacingAfter ?? 0);
           return;
         }
+        // A later paragraph of a frame was laid with the frame's first block.
+        if (prev && this.continuesFrame(prev, para)) return;
         this.flushBannerBand();
         this.clearBannerSlot();
         // Word keeps a frame that rides with the text on the page of the
@@ -4343,8 +4468,9 @@ class Engine {
         if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
           this.nextColumn();
         }
-        this.placeFrameParagraph(para, fr);
+        this.placeFrameStart(para, fr, siblings, index);
         return;
+
       }
     }
     this.flushBannerBand();
@@ -4478,10 +4604,8 @@ class Engine {
     };
     const retractParaAnchors = (): void => {
       if (lookMark) {
-        if (lookFrame) {
-          this.consumedFrames.delete(lookFrame);
-          lookFrame = null;
-        }
+        for (const f of lookFrames) this.consumedFrames.delete(f);
+        lookFrames = [];
         // Lookahead floats retract with the paragraph; the anchor paragraph
         // emits them normally on the new page/column instead.
         lookMark.page.items.length = Math.min(lookMark.page.items.length, lookMark.items);
@@ -4624,7 +4748,7 @@ class Engine {
     // contributes no height — measured: body resumes exactly one heading
     // height below the displaced heading).
     let lookMark: { page: InternalPage; items: number; floats: number; shapes: Shape[] } | null = null;
-    let lookFrame: object | null = null;
+    let lookFrames: object[] = [];
     const linesH = broken.lines.reduce((a, l) => a + l.height, 0);
     // Predict from the COLLAPSED paragraph top (paraTopEstimate carries the
     // raw spacing-before; the real placement subtracts the previous
@@ -4748,37 +4872,6 @@ class Engine {
         for (const s of hits) this.consumedAnchors.add(s);
         broken = breakNow(paraTopEstimate);
       }
-      // Same reflow for a PAGE/MARGIN-anchored framePr paragraph that follows:
-      // its position is ABSOLUTE (no prediction needed), and Word flows the
-      // preceding content around it (staging-frames p1: a page-anchored box
-      // over the opening heading — the heading wraps beside/below the frame).
-      if (!lookMark && !this.consumedFrames.has(next)) {
-        const nextProps = this.doc.effectiveParaProps(next);
-        if (nextProps.frame && !nextProps.dropCap) {
-          const fr = this.resolveFrame(nextProps.frame);
-          if (
-            fr.w !== undefined &&
-            fr.wrap !== "none" &&
-            (fr.vAnchor === "page" || fr.vAnchor === "margin") &&
-            !(fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1)
-          ) {
-            const top = fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y;
-            const paraBottom = effTop + linesH;
-            if (top <= paraBottom + 0.25) {
-              lookMark = {
-                page: this.cur,
-                items: this.cur.items.length,
-                floats: (this.floats.get(this.cur) ?? []).length,
-                shapes: [],
-              };
-              this.placeFrameParagraph(next, fr);
-              this.consumedFrames.add(next);
-              lookFrame = next;
-              broken = breakNow(paraTopEstimate);
-            }
-          }
-        }
-      }
     }
 
     // Absolutely positioned wrapping floats anchored FURTHER down the page
@@ -4788,10 +4881,28 @@ class Engine {
     // into wrapped lines although it is anchored five paragraphs later).
     if (broken.lines.length > 0 && siblings && index !== undefined && !endsWithBreak) {
       const farHits: Shape[] = [];
+      // Page/margin-anchored frames that follow reflow this paragraph the
+      // same way: their position is absolute, and Word flows the content
+      // before them around them (staging-frames p1: a page-anchored box over
+      // the opening heading; word95-check-b frame-notbeside-margin: a
+      // notBeside frame at the margin top, anchored after three body
+      // paragraphs, pushes all three below it).
+      const farFrames: { block: Block; idx: number; fr: ResolvedFrame }[] = [];
       let lastIdx = index;
       for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
         const blk = siblings[idx];
-        if (blk.type !== "paragraph") break;
+        const fr = this.pageFrameAhead(blk, siblings[idx - 1]);
+        if (fr && (fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y) <= paraBottom + 0.25) {
+          farFrames.push({ block: blk, idx, fr });
+        }
+        // A table inside a frame takes no room in the flow; any other ends the scan.
+        if (blk.type !== "paragraph") {
+          if (this.blockFrame(blk)?.w !== undefined) continue;
+          break;
+        }
+        // A page or column break sends this paragraph's boxes, and those of
+        // the paragraphs after it, to a later page. A frame found above
+        // still goes by the frame pass below, which stops at a page break.
         if (this.doc.effectiveParaProps(blk).pageBreakBefore || hasHardBreak(blk)) break;
         for (const s of this.collectAnchors(blk)) {
           if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
@@ -4808,7 +4919,7 @@ class Engine {
           }
         }
       }
-      if (farHits.length > 0) {
+      if (farHits.length > 0 || farFrames.length > 0) {
         // Pre-emit only when the anchor paragraph itself still lands on this
         // page: estimate the intervening flow height (spacing collapse + line
         // heights, no float narrowing). Snapshot numbering counters (and the
@@ -4816,25 +4927,60 @@ class Engine {
         // measurement only.
         const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
         const seenSnapshot = new Set(this.seenNumIds);
+        // A frame takes no room in the flow and goes with the paragraph after
+        // it: it is placed here when that paragraph's first line still fits on
+        // this page (GovDocs 001876: a caption frame whose next paragraph
+        // starts the next page belongs to that page), and never past a page
+        // break (002514). The shapes go by the last one's anchor paragraph.
+        const frameIdx = new Set(farFrames.map((f) => f.idx));
+        const endIdx = Math.max(lastIdx, ...frameIdx);
+        const framesHere = new Set<number>();
+        let pending: number[] = [];
         let simY = paraBottom;
+        let shapeY = Number.POSITIVE_INFINITY;
         let prevAfter = props.spacingAfter ?? 0;
-        for (let idx = index + 1; idx <= lastIdx; idx++) {
+        let pageBroken = broken.lines.some((line) => line.forcedBreakAfter === "page");
+        for (let idx = index + 1; idx < siblings.length && simY <= this.bodyBottom + 0.25; idx++) {
+          if (idx > endIdx && pending.length === 0) break;
           const blk = siblings[idx];
-          if (blk.type !== "paragraph") break;
-          const np = this.doc.effectiveParaProps(blk);
+          const np = blk.type === "paragraph" ? this.doc.effectiveParaProps(blk) : undefined;
+          if (blk.type === "paragraph" && (np?.pageBreakBefore || leadingBreakOf(blk)?.type === "page")) {
+            pageBroken = true;
+            pending = [];
+          }
+          if (frameIdx.has(idx) && !pageBroken) pending.push(idx);
+          if (this.blockFrame(blk)?.w !== undefined) continue; // a frame with a width is out of the flow
+          if (!np || blk.type !== "paragraph") break;
           simY += Math.max(prevAfter, np.spacingBefore ?? 0);
-          if (idx === lastIdx) break; // reached the anchor paragraph's top
+          if (idx === lastIdx) shapeY = simY; // reached the anchor paragraph's top
+          if (idx >= endIdx && pending.length === 0) break;
           const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, lookaheadOpts);
+          if (pending.length > 0 && simY + openingHeight(nb.lines, np) <= this.bodyBottom + 0.25) {
+            for (const f of pending) framesHere.add(f);
+          }
+          pending = [];
           simY += nb.lines.reduce((a, l) => a + l.height, 0);
+          if (nb.lines.some((line) => line.forcedBreakAfter === "page")) pageBroken = true;
           prevAfter = np.spacingAfter ?? 0;
         }
+        // Frames that end the section go with the flow's end.
+        if (simY <= this.bodyBottom + 0.25) for (const f of pending) framesHere.add(f);
         this.counters = counterSnapshot;
         this.seenNumIds = seenSnapshot;
-        if (simY <= this.bodyBottom + 0.25) {
+        const shapesHere = farHits.length > 0 && shapeY <= this.bodyBottom + 0.25;
+        if (shapesHere || framesHere.size > 0) {
           ensureLookMark();
-          lookMark!.shapes.push(...farHits);
-          this.emitAnchors(farHits, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
-          for (const s of farHits) this.consumedAnchors.add(s);
+          if (shapesHere) {
+            lookMark!.shapes.push(...farHits);
+            this.emitAnchors(farHits, this.cur, this.fieldCtx(), this.colX, paraTopEstimate);
+            for (const s of farHits) this.consumedAnchors.add(s);
+          }
+          for (const f of farFrames) {
+            if (!framesHere.has(f.idx)) continue;
+            this.placeFrame(this.frameGroup(f.block, siblings, f.idx), f.fr);
+            this.consumedFrames.add(f.block);
+            lookFrames.push(f.block);
+          }
           broken = breakNow(paraTopEstimate);
         }
       }
@@ -5037,7 +5183,7 @@ class Engine {
       totalHeight <= bodyHeight &&
       !this.pageIsEmptyAtCursor()
     ) {
-      if (anchors.length > 0) restartOnNextColumn(spacingBefore);
+      if (anchors.length > 0 || lookFrames.length > 0) restartOnNextColumn(spacingBefore);
       else this.nextColumn();
     }
 
@@ -5169,7 +5315,7 @@ class Engine {
           // Later columns in a shared band can be just as short. Advance
           // until the chain fits or a fresh page top permits progress.
           while (this.y + needed > this.bodyBottom && !this.pageIsEmptyAtCursor()) {
-            if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+            if (anchors.length > 0 || lookFrames.length > 0) restartOnNextColumn(borderPadTop);
             else this.nextColumn();
           }
         }
@@ -5245,7 +5391,7 @@ class Engine {
       this.seenNumIds = seenSnapshot;
       if (need > 0 && this.y + need > this.bodyBottom && need <= bodyHeight) {
         spacingBefore = borderPadTop;
-        if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+        if (anchors.length > 0 || lookFrames.length > 0) restartOnNextColumn(borderPadTop);
         else this.nextColumn();
       }
     }
@@ -5484,7 +5630,7 @@ class Engine {
     // along: retract, move, re-emit, and re-plan against the new geometry.
     // A shared band's next column can also be too short (govdocs 000131's
     // survey boxes); keep moving the anchors with their paragraph.
-    while (anchors.length > 0 && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
+    while ((anchors.length > 0 || lookFrames.length > 0) && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
       restartOnNextColumn(0);
       breaks = planBreaks();
     }
@@ -10396,6 +10542,31 @@ function sameParagraphBorderBox(a: ParaProps, b: ParaProps): boolean {
   );
 }
 
+/** The height a paragraph needs at a page bottom to start there: its first
+ * line, or its first two under widow/orphan control. */
+function openingHeight(lines: { height: number }[], props: ParaProps): number {
+  const n = props.widowControl !== false && lines.length > 1 ? 2 : 1;
+  return lines.slice(0, n).reduce((sum, line) => sum + line.height, 0);
+}
+
+/** Equal frame properties: two blocks with these share one frame. */
+function sameFrame(a: ResolvedFrame, b: ResolvedFrame): boolean {
+  return (
+    a.w === b.w &&
+    a.h === b.h &&
+    a.hRule === b.hRule &&
+    a.x === b.x &&
+    a.y === b.y &&
+    a.hAnchor === b.hAnchor &&
+    a.vAnchor === b.vAnchor &&
+    a.xAlign === b.xAlign &&
+    a.yAlign === b.yAlign &&
+    a.wrap === b.wrap &&
+    a.hSpace === b.hSpace &&
+    a.vSpace === b.vSpace
+  );
+}
+
 function isPageFieldFrame(p: Paragraph, props: ParaProps): boolean {
   const frame = props.frame;
   if (
@@ -10806,12 +10977,54 @@ function splitNote(part: NotePart, room: number, force: boolean): { keep: NotePa
   };
 }
 
+/** Clip a positioned item to a box that ends at `bottom` (page px): an
+ * exact-height frame. Returns false for an item that starts below the box.
+ * A text line or picture that crosses the bottom is cut there; shading and
+ * rules are shortened. */
+function clipToBottom(item: PageItem, top: number, bottom: number): boolean {
+  switch (item.kind) {
+    case "text":
+      if (item.lineTop >= bottom - 0.01) return false;
+      if (item.lineTop + item.lineHeight > bottom + 0.01) {
+        item.clip = { top: Math.max(top, item.clip?.top ?? top), bottom: Math.min(bottom, item.clip?.bottom ?? bottom) };
+      }
+      return true;
+    case "image": {
+      if (item.y >= bottom - 0.01) return false;
+      const visible = bottom - item.y;
+      if (visible < item.height - 0.01 && !item.rotation && !item.rotate) {
+        const c = item.crop ?? { l: 0, t: 0, r: 0, b: 0 };
+        const shown = 1 - c.t - c.b;
+        item.crop = { ...c, b: c.b + shown * (1 - visible / item.height) };
+        item.height = visible;
+      }
+      return true;
+    }
+    case "rect":
+      if (item.y >= bottom - 0.01) return false;
+      item.height = Math.min(item.height, bottom - item.y);
+      return true;
+    case "edge":
+      if (Math.min(item.y1, item.y2) > bottom + 0.01) return false;
+      item.y1 = Math.min(item.y1, bottom);
+      item.y2 = Math.min(item.y2, bottom);
+      return true;
+    case "grip":
+      return item.y1 < bottom;
+    default:
+      return item.y < bottom;
+  }
+}
+
 function offsetItem(item: PageItem, dx: number, dy: number): void {
   switch (item.kind) {
     case "text":
       item.x += dx;
       item.baseline += dy;
       item.lineTop += dy;
+      // A clip box moves with its line: a text box's clipped first line, or
+      // an exact row's line in a table laid inside a frame and then placed
+      // on the page.
       if (item.clip) item.clip = { top: item.clip.top + dy, bottom: item.clip.bottom + dy };
       if (item.glyphTop !== undefined) item.glyphTop += dy;
       if (item.caretClampX !== undefined) item.caretClampX += dx;
