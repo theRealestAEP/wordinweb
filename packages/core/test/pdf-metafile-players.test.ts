@@ -76,7 +76,7 @@ function emf(records: number[][]): Uint8Array {
   const total = 88 + all.reduce((sum, r) => sum + 4 + r.length * 4, 0);
   const bytes = new Uint8Array(total);
   const v = new DataView(bytes.buffer);
-  const header = [1, 88, 0, 0, 99, 49, 0, 0, 2646, 1323, 0x464d4520, 0x10000, total, all.length + 1, 4, 0, 0, 0, 0, 1024, 768, 320, 240];
+  const header = [1, 88, 0, 0, 99, 49, 0, 0, 990, 490, 0x464d4520, 0x10000, total, all.length + 1, 4, 0, 0, 0, 1000, 1000, 100, 100];
   header.forEach((value, i) => v.setInt32(i * 4, value, true));
   let at = 88;
   for (const [type, ...data] of all) {
@@ -270,6 +270,36 @@ describe("PICT player, version 1", () => {
 });
 
 describe("EMF records rewritten for emf-converter", () => {
+  it.each(["device", "origins", "extents"])("maps an offset physical frame to the picture box with %s mapping", async (mapping) => {
+    const mapped = mapping !== "device";
+    const windowX = mapping === "origins" ? 100 : 0;
+    const windowY = mapping === "origins" ? 200 : 0;
+    const bytes = emf([
+      ...(mapped ? [
+        [17, 8], [9, 200, 100], [11, 100, 50],
+        ...(mapping === "origins" ? [[10, windowX, windowY]] : []),
+        [12, 30, 40],
+      ] : []),
+      [75, 48, 5, 32, 1, 1, 16, 10, 20, 110, 70, 10, 20, 110, 70],
+      [39, 1, 0, 0x000000ff, 0],
+      [37, 1],
+      // Both rectangles start at device (10,20), the physical frame's left/top.
+      mapped ? patBlt(windowX - 40, windowY - 40, 80, 40, 0x00f00021) : patBlt(10, 20, 40, 20, 0x00f00021),
+    ]);
+    const view = new DataView(bytes.buffer);
+    [30, 40, 70, 60].forEach((value, i) => view.setInt32(8 + i * 4, value, true));
+    [100, 200, 1100, 700].forEach((value, i) => view.setInt32(24 + i * 4, value, true));
+    const prepared = prepareEmf(bytes);
+    const header = new DataView(prepared.buffer, prepared.byteOffset, prepared.byteLength);
+    expect([header.getInt32(16, true), header.getInt32(20, true)]).toEqual([100, 50]);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    expect([canvas!.width, canvas!.height]).toEqual([100, 50]);
+    const ops = canvas!.ops.join("\n");
+    expect(ops).toContain("0 0 m 100 0 l 100 50 l 0 50 l h W n");
+    expect(ops).toContain("1 0 0 rg 0 0 m 40 0 l 40 20 l 0 20 l h f");
+    expect(canvas!.dropped).toBe(0);
+  });
+
   it("keeps a device clip over the picture with mapped origins and scaled, reversed extents", async () => {
     const canvas = await convertMetafile("emf", emf([
       [17, 8],
@@ -297,7 +327,7 @@ describe("EMF records rewritten for emf-converter", () => {
     ]);
     const view = new DataView(bytes.buffer);
     [10, 20, 109, 69].forEach((value, i) => view.setInt32(8 + i * 4, value, true));
-    expect(prepareEmf(bytes)).toBe(bytes);
+    [100, 200, 1090, 690].forEach((value, i) => view.setInt32(24 + i * 4, value, true));
     const canvas = await convertMetafile("emf", bytes, fonts, resources());
     expect(canvas!.ops.join("\n")).toContain("0 0 m 99 0 l 99 49 l 0 49 l h W n");
     expect(canvas!.ops.join("\n")).toContain("10 10 m 50 10 l 50 30 l 10 30 l h f");
@@ -333,6 +363,8 @@ describe("EMF records rewritten for emf-converter", () => {
     const view = new DataView(bytes.buffer);
     view.setInt32(16, 12000, true);
     view.setInt32(20, 9000, true);
+    view.setInt32(32, 120000, true);
+    view.setInt32(36, 90000, true);
     const canvas = await convertMetafile("emf", bytes, fonts, resources());
     expect([canvas!.width, canvas!.height]).toEqual([12000, 9000]);
     expect(canvas!.ops.join("\n")).toContain("11000 8000 m 11500 8000 l 11500 8500 l 11000 8500 l h f");
