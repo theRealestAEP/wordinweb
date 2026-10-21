@@ -206,3 +206,45 @@ describe("a compatibility-mode 11 footer that starts with a page-anchored frame 
     expect(parseFloat(employer!.style.top)).toBeLessThan(1056 - 28.8);
   });
 });
+
+describe("a top-and-bottom art shape anchored above an empty paragraph (break-table br_smallTB_br)", () => {
+  // A red rectangle 1in tall, 12pt above its empty anchor paragraph. The
+  // body flow ignored an art shape's wrap, so the text after it was drawn
+  // over the rectangle.
+  const rect =
+    `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+    `<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>` +
+    `<wp:positionV relativeFrom="paragraph"><wp:posOffset>-152400</wp:posOffset></wp:positionV>` +
+    `<wp:extent cx="914400" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapTopAndBottom/><wp:docPr id="4" name="R"/><wp:cNvGraphicFramePr/>` +
+    `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+    `<wps:wsp ${WPS}><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp>` +
+    `</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+  const pageBreak = `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`;
+  const bodies = {
+    "without a page break": `${para("AAA")}<w:p>${rect}</w:p>${para("AFTER")}`,
+    "after a page break": `${para("AAA")}${pageBreak}<w:p>${rect}</w:p>${para("AFTER")}`,
+  };
+  for (const [name, body] of Object.entries(bodies)) {
+    it(`puts the following text below the rectangle ${name}`, () => {
+      const { result } = layout(body);
+      const page = result.pages.find((pg) => pg.items.some((i) => i.kind === "path"))!;
+      const red = page.items.find((i) => i.kind === "path")!;
+      if (red.kind !== "path") throw new Error("no rectangle");
+      const after = texts(page.items).find((t) => t.text === "AFTER")!;
+      expect(after.lineTop).toBeGreaterThanOrEqual(red.y + red.height);
+    });
+  }
+
+  it("puts the following text below the rectangle in the DOM renderer", () => {
+    const { doc, result } = layout(bodies["without a page break"]);
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const rendered = renderToDom(doc, result, container);
+    const after = rendered.bindings.map((b) => b.el).find((e) => e.textContent === "AFTER")!;
+    // The rectangle runs from 12pt above the anchor line to 1in below that.
+    const red = result.pages[0].items.find((i) => i.kind === "path")!;
+    if (red.kind !== "path") throw new Error("no rectangle");
+    expect(parseFloat(after.style.top)).toBeGreaterThanOrEqual(red.y + red.height);
+  });
+});

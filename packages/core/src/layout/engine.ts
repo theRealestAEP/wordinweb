@@ -6657,14 +6657,16 @@ class Engine {
           this.emitDrawingText(ts, ox - fx, oy - fy, page, fields, !shape.behind, rotate, shape.z);
         }
         revisionFrame(shape, ox - fx, oy - fy, shape.width, shape.height, rotate?.(ox - fx, oy - fy));
-        // FRAME stories only: a wrapped art shape excludes its band like a
-        // text box does. probe-headeranchor2 (Word-exported twice, byte
-        // identical): a wrapTopAndBottom bar in a header puts the body top
-        // exactly at the bar's bottom (+distB) at both 40pt and 72pt extents,
-        // and hftemplates p3/p4 lay the header's own line below their
-        // page-positioned bars. Body flow ignores art wrap, as before - no
-        // body-flow fixture measures a wrapped art shape.
-        if (page.physIndex === -1 && shape.wrap && shape.wrap !== "none") {
+        // A wrapped art shape excludes its band like a text box does.
+        // probe-headeranchor2 (Word-exported twice, byte identical): a
+        // wrapTopAndBottom bar in a header puts the body top exactly at the
+        // bar's bottom (+distB) at both 40pt and 72pt extents, and
+        // hftemplates p3/p4 lay the header's own line below their
+        // page-positioned bars. The body flow does the same: break-table's
+        // br_smallTB_br (GovDocs, doc97-check-d) anchors a top-and-bottom
+        // rectangle 12pt above an empty paragraph, and the text after it
+        // was drawn over the rectangle.
+        if (shape.wrap && shape.wrap !== "none") {
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           const list = this.floats.get(page) ?? [];
           list.push({
