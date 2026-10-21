@@ -1,3 +1,4 @@
+import { XmlParseError } from "../xml.js";
 import { shapedScriptOf } from "./scripts.js";
 import { shaperLoaded } from "./shaper.js";
 
@@ -16,7 +17,8 @@ export type PdfRenderErrorCode =
    * 6.0-2003 .doc is read: doc/convert.ts). */
   | "unsupported_format"
   /** The input is a .docx or .doc that cannot be read: a corrupt entry, XML
-   * that is not well formed, a .doc whose tables are corrupt. */
+   * that is malformed or uses forbidden declarations, a .doc whose tables
+   * are corrupt. */
   | "damaged"
   /** The document is over the size limits (DOCUMENT_LIMITS and
    * DEFAULT_ZIP_LIMITS in zip.ts), which the message names: found from the
@@ -50,6 +52,7 @@ export class PdfRenderError extends Error {
 export function asPdfRenderError(error: unknown): PdfRenderError {
   if (error instanceof PdfRenderError) return error;
   const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof XmlParseError) return new PdfRenderError("damaged", message, { cause: error });
   // stream/body.ts says this for a file of another format it knows ...
   if (/^unsupported format: /.test(message)) return new PdfRenderError("unsupported_format", message.slice("unsupported format: ".length), { cause: error });
   // ... and parse/document.ts says this for content it does not read ...

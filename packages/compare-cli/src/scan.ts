@@ -126,7 +126,7 @@ class Scanner {
             childName = name;
           }
         }
-        if (!selfClosing) depth++;
+        if (!selfClosing && ++depth >= DEFAULT_XML_LIMITS.maxDepth) throw new CompareError("damaged", `XML parse error: nesting too deep (> ${DEFAULT_XML_LIMITS.maxDepth})`);
       }
       pos = end - this.base;
     }
