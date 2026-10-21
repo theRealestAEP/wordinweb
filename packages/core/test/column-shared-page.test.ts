@@ -40,6 +40,36 @@ describe("a 2-column section after a continuous break", () => {
     expect(firstPage).not.toMatch(/C\s+o\s+l/);
   });
 
+  it("keeps a heading and its keepLines paragraph together past equally short shared columns", () => {
+    const body = [
+      // The intro leaves 54pt of the 648pt body for each shared column.
+      p("Intro", `<w:pPr><w:spacing w:line="11880" w:lineRule="exact"/></w:pPr>`),
+      `<w:p><w:pPr><w:sectPr>${PAGE}</w:sectPr></w:pPr></w:p>`,
+      p("Heading", `<w:pPr><w:keepNext/><w:spacing w:line="360" w:lineRule="exact"/></w:pPr>`),
+      p(["Body1", "Body2", "Body3", "Body4"].join("</w:t><w:br/><w:t>"),
+        `<w:pPr><w:keepLines/><w:spacing w:line="360" w:lineRule="exact"/></w:pPr>`),
+      p("Following", `<w:pPr><w:spacing w:line="3600" w:lineRule="exact"/></w:pPr>`),
+      `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PAGE}<w:cols w:num="2" w:space="720"/></w:sectPr></w:pPr></w:p>`,
+      p("Closing"),
+      `<w:sectPr><w:type w:val="continuous"/>${PAGE}</w:sectPr>`,
+    ];
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body.join("")) }));
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+    const positions = result.pages.flatMap((page, index) => page.items.flatMap((item) =>
+      item.kind === "text" && /^(Heading|Body[1-4])$/.test(item.text)
+        ? [{ text: item.text, page: index + 1, x: item.x }]
+        : []));
+    expect(result.totalPages).toBe(2);
+    expect(positions.map(({ text, page }) => ({ text, page }))).toEqual([
+      { text: "Heading", page: 2 },
+      { text: "Body1", page: 2 },
+      { text: "Body2", page: 2 },
+      { text: "Body3", page: 2 },
+      { text: "Body4", page: 2 },
+    ]);
+    expect(new Set(positions.map(({ x }) => x)).size).toBe(1);
+  });
+
   it("takes the anchors to the next page when neither shared column holds their paragraph", () => {
     const body = [
       p("Intro", `<w:pPr><w:spacing w:line="10500" w:lineRule="exact"/></w:pPr>`),

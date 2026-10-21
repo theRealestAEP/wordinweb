@@ -4738,8 +4738,9 @@ class Engine {
       lines = broken.lines;
     };
 
-    // keepLines: move the whole paragraph if it would split but fits on a page.
-    if (
+    // keepLines: skip short shared columns until the paragraph fits. At a
+    // fresh page top the empty-cursor guard lets oversized content progress.
+    while (
       !postTablePageBreak &&
       props.keepLines &&
       this.y + totalHeight > this.bodyBottom &&
@@ -4844,15 +4845,15 @@ class Engine {
           idx++;
           continue;
         }
-        // Terminator: only its first line (and the orphan-dragged second line
-        // when it has more than one) needs to stay with the chain. A 2- or
+        // A keepLines terminator binds all its lines to the chain. Otherwise,
+        // its first line and orphan-dragged second line must stay. A 2- or
         // 3-line terminator under widow control is UNSPLITTABLE (2+1 strands
         // a widow, 1+2 an orphan) — if its head can't stay, the whole
         // paragraph moves and drags the chain: reserve all of it (NIH
         // p416/417: '537' keepNext + Heading4 + a 3-line URL paragraph — Word
         // moves the whole 79pt block to p417 leaving 90pt unused).
         let need = gap + (nb.lines[0]?.height ?? 18);
-        if (np.widowControl !== false && (nb.lines.length === 2 || nb.lines.length === 3)) {
+        if (np.keepLines || (np.widowControl !== false && (nb.lines.length === 2 || nb.lines.length === 3))) {
           need = gap + nb.lines.reduce((a, l) => a + l.height, 0);
         } else if (nb.lines.length > 1 && np.widowControl !== false) {
           need += nb.lines[1].height;
@@ -4875,8 +4876,12 @@ class Engine {
           keepNextTail = tail;
         } else {
           spacingBefore = borderPadTop; // plain before drops at the page top; the border reserve stays
-          if (anchors.length > 0) restartOnNextColumn(borderPadTop);
-          else this.nextColumn();
+          // Later columns in a shared band can be just as short. Advance
+          // until the chain fits or a fresh page top permits progress.
+          while (this.y + needed > this.bodyBottom && !this.pageIsEmptyAtCursor()) {
+            if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+            else this.nextColumn();
+          }
         }
       }
     }
