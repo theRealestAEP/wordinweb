@@ -214,7 +214,7 @@ export class StyleSheet {
       if (style.chpx) {
         const run: RunProps = newRunProps();
         applyRunSprms(style.chpx, run);
-        const rpr = styleRPrXml(run, ctx);
+        const rpr = this.styleRPrXml(run, ctx, style.base);
         if (rpr) s += `<w:rPr>${rpr}</w:rPr>`;
       }
       out.push(s + "</w:style>");
@@ -222,20 +222,20 @@ export class StyleSheet {
     out.push("</w:styles>");
     return out.join("");
   }
-}
 
-/** A style's rPr: its toggles are written as set (on/off), never resolved against another style. */
-function styleRPrXml(run: RunProps, ctx: XmlContext): string {
-  for (const key of Object.keys(run.toggles) as ToggleProp[]) {
-    const v = run.toggles[key];
-    if (v === 0x80) delete run.toggles[key];
-    else if (v === 0x81) run.toggles[key] = 1;
+  /** A style's rPr: 0x80 inherits; 0x81 is the opposite of its base chain's value. */
+  private styleRPrXml(run: RunProps, ctx: XmlContext, base: number): string {
+    for (const key of Object.keys(run.toggles) as ToggleProp[]) {
+      const v = run.toggles[key];
+      if (v === 0x80) delete run.toggles[key];
+      else if (v === 0x81) run.toggles[key] = this.chainToggle(key, base) ? 0 : 1;
+    }
+    const istd = run.istd;
+    delete run.istd;
+    const xml = rPrXml(run, ctx, 0);
+    run.istd = istd;
+    return xml;
   }
-  const istd = run.istd;
-  delete run.istd;
-  const xml = rPrXml(run, ctx, 0);
-  run.istd = istd;
-  return xml;
 }
 
 /** An STD. A Word 6 one has an 8-byte base (no grfstd), an 8-bit name, and Word 6 sprms. */

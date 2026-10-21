@@ -87,6 +87,16 @@ describe("the .doc reader", () => {
     expect(numbered.length).toBeGreaterThanOrEqual(6);
   });
 
+  it("resolves a style's opposite toggles against its base chain", () => {
+    // GovDocs1 062412.doc (public domain): both styles have fVanish = 0x81.
+    const xml = parts(docToDocx(bytes("062412.doc")))["word/styles.xml"];
+    const styles = [...xml.matchAll(/<w:style\b[^>]*>[\s\S]*?<\/w:style>/g)].map((m) => m[0]);
+    const base = styles.find((s) => s.includes('<w:name w:val="z-Top of Form"/>'));
+    const address = styles.find((s) => s.includes('<w:name w:val="HTML Address"/>'));
+    expect(base).toMatch(/<w:rPr>.*<w:vanish\/>.*<\/w:rPr>/);
+    expect(address).toMatch(/<w:rPr>.*<w:vanish w:val="0"\/>.*<\/w:rPr>/);
+  });
+
   it("writes tables with their grid, header row, widths and shading", () => {
     const xml = parts(docToDocx(bytes("parity-tables--v00.doc")));
     const body = xml["word/document.xml"];
