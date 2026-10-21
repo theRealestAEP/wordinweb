@@ -16,6 +16,12 @@ export class NodeMeasurer implements TextMeasurer {
 
   constructor(readonly fonts: FontSet) {}
 
+  isPrefixWidthMonotone(text: string, font: FontSpec, letterSpacing = 0): boolean {
+    // Plain ASCII without kerning sums unsigned glyph advances. Shaped text
+    // and kerning retain the breaker's verified search.
+    return letterSpacing >= 0 && !font.kerning && /^[\x20-\x7e]*$/.test(text);
+  }
+
   width(text: string, font: FontSpec, letterSpacing = 0): number {
     if (text.includes("­")) text = text.replace(/­/g, "");
     if (text.length === 0) return 0;
