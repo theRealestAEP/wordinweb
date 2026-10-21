@@ -1059,6 +1059,40 @@ function brokenProj(b: BrokenParagraph): string {
   );
 }
 
+/** A paragraph that OPENS with a page/column break (before any real content,
+ * with content following) is a break-before: return its type and source run. A
+ * break-only paragraph, or one whose first content is text/tab/image, returns
+ * undefined (kept on the old flow). placeParagraph moves such a paragraph to
+ * the new page, and breakParagraph drops its break, so both read it here. */
+export function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } | undefined {
+  let br: { type: "page" | "column"; run: Run } | undefined;
+  for (const child of para.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const c of r.content) {
+        if (!br) {
+          if (c.kind === "break") {
+            if (c.breakType === "page" || c.breakType === "column") {
+              br = { type: c.breakType, run: r };
+              continue;
+            }
+            return undefined; // a line break opens the paragraph
+          }
+          if (c.kind === "text" && c.text.length === 0) continue;
+          return undefined; // real content precedes any break
+        }
+        // After the opening break: any real content confirms break-before.
+        if (c.kind === "text") {
+          if (c.text.length > 0) return br;
+          continue;
+        }
+        return br;
+      }
+    }
+  }
+  return undefined; // break with nothing after it (break-only paragraph)
+}
+
 export function breakParagraph(
   doc: DocxDocument,
   measurer: TextMeasurer,
@@ -1675,6 +1709,9 @@ function breakParagraphImpl(
     if (!ba || !bb) return false;
     return ba.style === bb.style && ba.color === bb.color && ba.width === bb.width && ba.space === bb.space;
   };
+  // Spans placed before the first atom: the numbering label and its suffix.
+  // A leading break moves them to the new page with the text after it.
+  const labelSpans = cur.length;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind === "anchorPoint") {
@@ -1698,7 +1735,7 @@ function breakParagraphImpl(
       // level, dropping spacing-before). Emitting a mark line would overflow a
       // nearly-full preceding page and spuriously double-break (wild-gatech
       // title page -> phantom blank p3).
-      if (atom.breakType !== "line" && cur.length === 0 && lines.length === 0 && !trailing) {
+      if (atom.breakType !== "line" && cur.length === labelSpans && lines.length === 0 && !trailing) {
         // Only the FIRST leading break is a break-BEFORE consumed by
         // placeParagraph (which does the block-level page/column move). A SECOND
         // (or later) consecutive break at the paragraph start creates a BLANK
@@ -1708,7 +1745,11 @@ function breakParagraphImpl(
         // page between "Before the breaks." and "After two...").
         if (!consumedLeadingBreak) {
           consumedLeadingBreak = true;
-          continue;
+          // placeParagraph moves the paragraph to the new page only when
+          // leadingBreakOf finds this break. Content that it counts but that
+          // draws nothing on the line (a SHAPE field with no text) leaves the
+          // break to this line; dropping it here lost the page break.
+          if (leadingBreakOf(para)) continue;
         }
         flush(false, true, atom.breakType);
         continue;
