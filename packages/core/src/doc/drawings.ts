@@ -347,15 +347,17 @@ const ICO_COLORS: Record<number, string> = {
 
 /**
  * Read the 68-byte PICF at `offset` of the Data stream, or for a Word 6.0/95
- * file (`word6`) its 58-byte PIC in the WordDocument stream, the same but
- * for its 2-byte BRCs.
+ * file (`word6`) its PIC in the WordDocument stream: 58 bytes, the same
+ * but for its 2-byte BRCs, or a 68-byte PICF some Word 6 versions wrote.
  */
 export function parsePicf(data: Uint8Array, offset: number, word6 = false): DocPicf | null {
-  const size = word6 ? 58 : 68;
-  if (offset < 0 || offset + size > data.length) return null;
+  if (offset < 0 || offset + 6 > data.length) return null;
   const v = view(data);
   const lcb = v.getUint32(offset, true);
   const cbHeader = v.getUint16(offset + 4, true);
+  word6 = word6 && cbHeader === 58;
+  const size = word6 ? 58 : 68;
+  if (offset + size > data.length) return null;
   const mm = v.getInt16(offset + 6, true);
   // A PICF header is 68 bytes and covers at least itself; anything else is
   // a stray sprmCPicLocation (Word leaves them in runs that hold no picture).

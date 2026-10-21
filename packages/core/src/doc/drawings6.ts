@@ -12,6 +12,7 @@
 // layer bit, fill patterns as shading patterns) is read from the files.
 import { i16, i32, parsePlc, u16, u32 } from "./bytes.js";
 import { type DocFloatingShape, type DocFspa, type DocInlinePicture, type DocLine, type DocShape, legacyPictureData } from "./drawings.js";
+import { makeImage } from "./officeart.js";
 
 const EMU_PER_TWIP = 635;
 
@@ -51,7 +52,8 @@ export function word6Drawings(word: Uint8Array, plcfdoa: Uint8Array, cpBase: num
 /**
  * The picture Word shows for a Word 6 OLE object, whose picture character
  * names (lTagObj) its storage in ObjectPool: the metafile of the storage's
- * \x03META stream (a METAFILEPICT, then the metafile), at the size its
+ * \x03META stream (a METAFILEPICT, then the metafile), or the PICT of its
+ * \x03PICT stream, at the size its
  * \x03PIC stream gives (32-bit integers: the metafile's extent at 12 and
  * 16, the goal size in twips at 20 and 24, the scaling in tenths of a
  * percent at 44 and 48). Null when the storage has none.
@@ -59,16 +61,18 @@ export function word6Drawings(word: Uint8Array, plcfdoa: Uint8Array, cpBase: num
 export function word6ObjectPicture(objectStream: (storage: string, name: string) => Uint8Array | null, tag: number): DocInlinePicture | null {
   const storage = `_${tag >>> 0}`;
   const pic = objectStream(storage, "\u0003PIC");
+  if (!pic || pic.length < 52) return null;
+  // Word 6 for the Macintosh keeps a PICT (\x03PICT) where Windows keeps a metafile.
   const meta = objectStream(storage, "\u0003META");
-  if (!pic || pic.length < 52 || !meta || meta.length < 8 + 18) return null;
-  const image = legacyPictureData(meta.subarray(8));
+  const pict = objectStream(storage, "\u0003PICT");
+  const image = meta && meta.length >= 8 + 18 ? legacyPictureData(meta.subarray(8)) : pict && pict.length > 10 ? makeImage("pict", pict) : null;
   if (!image) return null;
   const dxaGoal = i32(pic, 20), dyaGoal = i32(pic, 24);
   const mx = i32(pic, 44) || 1000, my = i32(pic, 48) || 1000;
   const none = { style: 0, width: 0, color: "000000", space: 0, shadow: false };
   return {
     picf: {
-      lcb: pic.length, cbHeader: 0, mm: u16(meta, 0), dxaGoal, dyaGoal, mx, my, dxaCropLeft: 0, dyaCropTop: 0, dxaCropRight: 0, dyaCropBottom: 0,
+      lcb: pic.length, cbHeader: 0, mm: u16(pic, 10), dxaGoal, dyaGoal, mx, my, dxaCropLeft: 0, dyaCropTop: 0, dxaCropRight: 0, dyaCropBottom: 0,
       borders: { top: none, left: none, bottom: none, right: none },
     },
     image,

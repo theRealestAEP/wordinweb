@@ -176,11 +176,16 @@ class Converter {
   /** A Word 6.0/95 document's lists, which its paragraphs make as they are read. */
   private readonly lists6: Word6Lists | undefined;
   private readonly styleAutonumbers = new Map<number, { nLvlAnm?: number; anld?: Uint8Array }>();
+  /** A Word 6.0/95 document's field begin, separator and end marks, by CP (word6FieldMarks): another 0x13, 0x14 or 0x15 is text. */
+  private readonly fieldMarks6: Set<number> | undefined;
 
   constructor(private readonly reader: DocReader, private readonly hooks: ConvertHooks) {
     // The whole text once: every story is a slice of it.
     this.text = reader.pieces.text(0, Math.min(reader.pieces.end, reader.parts.end));
-    if (reader.fib.word6) this.lists6 = new Word6Lists(reader.fonts, reader.fib.word6.mac, reader.ctx);
+    if (reader.fib.word6) {
+      this.lists6 = new Word6Lists(reader.fonts, reader.fib.word6.mac, reader.ctx);
+      this.fieldMarks6 = word6FieldMarks(this.text);
+    }
     this.readSections();
     this.readHeaderStories();
     this.readNoteRefs();
@@ -556,6 +561,11 @@ class Converter {
         text += String.fromCharCode(ch);
         continue;
       }
+      // A Word 6 field mark that no field holds is a character of the OEM set: ‼, ¶, §.
+      if (this.fieldMarks6 && ch >= 0x13 && ch <= 0x15 && !this.fieldMarks6.has(cp)) {
+        text += "‼¶§"[ch - 0x13];
+        continue;
+      }
       switch (ch) {
         case 0x09: flushText(); content += "<w:tab/>"; break;
         case 0x0b: flushText(); content += "<w:br/>"; break;
@@ -792,6 +802,28 @@ class Converter {
     out.push("</w:settings>");
     return out.join("");
   }
+}
+
+/**
+ * The CPs of a Word 6 file's field marks: a begin and its end, and the
+ * separators between them. A separator or end with no field open, or a
+ * begin never ended, is not one: a DOS or WordPerfect conversion left it
+ * as a character. (The field PLCs cannot decide: Word leaves fields such as
+ * PRIVATE out of them.)
+ */
+function word6FieldMarks(text: string): Set<number> {
+  const marks = new Set<number>();
+  const open: number[] = [];
+  for (let cp = 0; cp < text.length; cp++) {
+    const ch = text.charCodeAt(cp);
+    if (ch === 0x13) open.push(cp);
+    else if (ch === 0x14 && open.length) marks.add(cp);
+    else if (ch === 0x15 && open.length) {
+      marks.add(open.pop()!);
+      marks.add(cp);
+    }
+  }
+  return marks;
 }
 
 function bitCount(v: number): number {
