@@ -9,6 +9,23 @@
  * for every mainstream producer (Word, LibreOffice, Google Docs export).
  */
 
+/** An XML part is malformed or uses declarations OOXML does not allow. */
+export class XmlParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "XmlParseError";
+  }
+}
+
+/** Check even parts whose contents the document reader does not use. */
+export function rejectXmlDeclarations(input: string): void {
+  if (!input.includes("<!")) return;
+  const markup = /<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<!/g;
+  for (const match of input.matchAll(markup)) {
+    if (match[0] === "<!") throw new XmlParseError("XML parse error: DOCTYPE and entity declarations are not allowed");
+  }
+}
+
 export interface XmlElement {
   name: string;
   attrs: Record<string, string>;
@@ -50,7 +67,10 @@ export function decodeEntities(s: string): string {
         body[1] === "x" || body[1] === "X"
           ? parseInt(body.slice(2), 16)
           : parseInt(body.slice(1), 10);
-      return Number.isFinite(code) ? String.fromCodePoint(code) : m;
+      if (!Number.isFinite(code) || code < 0 || code > 0x10ffff) {
+        throw new XmlParseError("XML parse error: invalid character reference");
+      }
+      return String.fromCodePoint(code);
     }
     return ENTITIES[body] ?? m;
   });
@@ -104,7 +124,7 @@ function own(s: string): string {
 
 export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIMITS): XmlElement {
   if (input.length > limits.maxLength) {
-    throw new Error(`XML parse error: input exceeds ${limits.maxLength} bytes`);
+    throw new XmlParseError(`XML parse error: input exceeds ${limits.maxLength} bytes`);
   }
   let i = 0;
   const n = input.length;
@@ -129,7 +149,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
   };
 
   const fail = (msg: string): never => {
-    throw new Error(`XML parse error at offset ${i}: ${msg}`);
+    throw new XmlParseError(`XML parse error at offset ${i}: ${msg}`);
   };
 
   while (i < n) {
@@ -160,10 +180,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
         if (top !== root) top.text += own(input.slice(i + 9, end));
         i = end + 3;
       } else {
-        // DOCTYPE or other declaration — skip to next '>'
-        const end = input.indexOf(">", i);
-        if (end === -1) fail("unterminated declaration");
-        i = end + 1;
+        fail("DOCTYPE and entity declarations are not allowed");
       }
     } else if (c1 === "/") {
       const end = input.indexOf(">", i + 2);
@@ -224,7 +241,7 @@ export function parseXml(input: string, limits: XmlParseLimits = DEFAULT_XML_LIM
       i = j + 1;
     }
   }
-  if (root.children.length === 0) throw new Error("XML parse error: no root element");
+  if (root.children.length === 0) throw new XmlParseError("XML parse error: no root element");
   return root.children[0];
 }
 

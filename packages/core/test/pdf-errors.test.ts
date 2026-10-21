@@ -6,6 +6,7 @@ import { FontSet, defaultFontDirs } from "../src/pdf/fonts.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { loadShaper, shaperLoaded } from "../src/pdf/shaper.js";
 import { bytesSource } from "../src/stream/source.js";
+import { xmlErrorCases } from "./xml-error-fixtures.js";
 import { W_NS, makeDocx, p, wrapDocument } from "./helpers.js";
 
 // Mongolian is the one script still refused with the shaper present: its
@@ -48,6 +49,13 @@ describe("unsupportedScript", () => {
 });
 
 describe("renderDocxToPdf errors", () => {
+  it.each(xmlErrorCases)("refuses %s as damaged", async (_name, docx) => {
+    const { error, bytes } = await failure(docx);
+    expect(error.code).toBe("damaged");
+    expect(error.cause).toBeInstanceOf(Error);
+    expect(bytes).toBe(0);
+  });
+
   it("refuses Mongolian text with unsupported_script before any byte is written, naming the paragraph", async () => {
     const docx = makeDocx({ "word/document.xml": wrapDocument(p("Latin first page") + `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` + p(`then ${MONGOLIAN}`)) });
     const { error, bytes } = await failure(docx);

@@ -1,3 +1,4 @@
+import { DEFAULT_XML_LIMITS, XmlParseError } from "../xml.js";
 import { DOCUMENT_LIMITS } from "../zip.js";
 
 /** One block-level child of the body: its qualified name, and its bytes,
@@ -114,7 +115,7 @@ class Scanner {
       }
       let lt = this.indexOf(LT, pos);
       while (lt === -1) {
-        if (!this.more()) throw new Error(inside ? "an element is not closed" : "no w:body: it is not a Word document");
+        if (!this.more()) throw new XmlParseError(inside ? "an element is not closed" : "no w:body: it is not a Word document");
         lt = this.indexOf(LT, pos);
       }
       const at = this.base + lt;
@@ -126,7 +127,7 @@ class Scanner {
       } else if (next === 0x21 /* ! */) {
         if (this.startsWith("<!--", lt)) end = this.find("-->", lt + 4, "comment");
         else if (this.startsWith("<![CDATA[", lt)) end = this.find("]]>", lt + 9, "CDATA section");
-        else throw new Error("a document type declaration is not allowed");
+        else throw new XmlParseError("a document type declaration is not allowed");
       } else if (next === SLASH) {
         end = this.find(">", lt + 2, "end tag");
         depth--;
@@ -162,7 +163,7 @@ class Scanner {
         }
         if (!inside) {
           if (depth === cd && localName(name) === "body") {
-            if (this.base !== 0) throw new Error("the document's head is longer than a chunk");
+            if (this.base !== 0) throw new XmlParseError("the document's head is longer than a chunk");
             head = this.store.slice(0, end);
             inside = true;
             containers.push(cd);
@@ -172,7 +173,7 @@ class Scanner {
           const top = containers[containers.length - 1];
           if (depth === top + 1) {
             const ln = localName(name);
-            if (ln === "body") throw new Error("a w:body inside the body");
+            if (ln === "body") throw new XmlParseError("a w:body inside the body");
             if (ln === "sdt" && !selfClosing) sdts.push({ level: depth + 1, at, id: -1 });
             else if ((ln === "customXml" || ln === "AlternateContent") && !selfClosing) {
               containers.push(depth);
@@ -197,7 +198,7 @@ class Scanner {
             containers.push(depth);
           }
         }
-        if (!selfClosing) depth++;
+        if (!selfClosing && ++depth >= DEFAULT_XML_LIMITS.maxDepth) throw new XmlParseError(`XML parse error: nesting too deep (> ${DEFAULT_XML_LIMITS.maxDepth})`);
       }
       pos = end - this.base;
     }
@@ -239,7 +240,7 @@ class Scanner {
   }
 
   private byteAt(i: number): number {
-    while (i >= this.length) if (!this.more()) throw new Error("unexpected end of file");
+    while (i >= this.length) if (!this.more()) throw new XmlParseError("unexpected end of file");
     return this.store[i];
   }
 
@@ -261,7 +262,7 @@ class Scanner {
       }
       // Keep looking from where a match could still start.
       from = Math.max(from, this.length - text.length + 1);
-      if (!this.more()) throw new Error(`unterminated ${what}`);
+      if (!this.more()) throw new XmlParseError(`unterminated ${what}`);
     }
   }
 
@@ -269,13 +270,13 @@ class Scanner {
   private tagEnd(from: number): number {
     let quote = 0;
     for (let i = from; ; i++) {
-      if (i >= this.length && !this.more()) throw new Error("unterminated start tag");
+      if (i >= this.length && !this.more()) throw new XmlParseError("unterminated start tag");
       const c = this.store[i];
       if (quote) {
         if (c === quote) quote = 0;
       } else if (c === 0x22 || c === 0x27) quote = c;
       else if (c === GT) return this.base + i + 1;
-      else if (c === LT) throw new Error("'<' inside a start tag");
+      else if (c === LT) throw new XmlParseError("'<' inside a start tag");
     }
   }
 
