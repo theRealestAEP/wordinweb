@@ -15,6 +15,10 @@ export interface FontMetrics {
 
 export interface TextMeasurer {
   width(text: string, font: FontSpec, letterSpacing?: number): number;
+  /** Whether each suffix of this text has nondecreasing prefix widths.
+   * Lets emergency wrapping search near the line end without measuring the
+   * entire remaining token on every line. */
+  isPrefixWidthMonotone?(text: string, font: FontSpec, letterSpacing?: number): boolean;
   metrics(font: FontSpec): FontMetrics;
   /** The browser's own font box (fontBoundingBoxAscent/Descent) for the
    * resolved first face of this font's CSS stack, when the host can know it.
@@ -514,6 +518,10 @@ export class CanvasMeasurer implements TextMeasurer {
  * print-accurate, but stable — layout unit tests assert against it.
  */
 export class ApproxMeasurer implements TextMeasurer {
+  isPrefixWidthMonotone(_text: string, _font: FontSpec, letterSpacing = 0): boolean {
+    return letterSpacing >= 0;
+  }
+
   width(text: string, font: FontSpec, letterSpacing = 0): number {
     // Same explicit soft-hyphen rule as CanvasMeasurer: U+00AD is zero-width.
     if (text.includes("\u00AD")) text = text.replace(/\u00AD/g, "");

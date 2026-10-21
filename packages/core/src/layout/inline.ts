@@ -1594,42 +1594,38 @@ function breakParagraphImpl(
   // (wild2-legal-nih-contract p154: "at:  wamuv://…BOB_HUG_Kudifup" |
   // "a_Sucumo.idi"; p142/p153 char-wrap past '/' and '_' separators).
   const hardWrapFrag = (atom: FragAtom) => {
-    let rest = atom.text;
-    while (rest.length > 0) {
+    const monotone = measurer.isPrefixWidthMonotone?.(atom.text, atom.font, atom.props.letterSpacing) === true;
+    let sliceOff = 0;
+    while (sliceOff < atom.text.length) {
+      const remaining = atom.text.length - sliceOff;
       const capacity = lineStartX(lineIndex) + availFor(lineIndex) - x;
       const fits = (n: number): boolean =>
-        measurer.width(rest.slice(0, n), atom.font, atom.props.letterSpacing) <= capacity;
+        measurer.width(atom.text.slice(sliceOff, sliceOff + n), atom.font, atom.props.letterSpacing) <= capacity;
       // How many characters fit: the LARGEST n whose prefix still fits, or 1
       // when not even one does.
       //
-      // Found by bisection rather than by walking n down one character at a
-      // time. Both find the same n — the predicate is monotone, because every
-      // added character contributes a non-negative advance — but the walk
-      // measures a prefix per character, and measuring is O(prefix), so
-      // fitting one line of a long token was O(token²). That is the whole of
-      // perf B10: a collab flood pastes tokens with no spaces into one run,
-      // every line then takes this emergency character-wrap path, and the
-      // receiving client burned 67% of its main thread re-measuring prefixes
-      // (292 MILLION characters measured for a 1.5 KB document in 12 s) until
-      // clicks took seconds to land. Bisection makes it O(token · log token).
-      //
-      // Monotonicity is NOT a safe assumption to leave implicit. Negative
-      // letter spacing (Word condensed text) makes a longer prefix measure
-      // narrower outright, and text measurement has its own non-monotone
-      // corners — kerning pairs, combining marks, joiners. So the bisection
-      // is not trusted on faith: its answer is VERIFIED against the boundary
-      // property, and anything that fails verification falls back to the
-      // exact walk for that fragment. Three cache-warm probes on the happy
-      // path buy a result that is checked rather than assumed.
+      // For monotone widths, double the search bound until it crosses the
+      // line edge, then bisect. Every measured prefix is bounded by twice
+      // the line's character count, so measurement totals O(n log n).
+      // Bisection over the whole remainder, including a whole-remainder
+      // verification on every line, measured O(n²) characters.
+      // Other measurers keep the existing verification and exact fallback.
       const walkDown = (): number => {
-        let n = rest.length;
+        let n = remaining;
         while (n > 1 && !fits(n)) n--;
         return n;
       };
       let take: number;
       if ((atom.props.letterSpacing ?? 0) >= 0) {
         let lo = 1;
-        let hi = rest.length;
+        let hi = remaining;
+        if (monotone) {
+          hi = 1;
+          while (hi < remaining && fits(hi)) {
+            lo = hi;
+            hi = Math.min(hi * 2, remaining);
+          }
+        }
         while (lo < hi) {
           const mid = lo + Math.ceil((hi - lo) / 2);
           if (fits(mid)) lo = mid;
@@ -1640,14 +1636,15 @@ function breakParagraphImpl(
         // more character does not, and the whole remainder does not fit
         // either (the walk starts at the top and would have stopped there).
         const verified =
-          (take === 1 || fits(take)) &&
-          (take === rest.length || !fits(take + 1)) &&
-          (take === rest.length || !fits(rest.length));
+          monotone ||
+          ((take === 1 || fits(take)) &&
+            (take === remaining || !fits(take + 1)) &&
+            (take === remaining || !fits(remaining)));
         if (!verified) take = walkDown();
       } else {
         take = walkDown();
       }
-      const piece = rest.slice(0, take);
+      const piece = atom.text.slice(sliceOff, sliceOff + take);
       const w = measurer.width(piece, atom.font, atom.props.letterSpacing);
       if (w > capacity + 0.01 && curLineWidth > 0) {
         // Not even one character fits after the existing content: break the
@@ -1655,8 +1652,7 @@ function breakParagraphImpl(
         flush(false, false);
         continue;
       }
-      const sliceOff = atom.text.length - rest.length;
-      const finalPiece = take === rest.length;
+      const finalPiece = take === remaining;
       cur.push({
         x,
         width: w,
@@ -1677,8 +1673,8 @@ function breakParagraphImpl(
       });
       curLineWidth += w;
       x += w;
-      rest = rest.slice(take);
-      if (rest.length > 0) flush(false, false);
+      sliceOff += take;
+      if (sliceOff < atom.text.length) flush(false, false);
     }
   };
 
