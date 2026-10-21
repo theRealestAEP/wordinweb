@@ -363,6 +363,7 @@ interface LayoutSnapshot {
   bannerSlotUsed: number;
   counters: Map<number, number[]>;
   seenNumIds: Set<number>;
+  consumedFrames: Set<object>;
   bookmarkPages: Map<string, string>;
   bookmarkPageIndices: Map<string, number>;
   placedFootnotes: Set<number>;
@@ -2810,6 +2811,7 @@ class Engine {
       bannerSlotUsed: this.bannerSlotUsed,
       counters: new Map(Array.from(this.counters, ([k, v]) => [k, [...v]])),
       seenNumIds: new Set(this.seenNumIds),
+      consumedFrames: new Set(this.consumedFrames),
       bookmarkPages: new Map(this.bookmarkPages),
       bookmarkPageIndices: new Map(this.bookmarkPageIndices),
       placedFootnotes: new Set(this.placedFootnotes),
@@ -2852,6 +2854,7 @@ class Engine {
     this.bannerSlotUsed = s.bannerSlotUsed;
     this.counters = s.counters;
     this.seenNumIds = s.seenNumIds;
+    this.consumedFrames = new Set(s.consumedFrames);
     this.bookmarkPages = s.bookmarkPages;
     this.bookmarkPageIndices = s.bookmarkPageIndices;
     this.placedFootnotes = s.placedFootnotes;
@@ -3588,7 +3591,8 @@ class Engine {
       const np = this.doc.effectiveParaProps(after);
       const lines = breakParagraph(this.doc, this.measurer, after, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, LOOKAHEAD_BREAK).lines;
       const top = this.y + Math.max(this.lastParaSpacingAfter, np.spacingBefore ?? 0) - this.lastParaSpacingAfter;
-      if (lines.length > 0 && top + openingHeight(lines, np) > this.bodyBottom + 0.25) this.nextColumn();
+      if (np.pageBreakBefore || leadingBreakOf(after)?.type === "page") this.newPage(false);
+      else if (lines.length > 0 && top + openingHeight(lines, np) > this.bodyBottom + 0.25) this.nextColumn();
     }
     this.placeFrame(group, fr);
   }
@@ -3716,8 +3720,10 @@ class Engine {
   private consumedAnchors = new WeakSet<Shape>();
 
   /** Frame paragraphs already placed by a preceding paragraph's lookahead
-   * (page/margin-anchored frames reflow earlier content around them). */
-  private consumedFrames = new WeakSet<object>();
+   * (page/margin-anchored frames reflow earlier content around them). Part
+   * of the layout snapshot, so a section that column balancing lays again
+   * places its frames again. */
+  private consumedFrames = new Set<object>();
 
   /** Line bounds callback honoring this page's floating-image exclusions.
    * `frame` overrides the target page and column box (table-cell frames:
@@ -3862,15 +3868,15 @@ class Engine {
     // exact, two lines of text) fills and rules the whole 50pt box, leaving
     // empty shaded space under the text. Stretch the last paragraph's
     // decorations by the surplus: its full-width shading rect grows, the
-    // bottom rule moves down, and the side rules extend. Content items are
-    // untouched.
+    // bottom rule moves down, and the side rules extend. Content items,
+    // a table's fills and rules among them, are untouched.
     const surplus = height - laid.height;
     if (surplus > 0.5) {
       const isSideRule = (it: PageItem): it is LineEdgeItem =>
-        it.kind === "edge" && Math.abs(it.x1 - it.x2) < 0.01 && Math.abs(it.y1 - it.y2) >= 0.01;
+        it.kind === "edge" && !it.role && Math.abs(it.x1 - it.x2) < 0.01 && Math.abs(it.y1 - it.y2) >= 0.01;
       const isFullRule = (it: PageItem): it is LineEdgeItem =>
-        it.kind === "edge" && Math.abs(it.y1 - it.y2) < 0.01 && Math.abs(it.x2 - it.x1) >= contentW - 8;
-      const isFullRect = (it: PageItem): it is RectItem => it.kind === "rect" && it.width >= contentW - 4;
+        it.kind === "edge" && !it.role && Math.abs(it.y1 - it.y2) < 0.01 && Math.abs(it.x2 - it.x1) >= contentW - 8;
+      const isFullRect = (it: PageItem): it is RectItem => it.kind === "rect" && !it.role && it.width >= contentW - 4;
       let rectBottom = -Infinity;
       let ruleY = -Infinity;
       let sideBottom = -Infinity;

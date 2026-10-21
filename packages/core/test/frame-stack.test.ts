@@ -288,6 +288,34 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     expect(texts(pages[0].items).map((i) => i.text)).not.toContain("AnchoredCaption");
   });
 
+  it("moves a page-anchored frame to the page its page-broken follower starts", () => {
+    const page = `<w:framePr w:w="3000" w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="1500" w:y="2000"/>`;
+    const pages = layoutPages(
+      `<w:p><w:r><w:t>FirstPage</w:t></w:r></w:p>` +
+        framed("BrokenCaption", page) +
+        `<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>SecondPage follows here.</w:t></w:r></w:p>` +
+        SECTION,
+    );
+    const captionPages = pages.flatMap((p, index) => texts(p.items).some((i) => i.text === "BrokenCaption") ? [index] : []);
+    expect(captionPages).toEqual([1]);
+    expect(texts(pages[1].items).map((i) => i.text)).toContain("SecondPage");
+    expect(texts(pages[0].items).map((i) => i.text)).toContain("FirstPage");
+  });
+
+  it("does not stretch a table's fill in an exact-height frame", () => {
+    const exact = `<w:framePr w:w="4000" w:h="3000" w:hRule="exact" w:wrap="around" w:vAnchor="text" w:hAnchor="page" w:x="1494" w:y="0"/>`;
+    const table =
+      `<w:tbl><w:tblPr><w:tblW w:w="4000" w:type="dxa"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr>` +
+      `<w:tc><w:tcPr><w:tcW w:w="4000" w:type="dxa"/><w:shd w:val="clear" w:color="auto" w:fill="CCE5FF"/></w:tcPr>` +
+      framed("CellWord", exact) +
+      `</w:tc></w:tr></w:tbl>`;
+    const items = layoutBody(framed("TableCaption", exact) + table + BODY + SECTION);
+    const fill = items.find((i): i is RectItem => i.kind === "rect" && i.fill.toUpperCase().includes("CCE5FF"));
+    expect(fill).toBeDefined();
+    expect(fill!.height).toBeLessThan(60);
+  });
+
   it("leaves a drop cap as it is", () => {
     const drop =
       `<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/></w:pPr>` +
