@@ -387,3 +387,32 @@ describe("a blank paragraph's mark size in a text box (GovDocs 092399)", () => {
     expect(Math.abs(parseFloat(el.style.top) - line.lineTop)).toBeLessThanOrEqual(0.5);
   });
 });
+
+describe("a paragraph pushed off the page by a top-and-bottom float (review of 29b557c)", () => {
+  // A page-positioned rectangle covers y = 120..955px of the 96..960px body.
+  // The next paragraph's first line goes below it, past the body bottom, so
+  // the whole paragraph moves to page 2. The break plan used to keep the
+  // float's push for the moved line and break again after it.
+  const rect =
+    `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+    `<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>` +
+    `<wp:positionV relativeFrom="page"><wp:posOffset>1143000</wp:posOffset></wp:positionV>` +
+    `<wp:extent cx="914400" cy="7953375"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapTopAndBottom/><wp:docPr id="4" name="R"/><wp:cNvGraphicFramePr/>` +
+    `<a:graphic ${A}><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+    `<wps:wsp ${WPS}><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="7953375"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp>` +
+    `</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>`;
+  const tenLines =
+    `<w:p><w:pPr><w:widowControl w:val="0"/></w:pPr>` +
+    Array.from({ length: 10 }, (_, i) => `<w:r><w:t>row${i}</w:t>${i < 9 ? "<w:br/>" : ""}</w:r>`).join("") +
+    `</w:p>`;
+
+  it("keeps the moved paragraph together on page 2", () => {
+    const { result } = layout(`<w:p>${rect}</w:p>${tenLines}`);
+    const rows = result.pages.flatMap((pg, n) => texts(pg.items).filter((t) => /^row\d$/.test(t.text)).map((t) => ({ page: n + 1, top: t.lineTop })));
+    expect(rows).toHaveLength(10);
+    expect(rows.every((r) => r.page === 2)).toBe(true);
+    expect(rows[0].top).toBeCloseTo(96, 0);
+    expect(result.pages.length).toBe(2);
+  });
+});

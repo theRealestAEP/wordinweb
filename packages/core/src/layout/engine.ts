@@ -4310,9 +4310,10 @@ class Engine {
     // anchor before its space-before. The offset itself then places the shape
     // alongside the text (IEEE's biography portrait: 12.6pt posOffset plus a
     // 12pt paragraph gap must not count that gap twice).
+    // Set by this paragraph's own objects only: the lookaheads below leave a
+    // paragraph-positioned box that would be moved up to its own paragraph.
     this.anchorPushedUp = false;
     emitParaAnchors(this.y);
-    const ownAnchorsPushedUp = this.anchorPushedUp;
     let broken = breakNow(paraTopEstimate);
 
     // relH="character"/relV="line" shapes: Word places them from the
@@ -4764,7 +4765,8 @@ class Engine {
     // to the next page with the paragraph, as LibreOffice lays the GovDocs
     // .doc files (026966's sidebar, 074645's biography box). At a page top
     // there is nowhere better: the object stays, moved up (keepOnPage).
-    if (ownAnchorsPushedUp && !this.pageIsEmptyAtCursor()) restartOnNextColumn(spacingBefore);
+    // The flag covers the line-relative objects emitted after the first break.
+    if (this.anchorPushedUp && !this.pageIsEmptyAtCursor()) restartOnNextColumn(spacingBefore);
 
     // keepLines: move the whole paragraph if it would split but fits on a page.
     if (
@@ -5115,7 +5117,9 @@ class Engine {
       // next segment starts a fresh page by construction.
       let onPartialPage = !this.pageIsEmptyAtCursor();
       for (let li = 0; li < lines.length; li++) {
-        simY += lines[li].floatYOffset ?? 0;
+        // A line that starts a new column leaves its float's push behind,
+        // as the emit loop below does.
+        if (!(breaks.has(li) && li === segStart)) simY += lines[li].floatYOffset ?? 0;
         if (simOnCurrentPage) {
           const targetY = this.bannerLineY(simY, lines[li].fitHeight, simCol);
           if (targetY > simY + 0.01) {
