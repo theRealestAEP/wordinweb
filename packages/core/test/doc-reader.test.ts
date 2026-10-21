@@ -10,7 +10,7 @@ import { docToDocxFiles, openDoc } from "../src/doc/convert.js";
 import { docToDocx } from "../src/doc/hooks.js";
 import { isWordDocumentFile, openDocStreams } from "../src/doc/streams.js";
 import { parseFib } from "../src/doc/fib.js";
-import { applyParaSprms, newParaProps } from "../src/doc/sprm.js";
+import { applyParaSprms, newParaProps, pPrXml } from "../src/doc/sprm.js";
 import { PdfRenderError, renderDocxToPdf } from "../src/pdf/render.js";
 
 // Word 97-2003 .doc files desktop Word saved from the .docx beside each
@@ -224,6 +224,20 @@ describe("the .doc reader", () => {
     expect(cells[0]).toContain("LIVING ROOM");
     expect(cells[1]).toContain('<w:gridSpan w:val="3"/>');
     expect(cells[1]).toContain("For each item");
+  });
+
+  it("writes a frame's dyaAbs of 0 as inline, and the negative values as alignments", () => {
+    // [MS-DOC] 2.6.2 sprmPDyaAbs (0x8419): 0 inline, 0xFFFC top, 0xFFF8 center, 0xFFF4 bottom, 0xFFF0 inside, 0xFFEC outside.
+    const ctx = { styleId: () => undefined, fontName: () => undefined, styleToggle: () => false };
+    const frameOf = (dyaAbs: number): string => {
+      const p = newParaProps(0);
+      applyParaSprms(new Uint8Array([0x19, 0x84, dyaAbs & 0xff, dyaAbs >> 8, 0x1a, 0x84, 0x10, 0x0e]), p);
+      return /<w:framePr[^>]*>/.exec(pPrXml(p, ctx).before)?.[0] ?? "";
+    };
+    expect(frameOf(0)).toContain('w:yAlign="inline"');
+    expect(frameOf(0)).not.toContain("w:y=");
+    expect(frameOf(0xfff8)).toContain('w:yAlign="center"');
+    expect(frameOf(240)).toContain('w:y="240"');
   });
 
   it("sets the width of the cells sprmTDxaCol names and moves the later edges, whatever the TC80 widths", () => {
