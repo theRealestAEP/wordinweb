@@ -288,6 +288,10 @@ interface InternalPage {
   /** The page shell remains, but positioned items can be rematerialized. */
   discarded?: boolean;
   sp: SectionProps;
+  /** The props the page opened with, once a continuous section has taken
+   * it over (newBand replaces sp). The header and footer belong to the
+   * section at the top of the page, so they are laid out against these. */
+  hfSp?: SectionProps;
   physIndex: number;
   displayNumber: number;
   headerRel?: string;
@@ -428,6 +432,7 @@ interface IncrState {
    * rebuilt without re-running newPage's section/hf logic. */
   page: {
     sp: SectionProps;
+    hfSp?: SectionProps;
     physIndex: number;
     displayNumber: number;
     bodyTop: number;
@@ -1091,8 +1096,9 @@ class Engine {
 
     for (let i = 0; i < this.pages.length; i++) {
       const page = this.pages[i];
-      this.sp = page.sp;
-      const contentWidth = page.sp.pageWidth - page.sp.marginLeft - page.sp.marginRight - page.sp.gutter;
+      const sp = page.hfSp ?? page.sp;
+      this.sp = sp;
+      const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
       const header = this.doc.headers.get(page.headerRel ?? "");
       const footer = this.doc.footers.get(page.footerRel ?? "");
       const headerHeight = this.measureHeaderFooter(header, page, contentWidth, this.pageFieldFrameOverlay(header), true);
@@ -1262,16 +1268,26 @@ class Engine {
       // band must have ended in its first column - Word balances columns
       // before a continuous break, which we approximate by falling back to a
       // page break when content sits in a later column.)
+      //
+      // An empty page that an earlier section opened is shared too (see
+      // pageOpenedEmptyBySection). Word takes a page's headers and footers
+      // from the section at its top (govdocs 068399: an empty titlePg
+      // section 1 holds the FCC letterhead in its first-page header; the
+      // continuous section 2 has wider margins and its text starts on page 1
+      // under that letterhead, in LibreOffice too). Nothing sits on the page
+      // yet, so the margins may differ.
+      const openedEmpty = this.pages.length > 0 && this.pageOpenedEmptyBySection();
       const canContinue =
         sp.type === "continuous" &&
         prevSp !== null &&
         this.pages.length > 0 &&
         (this.col === 0 || this.prevBandBalanced) &&
-        !this.pageIsEmptyAtCursor() &&
+        (openedEmpty ||
+          (!this.pageIsEmptyAtCursor() &&
+            sp.marginLeft === prevSp.marginLeft &&
+            sp.marginRight === prevSp.marginRight)) &&
         sp.pageWidth === prevSp.pageWidth &&
         sp.pageHeight === prevSp.pageHeight &&
-        sp.marginLeft === prevSp.marginLeft &&
-        sp.marginRight === prevSp.marginRight &&
         // A continuous break that changes the page-number FORMAT can't stay on
         // the shared page - two different formats (e.g. decimal vs roman) can't
         // coexist on one sheet, so Word promotes it to a page break (wild-gatech:
@@ -1743,6 +1759,7 @@ class Engine {
         seenNumIds: [...this.seenNumIds],
         page: {
           sp: p.sp,
+          hfSp: p.hfSp,
           physIndex: p.physIndex,
           displayNumber: p.displayNumber,
           bodyTop: p.bodyTop,
@@ -1862,6 +1879,7 @@ class Engine {
     const page: InternalPage = {
       items: prefixItems,
       sp: ps.sp,
+      hfSp: ps.hfSp,
       physIndex: ps.physIndex,
       displayNumber: ps.displayNumber,
       bodyTop: ps.bodyTop,
@@ -2515,6 +2533,22 @@ class Engine {
 
   // ---------- page management ----------
 
+  /** The current page is empty and a section break opened it: that
+   * section's only paragraph is its empty break mark, which takes no height,
+   * but the page is still that section's first page. A continuous section
+   * after the first opened its page only because it could not share the one
+   * before (the margin, column and number-format fallbacks in enterSection
+   * stand in for Word, which keeps it there), so its page does not count. */
+  private pageOpenedEmptyBySection(): boolean {
+    const page = this.cur;
+    const opener = page.hfSp ?? page.sp;
+    return (
+      this.pageIsEmptyAtCursor() &&
+      page.physIndex === this.sectionFirstPagePhys &&
+      (page.physIndex === 1 || opener.type !== "continuous")
+    );
+  }
+
   private newPage(sectionStart: boolean): void {
     const baseSp = this.sp;
     // Coalesce a section break with a preceding page break: if the previous
@@ -2524,7 +2558,10 @@ class Engine {
     // followed by an empty section-break paragraph must not insert a blank
     // page; wild-multicolumn: a hard page break before a continuous multi-col
     // section starts that section on the fresh page). Parity breaks (odd/even
-    // page) still force their own page.
+    // page) still force their own page. A page that a section break opened
+    // stays (pageOpenedEmptyBySection): it prints with that section's header
+    // and footer (an empty first section before a next-page section leaves a
+    // blank page 1, as in LibreOffice; govdocs 000007 matches Word's 32 pages).
     if (
       sectionStart &&
       this.pages.length > 0 &&
@@ -2532,6 +2569,7 @@ class Engine {
       this.cur.items.length === 0 &&
       this.cur.footnotes.length === 0 &&
       this.pageIsEmptyAtCursor() &&
+      !this.pageOpenedEmptyBySection() &&
       (baseSp.type === undefined || baseSp.type === "nextPage" || baseSp.type === "continuous")
     ) {
       this.pages.pop();
@@ -2701,6 +2739,7 @@ class Engine {
   private newBand(): void {
     const sp = this.sp;
     const page = this.cur;
+    page.hfSp ??= page.sp;
     page.sp = sp;
     const contentWidth = sp.pageWidth - sp.marginLeft - sp.marginRight - sp.gutter;
     const { colXs, colWidths } = computeColumns(sp, contentWidth);
@@ -2753,14 +2792,16 @@ class Engine {
     }
 
     const snap = this.snapshot();
-    // A partial page is only "shared" when content sits above the cursor. When
-    // the section boundary landed on a fresh page (e.g. a preceding hard page
-    // break emptied the cursor to the page top), the multi-column section
-    // starts on THAT page rather than moving to yet another fresh page. The
-    // test reads the cursor, never the page's items: a streamed counting pass
-    // lays its lines without items, and must decide as the rendering pass
-    // does, or the two passes disagree on the page count (wild-multicolumn).
-    const sharedPartialPage = !this.pageIsEmptyAtCursor();
+    // A section too long for the rest of a shared page still starts there:
+    // Word fills the page's remaining band and flows on (word95-check-a:
+    // 133189 and 143726 start their 2-column sections under the 1-column
+    // text, as LibreOffice prints them). Columns too narrow to hold a glyph
+    // are the exception: Word starts wild-multicolumn's 2-column sections
+    // (w:space of 250in) on a fresh page, below an otherwise empty band.
+    // The test reads the cursor, never the page's items: a streamed counting
+    // pass lays its lines without items, and must decide as the rendering
+    // pass does, or the two passes disagree on the page count.
+    const sharedPartialPage = !this.pageIsEmptyAtCursor() && this.cur.colWidths.some((width) => width <= 0);
     // Measure pass from the current (possibly shared) position.
     this.beginMeasure();
     this.layoutBlocks(section.blocks);
@@ -4921,8 +4962,9 @@ class Engine {
       lines = broken.lines;
     };
 
-    // keepLines: move the whole paragraph if it would split but fits on a page.
-    if (
+    // keepLines: skip short shared columns until the paragraph fits. At a
+    // fresh page top the empty-cursor guard lets oversized content progress.
+    while (
       !postTablePageBreak &&
       props.keepLines &&
       this.y + totalHeight > this.bodyBottom &&
@@ -5027,15 +5069,15 @@ class Engine {
           idx++;
           continue;
         }
-        // Terminator: only its first line (and the orphan-dragged second line
-        // when it has more than one) needs to stay with the chain. A 2- or
+        // A keepLines terminator binds all its lines to the chain. Otherwise,
+        // its first line and orphan-dragged second line must stay. A 2- or
         // 3-line terminator under widow control is UNSPLITTABLE (2+1 strands
         // a widow, 1+2 an orphan) — if its head can't stay, the whole
         // paragraph moves and drags the chain: reserve all of it (NIH
         // p416/417: '537' keepNext + Heading4 + a 3-line URL paragraph — Word
         // moves the whole 79pt block to p417 leaving 90pt unused).
         let need = gap + (nb.lines[0]?.height ?? 18);
-        if (np.widowControl !== false && (nb.lines.length === 2 || nb.lines.length === 3)) {
+        if (np.keepLines || (np.widowControl !== false && (nb.lines.length === 2 || nb.lines.length === 3))) {
           need = gap + nb.lines.reduce((a, l) => a + l.height, 0);
         } else if (nb.lines.length > 1 && np.widowControl !== false) {
           need += nb.lines[1].height;
@@ -5058,8 +5100,12 @@ class Engine {
           keepNextTail = tail;
         } else {
           spacingBefore = borderPadTop; // plain before drops at the page top; the border reserve stays
-          if (anchors.length > 0) restartOnNextColumn(borderPadTop);
-          else this.nextColumn();
+          // Later columns in a shared band can be just as short. Advance
+          // until the chain fits or a fresh page top permits progress.
+          while (this.y + needed > this.bodyBottom && !this.pageIsEmptyAtCursor()) {
+            if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+            else this.nextColumn();
+          }
         }
       }
     }
@@ -5368,7 +5414,9 @@ class Engine {
     let breaks = planBreaks();
     // A paragraph pushed entirely to the next column/page takes its floats
     // along: retract, move, re-emit, and re-plan against the new geometry.
-    if (anchors.length > 0 && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
+    // A shared band's next column can also be too short (govdocs 000131's
+    // survey boxes); keep moving the anchors with their paragraph.
+    while (anchors.length > 0 && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
       restartOnNextColumn(0);
       breaks = planBreaks();
     }
@@ -7318,8 +7366,9 @@ class Engine {
     // be consumed by measurement: snapshot.
     const snapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
     const seenSnapshot = new Set(this.seenNumIds);
+    const sp = page.hfSp ?? page.sp;
     const origin = reserveBodyClearance
-      ? { x: page.sp.marginLeft + page.sp.gutter, y: page.sp.headerDistance }
+      ? { x: sp.marginLeft + sp.gutter, y: sp.headerDistance }
       : undefined;
     // A FOOTER paragraph framed to the PAGE (w:framePr vAnchor="page") is
     // positioned absolutely and consumes no footer flow, so it must not
@@ -7403,7 +7452,7 @@ class Engine {
       page.hfStart = 0;
       return;
     }
-    const sp = page.sp;
+    const sp = page.hfSp ?? page.sp;
     this.sp = sp; // frames built here must resolve anchors against this page's section
     if (emitBorders) this.emitPageBorders(page);
     page.hfStart = page.items.length;
