@@ -7031,9 +7031,7 @@ class Engine {
           if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
           else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
         }
-        // Lines from chainEnd on flow into the next box in the chain. The
-        // .doc reader chains every box whose shape names a next shape, so a
-        // one-line label box can be a chain of one (GovDocs 042652).
+        // Lines from chainEnd on flow into the next box in the chain.
         const chainEnd = chained ? chainBoxEnd(inner.items, skipTopY, capacity) : Infinity;
         // Every text box keeps a full-box hit target, including Word's
         // transparent/borderless VML text boxes. It is emitted before the

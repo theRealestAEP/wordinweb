@@ -40,8 +40,8 @@ function box(opts: { x: number; y: number; cx: number; cy: number; story: string
 
 const para = (text: string, sz = 24) => `<w:p><w:r><w:rPr><w:sz w:val="${sz}"/></w:rPr><w:t>${text}</w:t></w:r></w:p>`;
 
-function layout(body: string) {
-  const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body + LETTER) }));
+function layout(body: string, styles?: string) {
+  const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body + LETTER), ...(styles ? { "word/styles.xml": styles } : {}) }));
   return { doc, result: layoutDocument(doc, { measurer }) };
 }
 
@@ -75,9 +75,8 @@ describe("a text box shorter than one line of its text (GovDocs 042652)", () => 
     expect(result.pages[0].hiddenText?.some((t) => t.text === "BELOW")).toBe(true);
   });
 
-  it("paints the line of a box the .doc reader wrote as a chain of one", () => {
-    // The .doc reader gives a box an id when its shape names a next shape,
-    // even with no box continuing it (all 558 boxes of 042652).
+  it("paints the first line of a chained box shorter than the line", () => {
+    // A chain of one: a box with an id that no wps:linkedTxbx continues.
     const story = `<wps:txbx id="468"><w:txbxContent>${para("LABEL")}</w:txbxContent></wps:txbx>`;
     const { result } = layout(`<w:p>${box({ x: 914400, y: 914400, cx: 4998720, cy, story })}<w:r><w:t>Anchor</w:t></w:r></w:p>`);
     const label = texts(result.pages[0].items).find((t) => t.text === "LABEL");
@@ -346,5 +345,33 @@ describe("a tall box anchored near the page bottom (GovDocs 026966, 029456, 0746
     const rendered = renderToDom(doc, result, container);
     const last = rendered.bindings.map((b) => b.el).find((e) => e.textContent === "boxline24")!;
     expect(parseFloat(last.style.top)).toBeLessThan(1056);
+  });
+});
+
+describe("a blank paragraph's mark size in a text box (GovDocs 092399)", () => {
+  const styles =
+    `<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` +
+    `<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="36"/></w:rPr></w:rPrDefault></w:docDefaults></w:styles>`;
+  const paragraphs = para("Line A", 16) + `<w:p><w:pPr><w:rPr><w:sz w:val="12"/></w:rPr></w:pPr></w:p>` + para("Line B", 16);
+  const story = `<wps:txbx><w:txbxContent>${paragraphs}</w:txbxContent></wps:txbx>`;
+  const body = `<w:p>${box({ x: 914400, y: 914400, cx: 3000000, cy: 1500000, story })}</w:p>`;
+  const gap = (result: ReturnType<typeof layoutDocument>) => {
+    const lines = texts(result.pages[0].items);
+    return lines.find((t) => t.src?.t?.text === "Line B")!.lineTop - lines.find((t) => t.src?.t?.text === "Line A")!.lineTop;
+  };
+
+  it("advances the same distance as the body", () => {
+    const bodyGap = gap(layout(paragraphs, styles).result);
+    const boxGap = gap(layout(body, styles).result);
+    expect(Math.abs(boxGap - bodyGap)).toBeLessThanOrEqual(0.5);
+  });
+
+  it("draws Line B at its laid-out line top in the DOM", () => {
+    const { doc, result } = layout(body, styles);
+    const container = document.createElement("div");
+    const rendered = renderToDom(doc, result, container);
+    const line = texts(result.pages[0].items).find((t) => t.src?.t?.text === "Line B")!;
+    const el = rendered.bindings.find((b) => b.item.src?.t?.text === "Line B")!.el;
+    expect(Math.abs(parseFloat(el.style.top) - line.lineTop)).toBeLessThanOrEqual(0.5);
   });
 });
