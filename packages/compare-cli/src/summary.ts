@@ -1,4 +1,4 @@
-import { XmlElement, child } from "../../core/src/xml.js";
+import { XmlElement, child, localName } from "../../core/src/xml.js";
 import { RevisionKind } from "../../core/src/edit/suggest.js";
 
 /**
@@ -25,8 +25,14 @@ function heading(spec: SummarySpec, when: string): string {
   return withDate ? `Summary report: document comparison done on ${when}` : "Summary report: document comparison";
 }
 
-/** The summary as body XML, to go ahead of the body's final sectPr. */
-export function summaryXml(spec: SummarySpec, date: string, revisions: Record<RevisionKind, number>, notes: string[], sectPr: XmlElement | undefined): string {
+/** The comments (replies too) in the result's comments part, for the summary's count. */
+export function commentCount(comments: XmlElement | null): number {
+  return (comments?.children ?? []).filter((c) => localName(c.name) === "comment").length;
+}
+
+/** The summary as body XML, to go ahead of the body's final sectPr. The
+ * comments are counted on a row of their own, after the total of changes. */
+export function summaryXml(spec: SummarySpec, date: string, revisions: Record<RevisionKind, number>, comments: number, notes: string[], sectPr: XmlElement | undefined): string {
   const width = textWidth(sectPr);
   const first = Math.round(width * 0.74);
   const widths = [first, width - first];
@@ -42,6 +48,7 @@ export function summaryXml(spec: SummarySpec, date: string, revisions: Record<Re
     row([["Table Delete", false], [String(revisions.rowDeletion), false]]),
     row([["Format changes", false], [String(revisions.runFormat + revisions.paragraphFormat + revisions.tableFormat + revisions.rowFormat + revisions.cellFormat + revisions.sectionFormat), false]]),
     row([["Total Changes:", true], [String(total), true]]),
+    row([["Comments", false], [String(comments), false]]),
     ...[...new Set(notes)].map((note) => row([[`Note: ${note}`, false]])),
   ];
   const borders = ["top", "left", "bottom", "right", "insideH", "insideV"].map((side) => `<w:${side} w:val="single" w:sz="4" w:space="0" w:color="auto"/>`).join("");

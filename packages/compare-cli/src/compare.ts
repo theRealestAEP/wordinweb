@@ -50,7 +50,7 @@ import { Input, ROW_SLOT, Side, readInput, stubSource } from "./input.js";
 import { barParagraphs, flatten, markLastParagraph } from "./printable.js";
 import { DiskNotes } from "./notes.js";
 import { BlockStore } from "./store.js";
-import { SummarySpec, summaryXml } from "./summary.js";
+import { SummarySpec, commentCount, summaryXml } from "./summary.js";
 import { ZipEntry, ZipReader, ZipWriter, mb } from "./zip.js";
 
 export { CompareError, type CompareErrorCode } from "./errors.js";
@@ -69,7 +69,8 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
   /**
    * End the printable copy (and so the PDF) with a summary page the compare
    * writes itself (summary.ts): the date, the two documents' names, the
-   * revision counts, their total, and each distinct note. Its first row is
+   * revision counts, their total, the number of comments, and each distinct
+   * note. Its first row is
    * "Summary report: document comparison done on <date>", or "<title>,
    * <date>" with `summary.title`. It follows `printable.beforeSectPr` when
    * both are given. It is never in the tracked result.
@@ -212,7 +213,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const custom = printableSpec?.beforeSectPr;
     const beforeSectPr =
       (typeof custom === "function" ? custom(revisions) : custom ?? "") +
-      (options.summary ? summaryXml(options.summary, options.date ?? new Date().toISOString(), revisions, noted, child(child(R.shell.docRoot, "body"), "sectPr")) : "");
+      (options.summary ? summaryXml(options.summary, options.date ?? new Date().toISOString(), revisions, commentCount(R.shell.commentsTree()), noted, child(child(R.shell.docRoot, "body"), "sectPr")) : "");
     await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
     await options.onResultWritten?.();
     if (options.pdf && printableSpec) {

@@ -9,7 +9,7 @@ import { XmlElement, child, localName, parseXml } from "../../core/src/xml.js";
 
 const FORMAT_CHANGES = new Set(["rPrChange", "pPrChange", "tblPrChange", "trPrChange", "tcPrChange", "sectPrChange", "tblGridChange", "numberingChange", "cellIns", "cellDel", "cellMerge"]);
 const PROPERTIES = new Set(["rPr", "pPr", "trPr", "tcPr"]);
-const INSERTED = ['<w:strike w:val="0"/>', '<w:dstrike w:val="0"/>', '<w:color w:val="0000FF"/>', '<w:u w:val="single"/>'];
+const INSERTED = ['<w:strike w:val="0"/>', '<w:dstrike w:val="0"/>', '<w:color w:val="0000FF"/>', '<w:u w:val="double"/>'];
 const DELETED = ["<w:strike/>", '<w:dstrike w:val="0"/>', '<w:color w:val="FF0000"/>'];
 const CHANGE_BAR = '<w:left w:val="single" w:sz="6" w:space="12" w:color="000000"/>';
 
@@ -28,12 +28,13 @@ const PPR_ORDER = [
 const PBDR_ORDER = ["top", "left", "bottom", "right", "between", "bar"];
 
 /**
- * Rewrite each revision in `element` as plain formatting: an insertion's
- * runs blue and underlined, a deletion's red and struck through. A format
- * change keeps its words, so there is nothing to color; its paragraph gets
- * a change bar in the margin, and a table's, row's, cell's or section's
- * format change puts the bar on every paragraph of it (the body's last
- * paragraph for the final section). The revision markers inside paragraph
+ * Rewrite each revision in `element` as plain formatting, as a legal
+ * blackline prints it: an insertion's runs blue and double underlined, a
+ * deletion's red and struck through. Every paragraph that holds a change
+ * gets a change bar in the margin. A format change keeps its words, so
+ * there is nothing to color; a table's, row's, cell's or section's format
+ * change puts the bar on every paragraph of it (the body's last paragraph
+ * for the final section). The revision markers inside paragraph
  * and row properties carry no text and are dropped; a row or cell the
  * marker inserted or deleted has every run below it marked, nested tables
  * and all. `inside` names the revision the element is inside already (a
@@ -43,7 +44,7 @@ const PBDR_ORDER = ["top", "left", "bottom", "right", "between", "bar"];
 export function flatten(element: XmlElement, inside: Revision = null): XmlElement {
   const ln = localName(element.name);
   // What the element's own properties say, read before the markers go.
-  if (ln === "p" && contains(element, FORMAT_CHANGES)) changeBar(element);
+  if (ln === "p" && (inside || contains(element, FORMAT_CHANGES) || contains(element, REVISIONS))) changeBar(element);
   const properties = child(element, `${ln}Pr`);
   const barred =
     (ln === "tbl" && (child(properties, "tblPrChange") || child(child(element, "tblGrid"), "tblGridChange"))) ||
@@ -61,14 +62,11 @@ export function flatten(element: XmlElement, inside: Revision = null): XmlElemen
   const sdtPr = ln === "sdt" && (below || contains(element, REVISIONS)) ? child(element, "sdtPr") : undefined;
   if (sdtPr) removeNamed(sdtPr, "dataBinding");
   const kept: XmlElement[] = [];
-  let picture = false;
   for (const node of element.children) {
     const name = localName(node.name);
     if (FORMAT_CHANGES.has(name)) continue;
     if (name === "ins" || name === "del") {
       if (PROPERTIES.has(localName(element.name))) continue;
-      // A picture has no text to color: its paragraph gets the change bar.
-      picture ||= ln === "p" && contains(node, PICTURES);
       flatten(node, name);
       for (const run of node.children) markRuns(run, name);
       kept.push(...node.children);
@@ -83,7 +81,6 @@ export function flatten(element: XmlElement, inside: Revision = null): XmlElemen
     kept.push(node);
   }
   element.children = kept;
-  if (picture) changeBar(element);
   if (barred) barParagraphs(element);
   if (rowMarker) markRuns(element, rowMarker);
   if (cellMarker) markRuns(element, cellMarker);
@@ -91,7 +88,6 @@ export function flatten(element: XmlElement, inside: Revision = null): XmlElemen
   return element;
 }
 
-const PICTURES = new Set(["drawing", "pict", "object"]);
 const REVISIONS = new Set(["ins", "del"]);
 type Revision = "ins" | "del" | null;
 /** The run containers a field's runs can sit in, inside a paragraph. */

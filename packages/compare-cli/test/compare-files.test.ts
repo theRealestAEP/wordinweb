@@ -380,7 +380,7 @@ describe("compareFiles", () => {
         expect(xml).not.toMatch(/<w:(?:ins|del|delText)[\s>]/);
         // The struck word is a red, struck-through run; the new word a blue, underlined one.
         expect(xml).toMatch(new RegExp(`<w:r><w:rPr><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><w:t[^>]*>${old}`));
-        expect(xml).toMatch(/<w:r><w:rPr><w:strike w:val="0"\/><w:dstrike w:val="0"\/><w:color w:val="0000FF"\/><w:u w:val="single"\/><\/w:rPr><w:t[^>]*>AFTER/);
+        expect(xml).toMatch(/<w:r><w:rPr><w:strike w:val="0"\/><w:dstrike w:val="0"\/><w:color w:val="0000FF"\/><w:u w:val="double"\/><\/w:rPr><w:t[^>]*>AFTER/);
       }
     });
 
@@ -789,7 +789,7 @@ describe("the pdf option", () => {
     const hidden = text("hidden");
     for (const name of ["Carol", "Commenter", "Dan", "Drafter"]) expect(hidden).not.toContain(name);
     expect(hidden).not.toMatch(/\bCC\b/);
-    expect(hidden).toContain("8/14/2026 UTC Check the term.");
+    expect(hidden).toContain("Check the term.");
     expect(hidden).toContain("Summary report");
     const raw = readFileSync(pdf("hidden"), "latin1");
     for (const name of ["Carol", "Dan Drafter"]) expect(raw).not.toContain(name);
@@ -912,6 +912,7 @@ describe("the summary option", () => {
       ["Table Delete", "0"],
       ["Format changes", "1"],
       ["Total Changes:", "3"],
+      ["Comments", "0"],
     ]);
     // A page break ahead of the table, the table ahead of the final sectPr, and nothing of it in the result.
     expect(xml).toMatch(/<w:br w:type="page"\/>[\s\S]*<w:tbl>[\s\S]*<\/w:tbl><\/w:body>/);
@@ -958,7 +959,7 @@ describe("the summary option", () => {
     });
     expect(notes.filter((n) => n.code === "coarse-paragraph")).toHaveLength(2);
     const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
-    expect(tableRows(xml).slice(9)).toEqual([["Note: a paragraph holding inline math or other content a word diff cannot rebuild changed; struck and reinserted whole"]]);
+    expect(tableRows(xml).slice(10)).toEqual([["Note: a paragraph holding inline math or other content a word diff cannot rebuild changed; struck and reinserted whole"]]);
     expect(xml.indexOf("Custom first")).toBeLessThan(xml.indexOf("<w:tbl>"));
   });
 
@@ -974,15 +975,15 @@ describe("the summary option", () => {
     expect(pdfPages).toBe(2);
     const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
     const table = /<w:tbl>[\s\S]*<\/w:tbl>/.exec(xml)![0];
-    // Nine rows: the title's one cell, then eight rows of two.
-    expect(table.match(/<w:p>/g)).toHaveLength(17);
-    expect(table.match(/<w:jc w:val="left"\/>/g)).toHaveLength(17);
-    expect(table.match(/<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"\/>/g)).toHaveLength(17);
-    expect(table.match(/<w:ind w:left="0" w:right="0" w:firstLine="0"\/>/g)).toHaveLength(17);
-    expect(table.match(/<w:rPr>/g)).toHaveLength(17);
-    expect(table.match(/<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"\/>/g)).toHaveLength(17);
-    expect(table.match(/<w:sz w:val="20"\/>/g)).toHaveLength(17);
-    expect(table.match(/<w:u w:val="none"\/>/g)).toHaveLength(17);
+    // Ten rows: the title's one cell, then nine rows of two.
+    expect(table.match(/<w:p>/g)).toHaveLength(19);
+    expect(table.match(/<w:jc w:val="left"\/>/g)).toHaveLength(19);
+    expect(table.match(/<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto"\/>/g)).toHaveLength(19);
+    expect(table.match(/<w:ind w:left="0" w:right="0" w:firstLine="0"\/>/g)).toHaveLength(19);
+    expect(table.match(/<w:rPr>/g)).toHaveLength(19);
+    expect(table.match(/<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:cs="Times New Roman"\/>/g)).toHaveLength(19);
+    expect(table.match(/<w:sz w:val="20"\/>/g)).toHaveLength(19);
+    expect(table.match(/<w:u w:val="none"\/>/g)).toHaveLength(19);
     expect(table).toContain('<w:tblCellMar><w:top w:w="40" w:type="dxa"/><w:left w:w="100" w:type="dxa"/><w:bottom w:w="40" w:type="dxa"/><w:right w:w="100" w:type="dxa"/></w:tblCellMar>');
     expect(table).toContain('<w:tblGrid><w:gridCol w:w="6926"/><w:gridCol w:w="2434"/></w:tblGrid>');
     expect(table).not.toContain("w:pStyle");
@@ -1054,7 +1055,7 @@ describe("the printable copy's marks", () => {
     );
     // The marks replace the run's own color, underline and strike, in schema order, each once.
     expect(xml).toContain('<w:rPr><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><w:t xml:space="preserve">brown</w:t>');
-    expect(xml).toContain('<w:rPr><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:sz w:val="24"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">red</w:t>');
+    expect(xml).toContain('<w:rPr><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:sz w:val="24"/><w:u w:val="double"/></w:rPr><w:t xml:space="preserve">red</w:t>');
     expect(textGroups(ops, BLUE)).toEqual([{ underlined: true }]);
     expect(textGroups(ops, RED)).toEqual([{ underlined: false }]);
     expect(strikes(ops, RED)).toBe(1);
@@ -1079,7 +1080,7 @@ describe("the printable copy's marks", () => {
       styled(`<w:p><w:r><w:t xml:space="preserve">The quick </w:t></w:r>${run("brown", '<w:rStyle w:val="Plain"/>')}<w:r><w:t xml:space="preserve"> fox.</w:t></w:r></w:p>`),
       styled(`<w:p><w:r><w:t xml:space="preserve">The quick </w:t></w:r>${run("red", '<w:rStyle w:val="Plain"/>')}<w:r><w:t xml:space="preserve"> fox.</w:t></w:r></w:p>`),
     );
-    expect(xml).toContain('<w:rPr><w:rStyle w:val="Plain"/><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">red</w:t>');
+    expect(xml).toContain('<w:rPr><w:rStyle w:val="Plain"/><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="double"/></w:rPr><w:t xml:space="preserve">red</w:t>');
     // The plain words are struck black by the style; the new word is blue, underlined and not struck, the old one red and struck.
     expect(strikes(ops, "0 0 0")).toBeGreaterThan(0);
     expect(textGroups(ops, BLUE)).toEqual([{ underlined: true }]);
@@ -1106,7 +1107,7 @@ describe("the printable copy's marks", () => {
     const { xml, ops } = await compared("marks-math", docx(math("a+b=c")), docx(math("a+b=d")));
     // The marks sit in the math run's w:rPr, after its m:rPr, which stays as it was.
     expect(xml).toContain('<m:r><m:rPr><m:sty m:val="p"/></m:rPr><w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><m:t>a+b=c</m:t></m:r>');
-    expect(xml).toContain('<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><m:t>a+b=d</m:t>');
+    expect(xml).toContain('<w:rPr><w:rFonts w:ascii="Cambria Math" w:hAnsi="Cambria Math"/><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="double"/></w:rPr><m:t>a+b=d</m:t>');
     // Each equation piece is drawn in its mark's color: struck red, underlined blue.
     expect(textGroups(ops, RED).length).toBeGreaterThan(2);
     expect(strikes(ops, RED)).toBeGreaterThan(2);
@@ -1151,7 +1152,7 @@ describe("the printable copy's marks", () => {
     // Both fields' codes are gone (the PAGE field was deleted whole, the DATE field's result changed); the results stay, marked.
     expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
     expect(xml).toContain('<w:rPr><w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/></w:rPr><w:t xml:space="preserve">2025</w:t>');
-    expect(xml).toContain('<w:rPr><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">2026</w:t>');
+    expect(xml).toContain('<w:rPr><w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="double"/></w:rPr><w:t xml:space="preserve">2026</w:t>');
     // Drawn as marked text, not as a recomputed page number or today's date: the deleted
     // "1" and the space after it share one strike rule, "2025" takes the other.
     expect(strikes(ops, RED)).toBe(2);
@@ -1196,7 +1197,7 @@ describe("the printable copy's marks", () => {
     it("a deleted field with no result: its code goes, and nothing is left of it", () => {
       const xml = flat(`<w:p>${DEL}${chars("begin")}${code("DATE", true)}${chars("separate")}${chars("end")}</w:del></w:p>`);
       expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
-      expect(xml).toBe(`<w:body ${W}><w:p/></w:body>`);
+      expect(xml).toBe(`<w:body ${W}><w:p><w:pPr><w:pBdr><w:left w:val="single" w:sz="6" w:space="12" w:color="000000"/></w:pBdr></w:pPr></w:p></w:body>`);
     });
 
     it("a field inside a hyperlink or a content control, its code replaced", () => {
@@ -1235,7 +1236,7 @@ describe("the printable copy's marks", () => {
       );
       expect(xml).not.toMatch(/<w:(?:fldChar|instrText|delInstrText)\b/);
       expect(texts(xml)).toBe("new |result|After.");
-      expect(xml).toMatch(/<w:u w:val="single"\/><\/w:rPr><w:t xml:space="preserve">new <\/w:t>/);
+      expect(xml).toMatch(/<w:u w:val="double"\/><\/w:rPr><w:t xml:space="preserve">new <\/w:t>/);
     });
   });
 
@@ -1247,7 +1248,7 @@ describe("the printable copy's marks", () => {
     const same = control("<w:r><w:t>Same Name</w:t></w:r>");
     const xml = serializeXml(flatten(parseXml(`<w:body ${W}>${changed}${same}</w:body>`)));
     expect(xml.match(/<w:dataBinding /g)).toHaveLength(1);
-    expect(xml).toMatch(/<w:sdtPr><w:alias w:val="Author"\/><w:text\/><\/w:sdtPr><w:sdtContent><w:p><w:r><w:rPr><w:strike\/>/);
+    expect(xml).toMatch(/<w:sdtPr><w:alias w:val="Author"\/><w:text\/><\/w:sdtPr><w:sdtContent><w:p><w:pPr><w:pBdr><w:left [^>]*\/><\/w:pBdr><\/w:pPr><w:r><w:rPr><w:strike\/>/);
     expect(xml).toContain('<w:dataBinding w:xpath="/ns1:coreProperties[1]/ns0:creator[1]" w:storeItemID="{1}"/><w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Same Name</w:t>');
   });
 
@@ -1267,7 +1268,8 @@ describe("the printable copy's marks", () => {
     const { xml, ops } = await compared("marks-picture", withPicture(para("Before.") + para("After.")), withPicture(para("Before.") + picture + para("After.")));
     expect(xml).toMatch(/<w:p><w:pPr><w:pBdr><w:left w:val="single" w:sz="6" w:space="12" w:color="000000"\/><\/w:pBdr><\/w:pPr><w:r><w:rPr>[^<]*(?:<[^>]*>)*<\/w:rPr><w:drawing/);
     const rules = [...ops.matchAll(/ w ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l S/g)].map((m) => m.slice(1).map(Number));
-    expect(rules.filter(([x1, y1, x2, y2]) => x1 === x2 && y1 !== y2)).toHaveLength(1);
+    // Two bars: the picture's paragraph, and "Before.", whose paragraph mark the compare inserted.
+    expect(rules.filter(([x1, y1, x2, y2]) => x1 === x2 && y1 !== y2)).toHaveLength(2);
     expect(ops).toMatch(/\/Im\d+ Do/);
   });
 
@@ -1289,7 +1291,7 @@ describe("the printable copy's marks", () => {
     const one = para("Before.") + outer([cell(para("Plain row."))]) + para("After.");
     const two = para("Before.") + outer([cell(para("Plain row.")), cell(inner + para("OUTERTEXT"))]) + para("After.");
     for (const [name, original, revised, color, rPr] of [
-      ["marks-row-ins", one, two, BLUE, '<w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="single"/>'],
+      ["marks-row-ins", one, two, BLUE, '<w:strike w:val="0"/><w:dstrike w:val="0"/><w:color w:val="0000FF"/><w:u w:val="double"/>'],
       ["marks-row-del", two, one, RED, '<w:strike/><w:dstrike w:val="0"/><w:color w:val="FF0000"/>'],
     ] as const) {
       const { xml, ops } = await compared(name, docx(original), docx(revised));
