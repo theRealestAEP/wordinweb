@@ -6,9 +6,11 @@ import { strFromU8, unzipSync, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
 import { docToDocxFiles, openDoc } from "../src/doc/convert.js";
 import { drawingHooks } from "../src/doc/drawing-hooks.js";
+import { describeShape } from "../src/doc/drawings.js";
 import type { DocFloatingShape, DocFspa, DocShape } from "../src/doc/drawings.js";
 import { anchoredShapeXml } from "../src/doc/drawings-xml.js";
-import { REC, readProps, propFlag, propNumber } from "../src/doc/officeart.js";
+import { REC, readProps, readRecord, propFlag, propNumber } from "../src/doc/officeart.js";
+import type { ArtImage } from "../src/doc/officeart.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { prepareWmf } from "../src/render/wmf.js";
 import { bytesSource } from "../src/stream/source.js";
@@ -87,6 +89,18 @@ describe("doc drawings: pictures", () => {
     expect(rule).toBeDefined();
     expect(rule).toContain('<a:srgbClr val="808080">');
     expect(rule).toContain('<wp:extent cx="5943600"');
+  });
+
+  it("gives a floating picture frame with no pib no picture", () => {
+    // As in GovDocs1 031882.doc: a picture frame (type 75) with no pib in a group used to show BLIP 1, a texture, over the group.
+    const header = (verInst: number, type: number, length: number): number[] => [verInst & 0xff, verInst >> 8, type & 0xff, type >> 8, length & 0xff, (length >> 8) & 0xff, 0, 0];
+    const fsp = [...header((75 << 4) | 2, 0xf00a, 8), 0x49, 0x05, 0, 0, 0, 0x0a, 0, 0];
+    const fopt = header(3, 0xf00b, 0);
+    const bytes = new Uint8Array([...header(0x0f, 0xf004, fsp.length + fopt.length), ...fsp, ...fopt]);
+    const texture = { type: "png", ext: "png", contentType: "image/png", data: new Uint8Array([1]) } as unknown as ArtImage;
+    const shape = describeShape(bytes, readRecord(bytes, 0)!, { blips: (index) => (index === 1 ? texture : null), lookupDelayed: null });
+    expect(shape.kind).toBe("picture");
+    expect(shape.picture?.image).toBeNull();
   });
 
   it("writes a header WordArt as a VML text path in its fill colour, behind the text", () => {
