@@ -3641,7 +3641,9 @@ function buildAtoms(
             : content.customMarkFollows
               ? ""
             : (fields.noteMark?.(content.noteType, content.id) ?? "");
-          if (!text) break;
+          // The following text paints a custom mark; this empty fragment
+          // carries its note id so the reference line still reserves the note.
+          if (!text && !content.customMarkFollows) break;
           // Word's FootnoteReference style supplies superscript; force it
           // when the document's style chain doesn't, matching Word's look.
           const markProps = props.verticalAlign ? props : { ...props, verticalAlign: "superscript" as const };

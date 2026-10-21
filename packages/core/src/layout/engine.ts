@@ -682,13 +682,13 @@ export class Prescan {
   readonly refPosition: FieldMemo<"above" | "below">;
   readonly refParaNumber: FieldMemo<string>;
   readonly seqCounters = new Map<string, number>();
-  readonly footnoteNumbers = new Map<number, number>();
-  readonly endnoteNumbers = new Map<number, number>();
+  readonly footnoteNumbers = new Map<number, number | string>();
+  readonly endnoteNumbers = new Map<number, number | string>();
   /** Each bookmark's first-seen paragraph ordinal, and whether that paragraph carries list numbering. */
   private readonly bmOrdinal = new Map<string, number>();
   private readonly bmNumbered = new Map<string, boolean>();
   private readonly refs: { field: FieldContent; ordinal: number; target: string; position: boolean; number: boolean }[] = [];
-  private readonly notes: { type: "footnote" | "endnote"; id: number; section: number }[] = [];
+  private readonly notes: { type: "footnote" | "endnote"; id: number; section: number; customMark?: string }[] = [];
   private ordinal = 0;
   private section = 0;
 
@@ -713,32 +713,36 @@ export class Prescan {
         this.bmNumbered.set(nm, !!block.props.numbering);
       }
     }
-    for (const c of block.children) {
-      const runs = c.type === "run" ? [c] : c.runs;
-      for (const r of runs) {
-        for (const rc of r.content) {
-          if (rc.kind === "noteRef") {
-            if (rc.self || rc.customMarkFollows) continue;
-            // A reference in hidden text (w:vanish, its own or its paragraph
-            // style's) is not shown, and Word omits its note too.
-            if (block.type === "paragraph" && this.doc.effectiveRunProps(block, r.props).vanish) continue;
-            const known = rc.noteType === "footnote" ? this.doc.footnotes : this.doc.endnotes;
-            if (known.has(rc.id)) this.notes.push({ type: rc.noteType, id: rc.id, section: this.section });
-            continue;
+    const runs = block.children.flatMap((c) => c.type === "run" ? [c] : c.runs);
+    for (const [runIndex, r] of runs.entries()) {
+      for (const [contentIndex, rc] of r.content.entries()) {
+        if (rc.kind === "noteRef") {
+          if (rc.self) continue;
+          // A reference in hidden text (w:vanish, its own or its paragraph
+          // style's) is not shown, and Word omits its note too.
+          if (block.type === "paragraph" && this.doc.effectiveRunProps(block, r.props).vanish) continue;
+          const known = rc.noteType === "footnote" ? this.doc.footnotes : this.doc.endnotes;
+          if (known.has(rc.id)) {
+            // Symbols are parsed as text too. The mark can follow the
+            // reference in the same run or in the next run.
+            const following = r.content[contentIndex + 1] ?? runs[runIndex + 1]?.content[0];
+            const customMark = rc.customMarkFollows ? (following?.kind === "text" ? following.text : "") : undefined;
+            this.notes.push({ type: rc.noteType, id: rc.id, section: this.section, customMark });
           }
-          if (rc.kind !== "field") continue;
-          const parts = rc.instruction.trim().split(/\s+/);
-          if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
-            assignSeq(this.seq, this.seqCounters, parts[1], rc, rc.instruction.trim());
-          }
-          // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
-          // "above"/"below" instead of the bookmark's page number.
-          const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
-          if (!m) continue;
-          const position = /\\p(\s|$)/i.test(m[2]);
-          const number = /\\r(\s|$)/i.test(m[2]);
-          if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
+          continue;
         }
+        if (rc.kind !== "field") continue;
+        const parts = rc.instruction.trim().split(/\s+/);
+        if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
+          assignSeq(this.seq, this.seqCounters, parts[1], rc, rc.instruction.trim());
+        }
+        // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
+        // "above"/"below" instead of the bookmark's page number.
+        const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
+        if (!m) continue;
+        const position = /\\p(\s|$)/i.test(m[2]);
+        const number = /\\r(\s|$)/i.test(m[2]);
+        if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
       }
     }
   }
@@ -770,7 +774,7 @@ export class Prescan {
       }
       const numbers = note.type === "footnote" ? this.footnoteNumbers : this.endnoteNumbers;
       if (numbers.has(note.id)) continue;
-      numbers.set(note.id, note.type === "footnote" ? ++fnCounter : ++enCounter);
+      numbers.set(note.id, note.customMark ?? (note.type === "footnote" ? ++fnCounter : ++enCounter));
     }
   }
 }
@@ -844,9 +848,9 @@ class Engine {
   /** Linked text-box chains (wps:linkedTxbx): the seq-0 box records its story
    * and the frame-local Y at which it overflowed, so later boxes continue it. */
   private textboxChains = new Map<string, { blocks: Block[]; consumedY: number }>();
-  /** Note id → sequential display number, assigned in document order pre-layout. */
-  private footnoteNumbers = new Map<number, number>();
-  private endnoteNumbers = new Map<number, number>();
+  /** Note id → display number or custom mark, assigned in document order pre-layout. */
+  private footnoteNumbers = new Map<number, number | string>();
+  private endnoteNumbers = new Map<number, number | string>();
   private placedFootnotes = new Set<number>();
   /** Laid-out footnote content cache (id@width → frame). */
   private noteCache = new Map<string, { items: PageItem[]; height: number }>();
@@ -3232,12 +3236,14 @@ class Engine {
 
   private footnoteMark(id: number): string {
     const n = this.footnoteNumbers.get(id);
+    if (typeof n === "string") return n;
     if (n === undefined) return "";
     return formatNoteMark(n, this.sp.footnoteNumFmt ?? "decimal");
   }
 
   private endnoteMark(id: number): string {
     const n = this.endnoteNumbers.get(id);
+    if (typeof n === "string") return n;
     if (n === undefined) return "";
     return formatNoteMark(n, this.sp.endnoteNumFmt ?? "lowerRoman");
   }
@@ -3406,7 +3412,7 @@ class Engine {
   /** Endnotes flow after the last body block, under their own separator. */
   private placeEndnotes(): void {
     if (this.endnoteNumbers.size === 0 || this.pages.length === 0) return;
-    const ids = [...this.endnoteNumbers.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+    const ids = [...this.endnoteNumbers.keys()];
     if (this.y + NOTE_SEP_H > this.bodyBottom) this.nextColumn();
     const x0 = this.colX;
     const sepY = this.y + NOTE_SEP_H * 0.6;

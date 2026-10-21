@@ -3010,11 +3010,11 @@ describe("footnotes and endnotes", () => {
     expect(notePage).toBe(refPage);
   });
 
-  it("keeps each footnote on the same page as its reference", () => {
+  it.each([false, true])("keeps each footnote on the same page as its reference (custom mark: %s)", (custom) => {
     const filler = (n: number, from = 0) =>
       Array.from({ length: n }, (_, i) => p(`Filler paragraph ${from + i}`)).join("");
     const refPara = (word: string, id: number) =>
-      `<w:p><w:r><w:t xml:space="preserve">${word}</w:t></w:r><w:r><w:footnoteReference w:id="${id}"/></w:r></w:p>`;
+      `<w:p><w:r><w:t xml:space="preserve">${word}</w:t></w:r><w:r><w:footnoteReference w:id="${id}"${custom ? ' w:customMarkFollows="1"' : ""}/>${custom ? "<w:t>*</w:t>" : ""}</w:r></w:p>`;
     const { result } = layout({
       "word/document.xml": wrapDocument(
         refPara("HEADREF", 1) + filler(70) + refPara("TAILREF", 2) + filler(5, 70),
@@ -3034,10 +3034,10 @@ describe("footnotes and endnotes", () => {
     const tailPage = pageOf("TAILREF");
     expect(tailPage).toBeGreaterThan(0);
     expect(pageOf("betanote")).toBe(tailPage);
-    // Numbering follows document order.
+    // Each reference and its note use the same mark.
     expect(pageText(result, 0)).toContain("alphanote");
     const tailMarks = result.pages[tailPage].items.filter(
-      (i) => i.kind === "text" && i.text === "2" && i.props.verticalAlign === "superscript",
+      (i) => i.kind === "text" && i.text === (custom ? "*" : "2"),
     );
     expect(tailMarks.length).toBe(2);
   });
