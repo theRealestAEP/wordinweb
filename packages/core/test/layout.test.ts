@@ -5415,6 +5415,30 @@ describe("floating table flow and overlap", () => {
   });
 });
 
+describe("nested table taller than the page", () => {
+  // GovDocs1 086826 and 089704 (doc97-check-d B9): the outer row never split,
+  // because the nested cells' paragraph numbers collided and the row split
+  // took two nested rows for one paragraph. Its rows ran off the page.
+  it("splits the outer row and continues the nested rows on the next page", () => {
+    const tall = `<w:tr><w:trPr><w:trHeight w:val="9690"/></w:trPr><w:tc><w:p/></w:tc></w:tr>`;
+    const body =
+      p("Before") +
+      `<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tbl><w:tblPr/><w:tblGrid/>` +
+      tall + tall + `<w:tr><w:tc>${p("Closing Ceremony")}</w:tc></w:tr>` +
+      `</w:tbl><w:p/></w:tc></w:tr></w:tbl>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(body) });
+    expect(result.pages.length).toBe(2);
+    expect(pageText(result, 1)).toContain("Closing");
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "text" && item.text.trim()) {
+          expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.01);
+        }
+      }
+    }
+  });
+});
+
 describe("repeated header rows", () => {
   const cell = (body: string) => `<w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${body}</w:tc>`;
   const table = (header: string, rows: string[]) =>
@@ -5468,23 +5492,21 @@ describe("repeated header rows", () => {
     expect(picture.y + picture.height).toBeLessThanOrEqual(result.pages[1].bodyBottom);
   });
 
-  it("reserves all three text lines before repeating the header", () => {
+  it("splits a three-line row below the repeated header", () => {
+    // Below the header the row is at the top of its page: it cannot move on,
+    // so it splits at any line, and every page keeps the header.
     const { result } = layout({
       "word/document.xml": wrapDocument(smallTable([
         header50(), smallRow([line25("BODY"), line25("")]),
         smallRow([line25("ONE") + line25("TWO") + line25("THREE"), line25("")]),
       ]) + smallSection),
     });
-    expect(result.pages).toHaveLength(2);
     expect(pageText(result, 0)).toBe("HEADBODY");
-    expect(pageText(result, 1)).toBe("ONETWOTHREE");
-    expect(count(result, "HEAD")).toBe(1);
-    const lines = result.pages[1].items.filter((item) => item.kind === "text" && item.text);
-    expect(lines).toHaveLength(3);
-    for (const item of lines) {
-      if (item.kind === "text") {
-        expect(item.lineHeight).toBeCloseTo(25, 3);
-        expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(result.pages[1].bodyBottom);
+    for (let i = 1; i < result.pages.length; i++) expect(pageText(result, i).startsWith("HEAD")).toBe(true);
+    for (const text of ["ONE", "TWO", "THREE"]) expect(count(result, text)).toBe(1);
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "text") expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 0.01);
       }
     }
   });

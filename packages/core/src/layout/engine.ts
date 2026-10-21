@@ -8587,11 +8587,14 @@ class Engine {
         // strict cut (parity-rowsplit: a 2.4px overshoot moves).
         const keepSlack =
           this.rowNoteHeight(laid) > 0 || (this.cur.footnoteH[this.col] ?? 0) > 0 ? NOTE_SEP_H : 0;
-        // At the top of a page the row cannot move on, so it splits even when
-        // one part holds only empty paragraphs (GovDocs1 048972: a row of
-        // text and empty paragraphs under a repeated header made 50 pages of
-        // headers alone, then ran off the page).
-        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack, atColumnTop) : null;
+        // A row at the top of its page, or taller than a page, gains nothing
+        // by moving on, so it splits even when a part holds only empty
+        // paragraphs (GovDocs1 048972: a row of text and empty paragraphs
+        // under a repeated header made 50 pages of headers alone, then ran
+        // off the page; 089704 and 086826: a nested table of tall empty rows
+        // ran off the page and its last rows were lost).
+        const mustSplit = atColumnTop || rowHeight > this.cur.bodyBottom - this.cur.bodyTop + 0.01;
+        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack, mustSplit) : null;
         if (parts) {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
@@ -9003,6 +9006,7 @@ class Engine {
     this.col = 0;
     this.y = y;
     const frameTop = this.y;
+    const firstItem = fake.items.length;
     if (tbl.rows.length > 0) this.y += this.rowTopLead(tbl, 0);
     const laidRows = tbl.rows.map((row, ri) => this.layoutRow(tbl, row, ri, widths, fields));
     const { heights: rowHeights, spanPaint } = this.computeRowHeights(tbl, laidRows, widths, fields);
@@ -9035,6 +9039,14 @@ class Engine {
     // Nested tables are resizable too (the cover-letter layout puts every
     // user table inside a layout cell).
     if (tbl.src) this.emitTableGrips(tbl, fake, x0 + (tbl.props.indent ?? 0), widths, frameTop, this.y);
+    // paraSeq numbers the paragraphs of ONE cell. In the frame that holds
+    // this table, the numbers of its cells collide with each other and with
+    // the frame's own paragraphs, so a row split took separate nested rows
+    // for one paragraph and refused every cut (GovDocs1 086826, 089704).
+    for (let i = firstItem; i < fake.items.length; i++) {
+      const item = fake.items[i];
+      if (item.kind === "text") item.paraSeq = undefined;
+    }
     const endY = this.y;
     this.y = saveY;
     this.cur = saveCur;
@@ -9052,9 +9064,10 @@ class Engine {
     avail: number,
     /** Extra depth text glyphs may reach past the drawn cut (note fill band). */
     keepSlack = 0,
-    /** The row is at the top of its page: the part that moves on may hold
-     * only empty lines. */
-    atPageTop = false,
+    /** The row cannot move on (it is at the top of its page, or taller than
+     * a page): it may split at any line, and either part may hold only empty
+     * lines, but the part that stays needs a line of a cell that goes on. */
+    mustSplit = false,
   ): { top: typeof laid; rest: typeof laid } | null {
     if (avail < 12) return null;
     const bottomOf = (it: PageItem): number =>
@@ -9196,9 +9209,10 @@ class Engine {
           it.kind === "path" ||
           it.kind === "wordart",
       );
+    const hasLine = (items: PageItem[]) => items.some((it) => it.kind === "text");
     if (
-      !partitions.some(({ keep }) => hasVisibleContent(keep)) ||
-      (!atPageTop && !partitions.some(({ rest }) => hasVisibleContent(rest)))
+      !partitions.some(({ keep, rest }) => hasVisibleContent(keep) || (mustSplit && hasLine(keep) && rest.length > 0)) ||
+      (!mustSplit && !partitions.some(({ rest }) => hasVisibleContent(rest)))
     ) {
       return null;
     }
@@ -9215,8 +9229,10 @@ class Engine {
 
     // Keep a two-line boundary when text in the same cell continues. This is
     // why parity2-nestedtables moves its three-line rows whole instead of
-    // leaving one line on the next page.
+    // leaving one line on the next page. A row that cannot move on splits
+    // at any line.
     if (
+      !mustSplit &&
       partitions.some(({ keep, rest }) => {
         const keptLines = lineTops(keep).length;
         const restLines = lineTops(rest).length;
