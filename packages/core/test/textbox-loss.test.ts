@@ -248,3 +248,37 @@ describe("a top-and-bottom art shape anchored above an empty paragraph (break-ta
     expect(parseFloat(after.style.top)).toBeGreaterThanOrEqual(red.y + red.height);
   });
 });
+
+describe("a square-wrapped box in a balanced 3-column section (GovDocs 083839)", () => {
+  // The paragraph before the anchor draws the page-positioned box from its
+  // lookahead. The balancing pass rolled the page back, but the box stayed
+  // marked as drawn, so no pass drew it again and its text was lost.
+  const story = `<wps:txbx><w:txbxContent>${para("BOXTEXT")}</w:txbxContent></wps:txbx>`;
+  const squareBox = box({ x: 2237105, y: 688340, cx: 3200400, cy: 2743200, story }).replace("<wp:wrapNone/>", '<wp:wrapSquare wrapText="bothSides"/>');
+  const threeColumns =
+    `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/><w:cols w:num="3" w:space="346"/></w:sectPr></w:pPr></w:p>`;
+  const load = () =>
+    DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(
+          `${para("INTRO")}<w:p>${squareBox}<w:r><w:t>ANCHOR</w:t></w:r></w:p>${para("MORE")}${threeColumns}${para("NEXT")}` +
+            LETTER.replace("<w:sectPr>", '<w:sectPr><w:type w:val="continuous"/>'),
+        ),
+      }),
+    );
+
+  it("draws the box", () => {
+    const page = layoutDocument(load(), { measurer }).pages[0];
+    expect(texts(page.items).some((t) => t.text === "BOXTEXT")).toBe(true);
+    expect(page.items.some((i) => i.kind === "drawingHit")).toBe(true);
+  });
+
+  it("draws the box's text in the DOM renderer", () => {
+    const doc = load();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const rendered = renderToDom(doc, layoutDocument(doc, { measurer }), container);
+    expect(rendered.bindings.some((b) => b.el.textContent === "BOXTEXT")).toBe(true);
+  });
+});

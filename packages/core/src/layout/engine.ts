@@ -369,6 +369,7 @@ interface LayoutSnapshot {
   lnLastPage: InternalPage | undefined;
   lnResetEpoch: number;
   lastRealPage: InternalPage | null;
+  consumedAnchors: Set<Shape>;
 }
 
 /** Engine state captured at a clean page top, enough to resume block layout
@@ -2861,6 +2862,7 @@ class Engine {
       lnLastPage: this.lnLastPage,
       lnResetEpoch: this.lnResetEpoch,
       lastRealPage: this.lastRealPage,
+      consumedAnchors: new Set(this.consumedAnchors),
     };
   }
 
@@ -2903,6 +2905,7 @@ class Engine {
     this.lnLastPage = s.lnLastPage;
     this.lnResetEpoch = s.lnResetEpoch;
     this.lastRealPage = s.lastRealPage;
+    this.consumedAnchors = new Set(s.consumedAnchors);
   }
 
   private nextColumn(): void {
@@ -3723,8 +3726,11 @@ class Engine {
 
   /** Shapes already emitted by a preceding paragraph's lookahead (Word's
    * anchor reflow: the float keeps its first-pass position while earlier
-   * lines move below it). */
-  private consumedAnchors = new WeakSet<Shape>();
+   * lines move below it). A section's measure pass consumes them too, so the
+   * set is part of the layout snapshot: restoring the items a lookahead drew
+   * without restoring the set left the shape drawn nowhere (GovDocs 083839:
+   * a square-wrapped box in a balanced 3-column section). */
+  private consumedAnchors = new Set<Shape>();
 
   /** Frame paragraphs already placed by a preceding paragraph's lookahead
    * (page/margin-anchored frames reflow earlier content around them). */
