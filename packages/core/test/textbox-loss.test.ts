@@ -8,7 +8,7 @@ import { layoutDocument } from "../src/layout/engine.js";
 import { ApproxMeasurer } from "../src/layout/measure.js";
 import type { PageItem } from "../src/layout/types.js";
 import { renderToDom } from "../src/render/dom.js";
-import { makeDocx, wrapDocument } from "./helpers.js";
+import { makeDocx, makeDocxWithMedia, wrapDocument } from "./helpers.js";
 
 const measurer = new ApproxMeasurer();
 const WP = 'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
@@ -19,12 +19,12 @@ const LETTER =
   `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr>`;
 
 /** A text box anchored in a run: `story` is the wps:txbx / wps:linkedTxbx element. */
-function box(opts: { x: number; y: number; cx: number; cy: number; story: string; from?: string; insets?: string }): string {
+function box(opts: { x: number; y: number; cx: number; cy: number; story: string; from?: string; hFrom?: string; behind?: boolean; insets?: string }): string {
   const from = opts.from ?? "page";
   return (
-    `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+    `<w:r><w:drawing><wp:anchor ${WP} distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="${opts.behind ? 1 : 0}" locked="0" layoutInCell="1" allowOverlap="1">` +
     `<wp:simplePos x="0" y="0"/>` +
-    `<wp:positionH relativeFrom="page"><wp:posOffset>${opts.x}</wp:posOffset></wp:positionH>` +
+    `<wp:positionH relativeFrom="${opts.hFrom ?? "page"}"><wp:posOffset>${opts.x}</wp:posOffset></wp:positionH>` +
     `<wp:positionV relativeFrom="${from}"><wp:posOffset>${opts.y}</wp:posOffset></wp:positionV>` +
     `<wp:extent cx="${opts.cx}" cy="${opts.cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>` +
     `<wp:docPr id="1" name="Box"/><wp:cNvGraphicFramePr/>` +
@@ -428,5 +428,105 @@ describe("a paragraph pushed off the page by a top-and-bottom float (review of 2
     expect(rows.every((r) => r.page === 2)).toBe(true);
     expect(rows[0].top).toBeCloseTo(96, 0);
     expect(result.pages.length).toBe(2);
+  });
+});
+
+describe("anchors outside the page", () => {
+  const story = `<wps:txbx><w:txbxContent>${para("CAPTION")}</w:txbxContent></wps:txbx>`;
+  const emu = (px: number) => px * 9525;
+
+  it.each([
+    { x: -530.4, y: 96, hFrom: "column", width: 200, height: 80, left: 0, top: 96 },
+    { x: -60, y: 96, width: 200, height: 80, left: 0, top: 96 },
+    { x: 766, y: 96, width: 200, height: 80, left: 616, top: 96 },
+    { x: 96, y: -100, width: 200, height: 80, left: 96, top: 0 },
+    { x: 96, y: 1036, width: 200, height: 80, left: 96, top: 976 },
+    { x: 96, y: 96, width: 900, height: 1100, left: 0, top: 0 },
+  ])("brings a box onto the page: %j", ({ x, y, hFrom, width, height, left, top }) => {
+    const { result } = layout(`<w:p>${box({ x: emu(x), y: emu(y), cx: emu(width), cy: emu(height), hFrom, story })}</w:p>`);
+    const page = result.pages[0];
+    const hit = page.items.find((it) => it.kind === "drawingHit")!;
+    expect(hit).toMatchObject({ x: left, y: top, width, height });
+    const text = texts(page.items).find((it) => it.text === "CAPTION")!;
+    expect(text).toBeDefined();
+    expect(text.x).toBeGreaterThanOrEqual(0);
+    expect(text.x + text.width).toBeLessThanOrEqual(page.width);
+    expect(text.lineTop).toBeGreaterThanOrEqual(0);
+    expect(text.lineTop + text.lineHeight).toBeLessThanOrEqual(page.height);
+  });
+
+  it.each([
+    { x: -10, y: 96 },
+    { x: 626, y: 96 }, // 200px box ends 10px past the right edge.
+    { x: 96, y: -10 },
+    { x: 96, y: 986 },
+  ])("preserves a small bleed: %j", ({ x, y }) => {
+    const { result } = layout(`<w:p>${box({ x: emu(x), y: emu(y), cx: emu(200), cy: emu(80), story })}</w:p>`);
+    expect(result.pages[0].items.find((it) => it.kind === "drawingHit")).toMatchObject({ x, y, width: 200, height: 80 });
+  });
+
+  it.each([
+    { x: 0, y: 0, width: 816, height: 1056 },
+    { x: -300, y: -400, width: 1416, height: 1856 },
+  ])("preserves a behindDoc full-page background: %j", ({ x, y, width, height }) => {
+    const drawing = box({ x: emu(x), y: emu(y), cx: emu(width), cy: emu(height), behind: true, story: "" })
+      .replace("<a:noFill/><a:ln>", '<a:solidFill><a:srgbClr val="EEEEEE"/></a:solidFill><a:ln>');
+    const { result } = layout(`<w:p>${drawing}</w:p>`);
+    expect(result.pages[0].items.find((it) => (it.kind === "rect" || it.kind === "path") && it.behind)).toMatchObject({ x, y, width, height });
+  });
+
+  it("brings an absolute VML text box onto the page", () => {
+    const { result } = layout(
+      `<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" ` +
+      `style="position:absolute;margin-left:-400pt;margin-top:-100pt;width:150pt;height:60pt;` +
+      `mso-position-horizontal-relative:column;mso-position-vertical-relative:page" filled="f" stroked="f">` +
+      `<v:textbox inset="0,0,0,0"><w:txbxContent>${para("CAPTION")}</w:txbxContent></v:textbox>` +
+      `</v:shape></w:pict></w:r></w:p>`,
+    );
+    const text = texts(result.pages[0].items).find((it) => it.text === "CAPTION")!;
+    expect(text.x).toBe(0);
+    expect(text.lineTop).toBe(0);
+  });
+
+  it("brings a framed paragraph onto the page using its measured height", () => {
+    const { result } = layout(
+      `<w:p><w:pPr><w:framePr w:w="3000" w:hAnchor="page" w:vAnchor="page" ` +
+      `w:x="-7956" w:y="18000" w:wrap="none"/></w:pPr>` +
+      `<w:r><w:t>CAPTION</w:t></w:r></w:p>`,
+    );
+    const page = result.pages[0];
+    const text = texts(page.items).find((it) => it.text === "CAPTION")!;
+    expect(text.x).toBe(0);
+    expect(text.lineTop).toBeGreaterThan(1000);
+    expect(text.lineTop + text.lineHeight).toBeLessThanOrEqual(page.height);
+  });
+
+  it("preserves an off-page picture watermark", () => {
+    const doc = DocxDocument.load(makeDocxWithMedia({
+      "word/document.xml": wrapDocument(
+        `<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" ` +
+        `style="position:absolute;margin-left:-300pt;margin-top:-200pt;width:300pt;height:100pt;z-index:-1;` +
+        `mso-position-horizontal-relative:page;mso-position-vertical-relative:page">` +
+        `<v:imagedata xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdWm" gain="19661f" blacklevel="22938f"/>` +
+        `</v:shape></w:pict></w:r></w:p>${LETTER}`,
+      ),
+      "word/_rels/document.xml.rels":
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdWm" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/watermark.png"/>` +
+        `</Relationships>`,
+    }, { "word/media/watermark.png": new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]) }));
+    const result = layoutDocument(doc, { measurer });
+    expect(result.pages[0].items.find((it) => it.kind === "image")).toMatchObject({ x: -400, y: -200 * 96 / 72 });
+  });
+
+  it("preserves an off-page VML text watermark", () => {
+    const { result } = layout(
+      `<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" ` +
+      `style="position:absolute;margin-left:-300pt;margin-top:-200pt;width:300pt;height:100pt;z-index:-1;` +
+      `mso-position-horizontal-relative:page;mso-position-vertical-relative:page" fillcolor="#c0c0c0">` +
+      `<v:textpath style="font-family:Calibri;font-size:1pt" string="CONFIDENTIAL"/>` +
+      `</v:shape></w:pict></w:r></w:p>`,
+    );
+    expect(result.pages[0].items.find((it) => it.kind === "wordart")).toMatchObject({ x: -400, y: -200 * 96 / 72 });
   });
 });

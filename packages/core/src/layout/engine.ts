@@ -60,6 +60,14 @@ import { joinBoxBorders } from "./border-edges.js";
 
 const INITIAL_MODEL_WINDOW_PAGES = 12;
 
+/** Preserve small bleeds; bring substantially off-page anchors back into view. */
+function anchorPositionOnPage(position: number, size: number, pageSize: number): number {
+  if (size >= pageSize) return 0;
+  const overflow = Math.max(-position, position + size - pageSize);
+  if (overflow < size / 4) return position;
+  return Math.max(0, Math.min(position, pageSize - size));
+}
+
 /** Break options for a lookahead simulation. These sites sum line heights to
  * decide whether a following block fits, and never paint what they break, so
  * the break cache's metrics tier can answer them — which also keeps them from
@@ -4175,6 +4183,7 @@ class Engine {
       else if (fr.yAlign === "bottom") oy = bottom - height;
       else oy = top;
     }
+    oy = anchorPositionOnPage(oy, height, sp.pageHeight);
     // Word paints an exact/atLeast frame's paragraph box to the FRAME's height,
     // not the content height: probe2-dropcaps-frames' pull-quote (h=1000tw
     // exact, two lines of text) fills and rules the whole 50pt box, leaving
@@ -4361,7 +4370,7 @@ class Engine {
       else if (fr.xAlign === "right" || fr.xAlign === "outside") ox = base + span - contentW;
       else ox = base;
     }
-    return ox;
+    return anchorPositionOnPage(ox, contentW, sp.pageWidth);
   }
 
   /** A full-width `wrap="notBeside"` frame banner at the top of a multi-column
@@ -7014,19 +7023,26 @@ class Engine {
       const d = `M0 0 H${width} V${height} H0 Z${shape.revision.struck ? ` M0 ${height / 2} H${width}` : ""}`;
       page.items.push({ kind: "path", x, y, width, height, d, viewW: width, viewH: height, stroke: { color: shape.revision.color, width: 1.5 }, ...(rotate ? { rotate } : {}), front: true, z: shape.z });
     };
-    // A body object positioned from its paragraph or line never runs past the
-    // page bottom: its top moves up until it fits (or to the page top when it
-    // is taller than the page), and placeParagraph moves the paragraph to the
-    // next page when it can. Nothing past the page edge is printed, so the
-    // part below it was lost (GovDocs 026966, 029456, 036752: tall boxes
-    // anchored near the page bottom). Word's own rule is not established
-    // here; LibreOffice moves the anchor paragraph and the object to the next
-    // page in the .doc files.
-    const keepOnPage = (shape: Shape, y: number, height: number): number => {
-      if (page.physIndex === -1 || (shape.vRel !== "text" && shape.vRel !== "line")) return y;
-      if (y + height <= sp.pageHeight + 0.5) return y;
-      this.anchorPushedUp = true;
-      return Math.max(0, sp.pageHeight - height);
+    // Work in page coordinates before emitting paint, hit targets and wrap
+    // bounds. Measurement-only frames have no page origin yet.
+    const keepOnPage = (shape: Shape, x: number, y: number, width: number, height: number): { x: number; y: number } => {
+      if (page.physIndex === -1 && !frameOrigin) return { x, y };
+      if (shape.type !== "line") {
+        const background = shape.behind && (
+          (x <= 0 && x + width >= sp.pageWidth) ||
+          (y <= 0 && y + height >= sp.pageHeight)
+        );
+        const watermark = (shape.type === "textbox" && shape.behind && shape.wordArt) ||
+          (shape.type === "image" && (shape.washout || (shape.behind && shape.hAlign === "center" && shape.vAlign === "center")));
+        if (background || watermark) return { x, y };
+      }
+      const nextY = anchorPositionOnPage(y, height, sp.pageHeight);
+      // Preserve paragraph pagination for body anchors that pass the bottom
+      // edge, including those whose small bleed keeps their authored offset.
+      if (page.physIndex !== -1 && (shape.vRel === "text" || shape.vRel === "line") && y + height > sp.pageHeight + 0.5) {
+        this.anchorPushedUp = true;
+      }
+      return { x: anchorPositionOnPage(x, width, sp.pageWidth), y: nextY };
     };
 
     for (const shape of shapes) {
@@ -7053,7 +7069,7 @@ class Engine {
           else if (shape.vAlign === "bottom") y = oy + baseH - shape.height;
           else y = oy;
         }
-        y = keepOnPage(shape, y, shape.height);
+        ({ x, y } = keepOnPage(shape, x, y, shape.width, shape.height));
         page.items.push({
           kind: "image",
           x: x - fx,
@@ -7099,7 +7115,7 @@ class Engine {
         if (shape.vAlign === "center") oy = originY(shape.vRel) + (baseH - shape.height) / 2;
         else if (shape.vAlign === "bottom") oy = originY(shape.vRel) + baseH - shape.height;
         else if (shape.vAlign === "top") oy = originY(shape.vRel);
-        oy = keepOnPage(shape, oy, shape.height);
+        ({ x: ox, y: oy } = keepOnPage(shape, ox, oy, shape.width, shape.height));
         const centerX = ox - fx + shape.width / 2;
         const centerY = oy - fy + shape.height / 2;
         const rotate = shape.rotation
@@ -7171,8 +7187,13 @@ class Engine {
         continue;
       }
       if (shape.type === "line") {
-        const ox = originX(shape.hRel);
-        const oy = originY(shape.vRel);
+        let ox = originX(shape.hRel);
+        let oy = originY(shape.vRel);
+        const left = Math.min(shape.x1, shape.x2);
+        const top = Math.min(shape.y1, shape.y2);
+        const position = keepOnPage(shape, ox + left, oy + top, Math.abs(shape.x2 - shape.x1), Math.abs(shape.y2 - shape.y1));
+        ox = position.x - left;
+        oy = position.y - top;
         const x1 = ox + shape.x1 - fx;
         const y1 = oy + shape.y1 - fy;
         const x2 = ox + shape.x2 - fx;
@@ -7270,7 +7291,6 @@ class Engine {
         let oy = originY(shape.vRel) + shape.y;
         if (shape.pctY !== undefined) oy = originY(shape.vRel) + shape.pctY * pageH;
         if (shape.vAlign) oy = alignV(originY(shape.vRel), shape.vRel === "page" ? pageH : pageH - sp.marginTop - sp.marginBottom, height, shape.vAlign);
-        oy = keepOnPage(shape, oy, height);
 
         // allowOverlap="0": slide the box right past any earlier overlapping
         // box so they don't overlap (Word's overlap avoidance).
@@ -7286,6 +7306,7 @@ class Engine {
             if (!moved) break;
           }
         }
+        ({ x: ox, y: oy } = keepOnPage(shape, ox, oy, width, height));
         placedRects.push({ x0: ox, x1: ox + width, y0: oy, y1: oy + height });
 
         // Rotate the whole box (fill + border + text) about its center.
