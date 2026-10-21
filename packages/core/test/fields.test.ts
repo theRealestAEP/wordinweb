@@ -36,7 +36,60 @@ function bodyText(body: string): string {
     .join("");
 }
 
-describe("PAGE/NUMPAGES general-formatting (\\*) switch", () => {
+describe("SEQ switches", () => {
+  it.each(["\\r0", "\\r 0"])("%s resets the counter to zero", (reset) => {
+    const instructions = ["SEQ Figure", "SEQ Figure", `SEQ Figure ${reset}`, "SEQ Figure"];
+    expect(bodyText(instructions.map((instr) => `<w:p>${field(instr, "9")}</w:p>`).join(""))).toBe("1201");
+  });
+
+  it.each([
+    ["ALPHABETIC", "AB"],
+    ["alphabetic", "ab"],
+    ["ROMAN", "III"],
+    ["roman", "iii"],
+  ])("preserves the case of %s with either switch spacing", (format, expected) => {
+    for (const space of ["", " "]) {
+      const body = `<w:p>${field(`SEQ Figure \\*${space}${format}`, "9")}</w:p>`;
+      expect(bodyText(body + body)).toBe(expected);
+    }
+  });
+
+  it("\\h hides the value and advances the counter", () => {
+    const instructions = ["SEQ Figure", "SEQ Figure \\h", "SEQ Figure"];
+    expect(bodyText(instructions.map((instr) => `<w:p>${field(instr, "9")}</w:p>`).join(""))).toBe("13");
+  });
+
+  it("\\h \\r0 resets the counter while hiding the value", () => {
+    const instructions = [
+      "seq L \\*ALPHABETIC",
+      "seq L \\*ALPHABETIC",
+      "seq L \\h \\r0",
+      "seq L \\* ALPHABETIC",
+      "seq L \\*arabic",
+    ];
+    expect(bodyText(instructions.map((instr) => `<w:p>${field(instr, "9")}</w:p>`).join(""))).toBe("ABA2");
+  });
+
+  it.each(["\\s1", "\\s 1"])("accepts %s alongside a format switch", (restart) => {
+    const body = `<w:p>${field(`SEQ Figure ${restart} \\*ALPHABETIC`, "9")}</w:p>`;
+    expect(bodyText(body + body)).toBe("AB");
+  });
+
+  it("\\c repeats the current value", () => {
+    const instructions = ["SEQ Figure", "SEQ Figure \\c", "SEQ Figure"];
+    expect(bodyText(instructions.map((instr) => `<w:p>${field(instr, "9")}</w:p>`).join(""))).toBe("112");
+  });
+});
+
+describe("PAGE/NUMPAGES/SECTIONPAGES general-formatting (\\*) switch", () => {
+  it.each(["PAGE", "NUMPAGES", "SECTIONPAGES"])("%s preserves format case with either switch spacing", (keyword) => {
+    for (const space of ["", " "]) {
+      for (const [format, expected] of [["ALPHABETIC", "B"], ["alphabetic", "b"], ["ROMAN", "II"], ["roman", "ii"]]) {
+        expect(resolveField(`${keyword} \\*${space}${format}`, "9", ctx({ pageNumber: () => 2 }))).toBe(expected);
+      }
+    }
+  });
+
   it("PAGE \\* roman overrides the section decimal format", () => {
     // pageNumber 1, section formats decimal — the \* switch forces roman.
     expect(resolveField("PAGE \\* roman", "9", ctx({ pageNumber: () => 1 }))).toBe("i");

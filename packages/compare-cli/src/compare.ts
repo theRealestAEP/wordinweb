@@ -95,7 +95,8 @@ export interface CompareFilesOptions extends Omit<CompareOptions, "reuseRevised"
 export interface CompareFilesResult {
   /** The result's revisions by kind, as collectRevisions counts them. */
   revisions: Record<RevisionKind, number>;
-  /** The PDF's page count, when `pdf` was asked for. */
+  /** The PDF's page count, when `pdf` was asked for: the printable copy's
+   * page count, as a page whose comments do not fit gets a taller sheet. */
   pdfPages?: number;
   /** With `pdf`: font families no installed font holds (a substitute drew
    * them), and characters no installed font has (each an empty box). */
@@ -230,7 +231,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     }
     if (error instanceof CompareError) throw error;
     const message = error instanceof Error ? error.message : String(error);
-    if (error instanceof PdfRenderError && error.code === "unsupported_script") throw new CompareError("unsupported_script", message, undefined, { cause: error });
+    if (error instanceof PdfRenderError && (error.code === "unsupported_script" || error.code === "too_large")) throw new CompareError(error.code, message, undefined, { cause: error });
     throw new CompareError(isDiskFull(error) ? "disk_full" : "failed", message, undefined, { cause: error });
   } finally {
     for (const store of stores) store.close();
@@ -258,11 +259,11 @@ function openInput(path: string, side: Side, dir: string): ZipReader {
 
 /**
  * The .docx to read for an input: the input itself, or, for a Word
- * 97-2003 .doc or a document in one of the oldest Word formats, a working
+ * 6.0-2003 .doc or a document in one of the oldest Word formats, a working
  * file it is converted to (core's doc/convert.ts and oldword/; the input and
  * its .docx are in memory for the conversion). Another format
- * (RTF, PDF, Word 6.0/95, a password-protected document) is refused from
- * its first bytes as unsupported_format.
+ * (RTF, PDF, a password-protected document) is refused from its first
+ * bytes as unsupported_format.
  */
 function docxPathOf(path: string, side: Side, dir: string): string {
   const fd = openSync(path, "r");
@@ -302,8 +303,8 @@ async function readNamed(zip: ZipReader, side: Side, dir: string): Promise<Input
 /**
  * An error reading an input, as a CompareError naming the input: its own
  * code when it has one, disk_full when the disk filled up,
- * unsupported_content for content it does not read, else damaged (a part
- * that does not parse).
+ * unsupported_content for content it does not read, too_large for XML over
+ * core's DOCUMENT_LIMITS, else damaged (a part that does not parse).
  */
 function inputError(error: unknown, side: Side, path: string): CompareError {
   const message = error instanceof Error ? error.message : String(error);
@@ -312,6 +313,9 @@ function inputError(error: unknown, side: Side, path: string): CompareError {
   // core's parse/document.ts says this for content it does not read.
   const unsupported = /^unsupported content: (.*)/.exec(message);
   if (unsupported) return new CompareError("unsupported_content", `${path}: ${unsupported[1]}`, side, { cause: error });
+  // ... and zip.ts this for XML over its limits.
+  const tooLarge = /^too large: (.*)/.exec(message);
+  if (tooLarge) return new CompareError("too_large", `${path}: ${tooLarge[1]}`, side, { cause: error });
   return new CompareError(error instanceof CompareError ? error.code : "damaged", named, side, { cause: error });
 }
 

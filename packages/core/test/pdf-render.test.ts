@@ -14,7 +14,7 @@ import { NodeMeasurer } from "../src/pdf/measure.js";
 import { PdfRenderError } from "../src/pdf/errors.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
-import { W_NS, makeDocx } from "./helpers.js";
+import { W_NS, makeDocx, wrapDocument } from "./helpers.js";
 
 const R_NS = 'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
 
@@ -99,6 +99,45 @@ function pdfText(bytes: Buffer): string {
   return execFileSync("pdftotext", ["-layout", path, "-"], { encoding: "utf8" });
 }
 
+describe.skipIf(!hasPdftotext)("custom note marks in PDFs", () => {
+  const note = (type: "footnote" | "endnote", id: number, text: string) =>
+    `<w:${type} w:id="${id}"><w:p><w:r><w:${type}Ref/></w:r><w:r><w:t xml:space="preserve"> ${text}</w:t></w:r></w:p></w:${type}>`;
+
+  function noteDocx(type: "footnote" | "endnote", body: string, notes: string): Uint8Array {
+    return makeDocx({
+      "word/document.xml": wrapDocument(body),
+      "word/_rels/document.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdN" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/${type}s" Target="${type}s.xml"/></Relationships>`,
+      [`word/${type}s.xml`]: `<w:${type}s ${W_NS}>${notes}</w:${type}s>`,
+    });
+  }
+
+  it.each([
+    { type: "footnote" as const, mark: "*", markXml: "<w:t>*</w:t>", separateRun: false },
+    { type: "endnote" as const, mark: "**", markXml: "<w:t>**</w:t>", separateRun: false },
+    { type: "footnote" as const, mark: "α", markXml: '<w:sym w:font="Symbol" w:char="F061"/>', separateRun: true },
+  ])("prints a custom $type with mark '$mark' on the reference page", async ({ type, mark, markXml, separateRun }) => {
+    const body = para("FIRSTPAGE") + `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
+      `<w:p><w:r><w:t>REFERENCE</w:t></w:r><w:r><w:${type}Reference w:customMarkFollows="1" w:id="2"/>${separateRun ? "</w:r><w:r>" : ""}${markXml}</w:r></w:p>`;
+    const { bytes, pages } = await render(noteDocx(type, body, note(type, 2, "CUSTOMNOTE")));
+    expect(pages).toBe(2);
+    const sheets = pdfText(bytes).split("\f").map((text) => text.replace(/\s+/g, " ").trim());
+    expect(sheets[0]).toBe("FIRSTPAGE");
+    expect(sheets[1]).toBe(`REFERENCE${mark} ${mark} CUSTOMNOTE`);
+  });
+
+  it.each(["footnote", "endnote"] as const)("keeps automatic %s numbers around a custom mark", async (type) => {
+    const ref = (label: string, id: number, custom = false) =>
+      `<w:p><w:r><w:t>${label}</w:t></w:r><w:r><w:${type}Reference w:id="${id}"${custom ? ' w:customMarkFollows="1"' : ""}/>${custom ? "<w:t>*</w:t>" : ""}</w:r></w:p>`;
+    const body = ref("FIRSTREF", 7) + ref("CUSTOMREF", 2, true) + ref("SECONDREF", 4);
+    const notes = note(type, 2, "CUSTOMNOTE") + note(type, 4, "SECONDNOTE") + note(type, 7, "FIRSTNOTE");
+    const { bytes, pages } = await render(noteDocx(type, body, notes));
+    expect(pages).toBe(1);
+    const text = pdfText(bytes).replace(/\s+/g, " ").trim();
+    const [first, second] = type === "footnote" ? ["1", "2"] : ["i", "ii"];
+    expect(text).toBe(`FIRSTREF${first} CUSTOMREF* SECONDREF${second} ${first} FIRSTNOTE * CUSTOMNOTE ${second} SECONDNOTE`);
+  });
+});
+
 describe("renderDocxToPdf", () => {
   it("writes a PDF whose cross-reference table points at every object", async () => {
     const { bytes, text, pages } = await render(multiPageDocx(2));
@@ -153,6 +192,35 @@ describe("renderDocxToPdf", () => {
     expect(text).toContain("Sheet 1 of 3");
     expect(text).toContain("Sheet 3 of 3");
     expect(text).toContain("see page 3.");
+  });
+
+  it.skipIf(!hasPdftotext)("counts the pages it renders when a two-column section is too long for the page it would share", async () => {
+    // Section 2 starts below the intro on page 1 (a continuous break) and
+    // balances before section 3's continuous break, but fills more than the
+    // rest of page 1, so it moves to page 2. The counting pass lays its
+    // lines without page items; it once took page 1 for empty, kept the
+    // section there, and counted one page fewer than the render drew.
+    const words = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.";
+    const footer = `<w:footerReference ${R_NS} w:type="default" r:id="rIdF"/>`;
+    const page = `<w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440" w:header="720" w:footer="720"/>`;
+    const body = [
+      para("Intro"),
+      `<w:p><w:pPr><w:sectPr>${footer}${page}</w:sectPr></w:pPr></w:p>`,
+      ...Array.from({ length: 60 }, (_, i) => para(`${i + 1}. ${words}`)),
+      `<w:p><w:pPr><w:sectPr>${footer}<w:type w:val="continuous"/>${page}<w:cols w:num="2" w:space="720"/></w:sectPr></w:pPr></w:p>`,
+      para("Closing words"),
+      `<w:sectPr>${footer}<w:type w:val="continuous"/>${page}</w:sectPr>`,
+    ];
+    const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${W_NS} ${R_NS}><w:body>${body.join("")}</w:body></w:document>`;
+    const footerXml = `<?xml version="1.0"?>\n<w:ftr ${W_NS}><w:p><w:r><w:t xml:space="preserve">Sheet </w:t></w:r>${field("PAGE", "1")}<w:r><w:t xml:space="preserve"> of </w:t></w:r>${field("NUMPAGES", "1")}</w:p></w:ftr>`;
+    const rels = `<?xml version="1.0"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdF" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/></Relationships>`;
+    const docx = makeDocx({ "word/document.xml": document, "word/footer1.xml": footerXml, "word/_rels/document.xml.rels": rels });
+    const out = new HeldWritable(Infinity);
+    const result = await renderDocxToPdf(bytesSource(docx), out);
+    expect([result.pages, result.countedPages]).toEqual([3, 3]);
+    const text = pdfText(Buffer.concat(out.chunks));
+    expect(text.split("\f")[0]).not.toContain("1. Lorem");
+    expect(text).toContain("Sheet 3 of 3");
   });
 
   it("maps glyphs back to Unicode through a ToUnicode CMap", async () => {
@@ -305,14 +373,15 @@ describe("renderDocxToPdf", () => {
   });
 
   it("refuses other formats from their first bytes, with unsupported_format and the format's name", async () => {
-    // Compound files: an Excel workbook, a password-protected .docx, a Word 6.0/95 document (its FIB starts with 0xA5DC).
+    // Compound files: an Excel workbook, a password-protected .docx, an encrypted Word 6.0/95 document (its FIB starts with 0xA5DC).
     const ole = (name: string, content = new Uint8Array(64)): Uint8Array => {
       const cfb = CFB.utils.cfb_new();
       CFB.utils.cfb_add(cfb, name, content);
       return new Uint8Array(CFB.write(cfb, { type: "array" }) as number[]);
     };
-    const word6 = new Uint8Array(64);
+    const word6 = new Uint8Array(0x300);
     word6.set([0xdc, 0xa5, 0x65, 0x00]);
+    word6[0x0b] = 0x01;
     const odt = makeDocx({ mimetype: "application/vnd.oasis.opendocument.text", "content.xml": "<office:document-content/>" });
     const cases: [string, Uint8Array, RegExp][] = [
       ["xls", ole("Workbook"), /Excel 97-2003 workbook/],
@@ -323,7 +392,7 @@ describe("renderDocxToPdf", () => {
       ["html", new TextEncoder().encode("\ufeff\n<!DOCTYPE html><html><body>Hi</body></html>"), /HTML/],
       ["word 2003 xml", new TextEncoder().encode('<?xml version="1.0"?><?mso-application progid="Word.Document"?><w:wordDocument/>'), /Word 2003 XML/],
       ["encrypted", ole("EncryptionInfo"), /password-protected/],
-      ["word6", ole("WordDocument", word6), /Word 6\.0\/95/],
+      ["word6", ole("WordDocument", word6), /password-protected document \(Word 6\.0\/95/],
       ["rtf", new TextEncoder().encode("{\\rtf1\\ansi Hello.\\par }"), /RTF/],
       ["pdf", new TextEncoder().encode("%PDF-1.4\n%%EOF\n"), /PDF/],
       ["odt", odt, /OpenDocument/],

@@ -38,8 +38,10 @@ import {
   LineBox,
   breakParagraph,
   fontOf,
+  leadingBreakOf,
   resolveField,
   setBreakCacheWindowed,
+  starNumberFormat,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
 import {
@@ -49,9 +51,11 @@ import {
   LayoutFontSample,
   LayoutResult,
   LayoutWindow,
+  LineEdgeItem,
   PageItem,
   TextItem,
 } from "./types.js";
+import { joinBoxBorders } from "./border-edges.js";
 
 const INITIAL_MODEL_WINDOW_PAGES = 12;
 
@@ -634,18 +638,14 @@ function assignSeq(
 ): string {
   const prior = assigned.get(key);
   if (prior !== undefined) return prior;
-  const rMatch = /\\r\s+(\d+)/.exec(instr);
+  const rMatch = /\\r\s*(\d+)/.exec(instr);
   const repeat = /\\c(\s|$)/.test(instr);
   let n: number;
   if (rMatch) n = parseInt(rMatch[1], 10);
   else if (repeat) n = counters.get(ident) ?? 1;
   else n = (counters.get(ident) ?? 0) + 1;
   counters.set(ident, n);
-  const fmt = /\\\*\s+(\w+)/.exec(instr)?.[1]?.toLowerCase();
-  const text =
-    fmt === "roman" ? formatNumber(n, "lowerRoman")
-    : fmt === "alphabetic" ? formatNumber(n, "lowerLetter")
-    : String(n);
+  const text = starNumberFormat(instr, n) ?? String(n);
   assigned.set(key, text);
   return text;
 }
@@ -679,13 +679,13 @@ export class Prescan {
   readonly refPosition: FieldMemo<"above" | "below">;
   readonly refParaNumber: FieldMemo<string>;
   readonly seqCounters = new Map<string, number>();
-  readonly footnoteNumbers = new Map<number, number>();
-  readonly endnoteNumbers = new Map<number, number>();
+  readonly footnoteNumbers = new Map<number, number | string>();
+  readonly endnoteNumbers = new Map<number, number | string>();
   /** Each bookmark's first-seen paragraph ordinal, and whether that paragraph carries list numbering. */
   private readonly bmOrdinal = new Map<string, number>();
   private readonly bmNumbered = new Map<string, boolean>();
   private readonly refs: { field: FieldContent; ordinal: number; target: string; position: boolean; number: boolean }[] = [];
-  private readonly notes: { type: "footnote" | "endnote"; id: number; section: number }[] = [];
+  private readonly notes: { type: "footnote" | "endnote"; id: number; section: number; customMark?: string }[] = [];
   private ordinal = 0;
   private section = 0;
 
@@ -710,32 +710,36 @@ export class Prescan {
         this.bmNumbered.set(nm, !!block.props.numbering);
       }
     }
-    for (const c of block.children) {
-      const runs = c.type === "run" ? [c] : c.runs;
-      for (const r of runs) {
-        for (const rc of r.content) {
-          if (rc.kind === "noteRef") {
-            if (rc.self || rc.customMarkFollows) continue;
-            // A reference in hidden text (w:vanish, its own or its paragraph
-            // style's) is not shown, and Word omits its note too.
-            if (block.type === "paragraph" && this.doc.effectiveRunProps(block, r.props).vanish) continue;
-            const known = rc.noteType === "footnote" ? this.doc.footnotes : this.doc.endnotes;
-            if (known.has(rc.id)) this.notes.push({ type: rc.noteType, id: rc.id, section: this.section });
-            continue;
+    const runs = block.children.flatMap((c) => c.type === "run" ? [c] : c.runs);
+    for (const [runIndex, r] of runs.entries()) {
+      for (const [contentIndex, rc] of r.content.entries()) {
+        if (rc.kind === "noteRef") {
+          if (rc.self) continue;
+          // A reference in hidden text (w:vanish, its own or its paragraph
+          // style's) is not shown, and Word omits its note too.
+          if (block.type === "paragraph" && this.doc.effectiveRunProps(block, r.props).vanish) continue;
+          const known = rc.noteType === "footnote" ? this.doc.footnotes : this.doc.endnotes;
+          if (known.has(rc.id)) {
+            // Symbols are parsed as text too. The mark can follow the
+            // reference in the same run or in the next run.
+            const following = r.content[contentIndex + 1] ?? runs[runIndex + 1]?.content[0];
+            const customMark = rc.customMarkFollows ? (following?.kind === "text" ? following.text : "") : undefined;
+            this.notes.push({ type: rc.noteType, id: rc.id, section: this.section, customMark });
           }
-          if (rc.kind !== "field") continue;
-          const parts = rc.instruction.trim().split(/\s+/);
-          if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
-            assignSeq(this.seq, this.seqCounters, parts[1], rc, rc.instruction.trim());
-          }
-          // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
-          // "above"/"below" instead of the bookmark's page number.
-          const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
-          if (!m) continue;
-          const position = /\\p(\s|$)/i.test(m[2]);
-          const number = /\\r(\s|$)/i.test(m[2]);
-          if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
+          continue;
         }
+        if (rc.kind !== "field") continue;
+        const parts = rc.instruction.trim().split(/\s+/);
+        if (parts[0]?.toUpperCase() === "SEQ" && parts[1]) {
+          assignSeq(this.seq, this.seqCounters, parts[1], rc, rc.instruction.trim());
+        }
+        // Both REF and PAGEREF honour \p (position). PAGEREF \p shows
+        // "above"/"below" instead of the bookmark's page number.
+        const m = /^\s*(?:PAGE)?REF\s+([^\s\\]+)([\s\S]*)$/i.exec(rc.instruction);
+        if (!m) continue;
+        const position = /\\p(\s|$)/i.test(m[2]);
+        const number = /\\r(\s|$)/i.test(m[2]);
+        if (position || number) this.refs.push({ field: rc, ordinal: this.ordinal, target: m[1], position, number });
       }
     }
   }
@@ -767,7 +771,7 @@ export class Prescan {
       }
       const numbers = note.type === "footnote" ? this.footnoteNumbers : this.endnoteNumbers;
       if (numbers.has(note.id)) continue;
-      numbers.set(note.id, note.type === "footnote" ? ++fnCounter : ++enCounter);
+      numbers.set(note.id, note.customMark ?? (note.type === "footnote" ? ++fnCounter : ++enCounter));
     }
   }
 }
@@ -841,9 +845,9 @@ class Engine {
   /** Linked text-box chains (wps:linkedTxbx): the seq-0 box records its story
    * and the frame-local Y at which it overflowed, so later boxes continue it. */
   private textboxChains = new Map<string, { blocks: Block[]; consumedY: number }>();
-  /** Note id → sequential display number, assigned in document order pre-layout. */
-  private footnoteNumbers = new Map<number, number>();
-  private endnoteNumbers = new Map<number, number>();
+  /** Note id → display number or custom mark, assigned in document order pre-layout. */
+  private footnoteNumbers = new Map<number, number | string>();
+  private endnoteNumbers = new Map<number, number | string>();
   private placedFootnotes = new Set<number>();
   /** Laid-out footnote content cache (id@width → frame). */
   private noteCache = new Map<string, { items: PageItem[]; height: number }>();
@@ -2703,11 +2707,14 @@ class Engine {
     }
 
     const snap = this.snapshot();
-    // A partial page is only "shared" when it actually holds content. When the
-    // section boundary landed on a fresh page (e.g. a preceding hard page break
-    // emptied the cursor to the page top), the multi-column section starts on
-    // THAT page rather than moving to yet another fresh page.
-    const sharedPartialPage = this.y > this.cur.bodyTop + 0.01 && this.cur.items.length > 0;
+    // A partial page is only "shared" when content sits above the cursor. When
+    // the section boundary landed on a fresh page (e.g. a preceding hard page
+    // break emptied the cursor to the page top), the multi-column section
+    // starts on THAT page rather than moving to yet another fresh page. The
+    // test reads the cursor, never the page's items: a streamed counting pass
+    // lays its lines without items, and must decide as the rendering pass
+    // does, or the two passes disagree on the page count (wild-multicolumn).
+    const sharedPartialPage = !this.pageIsEmptyAtCursor();
     // Measure pass from the current (possibly shared) position.
     this.beginMeasure();
     this.layoutBlocks(section.blocks);
@@ -3226,12 +3233,14 @@ class Engine {
 
   private footnoteMark(id: number): string {
     const n = this.footnoteNumbers.get(id);
+    if (typeof n === "string") return n;
     if (n === undefined) return "";
     return formatNoteMark(n, this.sp.footnoteNumFmt ?? "decimal");
   }
 
   private endnoteMark(id: number): string {
     const n = this.endnoteNumbers.get(id);
+    if (typeof n === "string") return n;
     if (n === undefined) return "";
     return formatNoteMark(n, this.sp.endnoteNumFmt ?? "lowerRoman");
   }
@@ -3400,7 +3409,7 @@ class Engine {
   /** Endnotes flow after the last body block, under their own separator. */
   private placeEndnotes(): void {
     if (this.endnoteNumbers.size === 0 || this.pages.length === 0) return;
-    const ids = [...this.endnoteNumbers.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+    const ids = [...this.endnoteNumbers.keys()];
     if (this.y + NOTE_SEP_H > this.bodyBottom) this.nextColumn();
     const x0 = this.colX;
     const sepY = this.y + NOTE_SEP_H * 0.6;
@@ -4380,7 +4389,11 @@ class Engine {
         broken = breakNow(paraTopEstimate);
       }
     }
-    if (next?.type === "paragraph" && broken.lines.length > 0) {
+    // A paragraph that ends with a page or column break sends the paragraphs
+    // after it to the next page or column. Their anchored boxes go there with
+    // them, so the two lookaheads below must not draw those boxes here.
+    const endsWithBreak = broken.lines[broken.lines.length - 1]?.forcedBreakAfter !== undefined;
+    if (next?.type === "paragraph" && broken.lines.length > 0 && !endsWithBreak) {
       const predictedNextTop = paraBottom;
       // topAndBottom boxes anchor at this paragraph's line bottom EXACTLY
       // (parity2-textboxes), but a SQUARE box anchors at the next paragraph's
@@ -4459,12 +4472,13 @@ class Engine {
     // around a page/margin-anchored float once its anchor paragraph lands on
     // the same page (staging-anchors2: the relH/V=margin box carves Body 3/4
     // into wrapped lines although it is anchored five paragraphs later).
-    if (broken.lines.length > 0 && siblings && index !== undefined) {
+    if (broken.lines.length > 0 && siblings && index !== undefined && !endsWithBreak) {
       const farHits: Shape[] = [];
       let lastIdx = index;
       for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
         const blk = siblings[idx];
         if (blk.type !== "paragraph") break;
+        if (this.doc.effectiveParaProps(blk).pageBreakBefore || hasHardBreak(blk)) break;
         for (const s of this.collectAnchors(blk)) {
           if (!("wrap" in s) || (s.wrap !== "square" && s.wrap !== "topAndBottom")) continue;
           if ("behind" in s && s.behind) continue;
@@ -5615,10 +5629,12 @@ class Engine {
           }
           if (tb.stroke) {
             const b = { style: "single" as const, width: tb.stroke.weight, color: tb.stroke.color, space: 0 };
-            page.items.push({ kind: "edge", x1: bx, y1: by, x2: bx + w, y2: by, border: b });
-            page.items.push({ kind: "edge", x1: bx, y1: by + h, x2: bx + w, y2: by + h, border: b });
-            page.items.push({ kind: "edge", x1: bx, y1: by, x2: bx, y2: by + h, border: b });
-            page.items.push({ kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b });
+            page.items.push(...joinBoxBorders([
+              { kind: "edge", x1: bx, y1: by, x2: bx + w, y2: by, border: b },
+              { kind: "edge", x1: bx, y1: by + h, x2: bx + w, y2: by + h, border: b },
+              { kind: "edge", x1: bx, y1: by, x2: bx, y2: by + h, border: b },
+              { kind: "edge", x1: bx + w, y1: by, x2: bx + w, y2: by + h, border: b },
+            ]));
           }
           const ins = tb.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
           // Horizontally the shape stroke STRADDLES the shape edge (half in, half
@@ -6028,15 +6044,16 @@ class Engine {
     }
     const b = props.borders;
     if (!b) return;
+    const edges: [LineEdgeItem?, LineEdgeItem?, LineEdgeItem?, LineEdgeItem?] = [];
     if (b.top && b.top.style !== "none" && isFirstFrag) {
       const y = top - b.top.space - this.borderPaintWidth(b.top) + b.top.width / 2;
       const xPad = this.paragraphBorderOverhang(b.top);
-      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.top });
+      edges[0] = { kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.top };
     }
     if (b.bottom && b.bottom.style !== "none" && isLastFrag) {
       const y = bottom + b.bottom.space + b.bottom.width / 2;
       const xPad = this.paragraphBorderOverhang(b.bottom);
-      page.items.push({ kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.bottom });
+      edges[1] = { kind: "edge", x1: left - xPad, y1: y, x2: right + xPad, y2: y, border: b.bottom };
     }
     // w:between: when a merged run DECLARES a between border, that rule draws
     // at each interior boundary in place of the suppressed top/bottom pair. It
@@ -6051,12 +6068,13 @@ class Engine {
     }
     if (b.left && b.left.style !== "none") {
       const x = left - b.left.space - this.borderPaintWidth(b.left) + b.left.width / 2;
-      page.items.push({ kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.left });
+      edges[2] = { kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.left };
     }
     if (b.right && b.right.style !== "none") {
       const x = right + b.right.space + b.right.width / 2;
-      page.items.push({ kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.right });
+      edges[3] = { kind: "edge", x1: x, y1: top, x2: x, y2: bottom, border: b.right };
     }
+    page.items.push(...joinBoxBorders(edges));
   }
 
   // ---------- frames (headers, footers, table cells) ----------
@@ -6800,23 +6818,24 @@ class Engine {
           const b = { style: "single" as const, width: shape.stroke.weight, color: shape.stroke.color, space: 0 };
           const x0 = ox - fx;
           const y0 = oy - fy;
-          const edge = (x1: number, y1: number, x2: number, y2: number) =>
-            page.items.push({
-              kind: "edge",
-              x1,
-              y1,
-              x2,
-              y2,
-              border: b,
-              ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
-              ...(behind ? { behind: true } : {}),
-              ...(front ? { front: true } : {}),
-              z: shape.z,
-            });
-          edge(x0, y0, x0 + width, y0);
-          edge(x0, y0 + height, x0 + width, y0 + height);
-          edge(x0, y0, x0, y0 + height);
-          edge(x0 + width, y0, x0 + width, y0 + height);
+          const edge = (x1: number, y1: number, x2: number, y2: number): LineEdgeItem => ({
+            kind: "edge",
+            x1,
+            y1,
+            x2,
+            y2,
+            border: b,
+            ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}),
+            ...(behind ? { behind: true } : {}),
+            ...(front ? { front: true } : {}),
+            z: shape.z,
+          });
+          page.items.push(...joinBoxBorders([
+            edge(x0, y0, x0 + width, y0),
+            edge(x0, y0 + height, x0 + width, y0 + height),
+            edge(x0, y0, x0, y0 + height),
+            edge(x0 + width, y0, x0 + width, y0 + height),
+          ]));
         }
         // Text insets (bodyPr lIns/tIns/rIns/bIns), default 0.1in/0.05in.
         const ins = shape.insets ?? { l: 9.6, t: 4.8, r: 9.6, b: 4.8 };
@@ -7021,12 +7040,14 @@ class Engine {
     }
     if (ts.stroke) {
       const b = { style: "single" as const, width: ts.stroke.weight, color: ts.stroke.color, space: 0 };
-      const edge = (x1: number, y1: number, x2: number, y2: number) =>
-        page.items.push({ kind: "edge", x1, y1, x2, y2, border: b, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(front ? { front: true } : {}), z });
-      edge(tx, ty, tx + ts.width, ty);
-      edge(tx, ty + ts.height, tx + ts.width, ty + ts.height);
-      edge(tx, ty, tx, ty + ts.height);
-      edge(tx + ts.width, ty, tx + ts.width, ty + ts.height);
+      const edge = (x1: number, y1: number, x2: number, y2: number): LineEdgeItem =>
+        ({ kind: "edge", x1, y1, x2, y2, border: b, ...(rotate ? { rotate: rotate(Math.min(x1, x2), Math.min(y1, y2)) } : {}), ...(front ? { front: true } : {}), z });
+      page.items.push(...joinBoxBorders([
+        edge(tx, ty, tx + ts.width, ty),
+        edge(tx, ty + ts.height, tx + ts.width, ty + ts.height),
+        edge(tx, ty, tx, ty + ts.height),
+        edge(tx + ts.width, ty, tx + ts.width, ty + ts.height),
+      ]));
     }
     const ins = ts.insets;
     const inner = this.layoutFrame(ts.blocks, Math.max(ts.width - ins.l - ins.r, 1), fields, {
@@ -7307,7 +7328,7 @@ class Engine {
     if (tbl.grid.length > 0 && gridTotal >= target * 0.5 && (cellsDeclareWidths || cellsDeclareAutoWidths)) {
       const autoOnlyColumns = base.map((_, column) =>
         tbl.rows.every((row) => {
-          let gridPos = 0;
+          let gridPos = row.props.gridBefore ?? 0;
           for (const cell of row.cells) {
             if (gridPos === column) return cell.props.gridSpan === 1 && cell.props.widthAuto;
             gridPos += cell.props.gridSpan;
@@ -7317,7 +7338,7 @@ class Engine {
       );
       const fixedColumns = base.map((_, column) =>
         tbl.rows.some((row) => {
-          let gridPos = 0;
+          let gridPos = row.props.gridBefore ?? 0;
           for (const cell of row.cells) {
             if (gridPos === column) return cell.props.gridSpan === 1 && cell.props.width !== undefined;
             gridPos += cell.props.gridSpan;
@@ -7376,7 +7397,7 @@ class Engine {
       if (!nested && (tbl.props.widthPct ?? 1) < 0.95) {
         const declared = new Array<number>(base.length).fill(0);
         for (const row of tbl.rows) {
-          let gridPos = 0;
+          let gridPos = row.props.gridBefore ?? 0;
           for (const cell of row.cells) {
             if (cell.props.gridSpan === 1 && cell.props.width !== undefined) {
               declared[gridPos] = Math.max(declared[gridPos], cell.props.width);
@@ -7652,7 +7673,7 @@ class Engine {
     if (target <= 0) return null;
     const pref = new Array<number>(nCols).fill(0);
     for (const row of tbl.rows) {
-      let g = 0;
+      let g = row.props.gridBefore ?? 0;
       for (const cell of row.cells) {
         if (cell.props.gridSpan === 1 && g < nCols && cell.props.width !== undefined) {
           pref[g] = Math.max(pref[g], cell.props.width);
@@ -7730,8 +7751,9 @@ class Engine {
     // and still only 22 when the table has width to spare. Seeding a content
     // stub on top of `pad` let a freshly inserted column claim a share of the
     // table it never earned.
-    const minW = new Array<number>(nCols).fill(pad);
-    const prefW = new Array<number>(nCols).fill(pad);
+    const omitted = omittedGridWidths(tbl, nCols);
+    const minW = omitted.map((width) => Math.max(pad, width));
+    const prefW = [...minW];
     // Hard (non-negotiable) minimum: the demand of nested tables only. Word
     // squeezes TEXT below its longest word when a cell must shrink, but never
     // squeezes a nested table below its own minimum (grid4 L2/L3).
@@ -7741,7 +7763,7 @@ class Engine {
     // columns demand on their own. See spreadSpan below.
     const spans: { at: number; span: number; min: number; pref: number; hard: number }[] = [];
     for (const row of tbl.rows) {
-      let gridPos = 0;
+      let gridPos = row.props.gridBefore ?? 0;
       for (const cell of row.cells) {
         const span = cell.props.gridSpan;
         if (gridPos < nCols && cell.props.vMerge !== "continue") {
@@ -7844,7 +7866,7 @@ class Engine {
   private measureTableWidths(tbl: Table): { min: number; pref: number } {
     const nCols = Math.max(
       tbl.grid.length,
-      ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)),
+      ...tbl.rows.map(rowGridColumns),
     );
     const { minW, prefW, fudge } = this.columnMinPref(tbl, Math.max(1, nCols));
     // A nested table is a hard constraint on its host cell, so use the same
@@ -8060,9 +8082,7 @@ class Engine {
         : 0;
     const rows = tbl.rows;
     const nRows = rows.length;
-    const nCols =
-      tbl.grid.length ||
-      rows.reduce((m, r) => Math.max(m, r.cells.reduce((a, c) => a + c.props.gridSpan, 0)), 0);
+    const nCols = Math.max(tbl.grid.length, ...rows.map(rowGridColumns));
     // Conditional table-style borders participate in the boundary width too:
     // LightGrid's firstRow bottom rule is sz-18 (2.25pt) against a sz-8
     // insideH, and Word makes the header and first body row each taller by
@@ -8108,8 +8128,8 @@ class Engine {
     // top/bottom rule (probe-exactouter11/15: a live outer rule charges in
     // full, an all-nil row zeroes it, compat-invariant).
     const colWidths = (r: number, side: "top" | "bottom", fallback?: Border): number[] => {
-      const out: number[] = [];
-      let colStart = 0;
+      const out: number[] = new Array(rows[r].props.gridBefore ?? 0).fill(0);
+      let colStart = rows[r].props.gridBefore ?? 0;
       for (const c of rows[r].cells) {
         const own = c.props.borders?.[side];
         let w: number;
@@ -8121,13 +8141,15 @@ class Engine {
         for (let i = 0; i < Math.max(1, c.props.gridSpan); i++) out.push(w);
         colStart += c.props.gridSpan;
       }
-      while (out.length < nCols) out.push(bw(fallback));
+      while (out.length < nCols) out.push(0);
       return out;
     };
     /** Each grid column's top cell margin in row `r`. */
     const colTopPads = (r: number): number[] => {
       const fallback = this.cellMarginsOf(tbl, false).top ?? 0;
-      return rows[r].cells.flatMap((c) => Array<number>(Math.max(1, c.props.gridSpan)).fill(c.props.margins?.top ?? fallback));
+      return new Array<number>(rows[r].props.gridBefore ?? 0).fill(0).concat(
+        rows[r].cells.flatMap((c) => Array<number>(Math.max(1, c.props.gridSpan)).fill(c.props.margins?.top ?? fallback)),
+      );
     };
     const boundary = (k: number): number => {
       if (k === 0) return Math.max(0, ...colWidths(0, "top", tb?.top));
@@ -8289,6 +8311,11 @@ class Engine {
     this.lastParaSpacingAfter = 0;
     this.lastParaAfterPad = 0;
     this.lastParaWasEmpty = false;
+    // A paragraph that ends with a page break arms the next paragraph to open
+    // at the top of the new page. This table opens there instead, so the flag
+    // is used up here. Left armed, the paragraph after the table went back to
+    // the page top and was drawn over the table's first row.
+    this.suppressNextSpaceBefore = false;
     this.ensureTableBorders(tbl);
     const sourceTablePr = tbl.src ? child(tbl.src, "tblPr") : undefined;
     const sourceBorders = sourceTablePr ? child(sourceTablePr, "tblBorders") : undefined;
@@ -8376,6 +8403,7 @@ class Engine {
     let segTop = this.y;
     let segPage = this.cur;
     let segHasRows = false;
+    let segLastLaid = laidRows[0];
     let moveEmitted = false;
     const markTableStart = () => {
       if (moveEmitted) return;
@@ -8413,9 +8441,9 @@ class Engine {
         if (segHasRows && segmentBottom && segmentBottom.style !== "none") {
           this.cur.items.push({
             kind: "edge",
-            x1: x0,
+            x1: x0 + Math.min(...segLastLaid.cells.map((cell) => cell.x)),
             y1: this.y,
-            x2: x0 + widths.reduce((sum, width) => sum + width, 0),
+            x2: x0 + Math.max(...segLastLaid.cells.map((cell) => cell.x + cell.width)),
             y2: this.y,
             border: segmentBottom,
             role: "table-rule",
@@ -8463,6 +8491,7 @@ class Engine {
             markTableStart();
             this.paintRow(tbl, hr, hIdx, hLaid, x0, widths, hH);
             segHasRows = true;
+            segLastLaid = hLaid;
             this.y += hH;
           }
         }
@@ -8538,12 +8567,13 @@ class Engine {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
           segHasRows = true;
+          segLastLaid = parts.top;
           if (segmentBottom && segmentBottom.style !== "none") {
             this.cur.items.push({
               kind: "edge",
-              x1: x0,
+              x1: x0 + Math.min(...parts.top.cells.map((cell) => cell.x)),
               y1: this.y + parts.top.height,
-              x2: x0 + widths.reduce((sum, width) => sum + width, 0),
+              x2: x0 + Math.max(...parts.top.cells.map((cell) => cell.x + cell.width)),
               y2: this.y + parts.top.height,
               border: segmentBottom,
               role: "table-rule",
@@ -8564,6 +8594,7 @@ class Engine {
       markTableStart();
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       segHasRows = true;
+      segLastLaid = laid;
       this.y += rowHeight;
       // Separated cell borders: 2*spacing of vertical air between each row's
       // cell boxes (matching the horizontal gap), so the row-to-row boundary
@@ -8604,14 +8635,16 @@ class Engine {
   ): void {
     const tb = tbl.props.borders;
     const x1 = x0 + tableWidth;
-    const edge = (b: Border | undefined, ex1: number, ey1: number, ex2: number, ey2: number) => {
-      if (!b || b.style === "none") return;
-      page.items.push({ kind: "edge", x1: ex1, y1: ey1, x2: ex2, y2: ey2, border: b, role: "table-rule" });
+    const edge = (b: Border | undefined, ex1: number, ey1: number, ex2: number, ey2: number): LineEdgeItem | undefined => {
+      if (!b || b.style === "none") return undefined;
+      return { kind: "edge", x1: ex1, y1: ey1, x2: ex2, y2: ey2, border: b, role: "table-rule" };
     };
-    edge(tb?.top, x0, y0, x1, y0);
-    edge(tb?.bottom, x0, y1, x1, y1);
-    edge(tb?.left, x0, y0, x0, y1);
-    edge(tb?.right, x1, y0, x1, y1);
+    page.items.push(...joinBoxBorders([
+      edge(tb?.top, x0, y0, x1, y0),
+      edge(tb?.bottom, x0, y1, x1, y1),
+      edge(tb?.left, x0, y0, x0, y1),
+      edge(tb?.right, x1, y0, x1, y1),
+    ]));
   }
 
   /** Resolve a floating table's absolute footprint (x/y/size) and per-row
@@ -9030,13 +9063,12 @@ class Engine {
     const anyRest = partitions.some(({ rest }) => rest.length > 0);
     if (!anyKept || !anyRest) return null;
 
-    // A non-empty fragment must hold usable content: a text line with visible
-    // characters, an image, or a drawing. Empty-text spans are caret anchors
-    // and edges/rects are paragraph decorations (borders, shading) - a
-    // fragment made only of those is not content Word would strand on its own
-    // page, so the row moves whole instead (msa: the signature row's
-    // continuation held only the paragraph-border rule, which split off and
-    // painted as a bare black bar at the top of the next page).
+    // Each row fragment must hold usable content somewhere in the row: a text
+    // line with visible characters, an image, or a drawing. An empty cell's
+    // caret anchor can share a fragment with another cell's visible content.
+    // When either fragment holds only caret anchors or paragraph decorations,
+    // move the row whole (msa: the signature row's continuation held only the
+    // paragraph-border rule, which painted as a bare black bar on the next page).
     const hasVisibleContent = (items: PageItem[]) =>
       items.some(
         (it) =>
@@ -9046,11 +9078,8 @@ class Engine {
           it.kind === "wordart",
       );
     if (
-      partitions.some(
-        ({ keep, rest }) =>
-          (keep.length > 0 && !hasVisibleContent(keep)) ||
-          (rest.length > 0 && !hasVisibleContent(rest)),
-      )
+      !partitions.some(({ keep }) => hasVisibleContent(keep)) ||
+      !partitions.some(({ rest }) => hasVisibleContent(rest))
     ) {
       return null;
     }
@@ -9168,10 +9197,10 @@ class Engine {
     };
   }
 
-  /** Grid-column index where each cell of a row starts (honoring gridSpan). */
+  /** Grid-column index where each cell starts, including gridBefore and gridSpan. */
   private cellGridPositions(row: TableRow): number[] {
     const pos: number[] = [];
-    let g = 0;
+    let g = row.props.gridBefore ?? 0;
     for (const c of row.cells) {
       pos.push(g);
       g += c.props.gridSpan;
@@ -9265,7 +9294,7 @@ class Engine {
     const totalW = sum(widths, 0, widths.length);
     const bidi = tbl.props.bidiVisual === true;
     const geometry: { x: number; width: number; margins: typeof defaults }[] = [];
-    let gridPos = 0;
+    let gridPos = row.props.gridBefore ?? 0;
     for (let ci = 0; ci < row.cells.length; ci++) {
       const cell = row.cells[ci];
       const span = cell.props.gridSpan;
@@ -9463,7 +9492,7 @@ class Engine {
     const s2 = 2 * (tbl.props.cellSpacing ?? 0);
     // Grid column start per cell (gridSpan-aware), for conditional banding.
     const colStartByIdx = new Map<number, number>();
-    let gp = 0;
+    let gp = row.props.gridBefore ?? 0;
     for (const c of row.cells) {
       colStartByIdx.set(row.cells.indexOf(c), gp);
       gp += c.props.gridSpan;
@@ -9615,18 +9644,12 @@ class Engine {
     const left = pick(cb?.left, condBorders?.left, tb?.left, tb?.insideV, firstCol);
     const right = pick(cb?.right, condBorders?.right, tb?.right, tb?.insideV, lastCol);
 
-    if (top) {
-      page.items.push({ kind: "edge", x1: x, y1: y, x2: x + w, y2: y, border: top, role: "table-rule" });
-    }
-    if (bottom) {
-      page.items.push({ kind: "edge", x1: x, y1: y + h, x2: x + w, y2: y + h, border: bottom, role: "table-rule" });
-    }
-    if (left) {
-      page.items.push({ kind: "edge", x1: x, y1: y, x2: x, y2: y + h, border: left, role: "table-rule" });
-    }
-    if (right) {
-      page.items.push({ kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right, role: "table-rule" });
-    }
+    page.items.push(...joinBoxBorders([
+      top ? { kind: "edge", x1: x, y1: y, x2: x + w, y2: y, border: top, role: "table-rule" } : undefined,
+      bottom ? { kind: "edge", x1: x, y1: y + h, x2: x + w, y2: y + h, border: bottom, role: "table-rule" } : undefined,
+      left ? { kind: "edge", x1: x, y1: y, x2: x, y2: y + h, border: left, role: "table-rule" } : undefined,
+      right ? { kind: "edge", x1: x + w, y1: y, x2: x + w, y2: y + h, border: right, role: "table-rule" } : undefined,
+    ]));
     // Diagonal cell borders (w:tcBorders tl2br / tr2bl): corner-to-corner
     // strokes inside the cell box (probe3-table-exotics "diag" cell paints
     // both, forming an X).
@@ -10065,6 +10088,30 @@ function distributePctColumns(grid: number[], tableWidth: number, margins: numbe
   return widths;
 }
 
+function rowGridColumns(row: TableRow): number {
+  return (row.props.gridBefore ?? 0) + row.cells.reduce((n, cell) => n + cell.props.gridSpan, 0) + (row.props.gridAfter ?? 0);
+}
+
+/** Omitted columns retain their grid widths; row widths supply missing columns. */
+function omittedGridWidths(tbl: Table, nCols: number): number[] {
+  const widths = new Array<number>(nCols).fill(0);
+  for (const row of tbl.rows) {
+    const before = row.props.gridBefore ?? 0;
+    const after = row.props.gridAfter ?? 0;
+    for (const [start, count, preferred] of [
+      [0, before, row.props.widthBefore ?? 0],
+      [rowGridColumns(row) - after, after, row.props.widthAfter ?? 0],
+    ]) {
+      const missing = Math.max(0, start + count - Math.max(start, tbl.grid.length));
+      const fallback = missing > 0 ? Math.max(0, preferred - sum(tbl.grid, start, start + count)) / missing : 0;
+      for (let i = start; i < start + count; i++) {
+        widths[i] = Math.max(widths[i], tbl.grid[i] ?? fallback);
+      }
+    }
+  }
+  return widths;
+}
+
 function resolveGrid(
   tbl: Table,
   available: number,
@@ -10105,13 +10152,15 @@ function resolveGrid(
   );
   let widths = tbl.grid.length > 0 ? [...tbl.grid] : [];
   let total = widths.reduce((a, b) => a + b, 0);
-  if (widths.length === 0 || total < 1) {
-    // No usable grid: distribute the target width equally over the columns.
-    const cols =
-      widths.length > 0
-        ? widths.length
-        : Math.max(1, ...tbl.rows.map((r) => r.cells.reduce((a, c) => a + c.props.gridSpan, 0)));
-    return new Array(cols).fill(Math.min(target, available) / cols);
+  const cols = Math.max(1, widths.length, ...tbl.rows.map(rowGridColumns));
+  if (widths.length < cols || total < 1) {
+    const omitted = omittedGridWidths(tbl, cols);
+    widths = Array.from({ length: cols }, (_, i) => widths[i] ?? omitted[i]);
+    total = widths.reduce((a, b) => a + b, 0);
+    const missing = widths.filter((width) => width === 0).length;
+    const fallback = missing > 0 ? Math.max(0, Math.min(target, available) - total) / missing : 0;
+    widths = widths.map((width) => width || fallback);
+    total = widths.reduce((a, b) => a + b, 0);
   }
   // Scale the grid to an explicit table width, or shrink to fit the column. A
   // PERCENTAGE table splits by content share (distributePctColumns); every
@@ -10150,37 +10199,17 @@ function sectionHasColumnBreak(section: Section): boolean {
   return false;
 }
 
-/** A paragraph that OPENS with a page/column break (before any real content,
- * with content following) is a break-before: return its type and source run. A
- * break-only paragraph, or one whose first content is text/tab/image, returns
- * undefined (kept on the old flow). */
-function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } | undefined {
-  let br: { type: "page" | "column"; run: Run } | undefined;
+/** Does the paragraph hold a page or column break anywhere? */
+function hasHardBreak(para: Paragraph): boolean {
   for (const child of para.children) {
     const runs = child.type === "run" ? [child] : child.runs;
     for (const r of runs) {
       for (const c of r.content) {
-        if (!br) {
-          if (c.kind === "break") {
-            if (c.breakType === "page" || c.breakType === "column") {
-              br = { type: c.breakType, run: r };
-              continue;
-            }
-            return undefined; // a line break opens the paragraph
-          }
-          if (c.kind === "text" && c.text.length === 0) continue;
-          return undefined; // real content precedes any break
-        }
-        // After the opening break: any real content confirms break-before.
-        if (c.kind === "text") {
-          if (c.text.length > 0) return br;
-          continue;
-        }
-        return br;
+        if (c.kind === "break" && (c.breakType === "page" || c.breakType === "column")) return true;
       }
     }
   }
-  return undefined; // break with nothing after it (break-only paragraph)
+  return false;
 }
 
 /** The widest laid line in a shape's freshly measured frame, px. Must be read

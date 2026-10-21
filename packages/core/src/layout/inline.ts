@@ -20,13 +20,13 @@ import { localName, XmlElement } from "../xml.js";
 import { formatNumber } from "../parse/numbering.js";
 
 /** Apply a field's `\* <format>` general-formatting switch to a computed
- * number (Word's PAGE/NUMPAGES/SECTIONPAGES honour it, overriding the section's
- * pgNumType). Returns undefined when no numeric switch is present so the caller
- * keeps its default (section) formatting. The switch keyword is case-sensitive
- * in Word: `roman`→i, `ROMAN`→I. `ArabicDash` wraps the arabic value in hyphens
+ * number. The argument can immediately follow `\*`. Returns undefined when
+ * no numeric switch is present so the caller keeps its default formatting.
+ * The format keyword is case-sensitive in Word: `roman`→i, `ROMAN`→I.
+ * `ArabicDash` wraps the arabic value in hyphens
  * ("- 1 -"), matching Word's footer probe. */
-function starNumberFormat(instr: string, n: number): string | undefined {
-  const m = /\\\*\s+([A-Za-z]+)/.exec(instr);
+export function starNumberFormat(instr: string, n: number): string | undefined {
+  const m = /\\\*\s*([A-Za-z]+)/.exec(instr);
   if (!m) return undefined;
   switch (m[1]) {
     case "Arabic":
@@ -1059,6 +1059,40 @@ function brokenProj(b: BrokenParagraph): string {
   );
 }
 
+/** A paragraph that OPENS with a page/column break (before any real content,
+ * with content following) is a break-before: return its type and source run. A
+ * break-only paragraph, or one whose first content is text/tab/image, returns
+ * undefined (kept on the old flow). placeParagraph moves such a paragraph to
+ * the new page, and breakParagraph drops its break, so both read it here. */
+export function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run: Run } | undefined {
+  let br: { type: "page" | "column"; run: Run } | undefined;
+  for (const child of para.children) {
+    const runs = child.type === "run" ? [child] : child.runs;
+    for (const r of runs) {
+      for (const c of r.content) {
+        if (!br) {
+          if (c.kind === "break") {
+            if (c.breakType === "page" || c.breakType === "column") {
+              br = { type: c.breakType, run: r };
+              continue;
+            }
+            return undefined; // a line break opens the paragraph
+          }
+          if (c.kind === "text" && c.text.length === 0) continue;
+          return undefined; // real content precedes any break
+        }
+        // After the opening break: any real content confirms break-before.
+        if (c.kind === "text") {
+          if (c.text.length > 0) return br;
+          continue;
+        }
+        return br;
+      }
+    }
+  }
+  return undefined; // break with nothing after it (break-only paragraph)
+}
+
 export function breakParagraph(
   doc: DocxDocument,
   measurer: TextMeasurer,
@@ -1675,6 +1709,9 @@ function breakParagraphImpl(
     if (!ba || !bb) return false;
     return ba.style === bb.style && ba.color === bb.color && ba.width === bb.width && ba.space === bb.space;
   };
+  // Spans placed before the first atom: the numbering label and its suffix.
+  // A leading break moves them to the new page with the text after it.
+  const labelSpans = cur.length;
   for (let ai = 0; ai < atoms.length; ai++) {
     const atom = atoms[ai];
     if (atom.kind === "anchorPoint") {
@@ -1698,7 +1735,7 @@ function breakParagraphImpl(
       // level, dropping spacing-before). Emitting a mark line would overflow a
       // nearly-full preceding page and spuriously double-break (wild-gatech
       // title page -> phantom blank p3).
-      if (atom.breakType !== "line" && cur.length === 0 && lines.length === 0 && !trailing) {
+      if (atom.breakType !== "line" && cur.length === labelSpans && lines.length === 0 && !trailing) {
         // Only the FIRST leading break is a break-BEFORE consumed by
         // placeParagraph (which does the block-level page/column move). A SECOND
         // (or later) consecutive break at the paragraph start creates a BLANK
@@ -1708,7 +1745,11 @@ function breakParagraphImpl(
         // page between "Before the breaks." and "After two...").
         if (!consumedLeadingBreak) {
           consumedLeadingBreak = true;
-          continue;
+          // placeParagraph moves the paragraph to the new page only when
+          // leadingBreakOf finds this break. Content that it counts but that
+          // draws nothing on the line (a SHAPE field with no text) leaves the
+          // break to this line; dropping it here lost the page break.
+          if (leadingBreakOf(para)) continue;
         }
         flush(false, true, atom.breakType);
         continue;
@@ -1799,10 +1840,11 @@ function breakParagraphImpl(
       const stop = { ...rawStop, pos: rawStop.pos - offset };
       const leader = stop.leader && stop.leader !== "none" ? stop.leader : undefined;
       let target = stop.pos;
+      // The aligned text's width: the upcoming text until the next tab or break.
+      let w = 0;
       if (stop.align === "right" || stop.align === "center" || stop.align === "decimal") {
         // Aligned stops position the upcoming text (until the next tab or
         // break) so it ends at / centers on the stop.
-        let w = 0;
         for (let j = ai + 1; j < atoms.length; j++) {
           const a = atoms[j];
           if (a.kind === "tab" || a.kind === "break") break;
@@ -1896,8 +1938,13 @@ function breakParagraphImpl(
       // (the tab span carries no bidi level), reversing the leader/number and
       // shifting every entry (yiddish TOC p214: digits painted reversed,
       // 112 -> 211, one-entry page drift).
+      // The wrap needs a leader or a run that would cross the line end: a
+      // decimal stop with no separator in its text ("175\"" between columns of
+      // a tabbed table) only right-aligns, and text that cannot reach the stop
+      // continues at the cursor on the same line, as in LibreOffice and Word.
       const aligned = (stop.align === "right" || stop.align === "decimal") && !bidiPara;
-      if (aligned && curLineWidth > 0 && x > target + 0.75) {
+      const crossesLineEnd = x + w > lineStartX(lineIndex) + availFor(lineIndex) + 0.01;
+      if (aligned && curLineWidth > 0 && x > target + 0.75 && (leader || crossesLineEnd)) {
         flush(false, false);
         ai--; // re-evaluate the tab from the fresh line's start
         continue;
@@ -3594,7 +3641,9 @@ function buildAtoms(
             : content.customMarkFollows
               ? ""
             : (fields.noteMark?.(content.noteType, content.id) ?? "");
-          if (!text) break;
+          // The following text paints a custom mark; this empty fragment
+          // carries its note id so the reference line still reserves the note.
+          if (!text && !content.customMarkFollows) break;
           // Word's FootnoteReference style supplies superscript; force it
           // when the document's style chain doesn't, matching Word's look.
           const markProps = props.verticalAlign ? props : { ...props, verticalAlign: "superscript" as const };

@@ -311,7 +311,7 @@ WordInWeb never converts the document to flowing HTML. It parses the OOXML into 
 
 A Strict Open XML Document (ISO/IEC 29500 Strict, Word's "Strict Open XML Document") is read as Transitional: its namespaces, relationship types, unit-carrying measures ("72pt", "2.54cm", "63%") and renamed values are rewritten once, as the package is read (`packages/core/src/strict.ts`), so the viewer, the PDF renderer and the compare see the same document as its Transitional twin. A saved or compared Strict document is written as Transitional.
 
-A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.load`, `renderDocxToPdf` and the `docx-pdf` CLI convert it to a .docx in memory, and `docx-compare` (`compareFiles`) converts it to a working .docx in its temp directory, so a .doc can be compared with a .docx. The file's bytes decide, not its name. The converter (`packages/core/src/doc/`, exported as `docToDocx`) reads the text, formatting, styles, lists, sections, headers and footers, notes, tables, fields and form fields, bookmarks, comments and tracked changes, pictures, shapes and text boxes from the binary structures ([MS-DOC], [MS-ODRAW]).
+A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.load`, `renderDocxToPdf` and the `docx-pdf` CLI convert it to a .docx in memory, and `docx-compare` (`compareFiles`) converts it to a working .docx in its temp directory, so a .doc can be compared with a .docx. The file's bytes decide, not its name. The converter (`packages/core/src/doc/`, exported as `docToDocx`) reads the text, formatting, styles, lists, sections, headers and footers, notes, tables, fields and form fields, bookmarks, comments and tracked changes, pictures, shapes and text boxes from the binary structures ([MS-DOC], [MS-ODRAW]). A Word 6.0 or Word 95 .doc is read the same way: its 8-bit text in its fonts' character sets, autonumbered lists, comments, tracked changes, pictures, OLE objects' pictures and drawing objects.
 
 The oldest Word formats, which are not OLE compound files, are read the same way (`packages/core/src/oldword/`):
 
@@ -323,21 +323,21 @@ The oldest Word formats, which are not OLE compound files, are read the same way
 | Word for MS-DOS 1 to 6 | Text in its OEM code page (437 or 850), character and paragraph formatting, sections and page setup, running heads, footnotes (styles live in a separate .STY file the document only names) |
 | Windows Write 1.0 to 3.1 | Text in the Windows ANSI code page, character and paragraph formatting, page setup, running heads, metafile and bitmap pictures |
 
-Other formats are refused with `unsupported_format` and the format's name: Word 6.0/95, the pre-release builds of Word for Windows 1.0, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
+Other formats are refused with `unsupported_format` and the format's name: the pre-release builds of Word for Windows 1.0, WordPerfect, RTF, PDF, HTML, OpenDocument, Excel and PowerPoint files, and password-protected documents.
 
 `renderDocxToPdf` throws a `PdfRenderError` and `compareFiles` throws a `CompareError`. Each error has a `code` for the caller to act on, and a message that names the cause:
 
 | Code | Meaning | `docx-pdf` exit code |
 |---|---|---|
 | `not_docx` | The input is not a .docx: not a zip, or a zip with no Word document. | 4 |
-| `unsupported_format` | The input is another format, such as RTF, PDF, OpenDocument, Word 6.0/95, or a password-protected document. | 6 |
-| `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. For `renderDocxToPdf`, also a part over the size limits: an XML part or a body block over 64 MB, or more than 512 MB of parts in all. The zip's directory gives the sizes, so the check comes before anything is inflated. | 5 |
+| `unsupported_format` | The input is another format, such as RTF, PDF, OpenDocument, or a password-protected document. | 6 |
+| `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. | 5 |
 | `unsupported_content` | The document holds content that Word prints and that is not read here, such as a `w:altChunk` (an HTML or RTF part that Word imports when it opens the file) or a `w:subDoc` (a subdocument that Word reads from another file). The document is refused rather than printed without that content. | 7 |
 | `unsupported_script` | The text is in a script the PDF renderer cannot shape, such as Mongolian. | 3 |
-| `too_large` | `compareFiles` only: the parts outside the body are more than the compare holds in memory (3 MB), or a body block is over 64 MB. | — |
+| `too_large` | The document is over the size limits, which the message names. For `renderDocxToPdf` and `DocxDocument.load` (`DOCUMENT_LIMITS` in `packages/core/src/zip.ts`): an XML part over 64 MB, or more than 512 MB of parts in all; the XML parts other than the document over 8 MB, 150,000 elements, or 10,000 paragraphs and table cells together; the document over 1,000,000 elements, or 250,000 paragraphs and table cells. For `renderDocxToPdf` also one body block (a paragraph or table) over 8 MB, 1 MB of text, 250,000 elements, or 20,000 table rows. Sizes come from the zip's directory, and counts from the XML's bytes before it is parsed or as the body streams, so each check comes before the memory it guards is allocated. For `compareFiles`: the parts outside the body are more than the compare holds in memory (3 MB), or a body block is over 64 MB. | 8 |
 | `failed` | Anything else. | 1 |
 
-`compareFiles` also has codes for its files: `missing`, `disk_full`, `result_folder_missing`, `result_is_input` and `output_collision`. The `docx-compare` CLI exits with 1 for every failure, and its message starts with the code. `DocxDocument.load` throws an `Error` whose message starts with `unsupported content:` for the content that `unsupported_content` refuses.
+`compareFiles` also has codes for its files: `missing`, `disk_full`, `result_folder_missing`, `result_is_input` and `output_collision`. The `docx-compare` CLI exits with 1 for every failure, and its message starts with the code. `DocxDocument.load` throws an `Error` whose message starts with `unsupported content:` for the content that `unsupported_content` refuses, and `too large:` for a document over the size limits.
 
 A printed PDF names the authors of its comments and tracked changes by default. To print it with no author's name, set `authors: false`:
 

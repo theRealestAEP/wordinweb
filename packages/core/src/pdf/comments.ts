@@ -18,23 +18,22 @@ import { num } from "./writer.js";
  * A dashed leader in the author's color runs from the end of the comment's
  * first highlighted line across to the rail and on to the card's left edge.
  *
- * Balloons that do not fit: cards are placed in order down the rail. A
- * card that would cross the sheet's bottom moves whole to the top of the
- * next sheet's rail, ahead of that page's own cards (its leader stays on
- * the sheet with its text, reaching the rail); after the last page further
- * sheets with an empty page area carry what is left. Only a card taller
- * than a whole rail splits, at a line, and continues the same way. No
- * comment is ever cut.
+ * Balloons that do not fit: each sheet holds all of its page's cards,
+ * whole, in order down the rail. When they reach past the sheet's bottom,
+ * that sheet grows taller (layout gives the height): the page keeps its
+ * size at the top, and the rail goes on below it. So no card leaves its
+ * page's sheet, every leader reaches its card, and the PDF has one sheet
+ * per page.
  *
  * A page needs only its own comments: the column keeps the ids already
- * given a balloon and the lines carried to the next sheet, nothing else.
+ * given a balloon, nothing else.
  *
  * Every comment the document marks gets its card. One whose text is never
  * drawn (clipped by an exact-height row, hidden past a text box's bottom)
  * goes beside the nearest drawn text of its block, where the counting pass
  * found it (UndrawnComments); one with no drawn text near it at all
  * (marked at no body text, or in a header or footer) goes after the last
- * page's own cards, on that sheet or the ones after it.
+ * page's own cards, on the last sheet.
  */
 export const RAIL_WIDTH = 256;
 const CARD_WIDTH = 220;
@@ -142,8 +141,6 @@ export class UndrawnComments {
 
 export class CommentColumn {
   private readonly placed = new Set<string>();
-  /** Lines of balloons that did not fit the sheet before. */
-  private carried: Balloon[] = [];
   private readonly replies = new Map<string, DocComment[]>();
   private readonly byId = new Map<string, DocComment>();
 
@@ -198,9 +195,11 @@ export class CommentColumn {
   private readonly markedElsewhere = new Set<string>();
   private readonly names = new Map<string, string>();
 
-  /** Draw the page's highlights and its rail into `drawer`; on the last
-   * page, the cards of the comments no page placed go after its own. */
-  draw(page: LaidOutPage, drawer: PageDrawer, sheetHeight: number, last = false): void {
+  /** Lay out the page's highlights and its rail: the height of the sheet
+   * that holds them (`sheetHeight`, or more when the cards reach past its
+   * bottom), and how to draw them on a drawer for a sheet that tall. On the
+   * last page, the cards of the comments no page placed go after its own. */
+  layout(page: LaidOutPage, sheetHeight: number, last = false): { height: number; draw: (drawer: PageDrawer) => void } {
     // Each top-level comment's text items on this page, in paint order.
     const items = new Map<string, TextItem[]>();
     for (const item of page.items) {
@@ -256,15 +255,14 @@ export class CommentColumn {
       else if (ink !== undefined) x = ink + 1;
       firstLine.set(`rev:${id}`, { x, y: (top + bottom) / 2, top, bottom });
     }
+    const highlights: { top: number; height: number; x0: number; x1: number; resolved: boolean }[] = [];
     for (const [id, list] of items) {
-      const resolved = this.byId.get(id)?.resolved;
+      const resolved = !!this.byId.get(id)?.resolved;
       // One continuous rect per line, as word-granular spans would gap at spaces.
       let run: { top: number; height: number; x0: number; x1: number } | null = null;
       const flush = (): void => {
         if (run && run.x1 > run.x0) {
-          drawer.ops.push(
-            `q /${this.resources.alpha(resolved ? 0.22 : 0.38)} gs ${resolved ? "0.627 0.627 0.627" : "1 0.784 0.353"} rg ${drawer.rect(run.x0, run.top, run.x1 - run.x0, run.height)} f Q`,
-          );
+          highlights.push({ ...run, resolved });
           if (!firstLine.has(id)) firstLine.set(id, { x: run.x1 - 1, y: run.top + run.height / 2, top: run.top, bottom: run.top + run.height });
         }
         run = null;
@@ -305,12 +303,16 @@ export class CommentColumn {
     balloons.sort((a, b) => a.top - b.top);
     if (last) balloons.push(...this.remaining().map((balloon) => ({ top: 0, balloon })));
 
-    const cardX = page.width + CARD_GAP;
-    const bottom = sheetHeight - RAIL_PAD;
-    const rail = bottom - RAIL_PAD;
+    // Each card at its line, or just below the card above, whichever is lower.
+    const cards: { top: number; balloon: Balloon }[] = [];
     let y = RAIL_PAD;
-    let stacked = false;
-    const carried: Balloon[] = [];
+    for (const { top, balloon } of balloons) {
+      const at = Math.max(top, y);
+      cards.push({ top: at, balloon });
+      y = at + balloon.lines.reduce((sum, line) => sum + line.height, 0) + RAIL_PAD;
+    }
+
+    const cardX = page.width + CARD_GAP;
     // The leader stays in the white margin: the right edge of the page's
     // text area is past every text item and column on the page.
     let textRight = 0;
@@ -320,69 +322,38 @@ export class CommentColumn {
     /** Mark the highlight's or the change's end with a hairline bar in the
      * author's color (a heavier bar hid the letters beside it), and draw
      * the dashed leader from the text area's right edge across the margin
-     * to the rail, and on to a card at `cardTop` when it is on this sheet.
-     * No segment crosses or underlines text. */
-    const leader = (balloon: Balloon, cardTop: number | null): void => {
+     * to the rail, and on to the card at `cardTop`. No segment crosses or
+     * underlines text. */
+    const leader = (drawer: PageDrawer, balloon: Balloon, cardTop: number): void => {
       const from = firstLine.get(balloon.id);
       if (!from) return;
       drawer.ops.push(`q 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.top + 2))} m ${num(drawer.x(from.x))} ${num(drawer.y(from.bottom - 2))} l S Q`);
-      const ops = [
-        `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(textRight))} ${num(drawer.y(from.y))} m ${num(drawer.x(page.width))} ${num(drawer.y(from.y))} l`,
-      ];
-      if (cardTop !== null) ops.push(`${num(drawer.x(cardX))} ${num(drawer.y(cardTop + balloon.leaderAt))} l`);
-      ops.push("S Q");
-      drawer.ops.push(ops.join(" "));
+      drawer.ops.push(
+        `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(textRight))} ${num(drawer.y(from.y))} m ${num(drawer.x(page.width))} ${num(drawer.y(from.y))} l ` +
+          `${num(drawer.x(cardX))} ${num(drawer.y(cardTop + balloon.leaderAt))} l S Q`,
+      );
     };
-    /** Draw a card at `at` and give its top, or carry it to the next sheet
-     * (null). Only a card taller than the rail splits, at a line. A line
-     * taller than the rail itself fits no sheet: at the top of an empty
-     * rail it is drawn anyway, past the sheet's bottom, so that every sheet
-     * takes at least one line and the carrying ends. */
-    const place = (balloon: Balloon, at: number): number | null => {
+    const card = (drawer: PageDrawer, balloon: Balloon, top: number): void => {
       const height = balloon.lines.reduce((sum, line) => sum + line.height, 0);
-      let lines = balloon.lines;
-      if (carried.length > 0 || (at + height > bottom && height <= rail)) {
-        carried.push(balloon);
-        return null;
-      }
-      if (at + height > bottom) {
-        let fit = 0;
-        let fitHeight = 0;
-        while (fit < lines.length && at + fitHeight + lines[fit].height <= bottom) fitHeight += lines[fit++].height;
-        if (fit === 0 && at > RAIL_PAD) {
-          carried.push(balloon);
-          return null;
-        }
-        if (fit === 0) fit = 1;
-        if (fit < lines.length) carried.push({ ...balloon, lines: lines.slice(fit) });
-        lines = lines.slice(0, fit);
-      }
-      const drawn = lines.reduce((sum, line) => sum + line.height, 0);
-      drawer.ops.push(`q 1 g 0.878 0.878 0.878 RG 0.75 w ${drawer.rect(cardX, at, CARD_WIDTH, drawn)} B Q`);
-      let lineY = at;
-      for (const line of lines) {
+      drawer.ops.push(`q 1 g 0.878 0.878 0.878 RG 0.75 w ${drawer.rect(cardX, top, CARD_WIDTH, height)} B Q`);
+      let lineY = top;
+      for (const line of balloon.lines) {
         line.paint(drawer, cardX, lineY);
         lineY += line.height;
       }
-      y = at + drawn;
-      stacked = true;
-      return at;
     };
-    for (const balloon of this.carried) place(balloon, stacked ? y + RAIL_PAD : y);
-    this.carried = [];
-    for (const { top, balloon } of balloons) leader(balloon, place(balloon, Math.max(top, stacked ? y + RAIL_PAD : y)));
-    this.carried = carried;
-  }
-
-  /** How many balloon lines wait for another sheet after the last page. */
-  carriedLines(): number {
-    return this.carried.reduce((sum, balloon) => sum + balloon.lines.length, 0);
-  }
-
-  /** After the last page: the balloons of the comments no page placed (none
-   * is anchored at drawn text, or at any body text) wait for the sheets after it. */
-  placeRemaining(): void {
-    this.carried.push(...this.remaining());
+    return {
+      height: Math.max(sheetHeight, Math.ceil(y)),
+      draw: (drawer) => {
+        for (const { top, height, x0, x1, resolved } of highlights) {
+          drawer.ops.push(`q /${this.resources.alpha(resolved ? 0.22 : 0.38)} gs ${resolved ? "0.627 0.627 0.627" : "1 0.784 0.353"} rg ${drawer.rect(x0, top, x1 - x0, height)} f Q`);
+        }
+        for (const { top, balloon } of cards) {
+          card(drawer, balloon, top);
+          leader(drawer, balloon, top);
+        }
+      },
+    };
   }
 
   /** The balloons of the comments the document marks that are not yet placed, in comments.xml order. */

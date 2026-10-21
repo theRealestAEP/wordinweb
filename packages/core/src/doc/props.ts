@@ -6,6 +6,7 @@
 import { u16, u32 } from "./bytes.js";
 import { FC, Fib, tableBlob } from "./fib.js";
 import { PieceTable } from "./text.js";
+import { word6Grpprl } from "./word6.js";
 
 export interface CharRun {
   cp: number;
@@ -102,9 +103,17 @@ export class PropertyTables {
     fib: Fib,
     private readonly pieces: PieceTable,
   ) {
-    this.chpxBins = binTable(tableBlob(fib, table, FC.plcfBteChpx));
-    this.papxBins = binTable(tableBlob(fib, table, FC.plcfBtePapx));
+    this.word6 = !!fib.word6;
+    this.chpxBins = binTable(tableBlob(fib, table, FC.plcfBteChpx), this.word6);
+    this.papxBins = binTable(tableBlob(fib, table, FC.plcfBtePapx), this.word6);
+    if (fib.word6) {
+      completeBins(this.chpxBins, word, fib.word6.cpnBteChp);
+      completeBins(this.papxBins, word, fib.word6.cpnBtePap);
+    }
   }
+
+  /** A Word 6.0/95 file: 2-byte bin table entries, 7-byte BXs, and Word 6 sprms (word6.ts). */
+  private readonly word6: boolean;
 
   /** The character runs covering [start, end), clipped to it, in order. */
   charRuns(start: number, end: number): CharRun[] {
@@ -180,6 +189,7 @@ export class PropertyTables {
     let page = this.chpxPages.get(pn);
     if (!page) {
       page = readChpxPage(this.word, pn);
+      if (this.word6) page.runs = page.runs.map((grpprl) => grpprl && word6Grpprl(grpprl));
       this.chpxPages.set(pn, page);
     }
     return page;
@@ -190,7 +200,8 @@ export class PropertyTables {
     if (pn === undefined) return null;
     let page = this.papxPages.get(pn);
     if (!page) {
-      page = readPapxPage(this.word, pn);
+      page = readPapxPage(this.word, pn, this.word6);
+      if (this.word6) page.entries = page.entries.map((entry) => entry && { istd: entry.istd, grpprl: word6Grpprl(entry.grpprl) });
       this.papxPages.set(pn, page);
     }
     return page;
@@ -204,14 +215,31 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-function binTable(plc: Uint8Array): BinTable {
-  const n = Math.floor((plc.length - 4) / 8);
+/** A PlcBteChpx or PlcBtePapx; a Word 6 one has 2-byte page numbers. */
+function binTable(plc: Uint8Array, word6: boolean): BinTable {
+  const cbBte = word6 ? 2 : 4;
+  const n = Math.floor((plc.length - 4) / (4 + cbBte));
   const fcs: number[] = [];
   const pns: number[] = [];
   if (n < 0) return { fcs, pns };
   for (let i = 0; i <= n; i++) fcs.push(u32(plc, i * 4));
-  for (let i = 0; i < n; i++) pns.push(u32(plc, (n + 1) * 4 + i * 4) & 0x3fffff);
+  for (let i = 0; i < n; i++) pns.push(word6 ? u16(plc, (n + 1) * 4 + i * 2) : u32(plc, (n + 1) * 4 + i * 4) & 0x3fffff);
   return { fcs, pns };
+}
+
+/**
+ * A Word 6 bin table can list only the first of the file's `count` pages
+ * (the Word 6 format's "incomplete plcfbte"): the others follow the last
+ * one listed, and each starts at its own first FC.
+ */
+function completeBins(bins: BinTable, word: Uint8Array, count: number): void {
+  if (bins.pns.length === 0) return;
+  for (let pn = bins.pns[bins.pns.length - 1] + 1; bins.pns.length < count && (pn + 1) * 512 <= word.length; pn++) {
+    bins.fcs[bins.fcs.length - 1] = u32(word, pn * 512);
+    bins.pns.push(pn);
+    // The page's last FC ends its range.
+    bins.fcs.push(u32(word, pn * 512 + word[pn * 512 + 511] * 4));
+  }
 }
 
 /** The page number for `fc`: that of the largest aFC at or below it. A fc past the last range gets the last page. */
@@ -266,7 +294,8 @@ function readChpxPage(word: Uint8Array, pn: number): ChpxPage {
   return { rgfc, runs };
 }
 
-function readPapxPage(word: Uint8Array, pn: number): PapxPage {
+/** A PAPX FKP. A Word 6 one has 7-byte BXs, and its PAPX's count of words covers all of the bytes after it. */
+function readPapxPage(word: Uint8Array, pn: number, word6: boolean): PapxPage {
   const page = word.subarray(pn * 512, pn * 512 + 512);
   if (page.length < 512) return { rgfc: [], entries: [] };
   const cpara = page[511];
@@ -274,7 +303,7 @@ function readPapxPage(word: Uint8Array, pn: number): PapxPage {
   for (let i = 0; i <= cpara; i++) rgfc.push(u32(page, i * 4));
   const entries: ({ istd: number; grpprl: Uint8Array } | null)[] = [];
   for (let i = 0; i < cpara; i++) {
-    const off = page[(cpara + 1) * 4 + i * 13] * 2;
+    const off = page[(cpara + 1) * 4 + i * (word6 ? 7 : 13)] * 2;
     if (off === 0) {
       entries.push(null);
       continue;
@@ -282,7 +311,9 @@ function readPapxPage(word: Uint8Array, pn: number): PapxPage {
     let cb = page[off];
     let at = off + 1;
     let size: number;
-    if (cb === 0) {
+    if (word6) {
+      size = cb * 2;
+    } else if (cb === 0) {
       cb = page[at];
       at++;
       size = cb * 2;

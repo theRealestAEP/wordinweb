@@ -83,11 +83,20 @@ try {
   hasPdftotext = false;
 }
 
-function pdfText(bytes: Buffer): string {
+/** The PDF's text, whitespace folded: the whole, or a string per sheet. */
+function pdfText(bytes: Buffer): string;
+function pdfText(bytes: Buffer, perSheet: true): string[];
+function pdfText(bytes: Buffer, perSheet = false): string | string[] {
   const dir = mkdtempSync(join(tmpdir(), "wordinweb-pdf-"));
   const path = join(dir, "doc.pdf");
   writeFileSync(path, bytes);
-  return execFileSync("pdftotext", [path, "-"], { encoding: "utf8" }).replace(/\s+/g, " ");
+  const text = execFileSync("pdftotext", [path, "-"], { encoding: "utf8" });
+  return perSheet ? text.split("\f").map((sheet) => sheet.replace(/\s+/g, " ")) : text.replace(/\s+/g, " ");
+}
+
+/** Each sheet's height, pt, in page order. */
+function mediaHeights(bytes: Buffer): number[] {
+  return [...bytes.toString("latin1").matchAll(/\/MediaBox \[0 0 [\d.]+ ([\d.]+)\]/g)].map((m) => Number(m[1]));
 }
 
 /** The PDF's content streams, inflated and joined. */
@@ -131,45 +140,96 @@ describe("renderDocxToPdf with comments", () => {
     expect(text).toContain("Bob Editor");
   });
 
-  it.skipIf(!hasPdftotext)("moves a card that does not fit whole onto the next sheet, losing nothing", async () => {
+  it.skipIf(!hasPdftotext)("grows a sheet whose cards do not fit, keeping one sheet per page and every card whole beside its page", async () => {
     const { docx, texts } = commentedDocx(2, 9, 8);
     const { bytes, pages } = await render(docx, true);
-    // Two pages of text; the cards overflow onto extra sheets.
-    expect(pages).toBeGreaterThan(2);
-    const text = pdfText(bytes);
-    // Every card is whole, so its text reads as one piece.
-    for (const t of texts) expect(text).toContain(t);
+    expect(pages).toBe(2);
+    // Each page's cards stay on its sheet: both sheets grow below the page.
+    const heights = mediaHeights(bytes);
+    expect(heights).toHaveLength(2);
+    for (const height of heights) expect(height).toBeGreaterThan(792);
+    // Every card is whole, so its text reads as one piece, on its page's sheet.
+    const sheets = pdfText(bytes, true);
+    for (const t of texts) {
+      const page = /on page (\d)/.exec(t)?.[1];
+      expect(page ? sheets[Number(page) - 1] : sheets.join(" ")).toContain(t);
+    }
   });
 
-  it.skipIf(!hasPdftotext)("splits only a card taller than the rail, at a line", async () => {
+  it.skipIf(!hasPdftotext)("never splits a card: a card taller than the page makes its sheet that much taller", async () => {
     const { docx, texts } = commentedDocx(1, 1, 120);
     const { bytes, pages } = await render(docx, true);
-    expect(pages).toBeGreaterThan(1);
+    expect(pages).toBe(1);
+    expect(mediaHeights(bytes)[0]).toBeGreaterThan(792);
     const text = pdfText(bytes);
     for (const t of texts) expect(text).toContain(t.split(":")[0]);
     expect(text.match(/wording/g)?.length).toBe(120);
   });
 
-  it.skipIf(!hasPdftotext)("ends on a tiny page whose rail holds a few lines of a long comment, losing nothing", async () => {
+  it.skipIf(!hasPdftotext)("grows the sheet of a tiny page to hold a long comment", async () => {
     const { docx, texts } = commentedDocx(1, 1, 30, { w: 2880, h: 2880, margin: 200 });
     const { bytes, pages } = await render(docx, true);
-    expect(pages).toBeGreaterThan(1);
-    expect(pages).toBeLessThan(40);
+    expect(pages).toBe(1);
+    expect(mediaHeights(bytes)[0]).toBeGreaterThan(144);
     const text = pdfText(bytes);
     expect(text.match(/wording/g)?.length).toBe(30);
     expect(text).toContain(texts[0].split(":")[0]);
   });
 
-  it.skipIf(!hasPdftotext)("ends on a page shorter than one balloon line: each sheet takes a line, past its bottom", async () => {
+  it.skipIf(!hasPdftotext)("grows the sheet of a page shorter than one balloon line", async () => {
     // 20 px tall: the rail is 4 px, less than any line of a card.
     const { docx, texts } = commentedDocx(1, 1, 3, { w: 2880, h: 300, margin: 30 });
     const { bytes, pages } = await render(docx, true);
+    // The paragraph itself runs onto more pages; the cards add no sheet.
+    expect(pages).toBe((await render(docx, false)).pages);
+    // The sheet beside the commented text grows to hold the card.
+    expect(Math.max(...mediaHeights(bytes))).toBeGreaterThan(100);
     const text = pdfText(bytes);
     expect(text).toContain(texts[0].split(":")[0]);
     expect(text.match(/wording/g)?.length).toBe(3);
-    // One line per sheet: the card's lines, each on a sheet of its own.
-    expect(pages).toBeGreaterThan(3);
-    expect(pages).toBeLessThan(20);
+  });
+
+  it.skipIf(!hasPdftotext)("prints a heavily revised page on one taller sheet: 40 changes and 10 long comments, a leader to each card", async () => {
+    const ADA = 'w:author="Ada Reviewer" w:date="2026-08-12T10:00:00Z"';
+    const BOB = 'w:author="Bob Editor" w:date="2026-08-13T15:30:00Z"';
+    const t = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
+    const body: string[] = [];
+    const comments: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      const c = i % 2 === 0 ? i / 2 : -1;
+      body.push(
+        `<w:p>${t(`Clause ${i + 1}. The parties agree that `)}<w:ins w:id="${100 + 2 * i}" ${ADA}>${t(`the revised term ${i + 1}`)}</w:ins>${t(" applies and ")}` +
+          `<w:del w:id="${101 + 2 * i}" ${BOB}><w:r><w:delText xml:space="preserve">the old term ${i + 1}</w:delText></w:r></w:del>` +
+          (c >= 0 ? `<w:commentRangeStart w:id="${c}"/>${t("this commented part")}<w:commentRangeEnd w:id="${c}"/><w:r><w:commentReference w:id="${c}"/></w:r>` : t("this part")) +
+          `${t(" stays.")}</w:p>`,
+      );
+      if (c < 0) continue;
+      const text = `Comment ${c}: ${"please check this clause against the signed master agreement and the schedule. ".repeat(4).trim()}`;
+      comments.push(`<w:comment w:id="${c}" w:author="Carol Counsel" w:initials="CC" w:date="2026-08-14T09:00:00Z"><w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p></w:comment>`);
+    }
+    const sect = `<w:sectPr><w:pgSz w:w="${LETTER.w}" w:h="${LETTER.h}"/><w:pgMar w:top="${LETTER.margin}" w:bottom="${LETTER.margin}" w:left="${LETTER.margin}" w:right="${LETTER.margin}"/></w:sectPr>`;
+    const docx = makeDocx({
+      "word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:document ${W_NS}><w:body>${body.join("")}${sect}</w:body></w:document>`,
+      "word/comments.xml": `<?xml version="1.0"?>\n<w:comments ${W_NS}>${comments.join("")}</w:comments>`,
+    });
+    const out = new Collect();
+    const result = await renderDocxToPdf(bytesSource(docx), out, { comments: true, markup: true });
+    const bytes = Buffer.concat(out.chunks);
+    expect(result.pages).toBe(1);
+    const [height] = mediaHeights(bytes);
+    expect(height).toBeGreaterThan(792 * 3);
+    const text = pdfText(bytes);
+    for (let c = 0; c < 10; c++) expect(text).toContain(`Comment ${c}:`);
+    expect(text.match(/Inserted/g)?.length).toBe(20);
+    expect(text.match(/Deleted/g)?.length).toBe(20);
+    // 50 leaders, each ending at its card's left edge (the page's 612 pt and a 9 pt gap), on the sheet.
+    const ends = [...contentStreams(bytes).matchAll(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l ([\d.]+) (-?[\d.]+) l S/g)];
+    expect(ends).toHaveLength(50);
+    for (const [, x, y] of ends) {
+      expect(Number(x)).toBeCloseTo(621, 0);
+      expect(Number(y)).toBeGreaterThan(0);
+      expect(Number(y)).toBeLessThan(height);
+    }
   });
 
   it.skipIf(!hasPdftotext)("prints a card for every comment: in an equation, in text an exact row clips, at no text at all", async () => {
@@ -199,6 +259,18 @@ describe("renderDocxToPdf with comments", () => {
     // The equation's card and the clipped line's card (beside the row's visible line) have leaders; the card at no text has none.
     const content = contentStreams(bytes);
     expect(content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(2);
+  });
+
+  it.skipIf(!hasPdftotext)("prints the card of a comment at no text once, on the last sheet", async () => {
+    const { docx } = commentedDocx(3, 1);
+    // A comment referenced in an empty paragraph on page 1: no drawn text is near it.
+    const xml = unzipSync(docx);
+    const document = strFromU8(xml["word/document.xml"]).replace("<w:body>", `<w:body><w:p><w:r><w:commentReference w:id="99"/></w:r></w:p>`);
+    const comments = strFromU8(xml["word/comments.xml"]).replace("</w:comments>", `<w:comment w:id="99" w:author="Ada Reviewer" w:initials="AR" w:date="2026-06-01T10:00:00Z"><w:p><w:r><w:t>Note at no text</w:t></w:r></w:p></w:comment></w:comments>`);
+    const { bytes, pages } = await render(zipSync({ ...xml, "word/document.xml": strToU8(document), "word/comments.xml": strToU8(comments) }), true);
+    expect(pages).toBe(3);
+    const sheets = pdfText(bytes, true);
+    expect(sheets.map((sheet) => sheet.split("Note at no text").length - 1)).toEqual([0, 0, 1, 0]);
   });
 
   it.skipIf(!hasPdftotext)("prints the whole thread under its first comment, replies to replies stepped in, each author by the name people.xml gives", async () => {

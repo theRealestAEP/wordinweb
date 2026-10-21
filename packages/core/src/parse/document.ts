@@ -72,6 +72,24 @@ export function altChunkError(el: XmlElement, rels: Relationships): Error {
   return unsupportedContent(`the document embeds an alternative-format chunk (w:altChunk${part ? `, ${part}` : ""}) that Word imports on open`);
 }
 
+/** A w:altChunk start tag, with any prefix or none. */
+const ALT_CHUNK_TAG = /<(?:[\w.-]+:)?altChunk[\s/>]/;
+
+/**
+ * Refuse a part Word prints when its XML holds a w:altChunk anywhere: in
+ * the body, a table, a content control, a tracked change, either branch of
+ * an mc:AlternateContent, a text box. The part's text is checked before it
+ * is parsed, so no parse path can pass one over. `xml` is a whole part, or
+ * a start tag stream/scan.ts found in a body.
+ */
+export function refuseAltChunk(xml: string, rels: () => Relationships): void {
+  const found = ALT_CHUNK_TAG.exec(xml);
+  if (!found) return;
+  const tag = xml.slice(found.index, xml.indexOf(">", found.index) + 1);
+  const id = /\s(?:[\w.-]+:)?id\s*=\s*(["'])(.*?)\1/.exec(tag)?.[2];
+  throw altChunkError({ name: "w:altChunk", attrs: id === undefined ? {} : { "r:id": id }, children: [], text: "" }, rels());
+}
+
 /** A w:subDoc: a subdocument of a master document, whose content Word
  * reads from another file. */
 export function subDocError(el: XmlElement, rels: Relationships): Error {
@@ -135,8 +153,6 @@ export function parseBody(body: XmlElement, ctx: DocParseContext): Section[] {
       } else if (ln === "sectPr") {
         sections.push({ props: parseSectionProps(el), blocks });
         blocks = [];
-      } else if (ln === "altChunk") {
-        throw altChunkError(el, ctx.rels);
       } else {
         const content = wrappedContent(el);
         if (content) walk(content.children);
@@ -190,9 +206,7 @@ export function parseBlocks(container: XmlElement, ctx: DocParseContext): Block[
     } else if (ln === "tbl") {
       const t = parseTable(el, ctx);
       if (t.rows.length > 0) blocks.push(t); // all rows revision-deleted
-    }
-    else if (ln === "altChunk") throw altChunkError(el, ctx.rels);
-    else {
+    } else {
       const content = wrappedContent(el);
       if (content) blocks.push(...parseBlocks(content, ctx));
     }
@@ -2861,12 +2875,12 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
   // deeper in) — leave them to their own table.
   if (props.styleId) {
     const nRows = rows.length;
-    const nCols =
-      grid.length ||
-      rows.reduce((m, r) => Math.max(m, r.cells.reduce((a, c) => a + c.props.gridSpan, 0)), 0);
+    const nCols = Math.max(grid.length, ...rows.map((r) =>
+      (r.props.gridBefore ?? 0) + r.cells.reduce((a, c) => a + c.props.gridSpan, 0) + (r.props.gridAfter ?? 0),
+    ));
     for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
       const row = rows[rowIdx];
-      let colStart = 0;
+      let colStart = row.props.gridBefore ?? 0;
       for (const cell of row.cells) {
         const colSpan = cell.props.gridSpan;
         for (const block of cell.blocks) {
@@ -2906,6 +2920,15 @@ function parseRow(tr: XmlElement, ctx: DocParseContext): TableRow {
   const trPr = child(tr, "trPr");
   const props: TableRowProps = {};
   if (trPr) {
+    props.gridBefore = intAttr(child(trPr, "gridBefore"), "val");
+    props.gridAfter = intAttr(child(trPr, "gridAfter"), "val");
+    for (const [name, key] of [["wBefore", "widthBefore"], ["wAfter", "widthAfter"]] as const) {
+      const width = child(trPr, name);
+      if (width && (attr(width, "type") ?? "dxa") === "dxa") {
+        const value = intAttr(width, "w");
+        if (value !== undefined) props[key] = twipsToPx(value);
+      }
+    }
     const height = child(trPr, "trHeight");
     if (height) {
       const val = intAttr(height, "val");

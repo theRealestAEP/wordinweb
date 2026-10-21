@@ -1287,6 +1287,26 @@ describe("layout engine", () => {
     expect(bars.length).toBe(2);
   });
 
+  it("keeps a tabbed row on one line when a decimal stop's value has no separator", () => {
+    // A Windows Write table row: `175"` at a decimal stop right-aligns whole,
+    // and the cursor is already past where it would start. With no leader
+    // and room before the line end, the value continues at the cursor; it
+    // used to wrap the rest of the row onto four more lines.
+    const stops = [["left", 1440], ["left", 2160], ["decimal", 2700], ["left", 3240], ["left", 3960], ["left", 5040], ["decimal", 5580], ["left", 6120], ["decimal", 7200]];
+    const values = ['10"', '15"', '175"', '225"', '275"', '35"', '39"', '42"', '50"'];
+    const row =
+      `<w:p><w:pPr><w:tabs>${stops.map(([val, pos]) => `<w:tab w:val="${val}" w:pos="${pos}"/>`).join("")}</w:tabs><w:jc w:val="both"/></w:pPr>` +
+      `<w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="36"/></w:rPr>` +
+      `${values.map((v) => `<w:tab/><w:t xml:space="preserve">${v}</w:t>`).join("")}</w:r></w:p>`;
+    const { result } = layout({ "word/document.xml": wrapDocument(row + "<w:sectPr/>") });
+    const tops = values.map((v) => {
+      const item = result.pages[0].items.find((i) => i.kind === "text" && i.text === v);
+      expect(item?.kind).toBe("text");
+      return item?.kind === "text" ? item.lineTop : NaN;
+    });
+    expect(new Set(tops).size).toBe(1);
+  });
+
   it("renders U+00AD soft hyphens as visible non-breaking hyphens", () => {
     // probe2-hyphenation p1: Word paints an optional hyphen as a hyphen glyph
     // in EVERY position and never breaks a line at it — the soft-hyphenated
@@ -2990,11 +3010,11 @@ describe("footnotes and endnotes", () => {
     expect(notePage).toBe(refPage);
   });
 
-  it("keeps each footnote on the same page as its reference", () => {
+  it.each([false, true])("keeps each footnote on the same page as its reference (custom mark: %s)", (custom) => {
     const filler = (n: number, from = 0) =>
       Array.from({ length: n }, (_, i) => p(`Filler paragraph ${from + i}`)).join("");
     const refPara = (word: string, id: number) =>
-      `<w:p><w:r><w:t xml:space="preserve">${word}</w:t></w:r><w:r><w:footnoteReference w:id="${id}"/></w:r></w:p>`;
+      `<w:p><w:r><w:t xml:space="preserve">${word}</w:t></w:r><w:r><w:footnoteReference w:id="${id}"${custom ? ' w:customMarkFollows="1"' : ""}/>${custom ? "<w:t>*</w:t>" : ""}</w:r></w:p>`;
     const { result } = layout({
       "word/document.xml": wrapDocument(
         refPara("HEADREF", 1) + filler(70) + refPara("TAILREF", 2) + filler(5, 70),
@@ -3014,10 +3034,10 @@ describe("footnotes and endnotes", () => {
     const tailPage = pageOf("TAILREF");
     expect(tailPage).toBeGreaterThan(0);
     expect(pageOf("betanote")).toBe(tailPage);
-    // Numbering follows document order.
+    // Each reference and its note use the same mark.
     expect(pageText(result, 0)).toContain("alphanote");
     const tailMarks = result.pages[tailPage].items.filter(
-      (i) => i.kind === "text" && i.text === "2" && i.props.verticalAlign === "superscript",
+      (i) => i.kind === "text" && i.text === (custom ? "*" : "2"),
     );
     expect(tailMarks.length).toBe(2);
   });

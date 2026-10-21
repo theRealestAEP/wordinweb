@@ -12,7 +12,7 @@ import { IMAGE_PLACEHOLDER } from "./canvas.js";
 import { PageDrawer, Picture } from "./draw.js";
 import { PdfRenderError, asPdfRenderError, unsupportedScript } from "./errors.js";
 import { FontSet, defaultFontDirs, deobfuscateFont } from "./fonts.js";
-import { writeImage, writeSamples } from "./images.js";
+import { PICTURE_BYTES, writeImage, writeSamples } from "./images.js";
 import { bookmarkTops, linkAction, linkBoxes, pdfName } from "./links.js";
 import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
@@ -42,7 +42,8 @@ export interface RenderPdfOptions {
   title?: string;
   /** Print the review comments: each sheet is the page with a comment
    * column at its right (see comments.ts), every sheet the size of the
-   * largest page plus the column. */
+   * largest page plus the column, or taller when its page's cards need it:
+   * one sheet per page. */
   comments?: boolean;
   /**
    * Print the document's own tracked changes as Word's "All Markup" shows
@@ -69,6 +70,10 @@ export interface RenderPdfOptions {
 
 export interface RenderPdfResult {
   pages: number;
+  /** The counting pass's page total: the Y of "Page X of Y" (NUMPAGES).
+   * Always equal to `pages`; a difference is a layout bug, which
+   * scripts/pdf-page-count.mjs looks for. */
+  countedPages: number;
   /** Faces embedded, "family subfamily". */
   fonts: string[];
   /** Families the document asked for that no font directory holds; a
@@ -76,7 +81,9 @@ export interface RenderPdfResult {
   missingFonts: string[];
   /** Characters no installed font has, as "U+4E2D 中": each drew as an empty box. */
   missingCharacters: string[];
-  /** Picture parts drawn as empty frames: no decoder for their format. */
+  /** Picture parts drawn as empty frames: no decoder for their format, or
+   * cut short or malformed, or over the picture budgets (BITMAP_BYTES,
+   * PICTURE_BYTES in images.ts). */
   unsupportedImages: string[];
 }
 
@@ -106,8 +113,8 @@ export function fileSource(path: string): ByteSource {
 /**
  * Render a .docx to PDF with no browser: the document streams in
  * (stream/body.ts), a counting pass learns the page total and bookmark
- * pages, and the rendering pass writes each page's objects to `out` as the
- * layout finishes it. Fonts embed once at the end, subset to the glyphs
+ * pages, and the rendering pass writes each page's objects to `out` once the
+ * layout has finished the next page (or the document). Fonts embed once at the end, subset to the glyphs
  * used. `out` is ended when the PDF is complete.
  *
  * A link (w:hyperlink, a HYPERLINK field) is a /Link annotation over each
@@ -202,6 +209,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     if (size === undefined) return null;
     const ext = part.slice(part.lastIndexOf(".") + 1).toLowerCase();
     if (ext === "emf" || ext === "wmf" || ext === "pict") {
+      if (size > PICTURE_BYTES) return null;
       const bytes = await opened.media(part);
       const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources));
       if (!canvas) return null;
@@ -261,7 +269,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
     return annots;
   };
 
-  const onPage = async (page: LaidOutPage): Promise<void> => {
+  const writeSheet = async (page: LaidOutPage, last: boolean): Promise<void> => {
     const shown = new Map<string, Picture>();
     const xobjects: string[] = [];
     for (const item of page.items) {
@@ -276,28 +284,27 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       shown.set(item.part, loaded.picture);
       xobjects.push(...loaded.xobjects);
     }
-    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, sheet?.height ?? page.height);
+    // The rail first: a sheet whose cards reach past its bottom is taller.
+    const rail = column && sheet ? column.layout(page, sheet.height, printComments && last) : null;
+    const height = rail?.height ?? page.height;
+    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, page, 0, height);
     drawer.drawPage((part) => shown.get(part) ?? null);
-    if (column && sheet) column.draw(page, drawer, sheet.height, printComments && page.index === final.result.totalPages);
+    rail?.draw(drawer);
     for (const [name, top] of bookmarkTops(page)) if (!bookmarkAt.has(name)) bookmarkAt.set(name, { page: page.index - 1, y: drawer.y(top) });
-    await writePage(drawer, sheet?.width ?? page.width, sheet?.height ?? page.height, xobjects, await writeLinks(page, drawer));
+    await writePage(drawer, sheet?.width ?? page.width, height, xobjects, await writeLinks(page, drawer));
     if (page.index % 25 === 0) clearBreakCache(measurer);
+  };
+  // Each page's sheet is written when the next page comes, and the last
+  // one when the layout ends: only then is it known to be the last, the
+  // sheet that takes the cards of the comments no page placed.
+  let held: LaidOutPage | null = null;
+  const onPage = async (page: LaidOutPage): Promise<void> => {
+    if (held) await writeSheet(held, false);
+    held = page;
   };
   clearBreakCache(measurer);
   await layoutDocumentStream(opened.doc, { measurer, prescan: opened.prescan, knownTotalPages: final.knownTotalPages, final: final.result, onPage });
-
-  // Balloons past the last page go on sheets of their own. Each such sheet
-  // must take some of the waiting lines: one that takes none would be
-  // followed by another just like it, without end.
-  if (printComments) column?.placeRemaining();
-  while (column && sheet && column.carriedLines() > 0) {
-    const waiting = column.carriedLines();
-    const blank: LaidOutPage = { width: final.maxWidth, height: final.maxHeight, index: 0, number: 0, items: [], bodyTop: 0, bodyBottom: 0, hfStart: 0, columnBands: [] };
-    const drawer = new PageDrawer(fonts, resources, opened.doc.theme, blank, 0, sheet.height);
-    column.draw(blank, drawer, sheet.height);
-    if (column.carriedLines() >= waiting) throw new PdfRenderError("failed", `sheet ${pageNums.length + 1} holds no page and took none of the ${waiting} balloon lines waiting after the last page`);
-    await writePage(drawer, sheet.width, sheet.height, []);
-  }
+  if (held) await writeSheet(held, true);
 
   await resources.write();
   await writer.object(pagesNum, `<< /Type /Pages /Count ${pageNums.length} /Kids [${pageNums.map((n) => `${n} 0 R`).join(" ")}] >>`);
@@ -321,6 +328,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
   await new Promise<void>((resolve, reject) => out.end((error?: Error | null) => (error ? reject(error) : resolve())));
   return {
     pages: pageNums.length,
+    countedPages: final.result.totalPages,
     fonts: resources.embedded(),
     missingFonts: [...fonts.missing],
     missingCharacters: [...fonts.missingCodePoints].sort((a, b) => a - b).map((cp) => `U+${cp.toString(16).toUpperCase().padStart(4, "0")} ${String.fromCodePoint(cp)}`),
@@ -409,7 +417,7 @@ function unsupportedInXml(el: XmlElement, markup: boolean, authors: boolean): { 
 interface Count {
   result: StreamLayoutResult;
   knownTotalPages: number | undefined;
-  /** The largest page's sides, for sheets that must all be one size. */
+  /** The largest page's sides: the least size of a sheet with a comment column. */
   maxWidth: number;
   maxHeight: number;
 }

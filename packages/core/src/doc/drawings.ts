@@ -37,6 +37,7 @@ import {
   shapeProps,
 } from "./officeart.js";
 import { SPT_NOT_PRIMITIVE, SPT_PICTURE_FRAME, SPT_TEXT_BOX, isLineShapeType, isWordArtShapeType, presetForShapeType } from "./shape-types.js";
+import { brc80 } from "./word6.js";
 
 export type { ArtImage } from "./officeart.js";
 
@@ -344,16 +345,23 @@ const ICO_COLORS: Record<number, string> = {
   9: "000080", 10: "008080", 11: "008000", 12: "800080", 13: "800000", 14: "808000", 15: "808080", 16: "C0C0C0",
 };
 
-/** Read the 68-byte PICF at `offset` of the Data stream. */
-export function parsePicf(data: Uint8Array, offset: number): DocPicf | null {
-  if (offset < 0 || offset + 68 > data.length) return null;
+/**
+ * Read the 68-byte PICF at `offset` of the Data stream, or for a Word 6.0/95
+ * file (`word6`) its PIC in the WordDocument stream: 58 bytes, the same
+ * but for its 2-byte BRCs, or a 68-byte PICF some Word 6 versions wrote.
+ */
+export function parsePicf(data: Uint8Array, offset: number, word6 = false): DocPicf | null {
+  if (offset < 0 || offset + 6 > data.length) return null;
   const v = view(data);
   const lcb = v.getUint32(offset, true);
   const cbHeader = v.getUint16(offset + 4, true);
+  word6 = word6 && cbHeader === 58;
+  const size = word6 ? 58 : 68;
+  if (offset + size > data.length) return null;
   const mm = v.getInt16(offset + 6, true);
   // A PICF header is 68 bytes and covers at least itself; anything else is
   // a stray sprmCPicLocation (Word leaves them in runs that hold no picture).
-  if (cbHeader !== 68 || lcb < 68 || offset + lcb > data.length) return null;
+  if (cbHeader !== size || lcb < size || offset + lcb > data.length) return null;
   const picmid = offset + 28;
   const picf: DocPicf = {
     lcb,
@@ -367,12 +375,19 @@ export function parsePicf(data: Uint8Array, offset: number): DocPicf | null {
     dyaCropTop: v.getInt16(picmid + 10, true),
     dxaCropRight: v.getInt16(picmid + 12, true),
     dyaCropBottom: v.getInt16(picmid + 14, true),
-    borders: {
-      top: readBrc80(data, picmid + 18),
-      left: readBrc80(data, picmid + 22),
-      bottom: readBrc80(data, picmid + 26),
-      right: readBrc80(data, picmid + 30),
-    },
+    borders: word6
+      ? {
+          top: readBrc80(Uint8Array.from(brc80(v.getUint16(picmid + 18, true))), 0),
+          left: readBrc80(Uint8Array.from(brc80(v.getUint16(picmid + 20, true))), 0),
+          bottom: readBrc80(Uint8Array.from(brc80(v.getUint16(picmid + 22, true))), 0),
+          right: readBrc80(Uint8Array.from(brc80(v.getUint16(picmid + 24, true))), 0),
+        }
+      : {
+          top: readBrc80(data, picmid + 18),
+          left: readBrc80(data, picmid + 22),
+          bottom: readBrc80(data, picmid + 26),
+          right: readBrc80(data, picmid + 30),
+        },
   };
   if (mm === 0x66) {
     const nameAt = offset + cbHeader;
@@ -392,6 +407,8 @@ export interface InlinePictureOptions {
    */
   store?: DocOfficeArt;
   delayStream?: Uint8Array;
+  /** A Word 6.0/95 PIC (parsePicf). */
+  word6?: boolean;
 }
 
 /**
@@ -400,7 +417,7 @@ export interface InlinePictureOptions {
  * reference, or a BLIP type this reader does not decode).
  */
 export function parseInlinePicture(data: Uint8Array, offset: number, options: InlinePictureOptions = {}): DocInlinePicture | null {
-  const picf = parsePicf(data, offset);
+  const picf = parsePicf(data, offset, options.word6);
   if (!picf) return null;
   const end = Math.min(data.length, offset + picf.lcb);
   let at = offset + picf.cbHeader;
@@ -460,7 +477,7 @@ function inlineBlips(data: Uint8Array, start: number, end: number): { image: Art
 }
 
 /** A pre-OfficeArt picture (Word 6/95 PICF): a bare WMF, BMP or DIB after the header. */
-function legacyPictureData(bytes: Uint8Array): ArtImage | null {
+export function legacyPictureData(bytes: Uint8Array): ArtImage | null {
   if (bytes.length < 18) return null;
   const v = view(bytes);
   if (bytes[0] === 0x42 && bytes[1] === 0x4d) return makeImage("bmp", bytes);

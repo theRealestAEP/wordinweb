@@ -20,8 +20,10 @@ interface Reader {
 
 const TYPE_SIZE: Record<number, number> = { 1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8 };
 
-/** Decode a baseline TIFF (first IFD only). Returns null if unsupported. */
-export function decodeTiff(bytes: Uint8Array, maxPixels = Infinity): DecodedImage | null {
+/** Decode a baseline TIFF (first IFD only). Returns null if unsupported,
+ * cut short, or over `maxBytes` of pixels: its samples and its RGBA, checked
+ * before either is allocated. */
+export function decodeTiff(bytes: Uint8Array, maxBytes = Infinity): DecodedImage | null {
   try {
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const bom = dv.getUint16(0, false);
@@ -68,8 +70,6 @@ export function decodeTiff(bytes: Uint8Array, maxPixels = Infinity): DecodedImag
     const width = one(256, 0);
     const height = one(257, 0);
     if (!width || !height) return null;
-    // The pixels are decoded whole: a caller with a bound says so here.
-    if (width * height > maxPixels) return null;
     const bits = readValues(258) ?? [1];
     const compression = one(259, 1);
     const photometric = one(262, 1);
@@ -85,6 +85,8 @@ export function decodeTiff(bytes: Uint8Array, maxPixels = Infinity): DecodedImag
     if (predictor !== 1 && predictor !== 2) return null;
     const planar = one(284, 1);
     if (planar !== 1) return null;
+    // The pixels are decoded whole: a caller with a bound says so here.
+    if (width * height * (spp + 4) > maxBytes) return null;
 
     const rowBytes = width * spp;
     const out = new Uint8Array(height * rowBytes);
@@ -102,6 +104,8 @@ export function decodeTiff(bytes: Uint8Array, maxPixels = Infinity): DecodedImag
       outRow += rows;
       if (outRow >= height) break;
     }
+    // Strips that stop short of the image: it is cut short.
+    if (outRow < height) return null;
 
     // Horizontal differencing predictor: each sample is stored as the delta
     // from the same channel of the pixel to its left.
@@ -231,7 +235,8 @@ function lzwDecode(input: Uint8Array, expected: number): Uint8Array {
     oldCode = code;
     if (outPos >= expected) break;
   }
-  return out;
+  // Data that stops short gives fewer bytes than the strip needs.
+  return out.subarray(0, outPos);
 }
 
 /** PackBits RLE (TIFF compression 32773). */
@@ -242,11 +247,12 @@ function packBits(input: Uint8Array, expected: number): Uint8Array {
   while (i < input.length && o < expected) {
     const n = (input[i++] << 24) >> 24; // sign-extend
     if (n >= 0) {
-      for (let k = 0; k <= n && o < expected; k++) out[o++] = input[i++];
+      for (let k = 0; k <= n && o < expected && i < input.length; k++) out[o++] = input[i++];
     } else if (n !== -128) {
+      if (i >= input.length) break;
       const v = input[i++];
       for (let k = 0; k < 1 - n && o < expected; k++) out[o++] = v;
     }
   }
-  return out;
+  return out.subarray(0, Math.min(o, expected));
 }

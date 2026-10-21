@@ -313,13 +313,13 @@ describe("renderDocxToPdf with markup", () => {
     expect(rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3)).toHaveLength(1);
   });
 
-  it.skipIf(!hasPdftotext)("ends on a page shorter than a change's balloon, which goes on sheets after the page a line at a time", async () => {
+  it.skipIf(!hasPdftotext)("ends on a page shorter than a change's balloon, whose sheet grows to hold it", async () => {
     // A 2 x 0.3 in page: the rail is shorter than the balloon's head line.
     const tiny = `<w:sectPr><w:pgSz w:w="2880" w:h="400"/><w:pgMar w:top="30" w:right="30" w:bottom="30" w:left="30" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>`;
     const bytes = makeDocx({ "word/document.xml": `<?xml version="1.0"?>\n<w:document ${W_NS}><w:body>${p(`<w:ins w:id="1" ${ADA}>${t("new")}</w:ins>`)}${tiny}</w:body></w:document>` });
     const { pdf, pages } = await render(bytes, true);
-    expect(pages).toBeGreaterThan(1);
-    expect(pages).toBeLessThan(12);
+    expect(pages).toBe(1);
+    expect(Number(/\/MediaBox \[0 0 [\d.]+ ([\d.]+)\]/.exec(pdf.toString("latin1"))?.[1])).toBeGreaterThan(20);
     const text = pdfText(pdf);
     expect(text).toContain("Ada Reviewer");
     expect(text).toContain("Inserted");

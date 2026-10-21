@@ -1,4 +1,4 @@
-import { Package, FIXED_ZIP_MTIME, relativePartPath, resolvePartPath } from "./zip.js";
+import { Package, FIXED_ZIP_MTIME, holdXmlCounts, mainDocumentPart, relativePartPath, resolvePartPath } from "./zip.js";
 import { normalizeStrictPackage } from "./strict.js";
 import { XmlElement, parseXml, serializeXml, child, children, intAttr, onOff, attr, localName, cyrb53 } from "./xml.js";
 import { strFromU8, strToU8, zip, zipSync } from "fflate";
@@ -31,7 +31,7 @@ import {
 } from "./parse/styles.js";
 import { parseNumbering } from "./parse/numbering.js";
 import { StableIds } from "./edit/ids.js";
-import { parseBody, parseBlocks, parseParagraph, DocParseContext, altChunkError } from "./parse/document.js";
+import { parseBody, parseBlocks, parseParagraph, DocParseContext, refuseAltChunk } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
 import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
@@ -47,8 +47,6 @@ import {
   buildSmartArtLayoutXml,
   buildSmartArtStyleXml,
 } from "./edit/smartart.js";
-
-const REL_TYPE_DOCUMENT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
 
 /**
  * A fresh footnotes.xml / endnotes.xml root carrying the two stock notes Word
@@ -418,7 +416,7 @@ export class DocxDocument {
     if (this.relsRoot) this.rememberOriginalXml(this.relsPath, this.relsRoot);
     if (this.contentTypesRoot) this.rememberOriginalXml("[Content_Types].xml", this.contentTypesRoot);
 
-    const docRoot = this.readXmlOptional(docPart);
+    const docRoot = this.readPrintedXml(docPart);
     if (!docRoot) throw new Error(`Missing ${docPart} in package`);
     this.docRoot = docRoot;
     this.rememberOriginalXml(docPart, docRoot);
@@ -499,7 +497,7 @@ export class DocxDocument {
 
     // Review comments (optional part). The XML tree is retained so comments
     // can be deleted (with undo) and round-trip through save().
-    const commentsRoot = this.readXmlOptional(docDir + "comments.xml");
+    const commentsRoot = this.readPrintedXml(docDir + "comments.xml");
     if (commentsRoot) {
       this.commentsPart = docDir + "comments.xml";
       this.commentsRoot = commentsRoot;
@@ -556,7 +554,7 @@ export class DocxDocument {
       const isHeader = rel.type.endsWith("/header");
       const isFooter = rel.type.endsWith("/footer");
       if (!isHeader && !isFooter) continue;
-      const root = this.readXmlOptional(rel.target);
+      const root = this.readPrintedXml(rel.target);
       if (!root) continue;
       const partRelsRoot = this.readXmlOptional(relsPathFor(rel.target));
       const partRels = parseRelationships(partRelsRoot, rel.target);
@@ -578,7 +576,7 @@ export class DocxDocument {
       const isFn = rel.type.endsWith("/footnotes");
       const isEn = rel.type.endsWith("/endnotes");
       if (!isFn && !isEn) continue;
-      const root = this.readXmlOptional(rel.target);
+      const root = this.readPrintedXml(rel.target);
       if (!root) continue;
       const partRels = parseRelationships(this.readXmlOptional(relsPathFor(rel.target)), rel.target);
       if (isFn) {
@@ -1210,10 +1208,6 @@ export class DocxDocument {
       if (localName(c.name) !== "comment") continue;
       const paras: string[] = [];
       const collectPara = (el: XmlElement): void => {
-        if (localName(el.name) === "altChunk") {
-          const part = this.commentsPart as string;
-          throw altChunkError(el, parseRelationships(this.readXmlOptional(relsPathFor(part)), part));
-        }
         if (localName(el.name) === "p") {
           let text = "";
           const collectT = (e: XmlElement): void => {
@@ -2383,7 +2377,7 @@ export class DocxDocument {
       const floor = 600;
       const widths = new Array<number>(columns.length).fill(floor);
       for (const row of table.rows) {
-        let column = 0;
+        let column = row.props.gridBefore ?? 0;
         for (const cell of row.cells) {
           const span = Math.max(1, Math.min(cell.props.gridSpan, columns.length - column));
           const demand = Math.max(floor * span, textLength(cell.blocks) * 100 + 300);
@@ -3158,6 +3152,8 @@ export class DocxDocument {
     const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
     const pkg = isOleFile(bytes) ? Package.fromFiles(docPackageFiles(bytes)) : isOldWordFile(bytes) ? Package.fromFiles(oldWordPackageFiles(bytes)) : Package.from(bytes);
     normalizeStrictPackage(pkg.raw());
+    // What the XML will cost once parsed, from its bytes, before any of it is.
+    holdXmlCounts(pkg.raw(), mainDocumentPart(pkg.binary("_rels/.rels")));
     return new DocxDocument(pkg);
   }
 
@@ -3458,17 +3454,23 @@ export class DocxDocument {
   }
 
   private findDocumentPart(): string {
-    const rootRels = parseRelationships(this.readXmlOptional("_rels/.rels"), "");
-    for (const rel of rootRels.values()) {
-      if (rel.type === REL_TYPE_DOCUMENT) return rel.target;
-    }
-    if (this.pkg.has("word/document.xml")) return "word/document.xml";
+    const part = mainDocumentPart(this.pkg.binary("_rels/.rels"));
+    if (this.pkg.has(part)) return part;
     throw new Error("Not a WordprocessingML package: no main document part");
   }
 
   private readXmlOptional(part: string) {
     const text = this.pkg.text(part);
     if (text === undefined) return undefined;
+    return parseXml(text);
+  }
+
+  /** A part Word prints (the document, a header or footer, the notes, the
+   * comments), refused when it holds a w:altChunk anywhere. */
+  private readPrintedXml(part: string) {
+    const text = this.pkg.text(part);
+    if (text === undefined) return undefined;
+    refuseAltChunk(text, () => parseRelationships(this.readXmlOptional(relsPathFor(part)), part));
     return parseXml(text);
   }
 }

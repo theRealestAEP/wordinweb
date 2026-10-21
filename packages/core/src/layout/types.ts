@@ -167,6 +167,12 @@ export interface LineEdgeItem {
   x2: number;
   y2: number;
   border: Border;
+  /** PDF paint extensions along the rule; layout keeps the original endpoints. */
+  extendStart?: number;
+  extendEnd?: number;
+  /** The box's shadow strip, and its extension past the bottom-right corner. */
+  shadowSide?: "right" | "bottom";
+  shadowEnd?: number;
   /** Semantic paint provenance used by render-layer comparison. */
   role?: "table-rule";
   /** Rotate about a point (px, relative to this item's top-left). */
