@@ -17,6 +17,7 @@
 //   them through the two sprms below.
 import { u16 } from "./bytes.js";
 import type { Font } from "./styles.js";
+import { windows1252 } from "../windows1252.js";
 
 /** The Word 97 shapes the Word 6 autonumbering sprms are given, which no Word 97 sprm carries: sprmPAnld (an ANLD) and sprmPNLvlAnm (a level). */
 export const SPRM_ANLD = 0xc63e;
@@ -273,7 +274,7 @@ export function highHalf(charset: number, mac: boolean): string {
   let half = highHalves.get(encoding);
   if (half === undefined) {
     const bytes = new Uint8Array(128).map((_, i) => 0x80 + i);
-    half = new TextDecoder(encoding).decode(bytes);
+    half = encoding === "windows-1252" ? windows1252.decode(bytes) : new TextDecoder(encoding).decode(bytes);
     highHalves.set(encoding, half);
   }
   return half;

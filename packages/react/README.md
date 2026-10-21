@@ -46,6 +46,17 @@ export function Preview() {
 
 `source` accepts a URL string, `ArrayBuffer`, `Uint8Array`, `Blob`, or `File` — so a drag-and-drop or `<input type="file">` handler can pass its bytes straight through.
 
+### DOCX-only parser and renderer
+
+For a custom browser viewer that accepts `.docx` files, use the smaller entry:
+
+```ts
+import { DocxDocument, layoutDocumentAsync, renderToDom } from "wordinweb/docx-only";
+```
+
+This entry loads ZIP-based DOCX packages, including Strict Open XML. The main
+`wordinweb` entry also includes the binary Word converters for `.doc` and older formats.
+
 ### Editable (with the toolbar)
 
 The editor exposes its commands through an imperative `api` handed to `onReady`. Pair it with the bundled `<DocxToolbar />` for a word-processor UI, or drive the `api` yourself.

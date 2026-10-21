@@ -1,7 +1,7 @@
 import { defineConfig } from "tsup";
 
 export default defineConfig({
-  entry: ["src/index.tsx", "src/collab.tsx"],
+  entry: ["src/index.tsx", "src/collab.tsx", "src/docx-only.ts"],
   format: ["esm"],
   // `noExternal` bundles the JS, but the .d.ts rollup resolves SEPARATELY,
   // and it inlines a workspace package only when tsconfig `paths` maps that

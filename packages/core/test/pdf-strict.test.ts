@@ -26,7 +26,8 @@ async function render(docx: Uint8Array): Promise<{ text: string; images: number 
       callback();
     },
   });
-  await renderDocxToPdf(bytesSource(docx), out);
+  const report = await renderDocxToPdf(bytesSource(docx), out);
+  expect(report.unsupportedImages).toEqual([]);
   const bytes = Buffer.concat(chunks);
   const dir = mkdtempSync(join(tmpdir(), "wordinweb-strict-"));
   try {

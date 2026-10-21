@@ -1,6 +1,6 @@
 {
   "name": "wordinweb",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "React component for high-fidelity DOCX viewing and editing",
   "license": "MIT",
   "repository": {
@@ -27,6 +27,10 @@
     "./collab": {
       "types": "./dist/collab.d.ts",
       "import": "./dist/collab.js"
+    },
+    "./docx-only": {
+      "types": "./dist/docx-only.d.ts",
+      "import": "./dist/docx-only.js"
     }
   },
   "files": [

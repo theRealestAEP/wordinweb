@@ -323,6 +323,11 @@ describe("DATE/TIME re-evaluation (Word recomputes on open; cache is stale)", ()
     const iso = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
     expect(resolveField('DATE \\@ "yyyy-MM-dd"', "1999-01-01", ctx({ now }))).toBe(iso);
   });
+  it.each([[2026, "26"], [2006, "06"]])("DATE single-y picture uses two digits for %i", (year, expected) => {
+    const now = new Date(year, 9, 20, 12);
+    expect(resolveField('DATE \\@ "MMMM d, y"', "October 20, y", ctx({ now }))).toBe(`October 20, ${expected}`);
+    expect(resolveField("DATE \\@ \"'y' y yy yyyy\"", "", ctx({ now }))).toBe(`y ${expected} ${expected} ${year}`);
+  });
   it("TIME am/pm token renders the designator UPPERCASE like Word", () => {
     expect(resolveField('TIME \\@ "h:mm am/pm"', "3:07 pm", ctx())).toMatch(/^\d{1,2}:\d{2} [AP]M$/);
   });
