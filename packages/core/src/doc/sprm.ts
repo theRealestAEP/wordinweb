@@ -5,6 +5,7 @@
 // which are the .docx units too.
 import { i16, i32, u16, u32, utf16 } from "./bytes.js";
 import { sprms } from "./props.js";
+import { SPRM_ANLD, SPRM_NLVLANM } from "./word6.js";
 
 export interface Border {
   /** A BrcType ([MS-DOC] 2.9.22); 0 for none, 0xff for "nil" (leave as inherited). */
@@ -81,6 +82,8 @@ export interface RunProps {
   shading?: Shading;
   /** sprmCSymbol: the font and character of a symbol (the text is U+0028). */
   symbol?: { ftc: number; char: number };
+  /** sprmCChs (Word 6 sprmCChse): the character set of pasted 8-bit text, 256 the Macintosh one, when it is not the document's. */
+  chse?: number;
   /** sprmCPicLocation: the offset in the Data stream of a picture (U+0001) or an OLE object's name (U+0014). */
   picLocation?: number;
   /** sprmCFData: the U+0001 is binary data, not a picture. */
@@ -140,6 +143,9 @@ export interface ParaProps {
   textAlignment?: number;
   ilfo?: number;
   ilvl?: number;
+  /** Word 6 autonumbering (word6.ts): the ANLD, and the level: 1-9 a heading level, 10 numbered, 11 bulleted, 0 none. */
+  anld?: Uint8Array;
+  nLvlAnm?: number;
   dxaLeft?: number;
   dxaRight?: number;
   dxaLeft1?: number;
@@ -172,6 +178,7 @@ export interface CellProps {
   /** The cell's logical right edge, in twips from the row's origin (rgdxaCenter[i+1]). */
   right: number;
   /** TC80 fields. */
+  /** 1: the first cell of a horizontally merged range; 2 or 3: merged into the cell before (as Word 97 files hold it). */
   horzMerge: number;
   vertMerge: number;
   vertAlign: number;
@@ -278,6 +285,10 @@ export interface SectionProps {
   nfcEdnRef?: number;
   endnotesHere?: boolean;
   propRevision?: PropRevision;
+  /** Word 6 heading numbering (sprmSOlstAnm): an OLST. */
+  olst?: Uint8Array;
+  /** The headers and footers the section has (sprmSGprfIhdt), which a Word 6 file stores only. */
+  grpfIhdt?: number;
 }
 
 export function newRunProps(): RunProps {
@@ -413,6 +424,7 @@ export function applyRunSprms(grpprl: Uint8Array, p: RunProps): void {
       case 0x6805: p.insDate = u32(o, 0); break;
       case 0x0806: p.fData = o[0] !== 0; break;
       case 0x6a09: p.symbol = { ftc: u16(o, 0), char: u16(o, 2) }; break;
+      case 0xea08: if (o[0]) p.chse = u16(o, 1); else delete p.chse; break;
       case 0x080a: p.fOle2 = o[0] !== 0; break;
       case 0x0856: p.fObj = o[0] !== 0; break;
       case 0x2a0c: p.highlight = o[0]; break;
@@ -594,6 +606,8 @@ export function applyParaSprms(grpprl: Uint8Array, p: ParaProps): void {
       case 0x2406: p.keepNext = o[0] !== 0; break;
       case 0x2407: p.pageBreakBefore = o[0] !== 0; break;
       case 0x260a: p.ilvl = o[0]; break;
+      case SPRM_ANLD: p.anld = o.subarray(1); break;
+      case SPRM_NLVLANM: p.nLvlAnm = o[0]; break;
       case 0x460b: {
         const v = u16(o, 0);
         p.ilfo = v === 0xf801 ? 0 : v >= 0xf802 ? 0x10000 - v : v;
@@ -805,7 +819,7 @@ function applyTableSprm(sprm: number, o: Uint8Array, t: TableProps): void {
     }
     case 0x5624: {
       const cells = cellRange(o, 0, t.cells);
-      cells.forEach((cell, i) => { cell.horzMerge = i === 0 ? 2 : 1; });
+      cells.forEach((cell, i) => { cell.horzMerge = i === 0 ? 1 : 2; });
       break;
     }
     case 0x5625: for (const cell of cellRange(o, 0, t.cells)) cell.horzMerge = 0; break;
@@ -1126,6 +1140,8 @@ export function applySectSprms(grpprl: Uint8Array, s: SectionProps): void {
         else delete s.propRevision;
         break;
       case 0x7044: s.pgnStart = u32(o, 0); break;
+      case 0xd202: s.olst = o.subarray(1); break;
+      case 0x3014: s.grpfIhdt = o[0]; break;
       default: break;
     }
   }

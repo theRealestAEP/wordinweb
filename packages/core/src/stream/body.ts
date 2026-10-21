@@ -343,8 +343,8 @@ function parseBlock(el: XmlElement, ctx: DocParseContext): Block | null {
  * WordDocument stream) is read whole and converted (doc/hooks.ts); a file
  * that is another format altogether is refused from its first bytes, before
  * the zip directory is looked for (formats.ts), and a compound file that
- * holds something else by the converter: a password-protected .docx, a
- * Word 6.0/95 document, an Excel or PowerPoint file.
+ * holds something else by the converter: a password-protected .docx, an
+ * Excel or PowerPoint file.
  */
 async function asDocxSource(source: ByteSource): Promise<ByteSource> {
   const size = await source.size();

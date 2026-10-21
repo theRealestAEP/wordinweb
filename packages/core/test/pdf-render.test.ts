@@ -334,14 +334,15 @@ describe("renderDocxToPdf", () => {
   });
 
   it("refuses other formats from their first bytes, with unsupported_format and the format's name", async () => {
-    // Compound files: an Excel workbook, a password-protected .docx, a Word 6.0/95 document (its FIB starts with 0xA5DC).
+    // Compound files: an Excel workbook, a password-protected .docx, an encrypted Word 6.0/95 document (its FIB starts with 0xA5DC).
     const ole = (name: string, content = new Uint8Array(64)): Uint8Array => {
       const cfb = CFB.utils.cfb_new();
       CFB.utils.cfb_add(cfb, name, content);
       return new Uint8Array(CFB.write(cfb, { type: "array" }) as number[]);
     };
-    const word6 = new Uint8Array(64);
+    const word6 = new Uint8Array(0x300);
     word6.set([0xdc, 0xa5, 0x65, 0x00]);
+    word6[0x0b] = 0x01;
     const odt = makeDocx({ mimetype: "application/vnd.oasis.opendocument.text", "content.xml": "<office:document-content/>" });
     const cases: [string, Uint8Array, RegExp][] = [
       ["xls", ole("Workbook"), /Excel 97-2003 workbook/],
@@ -350,7 +351,7 @@ describe("renderDocxToPdf", () => {
       ["html", new TextEncoder().encode("\ufeff\n<!DOCTYPE html><html><body>Hi</body></html>"), /HTML/],
       ["word 2003 xml", new TextEncoder().encode('<?xml version="1.0"?><?mso-application progid="Word.Document"?><w:wordDocument/>'), /Word 2003 XML/],
       ["encrypted", ole("EncryptionInfo"), /password-protected/],
-      ["word6", ole("WordDocument", word6), /Word 6\.0\/95/],
+      ["word6", ole("WordDocument", word6), /password-protected document \(Word 6\.0\/95/],
       ["rtf", new TextEncoder().encode("{\\rtf1\\ansi Hello.\\par }"), /RTF/],
       ["pdf", new TextEncoder().encode("%PDF-1.4\n%%EOF\n"), /PDF/],
       ["odt", odt, /OpenDocument/],

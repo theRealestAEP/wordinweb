@@ -33,6 +33,8 @@ import {
 import { DocStreams, openDocStreams } from "./streams.js";
 import { Font, StyleSheet, parseFonts } from "./styles.js";
 import { PieceTable } from "./text.js";
+import { Word6Lists } from "./numbering6.js";
+import { highHalf, parseSttb6, word6Grpprl } from "./word6.js";
 
 /** The parsed structures of a .doc, for every module that reads one. */
 export interface DocReader {
@@ -51,7 +53,7 @@ export interface DocReader {
 export function openDoc(bytes: Uint8Array): DocReader {
   const streams = openDocStreams(bytes);
   const fib = parseFib(streams.wordDocument);
-  const pieces = new PieceTable(tableBlob(fib, streams.table, FC.clx), streams.wordDocument);
+  const pieces = new PieceTable(tableBlob(fib, streams.table, FC.clx), streams.wordDocument, fib.word6);
   const props = new PropertyTables(streams.wordDocument, streams.table, streams.data, fib, pieces);
   const fonts = parseFonts(fib, streams.table);
   const styles = new StyleSheet(fib, streams.table);
@@ -168,10 +170,19 @@ class Converter {
   private footerCount = 0;
   private readonly rPrCache = new Map<string, string>();
   private readonly encoder = new TextEncoder();
+  /** A Word 6.0/95 document's lists, which its paragraphs make as they are read. */
+  private readonly lists6: Word6Lists | undefined;
+  private readonly styleAutonumbers = new Map<number, { nLvlAnm?: number; anld?: Uint8Array }>();
+  /** A Word 6.0/95 document's field begin, separator and end marks, by CP (word6FieldMarks): another 0x13, 0x14 or 0x15 is text. */
+  private readonly fieldMarks6: Set<number> | undefined;
 
   constructor(private readonly reader: DocReader, private readonly hooks: ConvertHooks) {
     // The whole text once: every story is a slice of it.
     this.text = reader.pieces.text(0, Math.min(reader.pieces.end, reader.parts.end));
+    if (reader.fib.word6) {
+      this.lists6 = new Word6Lists(reader.fonts, reader.fib.word6.mac, reader.ctx);
+      this.fieldMarks6 = word6FieldMarks(this.text);
+    }
     this.readSections();
     this.readHeaderStories();
     this.readNoteRefs();
@@ -197,10 +208,23 @@ class Converter {
       this.documentRels.push(...extra.documentRels);
       this.contentTypes.push(...extra.contentTypes);
     }
+    const lists6 = this.lists6?.xml();
+    if (lists6) this.addPart("word/numbering.xml", lists6, "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml", `${REL_NS}/numbering`);
     this.parts["word/document.xml"] = this.encoder.encode(`${XML_HEAD}<w:document ${W_NS}><w:body>${body}</w:body></w:document>`);
-    this.parts["word/_rels/document.xml.rels"] = this.encoder.encode(
-      `${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${this.documentRels.map((rel) => `<Relationship Id="${rel.id}" Type="${rel.type}" Target="${escapeAttr(rel.target)}"/>`).join("")}</Relationships>`,
-    );
+    const relsXml = (rels: { id: string; type: string; target: string }[]): Uint8Array =>
+      this.encoder.encode(
+        `${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels.map((rel) => `<Relationship Id="${rel.id}" Type="${rel.type}" Target="${escapeAttr(rel.target)}"/>`).join("")}</Relationships>`,
+      );
+    this.parts["word/_rels/document.xml.rels"] = relsXml(this.documentRels);
+    // A picture in a header, footer, note or comment uses the same media ids, from that part's own .rels.
+    const mediaRels = this.documentRels.filter((rel) => rel.target.startsWith("media/"));
+    for (const name of mediaRels.length ? Object.keys(this.parts) : []) {
+      const story = /^word\/((?:header|footer)\d+|footnotes|endnotes|comments)\.xml$/.exec(name);
+      if (!story) continue;
+      const xml = new TextDecoder().decode(this.parts[name]);
+      const used = mediaRels.filter((rel) => xml.includes(`r:embed="${rel.id}"`));
+      if (used.length) this.parts[`word/_rels/${story[1]}.xml.rels`] = relsXml(used);
+    }
     this.parts["_rels/.rels"] = this.encoder.encode(
       `${XML_HEAD}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${REL_NS}/officeDocument" Target="word/document.xml"/></Relationships>`,
     );
@@ -230,7 +254,8 @@ class Converter {
       const fcSepx = u32(plc.data[i], 2);
       if (fcSepx !== 0xffffffff && fcSepx + 2 <= word.length) {
         const cb = u16(word, fcSepx);
-        applySectSprms(word.subarray(fcSepx + 2, fcSepx + 2 + cb), props);
+        const grpprl = word.subarray(fcSepx + 2, fcSepx + 2 + cb);
+        applySectSprms(fib.word6 ? word6Grpprl(grpprl) : grpprl, props);
       }
       this.sections.push({ start: plc.cps[i], end: Math.min(plc.cps[i + 1], fib.ccpText), props });
     }
@@ -253,7 +278,8 @@ class Converter {
 
   private readBookmarks(): void {
     const { fib, streams } = this.reader;
-    const names = parseSttb(tableBlob(fib, streams.table, FC.sttbfBkmk)).strings;
+    const sttb = tableBlob(fib, streams.table, FC.sttbfBkmk);
+    const names = (fib.word6 ? parseSttb6(sttb, 0) : parseSttb(sttb)).strings;
     const starts = parsePlc(tableBlob(fib, streams.table, FC.plcfBkf), 4);
     const ends = parsePlc(tableBlob(fib, streams.table, FC.plcfBkl), 0);
     for (let i = 0; i < starts.data.length && i < names.length; i++) {
@@ -294,6 +320,7 @@ class Converter {
   private paragraphs(start: number, end: number, sectionEnds: Set<number> | null): Paragraph[] {
     const out: Paragraph[] = [];
     let pStart = start;
+    this.lists6?.startStory();
     for (let cp = start; cp < end; cp++) {
       const ch = this.text.charCodeAt(cp);
       const isMark = ch === 0x0d || ch === 0x07 || (ch === 0x0c && sectionEnds?.has(cp));
@@ -302,6 +329,11 @@ class Converter {
       const direct = this.reader.props.paragraphProps(mark);
       const props = newParaProps(direct.istd);
       applyParaSprms(direct.grpprl, props);
+      if (this.lists6) {
+        const style = this.styleAutonumber(props.istd);
+        const section = this.sections.find((s) => mark < s.end) ?? this.sections[0];
+        this.lists6.number(props, props.nLvlAnm ?? style.nLvlAnm ?? 0, props.anld ?? style.anld, section.props.olst);
+      }
       let depth = props.itap ?? (props.inTable ? 1 : 0);
       if (props.dtap) depth += props.dtap;
       if (depth < 0) depth = 0;
@@ -312,6 +344,25 @@ class Converter {
       pStart = cp + 1;
     }
     return out;
+  }
+
+  /** A Word 6 paragraph style's autonumbering, through the styles it is based on. */
+  private styleAutonumber(istd: number): { nLvlAnm?: number; anld?: Uint8Array } {
+    let found = this.styleAutonumbers.get(istd);
+    if (!found) {
+      const chain: Uint8Array[] = [];
+      for (let i = istd, seen = 0; i !== 0x0fff && seen < 32; seen++) {
+        const style = this.reader.styles.style(i);
+        if (!style) break;
+        if (style.papx) chain.unshift(style.papx);
+        i = style.base;
+      }
+      const props = newParaProps(istd);
+      for (const papx of chain) applyParaSprms(papx, props);
+      found = { nLvlAnm: props.nLvlAnm, anld: props.anld };
+      this.styleAutonumbers.set(istd, found);
+    }
+    return found;
   }
 
   /** The blocks of a story as XML: its paragraphs and tables. */
@@ -389,13 +440,15 @@ class Converter {
       let cellIndex = 0;
       for (let c = 0; c < t.cells.length; c++) {
         const cell = t.cells[c];
-        // A horizontally merged cell joins the one before it.
-        if (cell.horzMerge === 1 && c > 0) {
+        // A horizontally merged cell (TC80 horzMerge 2 or 3) joins the one before it; its own
+        // cell mark, and the (normally empty) content before it, are not shown.
+        if (cell.horzMerge >= 2 && c > 0) {
+          cellIndex++;
           continue;
         }
         let right = cell.right;
         let k = c + 1;
-        while (k < t.cells.length && t.cells[k].horzMerge === 1) right = t.cells[k++].right;
+        while (k < t.cells.length && t.cells[k].horzMerge >= 2) right = t.cells[k++].right;
         const span = Math.max(1, column(right) - column(prevEdge));
         const blocks = row.cells[cellIndex];
         cellIndex++;
@@ -454,7 +507,11 @@ class Converter {
     const rPrFull = rPr + (this.hooks.runExtra?.(run.cp, end, props) ?? "");
     const rPrXmlWrapped = rPrFull ? `<w:rPr>${rPrFull}</w:rPr>` : "";
     const special = toggleValue(props, "fSpec", ctx, istdPara) === true;
-    const symbolFont = run.compressed && props.ftc0 !== undefined && fonts[props.ftc0]?.charset === 2;
+    // Word 6 text is bytes in the character set of the font the run shows in.
+    const word6 = this.reader.fib.word6;
+    const ftc = props.ftc0 ?? (word6 ? this.reader.styles.font(istdPara, props.istd) : undefined);
+    const symbolFont = run.compressed && ftc !== undefined && fonts[ftc]?.charset === 2;
+    const highChars = word6 && highHalf(ftc !== undefined ? fonts[ftc]?.charset ?? 0 : 0, props.chse !== undefined ? props.chse === 256 : word6.mac);
     const out: string[] = [];
     let text = "";
     let content = "";
@@ -482,6 +539,12 @@ class Converter {
       }
       let ch = this.text.charCodeAt(cp);
       if (ch >= 0x20) {
+        // A custom note mark of ordinary text: the PlcffndRef/PlcfendRef CP makes it a reference.
+        const refAt = this.noteRefs.get(cp);
+        if (refAt) {
+          flushText();
+          content += `<w:${refAt.kind}Reference w:customMarkFollows="1" w:id="${refAt.id}"/>`;
+        }
         if (ch === 0x28 && special && props.symbol) {
           flushText();
           const font = fonts[props.symbol.ftc]?.name ?? "Symbol";
@@ -490,8 +553,14 @@ class Converter {
         }
         if (special && (ch === 0x3c || ch === 0x3e)) continue;
         if (symbolFont && ch < 0x100) ch += 0xf000;
+        else if (highChars && ch >= 0x80 && ch < 0x100) ch = highChars.charCodeAt(ch - 0x80);
         if (ch === 0x7f) continue;
         text += String.fromCharCode(ch);
+        continue;
+      }
+      // A Word 6 field mark that no field holds is a character of the OEM set: ‼, ¶, §.
+      if (this.fieldMarks6 && ch >= 0x13 && ch <= 0x15 && !this.fieldMarks6.has(cp)) {
+        text += "‼¶§"[ch - 0x13];
         continue;
       }
       switch (ch) {
@@ -501,6 +570,13 @@ class Converter {
         case 0x0e: flushText(); content += '<w:br w:type="column"/>'; break;
         case 0x1e: flushText(); content += "<w:noBreakHyphen/>"; break;
         case 0x1f: flushText(); content += "<w:softHyphen/>"; break;
+        case 0x00:
+          // A Word 6 special character 0 is the current page number.
+          if (word6 && special) {
+            flushText();
+            content += '<w:fldChar w:fldCharType="begin"/><w:instrText xml:space="preserve"> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/>';
+          }
+          break;
         case 0x13: {
           flushText();
           // A ruby (an EQ \o\ad field), as Word converts it: the field gives way to a w:ruby.
@@ -638,6 +714,24 @@ class Converter {
     return body + last;
   }
 
+  /**
+   * The header story of kind `k` (in Word 97's order: even header, odd
+   * header, even footer, odd footer, first header, first footer) of section
+   * `index` in a Word 6 file, which stores only the stories the document
+   * (its note separators, DOP grpfIhdt) and each section (SEP grpfIhdt)
+   * have, in that order. Undefined when the section has none: it keeps the
+   * previous section's.
+   */
+  private word6HeaderStory(index: number, k: number): number | undefined {
+    const dop = tableBlob(this.reader.fib, this.reader.streams.table, FC.dop);
+    // The footnote and endnote separators, continuation separators and continuation notices.
+    let story = bitCount((dop[1] ?? 0) & 0x3f);
+    for (let s = 0; s < index; s++) story += bitCount((this.sections[s].props.grpfIhdt ?? 0) & 0x3f);
+    const bits = this.sections[index].props.grpfIhdt ?? 0;
+    if (!(bits & (1 << k))) return undefined;
+    return story + bitCount(bits & ((1 << k) - 1));
+  }
+
   /** The headerReference and footerReference elements of section `index`, registering the parts. */
   private headerReferences(index: number): string {
     const stories = this.headerStories;
@@ -647,7 +741,8 @@ class Converter {
     ] as const;
     let out = "";
     for (let k = 0; k < 6; k++) {
-      const i = 6 + index * 6 + k;
+      const i = this.reader.fib.word6 ? this.word6HeaderStory(index, k) : 6 + index * 6 + k;
+      if (i === undefined) continue;
       if (i + 1 >= stories.length) break;
       const start = stories[i];
       const end = stories[i + 1];
@@ -704,6 +799,34 @@ class Converter {
     out.push("</w:settings>");
     return out.join("");
   }
+}
+
+/**
+ * The CPs of a Word 6 file's field marks: a begin and its end, and the
+ * separators between them. A separator or end with no field open, or a
+ * begin never ended, is not one: a DOS or WordPerfect conversion left it
+ * as a character. (The field PLCs cannot decide: Word leaves fields such as
+ * PRIVATE out of them.)
+ */
+function word6FieldMarks(text: string): Set<number> {
+  const marks = new Set<number>();
+  const open: number[] = [];
+  for (let cp = 0; cp < text.length; cp++) {
+    const ch = text.charCodeAt(cp);
+    if (ch === 0x13) open.push(cp);
+    else if (ch === 0x14 && open.length) marks.add(cp);
+    else if (ch === 0x15 && open.length) {
+      marks.add(open.pop()!);
+      marks.add(cp);
+    }
+  }
+  return marks;
+}
+
+function bitCount(v: number): number {
+  let n = 0;
+  for (; v; v &= v - 1) n++;
+  return n;
 }
 
 function latin1(bytes: Uint8Array): string {

@@ -12,8 +12,8 @@ export type PdfRenderErrorCode =
   | "not_docx"
   /** The input is another format this renderer does not read, which the
    * message names: a password-protected document, an RTF or PDF file, an
-   * OpenDocument file, a Word 6.0/95 file. Nothing of it was read past its
-   * first bytes (a Word 97-2003 .doc is read: doc/convert.ts). */
+   * OpenDocument file. Nothing of it was read past its first bytes (a Word
+   * 6.0-2003 .doc is read: doc/convert.ts). */
   | "unsupported_format"
   /** The input is a .docx or .doc that cannot be read: a corrupt entry, XML
    * that is not well formed, a .doc whose tables are corrupt. */

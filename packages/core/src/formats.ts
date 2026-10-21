@@ -1,5 +1,5 @@
 // The formats a .docx reader is handed instead of a .docx, told from their
-// first bytes, so the refusal names what the file is. A Word 97-2003 .doc
+// first bytes, so the refusal names what the file is. A Word 6.0-2003 .doc
 // (an OLE compound file) is not among them: it is read (doc/).
 
 /** Enough of a file's start for every check here. */

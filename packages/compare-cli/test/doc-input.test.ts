@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { afterAll, describe, expect, it } from "vitest";
 import { DocxDocument } from "../../core/src/docx.js";
+import { docToDocx } from "../../core/src/doc/hooks.js";
 import { compareDocuments } from "../../core/src/edit/compare/index.js";
 import { collectRevisions } from "../../core/src/edit/suggest.js";
 import { AUTHOR, DATE } from "../../core/test/compare-helpers.js";
@@ -50,6 +51,18 @@ describe("compareFiles with a Word 97-2003 .doc", () => {
     // round sees the same count.
     expect(a.revisions.insertion + a.revisions.deletion).toBe(b.revisions.insertion + b.revisions.deletion);
     expect(DocxDocument.load(new Uint8Array(readFileSync(join(dir, "a.docx")))).sections[0].blocks.some((block) => block.type === "table")).toBe(true);
+  });
+
+  it("compares a Word 95 .doc with itself, and with its own .docx", async () => {
+    const doc = join(fixtures, "word95-025814.doc");
+    const same = await compareFiles(doc, doc, join(dir, "word95-same.docx"), options);
+    expect(Object.values(same.revisions).reduce((a, b) => a + b, 0)).toBe(0);
+    const docx = join(dir, "word95.docx");
+    writeFileSync(docx, docToDocx(new Uint8Array(readFileSync(doc))));
+    const against = await compareFiles(doc, docx, join(dir, "word95-against.docx"), options);
+    expect(Object.values(against.revisions).reduce((a, b) => a + b, 0)).toBe(0);
+    const result = DocxDocument.load(new Uint8Array(readFileSync(join(dir, "word95-against.docx"))));
+    expect(result.sections[0].blocks.some((block) => block.type === "table")).toBe(true);
   });
 
   it("refuses the formats it does not read, naming each", async () => {

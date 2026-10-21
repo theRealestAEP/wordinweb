@@ -3,6 +3,7 @@
 import { parseSttb, u16, utf16 } from "./bytes.js";
 import { FC, Fib, tableBlob } from "./fib.js";
 import { RunProps, ToggleProp, XmlContext, applyParaSprms, applyRunSprms, escapeAttr, newParaProps, newRunProps, pPrXml, rPrXml, tblPrXml } from "./sprm.js";
+import { parseFonts6, word6Grpprl } from "./word6.js";
 
 export interface Font {
   name: string;
@@ -13,6 +14,7 @@ export interface Font {
 /** The fonts of SttbfFfn, by ftc. */
 export function parseFonts(fib: Fib, table: Uint8Array): Font[] {
   const blob = tableBlob(fib, table, FC.sttbfFfn);
+  if (fib.word6) return parseFonts6(blob);
   const fonts: Font[] = [];
   if (blob.length < 4) return fonts;
   const count = u16(blob, 0);
@@ -69,6 +71,7 @@ export class StyleSheet {
   /** The default fonts' ftcs from the Stshif. */
   readonly defaultFtc: { ascii: number; eastAsia: number; other: number; bi: number | undefined };
   private readonly toggleCache = new Map<string, boolean>();
+  private readonly fontCache = new Map<string, number>();
 
   constructor(fib: Fib, table: Uint8Array) {
     const stsh = tableBlob(fib, table, FC.stshf);
@@ -82,6 +85,8 @@ export class StyleSheet {
       other: stshi.length >= 18 ? u16(stshi, 16) : 0,
       bi: stshi.length >= 20 ? u16(stshi, 18) : undefined,
     };
+    // A Word 6 STSHI has one default font, for all text.
+    if (fib.word6) this.defaultFtc = { ascii: this.defaultFtc.ascii, eastAsia: this.defaultFtc.ascii, other: this.defaultFtc.ascii, bi: undefined };
     let at = 2 + cbStshi;
     const ids = new Set<string>();
     for (let i = 0; i < cstd && at + 2 <= stsh.length; i++) {
@@ -92,7 +97,7 @@ export class StyleSheet {
         this.styles.push(null);
         continue;
       }
-      this.styles.push(parseStd(std, i, cbStdBase, ids));
+      this.styles.push(parseStd(std, i, cbStdBase, ids, !!fib.word6));
     }
   }
 
@@ -112,6 +117,31 @@ export class StyleSheet {
       if (this.chainToggle(prop, istdChar)) on = !on;
     }
     return on;
+  }
+
+  /** The font (ftc) of text with none of its own: its character style's, else its paragraph style's, else the document's. */
+  font(istdPara: number, istdChar: number | undefined): number {
+    const key = `${istdPara}:${istdChar}`;
+    let ftc = this.fontCache.get(key);
+    if (ftc === undefined) {
+      ftc = (istdChar !== undefined && istdChar !== 10 ? this.chainFont(istdChar) : undefined) ?? this.chainFont(istdPara) ?? this.defaultFtc.ascii;
+      this.fontCache.set(key, ftc);
+    }
+    return ftc;
+  }
+
+  private chainFont(istd: number): number | undefined {
+    for (let i = istd, seen = 0; i !== 0x0fff && seen < 32; seen++) {
+      const style = this.styles[i];
+      if (!style) return undefined;
+      if (style.chpx) {
+        const props = newRunProps();
+        applyRunSprms(style.chpx, props);
+        if (props.ftc0 !== undefined) return props.ftc0;
+      }
+      i = style.base;
+    }
+    return undefined;
   }
 
   private chainToggle(prop: ToggleProp, istd: number): boolean {
@@ -208,13 +238,14 @@ function styleRPrXml(run: RunProps, ctx: XmlContext): string {
   return xml;
 }
 
-function parseStd(std: Uint8Array, istd: number, cbStdBase: number, ids: Set<string>): Style | null {
-  if (std.length < 10) return null;
+/** An STD. A Word 6 one has an 8-byte base (no grfstd), an 8-bit name, and Word 6 sprms. */
+function parseStd(std: Uint8Array, istd: number, cbStdBase: number, ids: Set<string>, word6: boolean): Style | null {
+  if (std.length < (word6 ? 8 : 10)) return null;
   const w0 = u16(std, 0);
   const w1 = u16(std, 2);
   const w2 = u16(std, 4);
   const w3 = u16(std, 6);
-  const grfstd = u16(std, 8);
+  const grfstd = word6 ? 0 : u16(std, 8);
   const sti = w0 & 0x0fff;
   const kind = w1 & 0x000f;
   const base = (w1 >>> 4) & 0x0fff;
@@ -227,10 +258,17 @@ function parseStd(std: Uint8Array, istd: number, cbStdBase: number, ids: Set<str
     priority = u16(std, 16) >>> 4;
   }
   let at = cbStdBase;
-  // xstzName: cch, the characters, a null.
-  const cch = u16(std, at);
-  const fullName = utf16(std, at + 2, cch);
-  at += 2 + cch * 2 + 2;
+  // xstzName: cch, the characters, a null (in Word 6 a one-byte cch and 8-bit characters).
+  let fullName: string;
+  if (word6) {
+    const cch = std[at] ?? 0;
+    fullName = String.fromCharCode(...std.subarray(at + 1, at + 1 + cch));
+    at += 1 + cch + 1;
+  } else {
+    const cch = u16(std, at);
+    fullName = utf16(std, at + 2, cch);
+    at += 2 + cch * 2 + 2;
+  }
   const name = fullName.split(",")[0] || `Style${istd}`;
   if (at & 1) at++;
   const upx = (): Uint8Array | null => {
@@ -259,6 +297,10 @@ function parseStd(std: Uint8Array, istd: number, cbStdBase: number, ids: Set<str
   // A UpxPapx starts with the style's own istd.
   if (papx && papx.length >= 2) papx = papx.subarray(2);
   if (tapx && tapx.length === 0) tapx = null;
+  if (word6) {
+    papx = papx && word6Grpprl(papx);
+    chpx = chpx && word6Grpprl(chpx);
+  }
   let id = BUILT_IN_IDS[name] ?? styleIdOf(name);
   while (ids.has(id)) id += "0";
   ids.add(id);
