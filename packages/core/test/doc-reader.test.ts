@@ -10,6 +10,7 @@ import { docToDocxFiles, openDoc } from "../src/doc/convert.js";
 import { docToDocx } from "../src/doc/hooks.js";
 import { isWordDocumentFile, openDocStreams } from "../src/doc/streams.js";
 import { parseFib } from "../src/doc/fib.js";
+import { applyParaSprms, newParaProps } from "../src/doc/sprm.js";
 import { PdfRenderError, renderDocxToPdf } from "../src/pdf/render.js";
 
 // Word 97-2003 .doc files desktop Word saved from the .docx beside each
@@ -62,6 +63,89 @@ describe("the .doc reader", () => {
     expect(reader.styles.id(0)).toBe("Normal");
   });
 
+  it("promptly refuses a FIB character count beyond the piece table", () => {
+    const file = bytes("parity-columns--v03.doc");
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const sectorSize = 1 << view.getUint16(30, true);
+    const at = (sector: number): number => (sector + 1) * sectorSize;
+    const difat: number[] = [];
+    for (let i = 0; i < 109; i++) {
+      const sector = view.getInt32(76 + 4 * i, true);
+      if (sector >= 0) difat.push(sector);
+    }
+    const next = (sector: number): number => view.getInt32(at(difat[Math.floor(sector / (sectorSize / 4))]) + 4 * (sector % (sectorSize / 4)), true);
+    let wordDocument = -1;
+    for (let sector = view.getInt32(48, true); sector >= 0; sector = next(sector)) {
+      for (let entry = 0; entry < sectorSize / 128; entry++) {
+        const offset = at(sector) + entry * 128;
+        const name = new TextDecoder("utf-16le").decode(file.subarray(offset, offset + Math.max(0, view.getUint16(offset + 64, true) - 2)));
+        if (name === "WordDocument") wordDocument = at(view.getInt32(offset + 116, true));
+      }
+    }
+    expect(wordDocument).toBeGreaterThan(0);
+    // FibRgLw97 starts at 64; ccpText is at +12.
+    view.setInt32(wordDocument + 76, 0x7ffffff0, true);
+    const started = performance.now();
+    expect(() => docToDocx(file)).toThrow(/^damaged:/);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it("returns plain Uint8Array streams with copying slice semantics for an input view", () => {
+    const source = bytes("parity-columns--v03.doc");
+    const backing = new Uint8Array(source.length + 32);
+    backing.set(source, 16);
+    const input = backing.subarray(16, 16 + source.length);
+    const streams = openDocStreams(input);
+    expect(isWordDocumentFile(input)).toBe(true);
+    for (const stream of [streams.wordDocument, streams.table]) {
+      expect(Object.getPrototypeOf(stream)).toBe(Uint8Array.prototype);
+      const copy = stream.slice();
+      copy[0] ^= 0xff;
+      expect(copy[0]).not.toBe(stream[0]);
+    }
+  });
+
+  it.each(["loop", "short"])("refuses a %s FAT stream chain as damaged", (damage) => {
+    const c = fixtureAllocation();
+    const start = c.view.getInt32(c.entry("WordDocument") + 116, true);
+    const second = c.next(start);
+    c.view.setInt32(c.fatAt(second), damage === "loop" ? start : -2, true);
+    expect(() => docToDocx(c.source)).toThrow(/damaged: the WordDocument stream is shorter than its declared size/);
+    expect(isWordDocumentFile(c.source)).toBe(false);
+  });
+
+  it.each(["loop", "short"])("accepts an unused stream with a %s mini FAT chain", (damage) => {
+    const c = fixtureAllocation();
+    const start = c.view.getInt32(c.entry("\u0001CompObj") + 116, true);
+    const miniFat = c.at(c.view.getInt32(60, true));
+    const second = c.view.getInt32(miniFat + start * 4, true);
+    c.view.setInt32(miniFat + (damage === "loop" ? second : start) * 4, damage === "loop" ? start : -2, true);
+    expect(() => openDoc(c.source)).not.toThrow();
+  });
+
+  it("refuses a first directory name that exceeds its field before CFB reads it", () => {
+    const c = fixtureAllocation();
+    c.view.setUint16(c.at(c.view.getInt32(48, true)) + 64, 6801, true);
+    expect(() => docToDocx(c.source)).toThrow(/damaged: .*first directory name exceeds 64 bytes/);
+    expect(isWordDocumentFile(c.source)).toBe(false);
+  });
+
+  it.each(["WordDocument", "1Table"])("refuses a %s stream whose declared size exceeds its content", (name) => {
+    const c = fixtureAllocation();
+    c.view.setUint32(c.entry(name) + 120, 0x7fffffff, true);
+    expect(() => docToDocx(c.source)).toThrow(`damaged: the ${name} stream is shorter than its declared size`);
+  });
+
+  it("accepts ENDOFCHAIN for absent directory links and preserves the input", () => {
+    // GovDocs1 093396.doc uses -2 in the L/R/C fields of four VBA cache streams.
+    const c = fixtureAllocation();
+    for (const field of [68, 72, 76]) c.view.setInt32(c.entry("\u0001CompObj") + field, -2, true);
+    const original = c.source.slice();
+    expect(docToDocx(c.source)).toEqual(docToDocx(bytes("parity-columns--v03.doc")));
+    expect(isWordDocumentFile(c.source)).toBe(true);
+    expect(c.source).toEqual(original);
+  });
+
   it("writes the text with its paragraphs, styles and runs", () => {
     const doc = DocxDocument.load(docToDocx(bytes("parity-lists--v00.doc")));
     const texts = paragraphTexts(doc);
@@ -84,6 +168,16 @@ describe("the .doc reader", () => {
     const doc = DocxDocument.load(docToDocx(bytes("parity-lists--v00.doc")));
     const numbered = doc.sections[0].blocks.filter((b) => b.type === "paragraph" && b.props.numbering);
     expect(numbered.length).toBeGreaterThanOrEqual(6);
+  });
+
+  it("resolves a style's opposite toggles against its base chain", () => {
+    // GovDocs1 062412.doc (public domain): both styles have fVanish = 0x81.
+    const xml = parts(docToDocx(bytes("062412.doc")))["word/styles.xml"];
+    const styles = [...xml.matchAll(/<w:style\b[^>]*>[\s\S]*?<\/w:style>/g)].map((m) => m[0]);
+    const base = styles.find((s) => s.includes('<w:name w:val="z-Top of Form"/>'));
+    const address = styles.find((s) => s.includes('<w:name w:val="HTML Address"/>'));
+    expect(base).toMatch(/<w:rPr>.*<w:vanish\/>.*<\/w:rPr>/);
+    expect(address).toMatch(/<w:rPr>.*<w:vanish w:val="0"\/>.*<\/w:rPr>/);
   });
 
   it("writes tables with their grid, header row, widths and shading", () => {
@@ -130,6 +224,17 @@ describe("the .doc reader", () => {
     expect(cells[0]).toContain("LIVING ROOM");
     expect(cells[1]).toContain('<w:gridSpan w:val="3"/>');
     expect(cells[1]).toContain("For each item");
+  });
+
+  it("sets the width of the cells sprmTDxaCol names and moves the later edges, whatever the TC80 widths", () => {
+    // GovDocs1 085483.doc, a price table row: sprmTDefTable (edges -108..9540, every TC80 wWidth 0), then five sprmTDxaCol.
+    const hex =
+      "16240117240102966c0007947f0203340108d672000594ffd00248124218881d4425" +
+      "8000000000000000000000000000000000000000".repeat(5) +
+      "23760405160823760405700823760405160823760304fa05237604056207";
+    const p = newParaProps(0);
+    applyParaSprms(new Uint8Array(hex.match(/../g)!.map((h) => parseInt(h, 16))), p);
+    expect(p.table?.cells.map((cell) => cell.right)).toEqual([720, 4680, 6210, 7740, 9630]);
   });
 
   it("gives a header with a picture its own relationships", () => {
@@ -223,6 +328,26 @@ describe("the .doc reader", () => {
     expect((error as PdfRenderError).code).toBe("unsupported_format");
   });
 });
+
+/** Allocation fields of the small version 3 fixture, whose FAT fits in the header DIFAT. */
+function fixtureAllocation() {
+  const source = bytes("parity-columns--v03.doc");
+  const view = new DataView(source.buffer, source.byteOffset, source.byteLength);
+  const sectorSize = 1 << view.getUint16(30, true);
+  const at = (sector: number): number => (sector + 1) * sectorSize;
+  const fatAt = (sector: number): number => at(view.getInt32(76 + Math.floor(sector / (sectorSize / 4)) * 4, true)) + (sector % (sectorSize / 4)) * 4;
+  const next = (sector: number): number => view.getInt32(fatAt(sector), true);
+  const entries = new Map<string, number>();
+  for (let sector = view.getInt32(48, true); sector >= 0; sector = next(sector)) {
+    for (let offset = at(sector); offset < at(sector) + sectorSize; offset += 128) {
+      const length = view.getUint16(offset + 64, true);
+      let name = "";
+      for (let i = 0; i < length - 2; i += 2) name += String.fromCharCode(view.getUint16(offset + i, true));
+      entries.set(name, offset);
+    }
+  }
+  return { source, view, at, fatAt, next, entry: (name: string): number => entries.get(name)! };
+}
 
 // Word 6.0/95 files from GovDocs1 (public domain US government documents):
 // 000114 a full-saved Word 95 file with a table, a header and footers;

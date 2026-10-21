@@ -25,7 +25,7 @@ export function isOleFile(head: Uint8Array): boolean {
 export function isWordDocumentFile(bytes: Uint8Array): boolean {
   if (!isOleFile(bytes)) return false;
   try {
-    return streamBytes(CFB.read(bytes, { type: "array" }), "WordDocument") !== null;
+    return streamBytes(readCompoundFile(bytes), "WordDocument") !== null;
   } catch {
     return false;
   }
@@ -40,7 +40,7 @@ export function openDocStreams(bytes: Uint8Array): DocStreams {
   if (!isOleFile(bytes)) throw new Error("unsupported format: not an OLE compound file (a Word 97-2003 .doc is one)");
   let cfb: CFB.CFB$Container;
   try {
-    cfb = CFB.read(bytes, { type: "array" });
+    cfb = readCompoundFile(bytes);
   } catch (error) {
     throw new Error(`damaged: the compound file cannot be read (${error instanceof Error ? error.message : String(error)})`);
   }
@@ -62,6 +62,64 @@ export function openDocStreams(bytes: Uint8Array): DocStreams {
   return { wordDocument, table, data: streamBytes(cfb, "Data"), objectStream: (storage, name) => streamBytes(cfb, `ObjectPool/${storage}/${name}`) };
 }
 
+function readCompoundFile(bytes: Uint8Array): CFB.CFB$Container {
+  bytes = checkCompoundFile(bytes);
+  // CFB keeps streams as Buffers with this input. Array input creates JS
+  // number arrays, which can use many times the file's size in heap memory.
+  return typeof Buffer !== "undefined"
+    ? CFB.read(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength), { type: "buffer" })
+    : CFB.read(bytes, { type: "array" });
+}
+
+/** Check the first directory name and repair absent links ([MS-CFB] 2.2, 2.6). */
+function checkCompoundFile(bytes: Uint8Array): Uint8Array {
+  if (bytes.length < 512) return bytes;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const int = (offset: number): number => view.getInt32(offset, true);
+  const sectorSize = view.getUint16(26, true) === 4 ? 4096 : 512;
+  const at = (sector: number): number => (sector + 1) * sectorSize;
+  const directory = int(48);
+  // 062193.doc points into garbage with a 6,801-byte root name. CFB treats
+  // it as directory entries and exhausts memory. A directory name fits in
+  // 64 bytes ([MS-CFB] 2.6.1); check only the first entry before allocation.
+  if (directory >= 0 && at(directory) + 128 <= bytes.length && view.getUint16(at(directory) + 64, true) > 64) {
+    throw new Error("the compound file's first directory name exceeds 64 bytes");
+  }
+  const fat: number[] = [];
+  for (let offset = 76; offset < 512 && int(offset) >= 0; offset += 4) fat.push(int(offset));
+  const difatSeen = new Set<number>();
+  for (let sector = int(68), remaining = int(72); sector >= 0 && at(sector) + sectorSize <= bytes.length && !difatSeen.has(sector); sector = int(at(sector) + sectorSize - 4)) {
+    difatSeen.add(sector);
+    for (let offset = at(sector); offset < at(sector) + sectorSize - 4 && int(offset) !== -2; offset += 4) fat.push(int(offset));
+    if (remaining-- <= 0) break;
+  }
+  let result = bytes;
+  let repaired: DataView | undefined;
+  const seen = new Set<number>();
+  for (let sector = directory; sector >= 0 && at(sector) + 128 <= bytes.length && !seen.has(sector);) {
+    seen.add(sector);
+    for (let offset = at(sector); offset + 128 <= Math.min(at(sector) + sectorSize, bytes.length); offset += 128) {
+      // Some writers use ENDOFCHAIN (-2) for absent directory links.
+      // CFB needs NOSTREAM (-1). Copy only when this repair is needed.
+      for (const field of [68, 72, 76]) {
+        if (int(offset + field) === -2) {
+          if (!repaired) {
+            result = new Uint8Array(bytes);
+            repaired = new DataView(result.buffer);
+          }
+          repaired.setInt32(offset + field, -1, true);
+        }
+      }
+    }
+    const fatSector = fat[Math.floor(sector / (sectorSize / 4))];
+    if (fatSector === undefined || fatSector < 0) break;
+    const next = at(fatSector) + (sector % (sectorSize / 4)) * 4;
+    if (next + 4 > bytes.length) break;
+    sector = int(next);
+  }
+  return result;
+}
+
 /**
  * A stream of the root storage by name. An embedded Word object keeps
  * streams of the same names deeper down (ObjectPool/_123/1Table), so the
@@ -71,7 +129,12 @@ function streamBytes(cfb: CFB.CFB$Container, name: string): Uint8Array | null {
   const entry = CFB.find(cfb, "/" + name);
   if (!entry || entry.type !== 2) return null;
   const content = entry.content;
-  return content instanceof Uint8Array ? content : Uint8Array.from(content);
+  if (["WordDocument", "0Table", "1Table", "Data"].includes(name) && content.length < entry.size) {
+    throw new Error(`damaged: the ${name} stream is shorter than its declared size`);
+  }
+  return content instanceof Uint8Array
+    ? new Uint8Array(content.buffer, content.byteOffset, content.length)
+    : Uint8Array.from(content);
 }
 
 /** What a compound file with no WordDocument stream holds, by its streams' names. */

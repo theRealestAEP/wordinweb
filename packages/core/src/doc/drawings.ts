@@ -890,7 +890,8 @@ export function describeShape(bytes: Uint8Array, sp: ArtRecord, ctx: ShapeContex
     const pib = propNumber(props, P.pib) ?? 0;
     shape.kind = "picture";
     shape.picture = {
-      image: pib ? ctx.blips(pib) : ctx.blips(1),
+      // A floating picture frame with no pib has no picture ([MS-ODRAW] pib); an inline one's context falls back to its own first BLIP.
+      image: ctx.blips(pib),
       crop: {
         left: fixed16(propNumber(props, P.cropFromLeft) ?? 0),
         top: fixed16(propNumber(props, P.cropFromTop) ?? 0),
