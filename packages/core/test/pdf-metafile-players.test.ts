@@ -236,6 +236,64 @@ describe("PICT player", () => {
 });
 
 describe("EMF records rewritten for emf-converter", () => {
+  it("keeps a device clip over the picture with mapped origins and scaled, reversed extents", async () => {
+    const canvas = await convertMetafile("emf", emf([
+      [17, 8],
+      [9, 200, -100],
+      [11, 100, 50],
+      [10, 10, 110],
+      [12, 5, -5],
+      [32, 2, 1, 2, 1], // window 400 x -200
+      [31, 2, 1, 2, 1], // viewport 200 x 100
+      [75, 48, 5, 32, 1, 1, 16, 0, 0, 100, 50, 0, 0, 100, 50], // RGN_COPY, one device rectangle
+      [39, 1, 0, 0x000000ff, 0],
+      [37, 1],
+      patBlt(20, 80, 80, -40, 0x00f00021),
+    ]), fonts, resources());
+    const ops = canvas!.ops.join("\n");
+    expect(ops).toContain("0 0 m 100 0 l 100 50 l 0 50 l h W n");
+    expect(ops).toContain("1 0 0 rg 10 10 m 50 10 l 50 30 l 10 30 l h f");
+    expect(canvas!.dropped).toBe(0);
+  });
+
+  it("keeps a device clip relative to nonzero bounds before any mapping record", async () => {
+    const bytes = emf([
+      [75, 48, 5, 32, 1, 1, 16, 10, 20, 109, 69, 10, 20, 109, 69],
+      [43, 20, 30, 60, 50],
+    ]);
+    const view = new DataView(bytes.buffer);
+    [10, 20, 109, 69].forEach((value, i) => view.setInt32(8 + i * 4, value, true));
+    expect(prepareEmf(bytes)).toBe(bytes);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    expect(canvas!.ops.join("\n")).toContain("0 0 m 99 0 l 99 49 l 0 49 l h W n");
+    expect(canvas!.ops.join("\n")).toContain("10 10 m 50 10 l 50 30 l 10 30 l h f");
+  });
+
+  it("uses the default viewport extent when only a window extent is supplied", async () => {
+    const canvas = await convertMetafile("emf", emf([
+      [17, 8],
+      [9, 1, -1],
+      [10, 14, -20],
+      emfFont(-12),
+      [39, 2, 0, 0x000000ff, 0],
+      [37, 2],
+      patBlt(24, -30, 40, -20, 0x00f00021),
+    ]), fonts, resources());
+    expect(canvas!.ops.join("\n")).toContain("1 0 0 rg 10 10 m 50 10 l 50 30 l 10 30 l h f");
+    expect(canvas!.dropped).toBe(0);
+  });
+
+  it("records the full bounds above the converter's raster canvas cap", async () => {
+    const bytes = emf([[9, 12000, 9000], [11, 12000, 9000], patBlt(11000, 8000, 500, 500, 0x00f00021)]);
+    const view = new DataView(bytes.buffer);
+    view.setInt32(16, 12000, true);
+    view.setInt32(20, 9000, true);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    expect([canvas!.width, canvas!.height]).toEqual([12000, 9000]);
+    expect(canvas!.ops.join("\n")).toContain("11000 8000 m 11500 8000 l 11500 8500 l 11000 8500 l h f");
+    expect(canvas!.dropped).toBe(0);
+  });
+
   it("fills a blit with no bitmap (PatBlt) with the brush", async () => {
     const canvas = await convertMetafile(
       "emf",
@@ -283,7 +341,7 @@ describe("EMF records rewritten for emf-converter", () => {
       [84, 0, 0, 99, 49, 1, 0x3f800000, 0x3f800000, 20, 40, 1, 76, 0, 0, 0, 0, 0, 0, 65], // EXTTEXTOUTW: "A"
     ]);
     const prepared = prepareEmf(bytes);
-    const fontOffset = 88 + 12 + 16 + 16;
+    const fontOffset = 88 + 12 + 16 + 16 + 16; // includes the explicit default viewport extent
     const view = new DataView(prepared.buffer, prepared.byteOffset, prepared.byteLength);
     expect(view.getInt32(fontOffset + 12, true)).toBe(-10);
     expect(view.getInt32(fontOffset + 16, true)).toBe(0);

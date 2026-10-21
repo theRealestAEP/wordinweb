@@ -43,7 +43,9 @@ async function convertEmf(bytes: Uint8Array, fonts: FontSet, resources: Resource
     fonts,
     resources,
     (blob) => emfPlusBitmap(blob, budget),
-    () => convertEmfToDataUrl(buffer, undefined, undefined, { dpiScale: 1 }).catch(() => null),
+    // RecordingCanvas stores operators, so its dimensions allocate no pixels.
+    // Keep device coordinates at 1:1 even above the converter's raster cap.
+    () => convertEmfToDataUrl(buffer, undefined, undefined, { dpiScale: 1, maxCanvasDimension: Number.MAX_SAFE_INTEGER }).catch(() => null),
   );
   // The converter skips, with only a console warning, each EMF+ image it
   // cannot draw: one emfPlusBitmap does not read, a pixel format its

@@ -26,6 +26,18 @@
  * it is made. The height keeps its sign: negative for character height,
  * positive for cell height ([MS-EMF] 2.2.13, 2.3.7.8).
  *
+ * When a window extent precedes any viewport extent, an explicit 1 x 1
+ * viewport extent supplies the device context's default. emf-converter
+ * otherwise uses the canvas size, multiplying coordinates and font sizes.
+ *
+ * EXTSELECTCLIPRGN rectangles in device coordinates (the flight-plan map
+ * uses its viewport rectangle) go through emf-converter's logical mapping.
+ * Each rectangle is rewritten through the inverse mapping, using the
+ * current origins and extents, so the converter clips at its device position.
+ * Before any mapping record, its bounds-relative device mapping already
+ * places these rectangles correctly and they are kept as they are.
+ * [MS-EMF] 2.3.2.2 calls RgnData logical units; these files store device units.
+ *
  * An EMF that also carries EMF+ records gets none of the rewrites above
  * (emf-converter draws its EMF+ records, with their world transform), and
  * three of its own ([MS-EMFPLUS] 1.3.1, 2.1.1.2, 2.3.3.2, 2.3.4.6):
@@ -48,8 +60,11 @@
 const EMR_HEADER = 1;
 const EMR_POLYGON = 3;
 const EMR_SETWINDOWEXTEX = 9;
+const EMR_SETWINDOWORGEX = 10;
 const EMR_SETVIEWPORTEXTEX = 11;
+const EMR_SETVIEWPORTORGEX = 12;
 const EMR_EOF = 14;
+const EMR_SETMAPMODE = 17;
 const EMR_SCALEVIEWPORTEXTEX = 31;
 const EMR_SCALEWINDOWEXTEX = 32;
 const EMR_CREATEPEN = 38;
@@ -67,6 +82,7 @@ const GRAPHICS_VERSION_SIGNATURE = 0xdbc01;
 const EMR_BEGINPATH = 59;
 const EMR_ENDPATH = 60;
 const EMR_FILLPATH = 62;
+const EMR_EXTSELECTCLIPRGN = 75;
 const EMR_BITBLT = 76;
 const EMR_STRETCHBLT = 77;
 const EMR_EXTCREATEFONTINDIRECTW = 82;
@@ -128,6 +144,12 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
   let windowExtY = view.getInt32(20, true) - view.getInt32(12, true);
   let viewportExtX = windowExtX;
   let viewportExtY = windowExtY;
+  let windowOrgX = view.getInt32(8, true);
+  let windowOrgY = view.getInt32(12, true);
+  let viewportOrgX = 0;
+  let viewportOrgY = 0;
+  let viewportExtentSet = false;
+  let mapping = false;
   const scaled = (value: number, windowExt = windowExtX, viewportExt = viewportExtX): number => (windowExt ? Math.round(Math.abs((value * viewportExt) / windowExt)) : value);
   const parts: Uint8Array[] = [];
   let changed = false;
@@ -138,13 +160,39 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
     const size = view.getUint32(offset + 4, true);
     if (size < 8 || offset + size > bytes.length) break;
     let replacement: Uint8Array[] | null = null;
+    if (!viewportExtentSet && ((type === EMR_SETWINDOWEXTEX && size >= 16) || (type === EMR_SCALEWINDOWEXTEX && size >= 24))) {
+      const extent = record(EMR_SETVIEWPORTEXTEX, 16);
+      extent.view.setInt32(8, 1, true);
+      extent.view.setInt32(12, 1, true);
+      parts.push(extent.bytes);
+      records++;
+      changed = true;
+      viewportExtX = viewportExtY = 1;
+      viewportExtentSet = true;
+    }
     if (type === EMR_SETWINDOWEXTEX && size >= 16) {
+      mapping = true;
       windowExtX = view.getInt32(offset + 8, true);
       windowExtY = view.getInt32(offset + 12, true);
     } else if (type === EMR_SETVIEWPORTEXTEX && size >= 16) {
+      mapping = true;
+      viewportExtentSet = true;
       viewportExtX = view.getInt32(offset + 8, true);
       viewportExtY = view.getInt32(offset + 12, true);
+    } else if (type === EMR_SETWINDOWORGEX && size >= 16) {
+      mapping = true;
+      windowOrgX = view.getInt32(offset + 8, true);
+      windowOrgY = view.getInt32(offset + 12, true);
+    } else if (type === EMR_SETVIEWPORTORGEX && size >= 16) {
+      mapping = true;
+      viewportOrgX = view.getInt32(offset + 8, true);
+      viewportOrgY = view.getInt32(offset + 12, true);
+    } else if (type === EMR_SETMAPMODE && size >= 12) {
+      const mode = view.getUint32(offset + 8, true);
+      if (mode === 7 || mode === 8) mapping = true;
     } else if ((type === EMR_SCALEWINDOWEXTEX || type === EMR_SCALEVIEWPORTEXTEX) && size >= 24) {
+      mapping = true;
+      if (type === EMR_SCALEVIEWPORTEXTEX) viewportExtentSet = true;
       if (view.getInt32(offset + 12, true) !== 0) {
         const ext = Math.round(((type === EMR_SCALEWINDOWEXTEX ? windowExtX : viewportExtX) * view.getInt32(offset + 8, true)) / view.getInt32(offset + 12, true));
         if (type === EMR_SCALEWINDOWEXTEX) windowExtX = ext;
@@ -155,6 +203,23 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
         if (type === EMR_SCALEWINDOWEXTEX) windowExtY = ext;
         else viewportExtY = ext;
       }
+    } else if (type === EMR_EXTSELECTCLIPRGN && mapping && size >= 48 && view.getUint32(offset + 8, true) >= 32) {
+      const region = bytes.slice(offset, offset + size);
+      const out = new DataView(region.buffer);
+      const count = view.getUint32(offset + 24, true);
+      const end = Math.min(size, 16 + view.getUint32(offset + 8, true), 48 + count * 16);
+      // RegionDataHeader.Bounds, then every RectL in RegionData.Data.
+      for (let at = 32; at + 16 <= end; at += 16) {
+        for (let edge = 0; edge < 4; edge++) {
+          const x = edge % 2 === 0;
+          const device = out.getInt32(at + edge * 4, true);
+          const logical = x
+            ? ((device - viewportOrgX) * (windowExtX || 1)) / (viewportExtX || 1) + windowOrgX
+            : ((device - viewportOrgY) * (windowExtY || 1)) / (viewportExtY || 1) + windowOrgY;
+          out.setInt32(at + edge * 4, Math.round(logical), true);
+        }
+      }
+      replacement = [region];
     } else if ((type === EMR_BITBLT || type === EMR_STRETCHBLT) && size >= 100 && view.getUint32(offset + 40, true) === PATCOPY && view.getUint32(offset + 96, true) === 0) {
       // xDest, yDest, cxDest, cyDest, dwRop after the bounds; cbBitsSrc is the last field both records share.
       const x = view.getInt32(offset + 24, true);
