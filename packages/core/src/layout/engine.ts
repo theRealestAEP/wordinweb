@@ -3916,7 +3916,7 @@ class Engine {
   private placeFrameStart(first: Block, fr: ResolvedFrame, siblings: Block[] | undefined, index: number | undefined): void {
     const group = this.frameGroup(first, siblings, index);
     const after = siblings && index !== undefined ? siblings[index + group.length] : undefined;
-    if ((fr.vAnchor === "page" || fr.vAnchor === "margin") && after?.type === "paragraph" && !this.pageIsEmptyAtCursor()) {
+    if (fr.yAlign !== "inline" && (fr.vAnchor === "page" || fr.vAnchor === "margin") && after?.type === "paragraph" && !this.pageIsEmptyAtCursor()) {
       const np = this.doc.effectiveParaProps(after);
       const lines = breakParagraph(this.doc, this.measurer, after, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, LOOKAHEAD_BREAK).lines;
       const top = this.y + Math.max(this.lastParaSpacingAfter, np.spacingBefore ?? 0) - this.lastParaSpacingAfter;
@@ -4171,18 +4171,22 @@ class Engine {
     const sp = this.sp;
     const contentW = Math.max(8, fr.w ?? 0);
     const ox = this.frameOriginX(fr, contentW);
-    // Vertical origin (frame top) from the anchor.
+    // Inline-y frames start at the flow cursor, overriding vAnchor and y.
     let oy: number;
-    switch (fr.vAnchor) {
-      case "page":
-        oy = fr.y;
-        break;
-      case "margin":
-        oy = sp.marginTop + fr.y;
-        break;
-      default:
-        oy = this.y + fr.y; // text / paragraph travel with the current cursor
-        break;
+    if (fr.yAlign === "inline") {
+      oy = this.y;
+    } else {
+      switch (fr.vAnchor) {
+        case "page":
+          oy = fr.y;
+          break;
+        case "margin":
+          oy = sp.marginTop + fr.y;
+          break;
+        default:
+          oy = this.y + fr.y; // text / paragraph travel with the current cursor
+          break;
+      }
     }
     const laid = this.layoutFrame(blocks, contentW, this.fieldCtx(), { x: ox, y: oy });
     const height =
@@ -4262,13 +4266,13 @@ class Engine {
     }
   }
 
-  /** A paragraph's positioned frame when it rides with the text (vAnchor text or paragraph) and has a width. */
+  /** A paragraph's positioned frame when it rides with the text and has a width. */
   private textFrame(block: Block | undefined): ResolvedFrame | undefined {
     if (block?.type !== "paragraph") return undefined;
     const props = this.doc.effectiveParaProps(block);
     if (!props.frame || props.dropCap) return undefined;
     const fr = this.resolveFrame(props.frame);
-    return fr.w !== undefined && (fr.vAnchor === "text" || fr.vAnchor === "paragraph") ? fr : undefined;
+    return fr.w !== undefined && (fr.yAlign === "inline" || fr.vAnchor === "text" || fr.vAnchor === "paragraph") ? fr : undefined;
   }
 
   /** The positioned frame a block belongs to: a paragraph's own framePr (a
@@ -4311,7 +4315,7 @@ class Engine {
     if (!block || this.consumedFrames.has(block)) return undefined;
     if (this.continuesFrame(prev, block)) return undefined;
     const fr = this.blockFrame(block);
-    if (fr?.w === undefined || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
+    if (fr?.w === undefined || fr.yAlign === "inline" || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
     if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return undefined;
     return fr;
   }
@@ -4334,7 +4338,7 @@ class Engine {
     for (let i = index; i < siblings.length; i++) {
       const fr = this.textFrame(siblings[i]);
       if (!fr) return false;
-      if (fr.h !== undefined && this.y + fr.y + fr.h > this.bodyBottom + 0.01) return true;
+      if (fr.h !== undefined && this.y + (fr.yAlign === "inline" ? 0 : fr.y) + fr.h > this.bodyBottom + 0.01) return true;
     }
     return false;
   }
