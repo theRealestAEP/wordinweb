@@ -16,12 +16,14 @@ name.
 
 Options:
   --comments      print the review comments beside each page, as Word's markup
-  --markup        print the tracked changes as Word's All Markup: insertions
-                  underlined and deletions struck in each author's color, a
-                  balloon per change beside the page (with the comments)
-  --hide-authors  name no author anywhere: each balloon keeps its date, what
-                  changed and the comment text, with no name and no initials,
-                  and every author's changes are red
+  --markup        print the tracked changes as Word's All Markup with "Show
+                  Revisions in Balloons": insertions underlined in each
+                  author's color, deleted text in a balloon beside the page
+                  ("Deleted: ..."), format changes in balloons too (with the
+                  comments)
+  --hide-authors  name no author anywhere: each balloon keeps what changed
+                  and the comment text, with no name, and every author's
+                  changes are red
   --fonts DIR     also scan DIR for fonts, ahead of the system's directories
                   (repeatable; WORDINWEB_FONT_DIRS adds directories the same way)
   -h, --help      show this help

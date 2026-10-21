@@ -183,13 +183,13 @@ describe("renderDocxToPdf with comments", () => {
     // The paragraph itself runs onto more pages; the cards add no sheet.
     expect(pages).toBe((await render(docx, false)).pages);
     // The sheet beside the commented text grows to hold the card.
-    expect(Math.max(...mediaHeights(bytes))).toBeGreaterThan(100);
+    expect(Math.max(...mediaHeights(bytes))).toBeGreaterThan(60);
     const text = pdfText(bytes);
     expect(text).toContain(texts[0].split(":")[0]);
     expect(text.match(/wording/g)?.length).toBe(3);
   });
 
-  it.skipIf(!hasPdftotext)("prints a heavily revised page on one taller sheet: 40 changes and 10 long comments, a leader to each card", async () => {
+  it.skipIf(!hasPdftotext)("prints a heavily revised page on one taller sheet: 20 deletions and 10 long comments, a leader to each balloon, none for the 20 insertions", async () => {
     const ADA = 'w:author="Ada Reviewer" w:date="2026-08-12T10:00:00Z"';
     const BOB = 'w:author="Bob Editor" w:date="2026-08-13T15:30:00Z"';
     const t = (text: string): string => `<w:r><w:t xml:space="preserve">${text}</w:t></w:r>`;
@@ -217,16 +217,16 @@ describe("renderDocxToPdf with comments", () => {
     const bytes = Buffer.concat(out.chunks);
     expect(result.pages).toBe(1);
     const [height] = mediaHeights(bytes);
-    expect(height).toBeGreaterThan(792 * 3);
+    expect(height).toBeGreaterThan(792 * 2);
     const text = pdfText(bytes);
     for (let c = 0; c < 10; c++) expect(text).toContain(`Comment ${c}:`);
-    expect(text.match(/Inserted/g)?.length).toBe(20);
-    expect(text.match(/Deleted/g)?.length).toBe(20);
-    // 50 leaders, each ending at its card's left edge (the page's 612 pt and a 9 pt gap), on the sheet.
+    expect(text).not.toContain("Inserted");
+    expect(text.match(/Deleted: the old term \d+/g)?.length).toBe(20);
+    // 30 leaders, each ending at its balloon's bar (the page's 612 pt and a 2.25 pt gap), on the sheet.
     const ends = [...contentStreams(bytes).matchAll(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l ([\d.]+) (-?[\d.]+) l S/g)];
-    expect(ends).toHaveLength(50);
+    expect(ends).toHaveLength(30);
     for (const [, x, y] of ends) {
-      expect(Number(x)).toBeCloseTo(621, 0);
+      expect(Number(x)).toBeCloseTo(614.25, 1);
       expect(Number(y)).toBeGreaterThan(0);
       expect(Number(y)).toBeLessThan(height);
     }
@@ -301,23 +301,33 @@ describe("renderDocxToPdf with comments", () => {
     expect(at("Thread root")).toBeLessThan(at("Reply one"));
     expect(at("Reply one")).toBeLessThan(at("Reply to reply one"));
     expect(at("Reply to reply one")).toBeLessThan(at("Reply two"));
-    for (const name of ["Ada Reviewer", "Bob Editor", "Carol Deep", "6/3/2026"]) at(name);
+    for (const name of ["Ada Reviewer", "Bob Editor", "Carol Deep"]) at(name);
     expect(text).not.toContain("example.com");
-    // Each reply's bar stands at its own depth: a reply to a reply 10 px further in.
-    const bars = [...contentStreams(bytes).matchAll(/0\.91 0\.918 0\.929 rg ([\d.]+) [\d.]+ 1\.5 [\d.]+ re f/g)].map((m) => Number(m[1]));
-    expect(new Set(bars).size).toBe(2);
-    expect(Math.max(...bars) - Math.min(...bars)).toBeCloseTo(7.5, 1);
+    // No date: Word prints none in a balloon.
+    expect(text).not.toContain("2026");
+    // Each reply steps in by its depth: a reply to a reply 10 px (7.5 pt) further in.
+    const path = join(mkdtempSync(join(tmpdir(), "wordinweb-pdf-")), "doc.pdf");
+    writeFileSync(path, bytes);
+    const html = execFileSync("pdftotext", ["-bbox", path, "-"], { encoding: "utf8" });
+    const left = (word: string): number => Number(new RegExp(`<word xMin="([\\d.]+)"[^>]*>${word}</word>`).exec(html)?.[1]);
+    expect(left("Thread")).toBeLessThan(left("one"));
+    expect(left("to") - left("one")).toBeCloseTo(7.5, 1);
   });
 
-  it("draws a dashed leader from each card's text to the card", async () => {
+  it("draws a dashed leader from each comment's text to its balloon's bar", async () => {
     const { docx } = commentedDocx(1, 3);
     const { bytes } = await render(docx, true);
     const content = contentStreams(bytes);
-    // A hairline tick at each highlight's end, and a dashed line from the text area's right edge to the rail and the card.
-    expect(content.match(/q 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l S/g)?.length).toBe(3);
-    const leaders = content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG ([\d.]+) [\d.]+ m ([\d.]+) [\d.]+ l [\d.]+ [\d.]+ l S/g) ?? [];
+    // No tick at the text: the leader alone, along the top of the line from the highlight's end to the text area's right edge, then to the bar.
+    expect(content.match(/q 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l S/g)).toBeNull();
+    const leaders = [...content.matchAll(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l ([\d.]+) [\d.]+ l S/g)];
     expect(leaders.length).toBe(3);
-    // The line starts right of the text (the page's text area ends at the right margin, 612 - 72 pt).
-    for (const leader of leaders) expect(Number(/RG ([\d.]+)/.exec(leader)![1])).toBeGreaterThanOrEqual(540);
+    for (const [, x0, y0, turn, y1, end] of leaders) {
+      expect(Number(x0)).toBeLessThan(540);
+      expect(y1).toBe(y0);
+      // The page's text area ends at the right margin, 612 - 72 pt; the bar is 2.25 pt right of the page.
+      expect(Number(turn)).toBeGreaterThanOrEqual(540);
+      expect(Number(end)).toBeCloseTo(614.25, 1);
+    }
   });
 });

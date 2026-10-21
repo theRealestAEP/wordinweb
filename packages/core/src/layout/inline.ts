@@ -158,9 +158,10 @@ interface FragAtom {
   metricsStrut?: boolean;
   /** Render right-to-left (Arabic/Hebrew run). */
   rtl?: boolean;
-  /** Printed markup: the clear space after a tracked change that ends
-   * inside a word, where the change's bar goes (see CHANGE_GAP). */
-  changeGap?: true;
+  /** Printed markup: this empty item stands where deleted text was (see
+   * Run.inBalloon). It is part of the word around it, so a line never
+   * breaks at it. */
+  changeAnchor?: true;
 }
 interface SpaceAtom {
   kind: "space";
@@ -519,8 +520,8 @@ export interface LineSpan {
   caretClampX?: number;
   /** A trailing space hung past the line's end (a wrap, a paragraph end): it draws no underline or strike, as in Word without w:ulTrailSpace. */
   hanging?: boolean;
-  /** Printed markup: see FragAtom.changeGap. */
-  changeGap?: true;
+  /** Printed markup: see FragAtom.changeAnchor. */
+  changeAnchor?: true;
   /** Render this span right-to-left (browser shapes/orders within the box). */
   rtl?: boolean;
   /** East-Asian ruby cluster: the base text rides in `text`; `ruby` carries
@@ -2085,7 +2086,7 @@ function breakParagraphImpl(
         let headW = 0;
         while (glued && hi > minSpans) {
           const s = cur[hi - 1];
-          if (s.isSpace || (!s.text && !s.changeGap) || s.text === "\t" || s.image || s.drawing || s.breakAfter) break;
+          if (s.isSpace || (!s.text && !s.changeAnchor) || s.text === "\t" || s.image || s.drawing || s.breakAfter) break;
           headW += s.width;
           hi--;
         }
@@ -2218,7 +2219,7 @@ function breakParagraphImpl(
         const s = cur[hi - 1];
         // A noBreak space (word glued to a following NBSP) is not a break
         // opportunity: keep walking so the whole glued unit moves together.
-        if ((s.isSpace && !s.noBreak) || (!s.text && !s.changeGap) || s.text === "\t" || s.image || s.drawing) break;
+        if ((s.isSpace && !s.noBreak) || (!s.text && !s.changeAnchor) || s.text === "\t" || s.image || s.drawing) break;
         // A hyphen break opportunity ends the head: the hyphenated left part
         // stays on this line, only the current segment (+tail) moves down.
         if (s.breakAfter) {
@@ -2477,7 +2478,7 @@ function breakParagraphImpl(
     // this atom to a fresh line, where a mid-segment continuation re-insets.
     const padL = bdrPad && (!sameBdrAtom(atoms[ai - 1], atom) || curLineWidth === 0) ? bdrPad : 0;
     x += padL;
-    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, softHyphen: atom.softHyphen, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby, changeGap: atom.changeGap });
+    cur.push({ x, width: atom.width, text: atom.text, props: atom.props, font: atom.font, href: atom.href, src: atom.src, noteId: atom.noteId, metricsFont: atom.metricsFont, metricsStrut: atom.metricsStrut, breakAfter: atom.breakAfter, softHyphen: atom.softHyphen, pageRef: atom.pageRef, rtl: atom.rtl, rtlLevel: levelOf(atom.rtl), ruby: atom.ruby, changeAnchor: atom.changeAnchor });
     curLineWidth += padL + atom.width + bdrPadR;
     x += atom.width + bdrPadR;
     // A packed word may continue across formatting-run fragments, but an
@@ -3444,6 +3445,16 @@ function buildAtoms(
     }
     if (baseProps.vanish) return;
     const font = fontOf(baseProps, fallbackFamily);
+    // Printed markup: deleted text prints in its balloon, not on the line
+    // (Run.inBalloon), so the line closes up as in Word's "Show Revisions in
+    // Balloons". An empty item keeps the text's place: the change bar and
+    // the balloon's leader start there. The balloon prints the text in the
+    // run's effective formatting.
+    if (run.inBalloon) {
+      for (const change of run.changes ?? []) for (const piece of change.deleted ?? []) if (piece.run === run) piece.props = baseProps;
+      atoms.push({ kind: "frag", text: "", props: baseProps, font, width: 0, href, src: { run, t: null, offset: 0 }, changeAnchor: true });
+      return;
+    }
     // Kashida-justified paragraph: fold the per-glyph elongation into this RTL
     // run's letterSpacing so both line-breaking (measurer.width) and painting
     // (renderer reads props.letterSpacing) spread the Arabic glyphs. Non-RTL
@@ -4208,8 +4219,9 @@ function buildAtoms(
   // A tracked paragraph mark shows as a pilcrow in the revision's colors: a
   // suggested line break is otherwise only text that moved down. It has no
   // source element, so it is never hit-tested, saved or edited. Printed
-  // markup anchors the mark's changes (markChanges) on this run, a space
-  // when the mark itself is unchanged, so they get a balloon and a bar.
+  // markup anchors the mark's changes (markChanges) on this run, a space,
+  // so they get a balloon and a bar; a deleted mark prints in its balloon
+  // ("Deleted: ¶"), not on the line.
   if (para.markRevision || para.markChanges) {
     const last = para.children.at(-1);
     const lastRun = last?.type === "hyperlink" ? last.runs.at(-1) : last;
@@ -4223,8 +4235,10 @@ function buildAtoms(
             ...(deleted ? { strike: true } : { underline: "single" }),
           }
         : {},
-      content: [{ kind: "text", text: para.markRevision ? "\u00B6" : " " }],
+      // Printed, an inserted mark is no pilcrow: Word prints no formatting marks.
+      content: [{ kind: "text", text: para.markRevision && !para.markChanges ? "\u00B6" : " " }],
       changes: para.markChanges,
+      ...(para.markChanges?.some((change) => change.deleted) ? { inBalloon: true as const } : {}),
     });
   }
   // East Asian punctuation compression: Word gives a fullwidth comma/period
@@ -4268,26 +4282,8 @@ function buildAtoms(
       if (prevNbsp) a.noBreak = true;
     } else prevNbsp = false;
   }
-  // Printed markup marks the end of each tracked change with a hairline
-  // bar (pdf/comments.ts). A change that ends inside a word ("two (2"
-  // deleted, "three (3" inserted, then ")") gets clear space after its last
-  // letter for that bar, so the bar touches neither letter. A change that
-  // ends at a space or at the paragraph's end needs none: its bar goes in
-  // the space or past the text.
-  for (let i = atoms.length - 2; i >= 0; i--) {
-    const a = atoms[i];
-    const next = atoms[i + 1];
-    if (a.kind !== "frag" || !a.text || !a.src?.run.changes || next.kind !== "frag" || !next.text) continue;
-    const continuing = new Set(next.src?.run.changes?.map((change) => change.id));
-    if (a.src.run.changes.every((change) => continuing.has(change.id))) continue;
-    atoms.splice(i + 1, 0, { kind: "frag", text: "", props: a.props, font: a.font, width: CHANGE_GAP, src: { run: a.src.run, t: null, offset: 0 }, changeGap: true });
-  }
   return { atoms, anchors };
 }
-
-/** Printed markup: the clear space, px, after a tracked change that ends
- * inside a word: a hairline bar with 1 px clear on each side. */
-const CHANGE_GAP = 3;
 
 // ---------- fields ----------
 

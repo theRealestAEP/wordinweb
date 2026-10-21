@@ -305,7 +305,31 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
       if (ctx.revisionColor) {
         const author = revisionAuthor(mark);
         para.markRevisionColor = ctx.revisionColor(author);
-        para.markChanges = [{ id: `mark-${para.markRevision}:${attr(mark, "id") ?? ""}`, kind: para.markRevision, author, date: attr(mark, "date"), label: deleted ? "Deleted paragraph mark" : "Inserted paragraph mark" }];
+        const change: Revision = { id: `mark-${para.markRevision}:${attr(mark, "id") ?? ""}`, kind: para.markRevision, author, date: attr(mark, "date"), label: deleted ? "Deleted" : "Inserted" };
+        // A deleted mark prints in its balloon as Word's pilcrow ("Deleted: ¶").
+        if (deleted) change.deleted = [{ text: "¶", props: {} }];
+        para.markChanges = [change];
+      }
+    }
+  }
+  if (ctx.revisionColor) {
+    const runs = runsOf(para);
+    moveDeletionsToBalloons(runs);
+    const mark = para.markChanges?.[0];
+    if (mark?.deleted) {
+      // A deleted mark right after the same author's deleted text joins its
+      // balloon: "Deleted: the last words¶".
+      const last = runs.at(-1);
+      const before = last?.inBalloon ? last.changes?.find((c) => c.kind === "del") : undefined;
+      if (before?.deleted && before.author === mark.author) {
+        before.deleted.push(...mark.deleted);
+        para.markChanges = [before];
+      }
+      // A paragraph deleted whole, its mark too, closes up as in Word: it
+      // keeps one line of no height, with no number, where its deletions'
+      // leaders start.
+      if (runs.every((run) => run.inBalloon)) {
+        para.props = { ...para.props, spacingBefore: 0, spacingAfter: 0, beforeAutospacing: false, afterAutospacing: false, lineSpacing: { rule: "exact", value: 0.01 }, numbering: null, pageBreakBefore: false, contextualSpacing: false };
       }
     }
   }
@@ -323,9 +347,33 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
 /** Word's default color for moved text. */
 const MOVE_COLOR = "#008000";
 
-/** A format change's balloon, from its w:*Change element and Word's words for what changed. */
+/**
+ * A move's balloon label in Word's words: "Moved (insertion) [1]" at its
+ * destination; at its origin "Moved down [1]" when the origin comes first,
+ * else "Moved up [1]". The number is the move's, by the name of its move
+ * range (ParseContext.moves). A move outside a named range has no number
+ * and its origin says "Moved".
+ */
+function moveLabel(ctx: DocParseContext, id: string, origin: boolean): string {
+  const moves = ctx.moves;
+  const known = moves?.labels.get(id);
+  if (!moves || known) return known ?? (origin ? "Moved" : "Moved (insertion)");
+  const name = moves.open[origin ? "from" : "to"];
+  let move = name ? moves.byName.get(name) : undefined;
+  if (name && !move) {
+    move = { number: moves.byName.size + 1, down: origin };
+    moves.byName.set(name, move);
+  }
+  const label = !move ? (origin ? "Moved" : "Moved (insertion)") : origin ? `Moved ${move.down ? "down" : "up"} [${move.number}]` : `Moved (insertion) [${move.number}]`;
+  moves.labels.set(id, label);
+  return label;
+}
+
+/** A format change's balloon, from its w:*Change element and Word's words
+ * for what changed ("Formatted" alone when the change is in a property
+ * this model does not keep). */
 export function formatChange(el: XmlElement, what: string): Revision {
-  return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: revisionAuthor(el), date: attr(el, "date"), label: `Formatted: ${what}` };
+  return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: revisionAuthor(el), date: attr(el, "date"), label: what === "Formatted" ? what : `Formatted: ${what}` };
 }
 
 /** A change's author as Word names it: "Unknown" for a change with no
@@ -336,6 +384,39 @@ function revisionAuthor(el: XmlElement): string {
 
 function addChange(runs: Run[], change: Revision): void {
   for (const run of runs) run.changes = [...(run.changes ?? []), change];
+}
+
+/** Content a balloon can print as text. A deleted run with anything else
+ * (a picture, a shape, an equation, a note reference) stays on the line,
+ * struck through, and its deletion gets no balloon. */
+const BALLOON_CONTENT = new Set(["text", "tab", "ptab", "break", "field"]);
+
+/**
+ * Printed markup, as Word's "Show Revisions in Balloons": a paragraph's
+ * deleted text leaves the line for its deletion's balloon (Run.inBalloon,
+ * Revision.deleted). Deletions next to each other by the same author make
+ * one balloon, as in Word.
+ */
+function moveDeletionsToBalloons(runs: Run[]): void {
+  let open: Revision | undefined;
+  for (const run of runs) {
+    const change = run.changes?.find((c) => c.kind === "del" || c.kind === "moveFrom");
+    if (!change || run.content.length === 0 || !run.content.every((c) => BALLOON_CONTENT.has(c.kind))) {
+      open = undefined;
+      continue;
+    }
+    run.inBalloon = true;
+    if (open && open !== change && open.kind === "del" && change.kind === "del" && open.author === change.author) {
+      run.changes = run.changes?.map((c) => (c === change ? (open as Revision) : c));
+    } else if (open !== change) {
+      open = change;
+      open.deleted ??= [];
+    }
+    for (const content of run.content) {
+      const text = content.kind === "text" ? content.text : content.kind === "field" ? content.cachedResult ?? "" : content.kind === "break" ? "\n" : "\t";
+      open.deleted?.push({ text, props: run.props, run });
+    }
+  }
 }
 
 /** A paragraph's runs, hyperlinks' included. */
@@ -702,6 +783,10 @@ function parseParaChildren(
     } else if (ln === "bookmarkEnd") {
       const id = attr(el, "id");
       if (id) ctx.refBookmarks?.open.delete(id);
+    } else if (ctx.moves && (ln === "moveFromRangeStart" || ln === "moveToRangeStart")) {
+      ctx.moves.open[ln === "moveFromRangeStart" ? "from" : "to"] = attr(el, "name");
+    } else if (ctx.moves && (ln === "moveFromRangeEnd" || ln === "moveToRangeEnd")) {
+      ctx.moves.open[ln === "moveFromRangeEnd" ? "from" : "to"] = undefined;
     }
     if (ln === "r") {
       const run = parseRun(el, ctx, field, suppressedObjects);
@@ -737,8 +822,9 @@ function parseParaChildren(
         const author = revisionAuthor(el);
         const color = ctx.revisionColor ? (move ? MOVE_COLOR : ctx.revisionColor(author)) : isInsert ? "#188038" : "#D93025";
         const double = move && !!ctx.revisionColor;
+        const id = `${ln}:${attr(el, "id") ?? ""}`;
         const change: Revision | undefined = ctx.revisionColor
-          ? { id: `${ln}:${attr(el, "id") ?? ""}`, kind: ln, author, date: attr(el, "date"), label: move ? (isInsert ? "Moved to" : "Moved from") : isInsert ? "Inserted" : "Deleted" }
+          ? { id, kind: ln, author, date: attr(el, "date"), label: move ? moveLabel(ctx, id, !isInsert) : isInsert ? "Inserted" : "Deleted" }
           : undefined;
         const style = (r: Run) => {
           r.props = {
@@ -3019,8 +3105,10 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
       for (const run of runsOfBlocks(row.cells.flatMap((cell) => cell.blocks))) {
         run.props = { ...run.props, color, ...(inserted ? { underline: "single" } : { strike: true }) };
         // The row's balloon stands for the cells' content, which Word
-        // writes as inserted or deleted with the row.
+        // writes as inserted or deleted with the row. A deleted row stays
+        // in the table, its text on its lines, struck through.
         run.changes = [...(run.changes ?? []).filter((c) => c.kind !== change.kind), change];
+        delete run.inBalloon;
       }
     }
     const trPrChange = child(trPr, "trPrChange");

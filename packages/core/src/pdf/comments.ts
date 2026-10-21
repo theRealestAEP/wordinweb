@@ -9,44 +9,62 @@ import { Resources } from "./resources.js";
 import { num } from "./writer.js";
 
 /**
- * The review-comment column of a sheet, as renderToDom's renderComments
- * lays it out on screen: the commented text highlighted, each top-level
- * comment in a balloon in the rail right of the page beside its first
- * line, replies nested under their parent, balloons stacked down so none
- * overlaps the one above.
+ * The balloon column of a sheet, as Word prints "Show Revisions in
+ * Balloons": a thin grey rule along the page's right edge, and beside the
+ * page each comment and each change that Word balloons, in plain text with
+ * a thin bar in its author's color down its left side. A balloon reads the
+ * author's name in bold, then, stepped in, what changed: "Deleted: the"
+ * (the deleted text in its own formatting, wrapped, never cut short),
+ * "Formatted: Font: Bold", "Moved (insertion) [1]", or the comment's text
+ * with its replies under it. No date, no avatar: Word prints neither.
  *
- * A dashed leader in the author's color runs from the end of the comment's
- * first highlighted line across to the rail and on to the card's left edge.
+ * Which changes get a balloon: a deletion whose text left the line (see
+ * Run.inBalloon), a deleted paragraph mark ("Deleted: ¶"), a deleted
+ * table row, a move's destination, and every format change. An insertion
+ * stays on its line, underlined in its author's color, with no balloon;
+ * so does a deleted picture or shape, struck through.
  *
- * Balloons that do not fit: each sheet holds all of its page's cards,
- * whole, in order down the rail. When they reach past the sheet's bottom,
- * that sheet grows taller (layout gives the height): the page keeps its
- * size at the top, and the rail goes on below it. So no card leaves its
- * page's sheet, every leader reaches its card, and the PDF has one sheet
- * per page.
+ * The commented text is highlighted. A dashed leader in the author's color
+ * runs from the change or the comment along the top of its first line to
+ * the text area's right edge, then across to the balloon's bar; it slopes
+ * down when the balloon above pushed this one down.
  *
- * A page needs only its own comments: the column keeps the ids already
- * given a balloon, nothing else.
+ * Balloons that do not fit: each sheet holds all of its page's balloons,
+ * whole, in order down the column. When they reach past the sheet's
+ * bottom, that sheet grows taller (layout gives the height): the page
+ * keeps its size at the top, and the column goes on below it. So no
+ * balloon leaves its page's sheet, every leader reaches its balloon, and
+ * the PDF has one sheet per page.
  *
- * Every comment the document marks gets its card. One whose text is never
- * drawn (clipped by an exact-height row, hidden past a text box's bottom)
- * goes beside the nearest drawn text of its block, where the counting pass
- * found it (UndrawnComments); one with no drawn text near it at all
- * (marked at no body text, or in a header or footer) goes after the last
- * page's own cards, on the last sheet.
+ * A page needs only its own comments and changes: the column keeps the ids
+ * already given a balloon, nothing else.
+ *
+ * Every comment the document marks gets its balloon. One whose text is
+ * never drawn (deleted, clipped by an exact-height row, hidden past a text
+ * box's bottom) goes beside the nearest drawn text of its block, where the
+ * counting pass found it (UndrawnComments); one with no drawn text near it
+ * at all (marked at no body text, or in a header or footer) goes after the
+ * last page's own balloons, on the last sheet.
  */
 export const RAIL_WIDTH = 256;
-const CARD_WIDTH = 220;
-const CARD_GAP = 12;
-const PAD_X = 12;
-const PAD_Y = 10;
-const RAIL_PAD = 8;
-const TEXT_SIZE = 12;
-const LINE_HEIGHT = 15;
-const AVATAR = 24;
+/** The bar down a balloon's left side: its left edge right of the page, and its width (1.5 pt). */
+const BAR_X = 3;
+const BAR_WIDTH = 2;
+/** The author's name, right of the bar; the change or comment text, stepped in about 1.5 em. */
+const NAME_X = BAR_X + BAR_WIDTH + 8;
+const TEXT_X = NAME_X + 16;
+/** The balloons' right edge, right of the page. */
+const RIGHT = RAIL_WIDTH - 8;
+/** Space above and below a balloon's text, inside its bar. */
+const PAD_Y = 2;
+/** The least space between two balloons, and above the first. */
+const GAP = 12;
+/** Word prints balloons at about 8 pt. */
+const TEXT_SIZE = 11;
+const LINE_HEIGHT = 13;
 const UI_FONT = "Arial";
 
-/** One line of a balloon: its height and how to paint it at (x, y). */
+/** One line of a balloon: its height and how to paint it at (x, y), x the page's right edge. */
 interface Line {
   height: number;
   paint: (drawer: PageDrawer, x: number, y: number) => void;
@@ -54,12 +72,18 @@ interface Line {
 
 interface Balloon {
   id: string;
-  /** The author's color: the avatar's, and the leader line's. */
+  /** The author's color: the bar's, and the leader's. */
   color: string;
   lines: Line[];
-  /** How far below the card's top the leader meets it: the avatar's
-   * middle, or with no avatar the first line's. */
+  /** How far below the balloon's top the leader meets its bar: under the
+   * name line, or with no name the middle of the first line. */
   leaderAt: number;
+}
+
+/** A piece of a balloon's text in its font. */
+interface Piece {
+  text: string;
+  font: FontSpec;
 }
 
 /** The line a card goes beside: its page, and where its leader starts. */
@@ -149,17 +173,16 @@ export class CommentColumn {
     private readonly measurer: NodeMeasurer,
     private readonly resources: Resources,
     private readonly source: CommentSource,
-    /** The cards of the comments no page draws the text of (UndrawnComments.anchors). */
+    /** The balloons of the comments no page draws the text of (UndrawnComments.anchors). */
     private readonly undrawn: Map<string, LineAnchor>,
-    /** Name the authors (RenderPdfOptions.authors). Without, a card has no
-     * name line and no avatar, and every comment's leader is one color. */
+    /** Name the authors (RenderPdfOptions.authors). Without, a balloon has
+     * no name line, and every author's bar and leader are one color. */
     private readonly authors = true,
   ) {
     // The column prints the review comments; with markup, the tracked
-    // changes too: a balloon per change (Run.changes) with its author,
-    // date and what it is, in the author's revision color, beside the
-    // change's first line. The inline marks say where the change is, so
-    // no highlight is drawn for it.
+    // changes Word balloons too (Run.changes), beside the change's first
+    // line. The marks on the line say where the change is, so no
+    // highlight is drawn for it.
     for (const comment of doc.comments) {
       this.byId.set(comment.id, comment);
       if (!comment.parentId) continue;
@@ -167,7 +190,7 @@ export class CommentColumn {
       if (list) list.push(comment);
       else this.replies.set(comment.parentId, [comment]);
     }
-    // A card names its author as people.xml does: the person's name, found
+    // A balloon names its author as people.xml does: the person's name, found
     // by the name the comment carries or by the identity its presence
     // provider knows (the userId, or the address in an "S::address::id" one).
     for (const person of doc.people) {
@@ -195,15 +218,24 @@ export class CommentColumn {
   private readonly markedElsewhere = new Set<string>();
   private readonly names = new Map<string, string>();
 
-  /** Lay out the page's highlights and its rail: the height of the sheet
-   * that holds them (`sheetHeight`, or more when the cards reach past its
+  /** Lay out the page's highlights and its column: the height of the sheet
+   * that holds them (`sheetHeight`, or more when the balloons reach past its
    * bottom), and how to draw them on a drawer for a sheet that tall. On the
-   * last page, the cards of the comments no page placed go after its own. */
+   * last page, the balloons of the comments no page placed go after its own. */
   layout(page: LaidOutPage, sheetHeight: number, last = false): { height: number; draw: (drawer: PageDrawer) => void } {
-    // Each top-level comment's text items on this page, in paint order.
+    // Each top-level comment's text items on this page, in paint order; and
+    // where a comment on deleted text goes, which is in a balloon and not
+    // on the line: at the item that stands where the text was.
     const items = new Map<string, TextItem[]>();
+    const onDeleted = new Map<string, { x: number; top: number }>();
     for (const item of page.items) {
       if (item.kind !== "text" || item.hidden) continue;
+      if (item.src?.run.inBalloon) {
+        for (const content of item.src.run.content) {
+          const ids = content.kind === "text" && content.srcT ? this.source.commentIds(content.srcT) : undefined;
+          for (const id of ids ?? []) if (!onDeleted.has(id)) onDeleted.set(id, { x: item.x, top: item.lineTop });
+        }
+      }
       const t = textOf(item);
       const ids = t && this.source.commentIds(t);
       if (!ids) continue;
@@ -215,46 +247,33 @@ export class CommentColumn {
         else items.set(id, [item]);
       }
     }
-    // Each tracked change's first line on this page, in paint order (a
-    // changed picture's box counts as a line), and where the change ends on
-    // it: its last item, its last item that is more than spaces (ink), and
-    // the middle of the clear space the layout keeps after a change that
-    // ends inside a word (gap, TextItem.changeGap).
-    type ChangeLine = { top: number; bottom: number; x1: number; ink?: number; gap?: number };
-    const changes = new Map<string, ChangeLine & { change: Revision }>();
+    // Where each ballooned change's leader starts: where the change begins
+    // on its first line on this page (a changed picture's box counts as a
+    // line). Deleted text left the line, and an empty item marks where it
+    // was (Run.inBalloon).
+    const firstLine = new Map<string, { x: number; top: number }>();
+    const changes: { top: number; change: Revision }[] = [];
     for (const item of page.items) {
       let list: Revision[] | undefined;
-      let line: ChangeLine;
+      let at: { x: number; top: number };
       if (item.kind === "text" && !item.hidden) {
         list = item.src?.run.changes;
-        line = { top: item.lineTop, bottom: item.lineTop + item.lineHeight, x1: item.x + item.width };
-        if (item.changeGap) line.gap = item.x + item.width / 2;
-        else if (item.text.trim()) line.ink = item.x + item.width;
+        at = { x: item.x, top: item.lineTop };
       } else if (item.kind === "image") {
         list = item.changes;
-        line = { top: item.y, bottom: item.y + item.height, x1: item.x + item.width, ink: item.x + item.width };
+        at = { x: item.x, top: item.y };
       } else continue;
       for (const change of list ?? []) {
-        const first = changes.get(change.id);
-        if (!first) changes.set(change.id, { change, ...line });
-        else if (line.top === first.top) {
-          first.x1 = Math.max(first.x1, line.x1);
-          if (line.ink !== undefined) first.ink = Math.max(first.ink ?? line.ink, line.ink);
-          if (line.gap !== undefined) first.gap = line.gap;
-        }
+        if (!ballooned(change)) continue;
+        const id = `rev:${change.id}`;
+        const first = firstLine.get(id);
+        if (!first) {
+          firstLine.set(id, at);
+          changes.push({ top: at.top, change });
+        } else if (at.top === first.top) first.x = Math.min(first.x, at.x);
       }
     }
-    // The end of each comment's first highlighted line, where its leader
-    // starts. A change's bar goes in the clear space after it when it ends
-    // inside a word, else just past its last letter, in the space or the
-    // margin after it.
-    const firstLine = new Map<string, { x: number; y: number; top: number; bottom: number }>();
-    for (const [id, { top, bottom, x1, ink, gap }] of changes) {
-      let x = x1;
-      if (gap !== undefined && gap > (ink ?? -Infinity)) x = gap;
-      else if (ink !== undefined) x = ink + 1;
-      firstLine.set(`rev:${id}`, { x, y: (top + bottom) / 2, top, bottom });
-    }
+    // The end of each comment's first highlighted line, where its leader starts.
     const highlights: { top: number; height: number; x0: number; x1: number; resolved: boolean }[] = [];
     for (const [id, list] of items) {
       const resolved = !!this.byId.get(id)?.resolved;
@@ -263,7 +282,7 @@ export class CommentColumn {
       const flush = (): void => {
         if (run && run.x1 > run.x0) {
           highlights.push({ ...run, resolved });
-          if (!firstLine.has(id)) firstLine.set(id, { x: run.x1 - 1, y: run.top + run.height / 2, top: run.top, bottom: run.top + run.height });
+          if (!firstLine.has(id)) firstLine.set(id, { x: run.x1, top: run.top });
         }
         run = null;
       };
@@ -279,78 +298,77 @@ export class CommentColumn {
       flush();
     }
 
-    // Balloons for the comments whose first line is on this page, by that line.
+    // Balloons for the comments and changes whose first line is on this page, by that line.
     const balloons: { top: number; balloon: Balloon }[] = [];
     for (const [id, list] of items) {
       if (this.placed.has(id)) continue;
       this.placed.add(id);
-      balloons.push({ top: list[0].lineTop, balloon: this.balloon(this.byId.get(id) as DocComment) });
+      balloons.push({ top: list[0].lineTop, balloon: this.commentBalloon(this.byId.get(id) as DocComment) });
     }
-    for (const [id, { change, top }] of changes) {
-      if (this.placed.has(`rev:${id}`)) continue;
-      this.placed.add(`rev:${id}`);
-      const card: DocComment = { id: `rev:${id}`, author: change.author, date: change.date, text: change.label };
-      balloons.push({ top, balloon: this.balloon(card, this.doc.revisionColor(change.author)) });
+    for (const [id, at] of onDeleted) {
+      const comment = this.byId.get(id);
+      if (!comment || comment.parentId || this.placed.has(id)) continue;
+      this.placed.add(id);
+      firstLine.set(id, at);
+      balloons.push({ top: at.top, balloon: this.commentBalloon(comment) });
+    }
+    for (const { top, change } of changes) {
+      if (this.placed.has(`rev:${change.id}`)) continue;
+      this.placed.add(`rev:${change.id}`);
+      balloons.push({ top, balloon: this.changeBalloon(change) });
     }
     // The comments whose text is not drawn, beside the nearest text that is.
     for (const [id, at] of this.undrawn) {
       const comment = this.byId.get(id);
       if (at.page !== page.index || !comment || this.placed.has(id)) continue;
       this.placed.add(id);
-      firstLine.set(id, { x: at.x - 1, y: (at.top + at.bottom) / 2, top: at.top, bottom: at.bottom });
-      balloons.push({ top: at.top, balloon: this.balloon(comment) });
+      firstLine.set(id, { x: at.x, top: at.top });
+      balloons.push({ top: at.top, balloon: this.commentBalloon(comment) });
     }
     balloons.sort((a, b) => a.top - b.top);
     if (last) balloons.push(...this.remaining().map((balloon) => ({ top: 0, balloon })));
 
-    // Each card at its line, or just below the card above, whichever is lower.
-    const cards: { top: number; balloon: Balloon }[] = [];
-    let y = RAIL_PAD;
+    // Each balloon with its leader level with the top of its line, or just
+    // below the balloon above, whichever is lower.
+    const placed: { top: number; height: number; balloon: Balloon }[] = [];
+    let y = GAP;
     for (const { top, balloon } of balloons) {
-      const at = Math.max(top, y);
-      cards.push({ top: at, balloon });
-      y = at + balloon.lines.reduce((sum, line) => sum + line.height, 0) + RAIL_PAD;
+      const height = balloon.lines.reduce((sum, line) => sum + line.height, 0);
+      const at = Math.max(top - balloon.leaderAt, y);
+      placed.push({ top: at, height, balloon });
+      y = at + height + GAP;
     }
 
-    const cardX = page.width + CARD_GAP;
-    // The leader stays in the white margin: the right edge of the page's
-    // text area is past every text item and column on the page.
+    // The leader turns toward the column at the right edge of the page's
+    // text area (past every text item and column on the page).
     let textRight = 0;
     for (const band of page.columnBands) band.colXs.forEach((x, i) => (textRight = Math.max(textRight, x + band.colWidths[i])));
     for (const item of page.items) if (item.kind === "text" && !item.hidden) textRight = Math.max(textRight, item.x + item.width);
     textRight = Math.min(textRight + 6, page.width - 2);
-    /** Mark the highlight's or the change's end with a hairline bar in the
-     * author's color (a heavier bar hid the letters beside it), and draw
-     * the dashed leader from the text area's right edge across the margin
-     * to the rail, and on to the card at `cardTop`. No segment crosses or
-     * underlines text. */
-    const leader = (drawer: PageDrawer, balloon: Balloon, cardTop: number): void => {
-      const from = firstLine.get(balloon.id);
-      if (!from) return;
-      drawer.ops.push(`q 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.top + 2))} m ${num(drawer.x(from.x))} ${num(drawer.y(from.bottom - 2))} l S Q`);
-      drawer.ops.push(
-        `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(textRight))} ${num(drawer.y(from.y))} m ${num(drawer.x(page.width))} ${num(drawer.y(from.y))} l ` +
-          `${num(drawer.x(cardX))} ${num(drawer.y(cardTop + balloon.leaderAt))} l S Q`,
-      );
-    };
-    const card = (drawer: PageDrawer, balloon: Balloon, top: number): void => {
-      const height = balloon.lines.reduce((sum, line) => sum + line.height, 0);
-      drawer.ops.push(`q 1 g 0.878 0.878 0.878 RG 0.75 w ${drawer.rect(cardX, top, CARD_WIDTH, height)} B Q`);
-      let lineY = top;
-      for (const line of balloon.lines) {
-        line.paint(drawer, cardX, lineY);
-        lineY += line.height;
-      }
-    };
+    const barX = page.width + BAR_X;
+    const sheet = Math.max(sheetHeight, Math.ceil(y));
     return {
-      height: Math.max(sheetHeight, Math.ceil(y)),
+      height: sheet,
       draw: (drawer) => {
         for (const { top, height, x0, x1, resolved } of highlights) {
           drawer.ops.push(`q /${this.resources.alpha(resolved ? 0.22 : 0.38)} gs ${resolved ? "0.627 0.627 0.627" : "1 0.784 0.353"} rg ${drawer.rect(x0, top, x1 - x0, height)} f Q`);
         }
-        for (const { top, balloon } of cards) {
-          card(drawer, balloon, top);
-          leader(drawer, balloon, top);
+        // The rule between the page and the column, the sheet's full height.
+        drawer.ops.push(`q 0.75 w 0.8 G ${num(drawer.x(page.width))} ${num(drawer.y(0))} m ${num(drawer.x(page.width))} ${num(drawer.y(sheet))} l S Q`);
+        for (const { top, height, balloon } of placed) {
+          drawer.ops.push(`q ${rgb(balloon.color)} rg ${drawer.rect(barX, top, BAR_WIDTH, height)} f Q`);
+          let lineY = top;
+          for (const line of balloon.lines) {
+            line.paint(drawer, page.width, lineY);
+            lineY += line.height;
+          }
+          const from = firstLine.get(balloon.id);
+          if (!from) continue;
+          const turn = Math.max(textRight, from.x);
+          drawer.ops.push(
+            `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.top))} m ` +
+              `${num(drawer.x(turn))} ${num(drawer.y(from.top))} l ${num(drawer.x(barX))} ${num(drawer.y(top + balloon.leaderAt))} l S Q`,
+          );
         }
       },
     };
@@ -363,51 +381,48 @@ export class CommentColumn {
       if (comment.parentId || this.placed.has(comment.id)) continue;
       if (!this.source.commentAnchor(comment.id) && !this.markedElsewhere.has(comment.id)) continue;
       this.placed.add(comment.id);
-      out.push(this.balloon(comment));
+      out.push(this.commentBalloon(comment));
     }
     return out;
   }
 
-  /** The lines of a comment's balloon: its head, text, and its thread, each
-   * reply under the comment it answers, stepped in by its depth. A tracked
-   * change's balloon takes its author's revision color. The head is the
-   * avatar, the author's name and the date; without authors, or for an
-   * author with no name, the date alone, on a line of its own (none when
-   * there is no date). As in Word, a comment with no author shows no date. */
-  private balloon(comment: DocComment, color = this.authors ? avatarColor(comment.author) : AVATAR_COLORS[0]): Balloon {
-    const lines: Line[] = [{ height: PAD_Y, paint: () => undefined }];
-    const inner = CARD_WIDTH - 2 * PAD_X;
-    const resolved = !!comment.resolved;
-    const fg = resolved ? "#5f6368" : "#3c4043";
-    const change = comment.id.startsWith("rev:");
-    const nameOf = (source: DocComment): string => this.names.get(source.author) ?? source.author;
-    const push = (indent: number, source: DocComment): void => {
-      const left = PAD_X + indent;
-      const width = inner - indent;
-      const name = nameOf(source);
-      const date = source.date && (name || change) ? new Date(source.date) : null;
-      const dateText = date && !Number.isNaN(date.getTime()) ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : "";
-      const dateFont: FontSpec = { family: UI_FONT, size: 11, bold: false, italic: false };
-      if (!this.authors || !name) {
-        if (dateText) lines.push({ height: LINE_HEIGHT + 4, paint: (drawer, x, y) => this.text(drawer, dateText, dateFont, "#5f6368", x + left, y + 12) });
-      } else lines.push({
-        height: AVATAR + 6,
-        paint: (drawer, x, y) => {
-          drawer.ops.push(`q ${rgb(source === comment ? color : avatarColor(source.author))} rg ${circle(drawer, x + left + AVATAR / 2, y + AVATAR / 2, AVATAR / 2)} f Q`);
-          const initials = initialsOf(name, source.initials);
-          const initialsFont: FontSpec = { family: UI_FONT, size: 10, bold: true, italic: false };
-          const iw = this.measurer.width(initials, initialsFont);
-          this.text(drawer, initials, initialsFont, "#ffffff", x + left + AVATAR / 2 - iw / 2, y + AVATAR / 2 + 3.5);
-          const authorFont: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: true, italic: false };
-          const textX = x + left + AVATAR + 8;
-          this.text(drawer, this.clip(name, authorFont, width - AVATAR - 8), authorFont, fg, textX, y + (dateText ? 10 : 16));
-          if (dateText) this.text(drawer, dateText, dateFont, "#5f6368", textX, y + 22);
-        },
-      });
-      const font: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: false, italic: false };
-      for (const text of this.wrap(source.text, font, width)) {
-        lines.push({ height: LINE_HEIGHT, paint: (drawer, x, y) => this.text(drawer, text, font, fg, x + left, y + 12) });
+  /** A change's balloon: its author, then what changed ("Deleted: the",
+   * "Formatted: Font: Bold"), the label in bold. As in Word, a change with
+   * no w:author is by "Unknown" (the parse names it), and one with an
+   * empty w:author has no name line. */
+  private changeBalloon(change: Revision): Balloon {
+    const bold: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: true, italic: false };
+    const plain: FontSpec = { ...bold, bold: false };
+    const pieces: Piece[] = [];
+    if (change.deleted) {
+      pieces.push({ text: `${change.label}: `, font: bold });
+      for (const piece of change.deleted) {
+        pieces.push({ text: piece.text, font: { family: piece.props.font ?? UI_FONT, size: TEXT_SIZE, bold: !!piece.props.bold, italic: !!piece.props.italic } });
       }
+    } else {
+      const colon = change.label.indexOf(": ");
+      if (colon < 0) pieces.push({ text: change.label, font: bold });
+      else pieces.push({ text: change.label.slice(0, colon + 1), font: bold }, { text: change.label.slice(colon + 1), font: plain });
+    }
+    const lines: Line[] = [{ height: PAD_Y, paint: () => undefined }];
+    const named = this.authors && !!change.author;
+    if (named) lines.push(this.nameLine(change.author, NAME_X));
+    lines.push(...this.textLines(pieces, TEXT_X, "#000000"));
+    lines.push({ height: PAD_Y, paint: () => undefined });
+    return { id: `rev:${change.id}`, color: this.doc.revisionColor(change.author), lines, leaderAt: PAD_Y + (named ? LINE_HEIGHT : LINE_HEIGHT / 2) };
+  }
+
+  /** A comment's balloon: its author and text, then its thread, each reply
+   * under the comment it answers, stepped in by its depth. Without
+   * authors, or for an author with no name, no name line. */
+  private commentBalloon(comment: DocComment): Balloon {
+    const lines: Line[] = [{ height: PAD_Y, paint: () => undefined }];
+    const fg = comment.resolved ? "#5f6368" : "#000000";
+    const nameOf = (source: DocComment): string => (this.authors ? this.names.get(source.author) ?? source.author : "");
+    const push = (indent: number, source: DocComment): void => {
+      const name = nameOf(source);
+      if (name) lines.push(this.nameLine(name, NAME_X + indent, fg));
+      lines.push(...this.textLines([{ text: source.text, font: { family: UI_FONT, size: TEXT_SIZE, bold: false, italic: false } }], TEXT_X + indent, fg));
     };
     push(0, comment);
     const seen = new Set<string>();
@@ -416,30 +431,37 @@ export class CommentColumn {
         // A malformed thread may answer itself.
         if (seen.has(reply.id)) continue;
         seen.add(reply.id);
-        // The reply block: a rule above, a bar down its left side, both at
-        // the depth of the comment it answers.
-        const bar = PAD_X + indent - 10;
-        lines.push({
-          height: 8 + 8,
-          paint: (drawer, x, y) => {
-            drawer.ops.push(`q 0.945 0.953 0.957 rg ${drawer.rect(x + bar, y + 8, inner - (bar - PAD_X), 1)} f Q`);
-          },
-        });
-        const start = lines.length;
+        lines.push({ height: 4, paint: () => undefined });
         push(indent, reply);
-        for (const line of lines.slice(start)) {
-          const paint = line.paint;
-          line.paint = (drawer, x, y) => {
-            drawer.ops.push(`q 0.91 0.918 0.929 rg ${drawer.rect(x + bar, y, 2, line.height)} f Q`);
-            paint(drawer, x, y);
-          };
-        }
         thread(reply, Math.min(indent + 10, 30));
       }
     };
     thread(comment, 10);
     lines.push({ height: PAD_Y, paint: () => undefined });
-    return { id: comment.id, color, lines, leaderAt: PAD_Y + (this.authors && nameOf(comment) ? AVATAR : LINE_HEIGHT) / 2 };
+    // Without authors every comment is one color; with them, its author's, as Word colors a reviewer's comments and changes alike.
+    const color = this.doc.revisionColor(this.authors ? comment.author : "");
+    return { id: comment.id, color, lines, leaderAt: PAD_Y + (nameOf(comment) ? LINE_HEIGHT : LINE_HEIGHT / 2) };
+  }
+
+  /** The author's name in bold, cut short with an ellipsis when it does not fit. */
+  private nameLine(name: string, left: number, color = "#000000"): Line {
+    const font: FontSpec = { family: UI_FONT, size: TEXT_SIZE, bold: true, italic: false };
+    const text = this.clip(name, font, RIGHT - left);
+    return { height: LINE_HEIGHT, paint: (drawer, x, y) => this.text(drawer, text, font, color, x + left, y + LINE_HEIGHT - 3) };
+  }
+
+  /** `pieces` wrapped to the column from `left`, as lines that paint them. */
+  private textLines(pieces: Piece[], left: number, color: string): Line[] {
+    return this.wrap(pieces, RIGHT - left).map((line) => ({
+      height: LINE_HEIGHT,
+      paint: (drawer, x, y) => {
+        let at = x + left;
+        for (const piece of line) {
+          this.text(drawer, piece.text, piece.font, color, at, y + LINE_HEIGHT - 3);
+          at += this.measurer.width(piece.text, piece.font);
+        }
+      },
+    }));
   }
 
   private text(drawer: PageDrawer, text: string, font: FontSpec, color: string, x: number, baseline: number): void {
@@ -458,35 +480,50 @@ export class CommentColumn {
     drawer.drawItem(item, () => null);
   }
 
-  /** Greedy word wrap of a comment's paragraphs to `width` px; a word
-   * longer than the line breaks where it must. */
-  private wrap(text: string, font: FontSpec, width: number): string[] {
-    const out: string[] = [];
-    for (const paragraph of text.split("\n")) {
-      let line = "";
-      for (const word of paragraph.split(/(\s+)/)) {
+  /** Greedy word wrap of the pieces to `width` px: a line breaks at a
+   * space, at a line break ("\n"), and inside a word longer than the line.
+   * A tab prints as a space. Each line is its pieces, a piece per font. */
+  private wrap(pieces: Piece[], width: number): Piece[][] {
+    const out: Piece[][] = [];
+    let line: Piece[] = [];
+    let used = 0;
+    const add = (text: string, font: FontSpec): void => {
+      const last = line.at(-1);
+      if (last && last.font === font) last.text += text;
+      else line.push({ text, font });
+      used += this.measurer.width(text, font);
+    };
+    const newLine = (): void => {
+      const last = line.at(-1);
+      if (last) last.text = last.text.trimEnd();
+      out.push(line);
+      line = [];
+      used = 0;
+    };
+    for (const { text, font } of pieces) {
+      for (const word of text.replace(/\t/g, " ").split(/(\n|[^\S\n]+)/)) {
         if (!word) continue;
-        if (this.measurer.width(line + word, font) <= width || (!line && !/\S/.test(word))) {
-          line += word;
+        if (word === "\n") {
+          newLine();
           continue;
         }
-        if (/^\s+$/.test(word)) {
-          out.push(line);
-          line = "";
+        const w = this.measurer.width(word, font);
+        if (used + w <= width || (used === 0 && !/\S/.test(word))) {
+          add(word, font);
           continue;
         }
-        if (line) out.push(line.trimEnd());
-        line = "";
+        if (!/\S/.test(word)) {
+          newLine();
+          continue;
+        }
+        if (used > 0) newLine();
         for (const ch of word) {
-          if (line && this.measurer.width(line + ch, font) > width) {
-            out.push(line);
-            line = "";
-          }
-          line += ch;
+          if (used > 0 && used + this.measurer.width(ch, font) > width) newLine();
+          add(ch, font);
         }
       }
-      out.push(line.trimEnd());
     }
+    newLine();
     return out;
   }
 
@@ -501,30 +538,17 @@ export class CommentColumn {
   }
 }
 
-function circle(drawer: PageDrawer, cx: number, cy: number, r: number): string {
-  const k = 0.5523 * r;
-  const p = (x: number, y: number): string => `${num(drawer.x(x))} ${num(drawer.y(y))}`;
-  return `${p(cx + r, cy)} m ${p(cx + r, cy + k)} ${p(cx + k, cy + r)} ${p(cx, cy + r)} c ${p(cx - k, cy + r)} ${p(cx - r, cy + k)} ${p(cx - r, cy)} c ${p(cx - r, cy - k)} ${p(cx - k, cy - r)} ${p(cx, cy - r)} c ${p(cx + k, cy - r)} ${p(cx + r, cy - k)} ${p(cx + r, cy)} c`;
+/** Whether Word balloons a change: a deletion whose text left the line
+ * (Revision.deleted), a deleted row, a move's destination, a format
+ * change. An insertion, and a deleted picture or shape, stay on the line
+ * with no balloon. */
+function ballooned(change: Revision): boolean {
+  if (change.kind === "format" || change.kind === "moveTo") return true;
+  if (change.kind === "ins") return false;
+  return !!change.deleted || change.id.startsWith("row-");
 }
 
 function rgb(css: string): string {
   const c = parseColor(css) ?? { r: 0, g: 0, b: 0, a: 1 };
   return `${num(c.r / 255)} ${num(c.g / 255)} ${num(c.b / 255)}`;
-}
-
-function initialsOf(author: string, initials?: string): string {
-  if (initials) return initials.slice(0, 2).toUpperCase();
-  const parts = author.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  return ((parts[0][0] ?? "") + (parts.length > 1 ? parts[parts.length - 1][0] : "")).toUpperCase();
-}
-
-/** The DOM renderer's avatar palette. */
-const AVATAR_COLORS = ["#1a73e8", "#188038", "#a50e0e", "#8430ce", "#007b83", "#b06000"];
-
-/** Stable per-author avatar color, the DOM renderer's. */
-function avatarColor(author: string): string {
-  let h = 0;
-  for (let i = 0; i < author.length; i++) h = (h * 31 + author.charCodeAt(i)) | 0;
-  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }

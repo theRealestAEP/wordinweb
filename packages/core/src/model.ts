@@ -859,9 +859,10 @@ export type RunContent =
   | RubyContent;
 
 /**
- * A tracked change a printed markup page shows beside its text (see
- * pdf/comments.ts): what it is, in Word's words, and who made it when.
- * Set only when the document is parsed for print with author colors.
+ * A tracked change on a printed markup page, which shows the changes as
+ * Word's "Show Revisions in Balloons" does (see pdf/comments.ts): what it
+ * is, in Word's words, and who made it when. Set only when the document is
+ * parsed for print with author colors.
  */
 export interface Revision {
   /** Unique over the document: the element's kind and w:id. */
@@ -870,9 +871,18 @@ export interface Revision {
   author: string;
   /** ISO timestamp from w:date, verbatim. */
   date?: string;
-  /** The balloon's text: "Inserted", "Deleted", "Moved from", "Moved to",
-   * "Inserted row", "Deleted row", "Formatted: Font: Bold", ... */
+  /** What the balloon says, in Word's words: "Deleted", "Moved down [1]",
+   * "Moved (insertion) [1]", "Deleted row", "Formatted: Font: Bold", ...
+   * An insertion's label ("Inserted") is never printed: an insertion stays
+   * on the line and gets no balloon. */
   label: string;
+  /** The deleted text the balloon prints after the label ("Deleted: the"),
+   * each piece in its run's formatting. The text is not on the line (see
+   * Run.inBalloon). Set on a deletion, a move's origin and a deleted
+   * paragraph mark. A piece's `props` are its run's direct formatting until
+   * the layout reaches the run and puts in its effective formatting (styles
+   * included). */
+  deleted?: { text: string; props: RunProps; run?: Run }[];
 }
 
 export interface Run {
@@ -885,6 +895,10 @@ export interface Run {
    * it (a paragraph's, row's or table's format change is put on each of its
    * runs). Print with markup only. */
   changes?: Revision[];
+  /** Print with markup only: the run is deleted text, which prints in its
+   * change's balloon (Revision.deleted) and not on the line. The layout
+   * keeps an empty item in its place, where the balloon's leader starts. */
+  inBalloon?: true;
   /** Element whose children array contains src (w:p, w:hyperlink, …). */
   srcParent?: XmlElement;
 }

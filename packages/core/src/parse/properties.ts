@@ -31,6 +31,14 @@ export interface ParseContext {
    * (Run.changes). Absent, the markup view colors insertions green and
    * deletions red for every author, as the editor shows them. */
   revisionColor?: (author: string) => string;
+  /** With revisionColor: the moves' balloon labels. A move is numbered by
+   * its name (the w:name of its move range), in the order the names first
+   * appear; its origin says "Moved down" when it comes before its
+   * destination, else "Moved up". The parse that reads the document in
+   * order sets `labels` (by the move element's Revision id), so a later
+   * parse of one block alone labels its moves the same. Shared by every
+   * copy of the context. */
+  moves?: { open: { from?: string; to?: string }; byName: Map<string, { number: number; down: boolean }>; labels: Map<string, string> };
 }
 
 // ---------- colors ----------

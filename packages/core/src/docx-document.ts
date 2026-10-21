@@ -34,7 +34,7 @@ import { StableIds } from "./edit/ids.js";
 import { parseBody, parseBlocks, parseParagraph, DocParseContext, refuseAltChunk } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
-import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
+import { ParseContext, mergeParaProps, mergeRunProps } from "./parse/properties.js";
 import { extractOlePackage } from "./parse/ole.js";
 import { isSourcesRoot } from "./citations.js";
 import {
@@ -350,7 +350,7 @@ export class DocxDocument {
     rels: Relationships;
     relsRoot: XmlElement | null;
   }[] = [];
-  private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup"; revisionColor?: (author: string) => string };
+  private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup"; revisionColor?: (author: string) => string; moves?: ParseContext["moves"] };
   /** Tracked-changes display mode; refresh() re-derives after changes. */
   revisionView: "final" | "markup" = "final";
   /** The revision authors in the order they first appeared, for revisionColor. */
@@ -398,7 +398,10 @@ export class DocxDocument {
     if (options.revisionView) this.revisionView = options.revisionView;
     this.ctxBase.revisionView = this.revisionView;
     if (options.revisionAuthors === false) this.revisionAuthorColors = false;
-    if (options.revisionColors) this.ctxBase.revisionColor = (author) => this.revisionColor(author);
+    if (options.revisionColors) {
+      this.ctxBase.revisionColor = (author) => this.revisionColor(author);
+      this.ctxBase.moves = { open: {}, byName: new Map(), labels: new Map() };
+    }
 
     this.stylesPart = docDir + "styles.xml";
     this.stylesRoot = this.readXmlOptional(this.stylesPart) ?? null;
