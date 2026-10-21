@@ -113,15 +113,18 @@ class WinWordReader extends Word2Reader {
     if (d.length < 2) return;
     if (d[1] & 0x04) c.flags[2] = !c.flags[2];
     c.special = (d[1] & 0x02) !== 0;
-    const set = d.length >= 3 ? d[2] : 0;
-    if (set & 0x02 && d.length >= 6) c.fontId = this.n16(d, 4);
-    if (set & 0x04 && d.length >= 8) c.hps = this.n16(d, 6);
-    if (set & 0x20) c.dxaSpace = d.length >= 9 ? (((d[8] & 0x3f) << 26) >> 26) * 5 : 0;
-    if (set & 0x01) c.ico = d.length >= 10 ? d[9] & 0x1f : 0;
-    if (set & 0x08) c.kul = d.length >= 10 ? d[9] >> 5 : 0;
-    if (set & 0x10) c.hpsPos = d.length >= 11 ? (d[10] << 24) >> 24 : 0;
+    // A CHPX may stop short: the bytes it leaves out are zero.
+    const byte = (at: number): number => d[at] ?? 0;
+    const set = byte(2);
+    if (set & 0x02) c.fontId = this.n16(d, 4);
+    if (set & 0x04 && this.n16(d, 6)) c.hps = this.n16(d, 6);
+    if (set & 0x20) c.dxaSpace = (((byte(8) & 0x3f) << 26) >> 26) * 5;
+    if (set & 0x01) c.ico = byte(9) & 0x1f;
+    if (set & 0x08) c.kul = byte(9) >> 5;
+    if (set & 0x10) c.hpsPos = (byte(10) << 24) >> 24;
     // The language at 12, then the picture's file offset: three bytes at 14 (the fourth holds something else).
-    if (d.length >= 17) c.picture = this.n32(d, 14) & 0xffffff;
+    const picture = this.n32(d, 14) & 0xffffff;
+    if (picture) c.picture = picture;
   }
 
   /**
@@ -136,16 +139,19 @@ class WinWordReader extends Word2Reader {
     const flips: [number, number][] = [[0x01, 0], [0x02, 1], [0x04, 2], [0x08, 3], [0x20, 5], [0x40, 6], [0x80, 7]];
     for (const [bit, i] of flips) if (d[0] & bit) c.flags[i] = !c.flags[i];
     if (d.length < 2) return;
+    // A CHPX may stop short: the bytes it leaves out are zero.
+    const byte = (at: number): number => d[at] ?? 0;
     const set = d[1];
     c.special = (set & 0x02) !== 0;
-    if (set & 0x08 && d.length >= 4) c.fontId = this.n16(d, 2);
-    if (set & 0x10 && d.length >= 5 && d[4]) c.hps = d[4];
-    if (set & 0x40) c.hpsPos = d.length >= 6 ? (d[5] << 24) >> 24 : 0;
+    if (set & 0x08) c.fontId = this.n16(d, 2);
+    if (set & 0x10 && byte(4)) c.hps = byte(4);
+    if (set & 0x40) c.hpsPos = (byte(5) << 24) >> 24;
     // The spacing byte (fsSpace 0x80, byte 6) stays unread: Word 1 writes 0x38 for expanded
     // and 0x39 for condensed text, an encoding no source documents.
-    if (set & 0x04) c.ico = d.length >= 8 ? d[7] & 0x0f : 0;
-    if (set & 0x20) c.kul = d.length >= 8 ? (d[7] >> 4) & 7 : 0;
-    if (d.length >= 11) c.picture = this.n32(d, 8) & 0xffffff;
+    if (set & 0x04) c.ico = byte(7) & 0x0f;
+    if (set & 0x20) c.kul = (byte(7) >> 4) & 7;
+    const picture = this.n32(d, 8) & 0xffffff;
+    if (picture) c.picture = picture;
   }
 
   protected isCharSprm(op: number): boolean {
