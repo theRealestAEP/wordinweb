@@ -66,6 +66,7 @@ function picfBorderLine(picture: DocInlinePicture): DocLine | null {
 /** A floating picture, shape or group: `<w:drawing>` with a `wp:anchor`. */
 export function anchoredShapeXml(floating: DocFloatingShape, options: DrawingXmlOptions): string {
   const { shape } = floating;
+  if (shape.wordArt) return wordArtPictXml(floating, options.nextId());
   const id = options.nextId();
   const name = shape.name ?? `${shape.kind === "picture" ? "Picture" : shape.kind === "group" ? "Group" : "Shape"} ${id}`;
   const position = (axis: "horizontal" | "vertical"): string => {
@@ -98,6 +99,41 @@ export function anchoredShapeXml(floating: DocFloatingShape, options: DrawingXml
     `<wp:cNvGraphicFramePr/>` +
     `<a:graphic><a:graphicData uri="${uri}">${graphic}</a:graphicData></a:graphic>` +
     `</wp:anchor></w:drawing>`
+  );
+}
+
+/**
+ * A floating WordArt shape as Word writes legacy WordArt: a VML v:shape whose
+ * v:textpath text is drawn in the fill colour and stretched to the shape's
+ * box. The fill belongs to the letters, not to a box behind them.
+ */
+function wordArtPictXml(floating: DocFloatingShape, id: number): string {
+  const { shape } = floating;
+  const pt = (value: number): string => `${Math.round(value / 127) / 100}pt`;
+  const relH: Record<string, string> = { margin: "margin", page: "page", column: "text", character: "char" };
+  const relV: Record<string, string> = { margin: "margin", page: "page", paragraph: "text", line: "line" };
+  const style = [
+    "position:absolute",
+    `margin-left:${pt(floating.horizontal.offset)}`,
+    `margin-top:${pt(floating.vertical.offset)}`,
+    `width:${pt(floating.extent.cx)}`,
+    `height:${pt(floating.extent.cy)}`,
+    ...(shape.rotation ? [`rotation:${shape.rotation}`] : []),
+    // Word draws a header's drawings under the body text, so a header WordArt (a watermark) goes behind it.
+    `z-index:${floating.behindText || floating.dgglbl === 1 ? -(floating.zIndex + 1) : floating.zIndex + 1}`,
+    ...(floating.horizontal.align ? [`mso-position-horizontal:${floating.horizontal.align}`] : []),
+    `mso-position-horizontal-relative:${relH[floating.horizontal.relativeFrom] ?? "text"}`,
+    ...(floating.vertical.align ? [`mso-position-vertical:${floating.vertical.align}`] : []),
+    `mso-position-vertical-relative:${relV[floating.vertical.relativeFrom] ?? "text"}`,
+  ].join(";");
+  const fill = shape.fill;
+  const font = shape.wordArt?.font ? `font-family:&quot;${escape(shape.wordArt.font)}&quot;` : "";
+  return (
+    `<w:pict xmlns:v="urn:schemas-microsoft-com:vml">` +
+    `<v:shape id="WordArt ${id}" style="${style}" fillcolor="#${fill?.color ?? "808080"}" stroked="f">` +
+    (fill?.opacity !== undefined ? `<v:fill opacity="${fill.opacity}"/>` : "") +
+    `<v:textpath on="t" fitshape="t" style="${font}" string="${escape(shape.wordArt?.text ?? "")}"/>` +
+    `</v:shape></w:pict>`
   );
 }
 

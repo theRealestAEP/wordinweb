@@ -6,6 +6,8 @@ import { strFromU8, unzipSync, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
 import { docToDocxFiles, openDoc } from "../src/doc/convert.js";
 import { drawingHooks } from "../src/doc/drawing-hooks.js";
+import type { DocFloatingShape, DocFspa, DocShape } from "../src/doc/drawings.js";
+import { anchoredShapeXml } from "../src/doc/drawings-xml.js";
 import { REC, readProps, propFlag, propNumber } from "../src/doc/officeart.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { prepareWmf } from "../src/render/wmf.js";
@@ -85,6 +87,26 @@ describe("doc drawings: pictures", () => {
     expect(rule).toBeDefined();
     expect(rule).toContain('<a:srgbClr val="808080">');
     expect(rule).toContain('<wp:extent cx="5943600"');
+  });
+
+  it("writes a header WordArt as a VML text path in its fill colour, behind the text", () => {
+    // As GovDocs1 026823.doc's "DRAFT" watermark: WordArt type 172, silver fill, in the header drawing.
+    const shape = {
+      spid: 2049, type: 172, kind: "shape", adjust: [], frame: { x: 0, y: 0, cx: 0, cy: 0 }, rotation: 0, flipH: false, flipV: false,
+      fill: { kind: "solid", color: "C0C0C0" }, line: null, hidden: false, behindText: false, layoutInCell: true, isBackground: false, props: new Map(),
+      preset: "rect", wordArt: { text: "DRAFT", font: "Arial Black" },
+    } as unknown as DocShape;
+    const floating = {
+      shape, fspa: {} as DocFspa, horizontal: { relativeFrom: "column", offset: 2194560 }, vertical: { relativeFrom: "paragraph", offset: 3931920 },
+      extent: { cx: 1695450, cy: 1457325 }, wrap: "none", wrapSide: "bothSides", distance: { left: 0, top: 0, right: 0, bottom: 0 },
+      behindText: false, zIndex: 0, layoutInCell: false, anchorLock: false, dgglbl: 1,
+    } as DocFloatingShape;
+    const xml = anchoredShapeXml(floating, { addMedia: () => "rId1", nextId: () => 1 });
+    expect(xml).not.toContain("<w:drawing");
+    expect(xml).toContain('fillcolor="#C0C0C0"');
+    expect(xml).toContain('string="DRAFT"');
+    expect(xml).toMatch(/z-index:-\d/);
+    expect(xml).toContain("margin-left:172.8pt;margin-top:309.6pt;width:133.5pt;height:114.75pt");
   });
 
   it("draws a Word 97 OLE object's picture from its ObjectPool storage", () => {
