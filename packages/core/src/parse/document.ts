@@ -1051,7 +1051,16 @@ function parseRun(
       case "fldChar": {
         const type = attr(el, "fldCharType");
         if (type === "begin") {
-          const field: FieldFrame = {
+          // A field in a top-level cached result starts a visible segment.
+          // Finish the outer field so recomputing it preserves the nested
+          // field and following text. Instruction operands and SET stay nested.
+          if (
+            stack.length === 1 && field?.mode === "result" && !field.live &&
+            !/^\s*SET\b/i.test(field.instruction)
+          ) {
+            flushField(stack);
+          }
+          const frame: FieldFrame = {
             mode: "instr",
             instruction: "",
             instructionParts: [],
@@ -1059,7 +1068,7 @@ function parseRun(
             carrier: run,
             beginEl: el,
           };
-          stack.push(field);
+          stack.push(frame);
           // Legacy form fields carry their display in the fldChar begin's
           // w:ffData, not a separate/result run. FORMCHECKBOX: a ballot box
           // (U+2610) or ballot-box-with-X (U+2612) from w:checkBox/w:checked.
@@ -1068,12 +1077,12 @@ function parseRun(
           const checkBox = child(ffData, "checkBox");
           const ddList = child(ffData, "ddList");
           if (checkBox) {
-            field.cachedResult = onOff(child(checkBox, "checked")) ? "☒" : "☐";
-            field.checkbox = checkBox;
+            frame.cachedResult = onOff(child(checkBox, "checked")) ? "☒" : "☐";
+            frame.checkbox = checkBox;
           } else if (ddList) {
             const entries = children(ddList, "listEntry");
             const sel = intAttr(child(ddList, "result"), "val") ?? 0;
-            field.cachedResult = attr(entries[sel], "val") ?? "";
+            frame.cachedResult = attr(entries[sel], "val") ?? "";
           }
         } else if (type === "separate" && field) {
           field.mode = "result";

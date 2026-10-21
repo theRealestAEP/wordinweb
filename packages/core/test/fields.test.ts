@@ -100,6 +100,22 @@ describe("nested complex fields", () => {
     expect(bodyText(`<w:p>${runs}</w:p>`)).toBe("2");
   });
 
+  it.each([false, true])("preserves text after a nested field in a DATE result (shared run: %s)", (sharedRun) => {
+    const date = 'DATE \\@ "d/M/yyyy"';
+    let result = field(date, "").replace(
+      '<w:r><w:t xml:space="preserve"></w:t></w:r>',
+      field("NUMPAGES", "2") + '<w:r><w:t>romeo eight ten oscar quebec</w:t></w:r>',
+    );
+    if (sharedRun) {
+      result = result.replace(
+        '<w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="begin"/>',
+        '<w:fldChar w:fldCharType="separate"/><w:fldChar w:fldCharType="begin"/>',
+      );
+    }
+    const currentDate = bodyText(`<w:p>${field(date, "")}</w:p>`);
+    expect(bodyText(`<w:p>${result}</w:p>`)).toBe(`${currentDate}1romeo eight ten oscar quebec`);
+  });
+
   it("keeps nested SEQ assignments stable across streamed layout passes", async () => {
     const set = nestedField("SET x ", field("SEQ table", "9"), "", "9");
     const body = `<w:p>${set}${field("REF x", "stale")}${field("SEQ table", "9")}</w:p>`;
@@ -130,6 +146,14 @@ describe("nested complex fields", () => {
 
   it("hides a simple SET and exposes its value through REF", () => {
     const set = '<w:fldSimple w:instr="SET x &quot;value&quot;"><w:r><w:t>stale</w:t></w:r></w:fldSimple>';
+    expect(bodyText(`<w:p>${set}${field("REF x", "stale")}</w:p>`)).toBe("value");
+  });
+
+  it("hides a SET result containing a nested field and trailing text", () => {
+    const set = field('SET x "value"', "stale").replace(
+      '<w:r><w:t xml:space="preserve">stale</w:t></w:r>',
+      field("NUMPAGES", "2") + '<w:r><w:t>hidden</w:t></w:r>',
+    );
     expect(bodyText(`<w:p>${set}${field("REF x", "stale")}</w:p>`)).toBe("value");
   });
 });
