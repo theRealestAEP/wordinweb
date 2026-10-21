@@ -8,6 +8,7 @@ import { CHART_LABEL_COLOR, CHART_TEXT_PX, type ChartPen, paintChart } from "./c
 import { warpBaseline } from "./warp-geometry.js";
 import { XmlElement } from "../xml.js";
 import { decodeTiff } from "./tiff.js";
+import { prepareEmf } from "./emf.js";
 import { extractOlePackage } from "../parse/ole.js";
 
 export interface RenderOptions {
@@ -1778,7 +1779,8 @@ function renderItem(doc: DocxDocument, item: PageItem, urls: string[], interacti
         if (cachedEmf) {
           decoded = cachedEmf;
         } else {
-          const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+          const prepared = prepareEmf(bytes);
+          const buf = prepared.buffer.slice(prepared.byteOffset, prepared.byteOffset + prepared.byteLength) as ArrayBuffer;
           trackPaint(import("emf-converter")
             .then(({ convertEmfToDataUrl }) => convertEmfToDataUrl(buf))
             .then((url) => {
