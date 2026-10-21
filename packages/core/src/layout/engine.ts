@@ -5727,7 +5727,8 @@ class Engine {
       // next column whole (it used to be placed past the page bottom). The
       // float's push belongs to the page the line leaves: carried along, it
       // opened a blank band at the top of the next page (GovDocs 071877,
-      // doc97-check-c bug 7).
+      // doc97-check-c bug 7; govdocs 000759: a moved heading kept the
+      // offset of a full-page figure and opened its new page 600px down).
       const movesOn = (planned || overflow) && li > fragStartLine;
       const movesWhole = !movesOn && ((planned && li === 0) || (breaks.has(0) && li === 0 && !this.pageIsEmptyAtCursor()));
       if (movesOn || movesWhole || overflow) floatOffset = 0;
@@ -7152,7 +7153,9 @@ class Engine {
         // page-positioned bars. The body flow does the same: break-table's
         // br_smallTB_br (GovDocs, doc97-check-d) anchors a top-and-bottom
         // rectangle 12pt above an empty paragraph, and the text after it
-        // was drawn over the rectangle.
+        // was drawn over the rectangle; a Word 97 figure group (picture plus
+        // caption box, wrapTopAndBottom) keeps the text below it, as
+        // LibreOffice prints govdocs 071539.
         if (shape.wrap && shape.wrap !== "none") {
           const d = shape.dist ?? { t: 0, b: 0, l: 0, r: 0 };
           const list = this.floats.get(page) ?? [];

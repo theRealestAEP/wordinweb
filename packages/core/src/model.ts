@@ -557,8 +557,8 @@ export interface ShapeArt {
   behind?: boolean;
   /** a:xfrm rotation, degrees clockwise. */
   rotation?: number;
-  /** wp:wrapSquare/.../wrapTopAndBottom on the anchor. Only FRAME stories
-   * (header/footer/cell) act on it - body flow ignores art wrap, as before. */
+  /** wp:wrapSquare/.../wrapTopAndBottom on the anchor (w10:wrap on a VML
+   * group): text wraps around the art as around a text box. */
   wrap?: WrapMode;
   /** wp:anchor dist* in px, used with `wrap`. */
   dist?: { t: number; b: number; l: number; r: number };

@@ -118,3 +118,47 @@ describe("a line clearing a square float resumes at exactly float bottom + distB
     }
   });
 });
+
+it("starts a line moved past a bottom-aligned float at the next page's body top", () => {
+  const cx = 432 * EMU_PER_PT;
+  const cy = 504 * EMU_PER_PT;
+  const drawing =
+    `<w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0"` +
+    ` simplePos="0" relativeHeight="2516502" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">` +
+    `<wp:simplePos x="0" y="0"/>` +
+    `<wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>` +
+    `<wp:positionV relativeFrom="margin"><wp:align>bottom</wp:align></wp:positionV>` +
+    `<wp:extent cx="${cx}" cy="${cy}"/><wp:effectExtent l="0" t="0" r="0" b="0"/>` +
+    `<wp:wrapTopAndBottom/>` +
+    `<wp:docPr id="9" name="Shape 9"/><wp:cNvGraphicFramePr/>` +
+    `<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">` +
+    `<wps:wsp><wps:cNvSpPr/><wps:spPr>` +
+    `<a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm>` +
+    `<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>` +
+    `<a:solidFill><a:srgbClr val="FFF2CC"/></a:solidFill>` +
+    `</wps:spPr><wps:txbx><w:txbxContent><w:p/></w:txbxContent></wps:txbx>` +
+    `<wps:bodyPr rot="0" anchor="t"><a:noAutofit/></wps:bodyPr>` +
+    `</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>`;
+  // The 7-inch box fills the bottom of the 9-inch body. A later paragraph
+  // reaches its wrap band and must move to page 2.
+  const body =
+    `<w:p><w:r>${drawing}</w:r><w:r><w:t>Anchor</w:t></w:r></w:p>` +
+    Array.from({ length: 16 }, (_, i) => `<w:p><w:r><w:t>Paragraph ${i + 1}</w:t></w:r></w:p>`).join("") +
+    `<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>` +
+    `<w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720"/></w:sectPr>`;
+  const doc = DocxDocument.load(
+    makeDocx({
+      "word/document.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${body}</w:body></w:document>`,
+    }),
+  );
+  const { pages } = layoutDocument(doc, { measurer });
+  expect(pages).toHaveLength(2);
+  const firstLine = pages[1].items
+    .filter(
+      (it): it is Extract<typeof it, { kind: "text" }> =>
+        it.kind === "text" && it.text.trim().length > 0,
+    )
+    .sort((a, b) => a.lineTop - b.lineTop)[0];
+  if (!firstLine) throw new Error("no text line found on page 2");
+  expect(firstLine.lineTop).toBeCloseTo(96, 0);
+});
