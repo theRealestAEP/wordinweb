@@ -36,6 +36,11 @@ function layoutBody(body: string, parts: Record<string, string> = {}) {
   return layoutDocument(doc, { measurer }).pages[0].items;
 }
 
+function layoutPages(body: string) {
+  const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body) }));
+  return layoutDocument(doc, { measurer }).pages;
+}
+
 function texts(items: PageItem[]): TextItem[] {
   return items.filter((i): i is TextItem => i.kind === "text" && i.text.trim().length > 0);
 }
@@ -150,16 +155,17 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     expect(body.x).toBeGreaterThan(FRAME_X + FRAME_W);
   });
 
-  it("sizes a frame of no w:w to its widest line and wraps the body beside it", () => {
+  it("keeps a frame of no w:w in the flow, its paragraphs one under another", () => {
+    // A widthless frame stays in the flow: GovDocs 002514's side heads
+    // (vAnchor margin, y 0, no width) print in the flow in LibreOffice, and
+    // lifting them to the margin top put a page's headings over its text.
     const auto = FRAME.replace('w:w="4000" ', "");
-    const items = layoutBody(framed("Short", auto) + framed("Widest", auto) + BODY.repeat(2) + SECTION);
+    const items = layoutBody(framed("Short", auto) + framed("Widest", auto) + BODY + SECTION);
     const short = line(items, "Short");
     const widest = line(items, "Widest");
-    expect(widest.lineTop).toBeGreaterThanOrEqual(short.lineTop + short.lineHeight - 0.01);
-    expect(short.x).toBeCloseTo(FRAME_X, 1);
-    // The body's channel starts one hSpace past the widest frame line.
     const body = line(items, "Body");
-    expect(body.x).toBeCloseTo(widest.x + widest.width + 187 * TW, 0);
+    expect(widest.lineTop).toBeGreaterThanOrEqual(short.lineTop + short.lineHeight - 0.01);
+    expect(body.lineTop).toBeGreaterThanOrEqual(widest.lineTop + widest.lineHeight - 0.01);
   });
 
   it("stacks a page-anchored frame at its page position (word95-check-b frame-three-paragraphs)", () => {
@@ -209,6 +215,47 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     // Page 15840tw, bottom margin 1440tw: the 2736tw box ends at 14400tw.
     expect(box.lineTop).toBeCloseTo((15840 - 1440 - 2736) * TW, 0);
     expect(line(items, "Body").lineTop).toBeLessThan(box.lineTop);
+  });
+
+  it("does not pull a margin-anchored frame onto the page before its page break", () => {
+    const margin = `<w:framePr w:w="4000" w:wrap="around" w:vAnchor="margin" w:hAnchor="margin" w:x="0" w:y="0"/>`;
+    const pages = layoutPages(
+      `<w:p><w:r><w:t>PageOneBody</w:t></w:r></w:p>` +
+        `<w:p><w:r><w:br w:type="page"/></w:r></w:p>` +
+        `<w:p><w:r><w:t>First paragraph after the page break.</w:t></w:r></w:p>` +
+        `<w:p><w:r><w:t>Second paragraph before the margin frame.</w:t></w:r></w:p>` +
+        framed("PbFrameOne", margin) +
+        framed("PbFrameTwo", margin) +
+        BODY +
+        SECTION,
+    );
+    const firstPageWords = texts(pages[0].items).map((i) => i.text);
+    expect(firstPageWords).not.toContain("PbFrameOne");
+    expect(firstPageWords).not.toContain("PbFrameTwo");
+    expect(firstPageWords).toContain("PageOneBody");
+    const first = line(pages[1].items, "PbFrameOne");
+    const second = line(pages[1].items, "PbFrameTwo");
+    expect(second.lineTop).toBeGreaterThanOrEqual(first.lineTop + first.lineHeight - 0.01);
+  });
+
+  it("keeps an exact table row's clip with its line when the table is in a frame", () => {
+    const cell =
+      `<w:tc><w:tcPr><w:tcW w:w="3800" w:type="dxa"/></w:tcPr>` +
+      framed("Cell ".repeat(30).trim()) +
+      `</w:tc>`;
+    const table =
+      `<w:tbl><w:tblPr><w:tblW w:w="3800" w:type="dxa"/></w:tblPr>` +
+      `<w:tblGrid><w:gridCol w:w="3800"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:val="300" w:hRule="exact"/></w:trPr>${cell}</w:tr></w:tbl>`;
+    const items = layoutBody(framed("Caption") + table + BODY + SECTION);
+    expect(texts(items).some((i) => i.text === "Cell")).toBe(true);
+    const clipped = texts(items).filter((i) => i.clip);
+    expect(clipped.length).toBeGreaterThan(0);
+    for (const item of clipped) {
+      const details = JSON.stringify({ text: item.text, clip: item.clip, lineTop: item.lineTop, lineHeight: item.lineHeight });
+      expect(item.clip!.top, details).toBeLessThanOrEqual(item.lineTop + item.lineHeight);
+      expect(item.clip!.bottom, details).toBeGreaterThanOrEqual(item.lineTop);
+    }
   });
 
   it("leaves a drop cap as it is", () => {

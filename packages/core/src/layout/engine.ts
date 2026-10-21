@@ -3566,9 +3566,9 @@ class Engine {
   private placeFramedTable(tbl: Table, siblings: Block[], index: number): boolean {
     if (this.cur.physIndex === -1) return false;
     const fr = this.blockFrame(tbl);
-    if (!fr) return false;
+    if (fr?.w === undefined) return false;
     if (this.consumedFrames.has(tbl)) return true; // placed by a paragraph's lookahead
-    if (fr.wrap === "notBeside" && fr.w !== undefined && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return false;
+    if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return false;
     if (this.continuesFrame(siblings[index - 1], tbl)) return true;
     this.flushBannerBand();
     this.clearBannerSlot();
@@ -3807,7 +3807,7 @@ class Engine {
    */
   private placeFrame(blocks: Block[], fr: ResolvedFrame): void {
     const sp = this.sp;
-    const contentW = Math.max(8, fr.w ?? this.autoFrameWidth(blocks));
+    const contentW = Math.max(8, fr.w ?? 0);
     const ox = this.frameOriginX(fr, contentW);
     // Vertical origin (frame top) from the anchor.
     let oy: number;
@@ -3900,26 +3900,6 @@ class Engine {
     }
   }
 
-  /** The width of a frame of no w:w (auto width): Word sizes it to its
-   * content, the widest line or picture of its paragraphs (laid at the column
-   * width) and the grid width of its tables. */
-  private autoFrameWidth(blocks: Block[]): number {
-    // The measure must not consume numbering counters: snapshot them.
-    const counters = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
-    const seenNumIds = new Set(this.seenNumIds);
-    const laid = this.layoutFrame(blocks, this.colWidth, this.fieldCtx());
-    this.counters = counters;
-    this.seenNumIds = seenNumIds;
-    let right = 0;
-    for (const it of laid.items) {
-      if (it.kind === "text" || it.kind === "image") right = Math.max(right, it.x + it.width);
-    }
-    for (const b of blocks) {
-      if (b.type === "table") right = Math.max(right, b.grid.reduce((sum, w) => sum + w, 0));
-    }
-    return Math.min(right, this.colWidth);
-  }
-
   /** A paragraph's positioned frame when it rides with the text (vAnchor text or paragraph) and has a width. */
   private textFrame(block: Block | undefined): ResolvedFrame | undefined {
     if (block?.type !== "paragraph") return undefined;
@@ -3969,8 +3949,8 @@ class Engine {
     if (!block || this.consumedFrames.has(block)) return undefined;
     if (this.continuesFrame(prev, block)) return undefined;
     const fr = this.blockFrame(block);
-    if (!fr || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
-    if (fr.wrap === "notBeside" && fr.w !== undefined && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return undefined;
+    if (fr?.w === undefined || fr.wrap === "none" || (fr.vAnchor !== "page" && fr.vAnchor !== "margin")) return undefined;
+    if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) return undefined;
     return fr;
   }
 
@@ -4135,31 +4115,35 @@ class Engine {
     if (this.consumedFrames.has(para)) return; // placed by the previous paragraph's lookahead
     if (props.frame && !props.dropCap && this.cur.physIndex !== -1) {
       const fr = this.resolveFrame(props.frame);
-      // A frame is lifted out of flow. A widthless `wrap="notBeside"` frame
-      // defaults to the full section text width (a full-width banner); any
-      // other widthless frame is as wide as its content (placeFrame).
-      // A full-width `wrap="notBeside"` frame in a multi-column section is a
-      // banner (IEEE title/authors): it spans ALL columns at the section top
-      // and the column band begins below it. Otherwise it is an ordinary float.
-      if (fr.wrap === "notBeside" && fr.w !== undefined && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) {
-        this.placeBannerFrame(para, fr, props.spacingAfter ?? 0);
+      // A frame needs a width to be lifted out of flow. A widthless
+      // `wrap="notBeside"` frame defaults to the full section text width (a
+      // full-width banner); any other widthless framePr falls through to normal
+      // flow (it carries no geometry to position against).
+      if (fr.w !== undefined) {
+        // A full-width `wrap="notBeside"` frame in a multi-column section is a
+        // banner (IEEE title/authors): it spans ALL columns at the section top
+        // and the column band begins below it. Otherwise it is an ordinary float.
+        if (fr.wrap === "notBeside" && this.cur.colXs.length > 1 && fr.w > this.colWidth + 1) {
+          this.placeBannerFrame(para, fr, props.spacingAfter ?? 0);
+          return;
+        }
+        // A later paragraph of a frame was laid with the frame's first block.
+        if (prev && this.continuesFrame(prev, para)) return;
+        this.flushBannerBand();
+        this.clearBannerSlot();
+        // Word keeps a frame that rides with the text on the page of the
+        // paragraph it rides with: when a frame of the run of frame
+        // paragraphs here would reach past the body bottom, the run and that
+        // paragraph move to the next page together (probe2-dropcaps-frames
+        // with its text grown by a compare's marks: Word's export moves
+        // "Body paragraph 1" and both frames anchored above it to page 2).
+        if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
+          this.nextColumn();
+        }
+        this.placeFrame(this.frameGroup(para, siblings, index), fr);
         return;
+
       }
-      // A later paragraph of a frame was laid with the frame's first block.
-      if (prev && this.continuesFrame(prev, para)) return;
-      this.flushBannerBand();
-      this.clearBannerSlot();
-      // Word keeps a frame that rides with the text on the page of the
-      // paragraph it rides with: when a frame of the run of frame
-      // paragraphs here would reach past the body bottom, the run and that
-      // paragraph move to the next page together (probe2-dropcaps-frames
-      // with its text grown by a compare's marks: Word's export moves
-      // "Body paragraph 1" and both frames anchored above it to page 2).
-      if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
-        this.nextColumn();
-      }
-      this.placeFrame(this.frameGroup(para, siblings, index), fr);
-      return;
     }
     this.flushBannerBand();
     // Word merges identical borders of consecutive paragraphs: the shared
@@ -4545,7 +4529,7 @@ class Engine {
       // over the opening heading — the heading wraps beside/below the frame).
       if (!lookMark) {
         const fr = this.pageFrameAhead(next, para);
-        if (fr) {
+        if (fr && !broken.lines.some((line) => line.forcedBreakAfter === "page")) {
           const top = fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y;
           if (top <= paraBottom + 0.25) {
             ensureLookMark();
@@ -4613,17 +4597,21 @@ class Engine {
         let simY = paraBottom;
         let shapeY = Number.POSITIVE_INFINITY;
         let prevAfter = props.spacingAfter ?? 0;
+        // A frame past a page break is anchored on a later page (GovDocs 002514).
+        let pageBroken = broken.lines.some((line) => line.forcedBreakAfter === "page");
         for (let idx = index + 1; idx <= endIdx && simY <= this.bodyBottom + 0.25; idx++) {
           const blk = siblings[idx];
-          if (frameIdx.has(idx)) framesHere.add(idx);
+          const np = blk.type === "paragraph" ? this.doc.effectiveParaProps(blk) : undefined;
+          if (blk.type === "paragraph" && (np?.pageBreakBefore || leadingBreakOf(blk)?.type === "page")) pageBroken = true;
+          if (frameIdx.has(idx) && !pageBroken) framesHere.add(idx);
           if (this.blockFrame(blk)) continue;
-          if (blk.type !== "paragraph") break;
-          const np = this.doc.effectiveParaProps(blk);
+          if (!np || blk.type !== "paragraph") break;
           simY += Math.max(prevAfter, np.spacingBefore ?? 0);
           if (idx === lastIdx) shapeY = simY; // reached the anchor paragraph's top
           if (idx === endIdx) break;
           const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, lookaheadOpts);
           simY += nb.lines.reduce((a, l) => a + l.height, 0);
+          if (nb.lines.some((line) => line.forcedBreakAfter === "page")) pageBroken = true;
           prevAfter = np.spacingAfter ?? 0;
         }
         this.counters = counterSnapshot;
@@ -4837,7 +4825,7 @@ class Engine {
       totalHeight <= bodyHeight &&
       !this.pageIsEmptyAtCursor()
     ) {
-      if (anchors.length > 0) restartOnNextColumn(spacingBefore);
+      if (anchors.length > 0 || lookFrames.length > 0) restartOnNextColumn(spacingBefore);
       else this.nextColumn();
     }
 
@@ -4966,7 +4954,7 @@ class Engine {
           keepNextTail = tail;
         } else {
           spacingBefore = borderPadTop; // plain before drops at the page top; the border reserve stays
-          if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+          if (anchors.length > 0 || lookFrames.length > 0) restartOnNextColumn(borderPadTop);
           else this.nextColumn();
         }
       }
@@ -5041,7 +5029,7 @@ class Engine {
       this.seenNumIds = seenSnapshot;
       if (need > 0 && this.y + need > this.bodyBottom && need <= bodyHeight) {
         spacingBefore = borderPadTop;
-        if (anchors.length > 0) restartOnNextColumn(borderPadTop);
+        if (anchors.length > 0 || lookFrames.length > 0) restartOnNextColumn(borderPadTop);
         else this.nextColumn();
       }
     }
@@ -5262,7 +5250,7 @@ class Engine {
     let breaks = planBreaks();
     // A paragraph pushed entirely to the next column/page takes its floats
     // along: retract, move, re-emit, and re-plan against the new geometry.
-    if (anchors.length > 0 && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
+    if ((anchors.length > 0 || lookFrames.length > 0) && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
       restartOnNextColumn(0);
       breaks = planBreaks();
     }
@@ -10392,6 +10380,9 @@ function offsetItem(item: PageItem, dx: number, dy: number): void {
       item.lineTop += dy;
       if (item.glyphTop !== undefined) item.glyphTop += dy;
       if (item.caretClampX !== undefined) item.caretClampX += dx;
+      // An exact row's clip box moves with its line (a table laid inside a
+      // frame and then placed on the page).
+      if (item.clip) item.clip = { top: item.clip.top + dy, bottom: item.clip.bottom + dy };
       break;
     case "rect":
     case "image":
