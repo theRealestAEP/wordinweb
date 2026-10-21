@@ -18,7 +18,7 @@ import { convertMetafile } from "./metafile.js";
 import { NodeMeasurer } from "./measure.js";
 import { Resources } from "./resources.js";
 import { loadShaper } from "./shaper.js";
-import { PdfWriter, num, pdfString } from "./writer.js";
+import { PdfWriter, finiteOps, num, pdfString } from "./writer.js";
 
 // The package's "./pdf" entry is this module: everything a caller needs is here.
 export { PdfRenderError } from "./errors.js";
@@ -213,6 +213,8 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       const bytes = await opened.media(part);
       const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources, frame));
       if (!canvas) return null;
+      // Drawn without what the canvas left out of reach, and reported.
+      if (canvas.dropped > 0) unsupportedImages.add(part);
       // The bitmaps the metafile drew become XObjects, named in its operators.
       const names: string[] = [];
       const xobjects: string[] = [];
@@ -243,7 +245,7 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
 
   const writePage = async (drawer: PageDrawer, width: number, height: number, xobjects: string[], annots: number[] = []): Promise<void> => {
     const content = writer.allocate();
-    await writer.deflatedStream(content, "", Buffer.from(drawer.ops.join("\n"), "latin1"));
+    await writer.deflatedStream(content, "", Buffer.from(finiteOps(drawer.ops).join("\n"), "latin1"));
     const pageNum = writer.allocate();
     pageNums.push(pageNum);
     pageTops.push(pt(height));

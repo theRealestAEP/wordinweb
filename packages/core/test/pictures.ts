@@ -164,8 +164,8 @@ export const PIXEL_FORMAT_8BPP_INDEXED = 0x00030803;
 export function emfPlusPixelImage(id: number, width: number, height: number, stride: number, format: number, bits: Uint8Array): [number, number, Uint8Array] {
   const data = new Uint8Array(28 + bits.length);
   const v = new DataView(data.buffer);
-  // Image version and type 1 (bitmap); bitmap width, height, stride, format and type 1 (pixels).
-  [EMFPLUS_VERSION, 1, width, height, stride, format, 1].forEach((value, i) => v.setUint32(i * 4, value >>> 0, true));
+  // Image version and type 1 (bitmap); bitmap width, height, stride, format and type 0 (pixels).
+  [EMFPLUS_VERSION, 1, width, height, stride, format, 0].forEach((value, i) => v.setUint32(i * 4, value >>> 0, true));
   data.set(bits, 28);
   return [0x4008, (5 << 8) | id, data];
 }
@@ -174,7 +174,8 @@ export function emfPlusPixelImage(id: number, width: number, height: number, str
 export function emfPlusCompressedImage(id: number, width: number, height: number, file: Uint8Array): [number, number, Uint8Array] {
   const data = new Uint8Array(28 + file.length);
   const v = new DataView(data.buffer);
-  [EMFPLUS_VERSION, 1, width, height, 0, 0, 2].forEach((value, i) => v.setUint32(i * 4, value, true));
+  // Image version and type 1 (bitmap); bitmap width, height, stride, format and type 1 (compressed).
+  [EMFPLUS_VERSION, 1, width, height, 0, 0, 1].forEach((value, i) => v.setUint32(i * 4, value, true));
   data.set(file, 28);
   return [0x4008, (5 << 8) | id, data];
 }
@@ -197,6 +198,39 @@ export function emfPlusDrawImage(id: number, width: number, height: number, [x, 
   v.setUint32(4, 2, true);
   [0, 0, width, height, x, y, w, h].forEach((value, i) => v.setFloat32(8 + i * 4, value, true));
   return [0x401a, id, data];
+}
+
+/** An EmfPlusObject record for emfPlus(): font `id`, Arial at `size` pixels ([MS-EMFPLUS] 2.2.1.5). */
+export function emfPlusFont(id: number, size: number): [number, number, Uint8Array] {
+  const name = "Arial";
+  const data = new Uint8Array(24 + name.length * 2);
+  const v = new DataView(data.buffer);
+  v.setUint32(0, 0xdbc01002, true);
+  v.setFloat32(4, size, true);
+  v.setUint32(8, 2, true); // UnitPixel
+  v.setUint32(20, name.length, true);
+  [...name].forEach((c, i) => v.setUint16(24 + i * 2, c.charCodeAt(0), true));
+  return [0x4008, (6 << 8) | id, data];
+}
+
+/**
+ * An EmfPlusDrawDriverString record for emfPlus() ([MS-EMFPLUS] 2.3.4.6):
+ * `text` in font 0, black, its glyph positions right after its glyphs, all
+ * at x, y.
+ */
+export function emfPlusDriverString(text: string, x: number, y: number): [number, number, Uint8Array] {
+  const n = text.length;
+  const data = new Uint8Array(16 + n * 2 + n * 8);
+  const v = new DataView(data.buffer);
+  v.setUint32(0, 0xff000000, true); // black, as a color (flag 0x8000)
+  v.setUint32(4, 1, true); // DriverStringOptionsCmapLookup: the glyphs are characters
+  v.setUint32(12, n, true);
+  [...text].forEach((c, i) => v.setUint16(16 + i * 2, c.charCodeAt(0), true));
+  for (let i = 0; i < n; i++) {
+    v.setFloat32(16 + n * 2 + i * 8, x, true);
+    v.setFloat32(16 + n * 2 + i * 8 + 4, y, true);
+  }
+  return [0x4036, 0x8000, data];
 }
 
 /** The little-endian bytes of 32-bit ARGB pixels (0xAARRGGBB): blue, green, red, alpha. */

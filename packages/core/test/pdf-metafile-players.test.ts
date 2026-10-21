@@ -95,6 +95,11 @@ function patBlt(x: number, y: number, w: number, h: number, rop: number): number
   return [76, ...record];
 }
 
+/** An EXTCREATEFONTINDIRECTW with the LogFont height and width. */
+function emfFont(height: number, width = 0): number[] {
+  return [82, 1, height, width, 0, 0, 400, ...new Array(75).fill(0)];
+}
+
 /** A version 2 PICT (big-endian) of `width` x `height` with the opcode bytes `body`. */
 function pict(width: number, height: number, body: number[]): Uint8Array {
   const head = [0, 0, 0, 0, 0, 0, height >> 8, height & 255, width >> 8, width & 255, 0x00, 0x11, 0x02, 0xff, 0x0c, 0x00, 0xff, 0xff, 0xff, 0xff, ...new Array(20).fill(0)];
@@ -265,6 +270,75 @@ describe("PICT player, version 1", () => {
 });
 
 describe("EMF records rewritten for emf-converter", () => {
+  it("keeps a device clip over the picture with mapped origins and scaled, reversed extents", async () => {
+    const canvas = await convertMetafile("emf", emf([
+      [17, 8],
+      [9, 200, -100],
+      [11, 100, 50],
+      [10, 10, 110],
+      [12, 5, -5],
+      [32, 2, 1, 2, 1], // window 400 x -200
+      [31, 2, 1, 2, 1], // viewport 200 x 100
+      [75, 48, 5, 32, 1, 1, 16, 0, 0, 100, 50, 0, 0, 100, 50], // RGN_COPY, one device rectangle
+      [39, 1, 0, 0x000000ff, 0],
+      [37, 1],
+      patBlt(20, 80, 80, -40, 0x00f00021),
+    ]), fonts, resources());
+    const ops = canvas!.ops.join("\n");
+    expect(ops).toContain("0 0 m 100 0 l 100 50 l 0 50 l h W n");
+    expect(ops).toContain("1 0 0 rg 10 10 m 50 10 l 50 30 l 10 30 l h f");
+    expect(canvas!.dropped).toBe(0);
+  });
+
+  it("keeps a device clip relative to nonzero bounds before any mapping record", async () => {
+    const bytes = emf([
+      [75, 48, 5, 32, 1, 1, 16, 10, 20, 109, 69, 10, 20, 109, 69],
+      [43, 20, 30, 60, 50],
+    ]);
+    const view = new DataView(bytes.buffer);
+    [10, 20, 109, 69].forEach((value, i) => view.setInt32(8 + i * 4, value, true));
+    expect(prepareEmf(bytes)).toBe(bytes);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    expect(canvas!.ops.join("\n")).toContain("0 0 m 99 0 l 99 49 l 0 49 l h W n");
+    expect(canvas!.ops.join("\n")).toContain("10 10 m 50 10 l 50 30 l 10 30 l h f");
+  });
+
+  it("uses the default viewport extent when only a window extent is supplied", async () => {
+    const canvas = await convertMetafile("emf", emf([
+      [17, 8],
+      [9, 1, -1],
+      [10, 14, -20],
+      emfFont(-12),
+      [39, 2, 0, 0x000000ff, 0],
+      [37, 2],
+      patBlt(24, -30, 40, -20, 0x00f00021),
+    ]), fonts, resources());
+    expect(canvas!.ops.join("\n")).toContain("1 0 0 rg 10 10 m 50 10 l 50 30 l 10 30 l h f");
+    expect(canvas!.dropped).toBe(0);
+  });
+
+  it("leaves the extents to the converter in MM_TEXT, where GDI ignores them", async () => {
+    // A window extent of the bounds' size and no SETMAPMODE (GovDocs 002513's cover).
+    const canvas = await convertMetafile("emf", emf([
+      [9, 99, 49],
+      [39, 2, 0, 0x000000ff, 0],
+      [37, 2],
+      patBlt(10, 10, 40, 20, 0x00f00021),
+    ]), fonts, resources());
+    expect(canvas!.ops.join("\n")).toContain("1 0 0 rg 10 10 m 50 10 l 50 30 l 10 30 l h f");
+  });
+
+  it("records the full bounds above the converter's raster canvas cap", async () => {
+    const bytes = emf([[9, 12000, 9000], [11, 12000, 9000], patBlt(11000, 8000, 500, 500, 0x00f00021)]);
+    const view = new DataView(bytes.buffer);
+    view.setInt32(16, 12000, true);
+    view.setInt32(20, 9000, true);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    expect([canvas!.width, canvas!.height]).toEqual([12000, 9000]);
+    expect(canvas!.ops.join("\n")).toContain("11000 8000 m 11500 8000 l 11500 8500 l 11000 8500 l h f");
+    expect(canvas!.dropped).toBe(0);
+  });
+
   it("fills a blit with no bitmap (PatBlt) with the brush", async () => {
     const canvas = await convertMetafile(
       "emf",
@@ -302,8 +376,47 @@ describe("EMF records rewritten for emf-converter", () => {
     expect(strokes[0]).toContain("1 0 0 RG 4 w");
   });
 
+  it("scales a logical font's height to pixels", async () => {
+    const bytes = emf([
+      [17, 8], // SETMAPMODE: MM_ANISOTROPIC
+      [9, 200, 100], // SETWINDOWEXTEX: two units a pixel
+      [11, 100, 50], // SETVIEWPORTEXTEX
+      emfFont(-20),
+      [37, 1], // SELECTOBJECT
+      [84, 0, 0, 99, 49, 1, 0x3f800000, 0x3f800000, 20, 40, 1, 76, 0, 0, 0, 0, 0, 0, 65], // EXTTEXTOUTW: "A"
+    ]);
+    const prepared = prepareEmf(bytes);
+    const fontOffset = 88 + 12 + 16 + 16 + 16; // includes the explicit default viewport extent
+    const view = new DataView(prepared.buffer, prepared.byteOffset, prepared.byteLength);
+    expect(view.getInt32(fontOffset + 12, true)).toBe(-10);
+    expect(view.getInt32(fontOffset + 16, true)).toBe(0);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    const sizes = [...canvas!.ops.join("\n").matchAll(/\/\S+ ([\d.]+) Tf/g)].map((match) => Number(match[1]));
+    expect(sizes).toHaveLength(1);
+    expect(sizes[0]).toBeCloseTo(10);
+  });
+
+  it("scales each font with the x and y extents where it is made", () => {
+    const bytes = emf([
+      [9, 400, 200],
+      [11, 100, 100],
+      emfFont(20, 8), // height 10, width 2
+      [32, 2, 1, 4, 1], // SCALEWINDOWEXTEX
+      emfFont(-40, 16), // height -5, width 2
+      [31, -2, 1, -4, 1], // SCALEVIEWPORTEXTEX: reversed axes
+      emfFont(-40, 16), // height -20, width 4; height keeps its sign
+    ]);
+    const prepared = prepareEmf(bytes);
+    const view = new DataView(prepared.buffer, prepared.byteOffset, prepared.byteLength);
+    const dimensions: number[][] = [];
+    for (let at = 0; at + 8 <= prepared.length; at += view.getUint32(at + 4, true)) {
+      if (view.getUint32(at, true) === 82) dimensions.push([view.getInt32(at + 12, true), view.getInt32(at + 16, true)]);
+    }
+    expect(dimensions).toEqual([[10, 2], [-5, 2], [-20, 4]]);
+  });
+
   it("leaves an EMF with EMF+ records as it is", () => {
-    const plus = emf([[70, 16, 0x2b464d45, 0x4001, 12], patBlt(0, 0, 10, 10, 0x00f00021)]);
+    const plus = emf([[70, 16, 0x2b464d45, 0x4001, 12], [9, 200, 100], [11, 100, 50], emfFont(-20, 8), patBlt(0, 0, 10, 10, 0x00f00021)]);
     expect(prepareEmf(plus)).toBe(plus);
   });
 });

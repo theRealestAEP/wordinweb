@@ -82,12 +82,9 @@ describe("an EMF+ image in the PDF render", () => {
     });
   }
 
-  it("keeps an EMF+ Dual picture whose EMF+ image does not draw: its EMF records draw it", async () => {
+  it("gives no picture for an EMF+ Dual EMF whose EMF+ image does not draw: its EMF records are not played", async () => {
     const plus = emfPlus([emfPlusCompressedImage(0, 2, 2, tinyGif()), emfPlusDrawImage(0, 2, 2, [10, 10, 40, 20])], true);
     // The EMF records' version of the picture: an EMR_RECTANGLE over the image's rectangle.
-    const canvas = await convert(emf([plus, [43, 10, 10, 50, 30]]));
-    expect(canvas).not.toBeNull();
-    expect(canvas!.images).toHaveLength(0);
-    expect(canvas!.ops.join("\n")).toMatch(/ f Q/);
+    expect(await convert(emf([plus, [43, 10, 10, 50, 30]]))).toBeNull();
   });
 });

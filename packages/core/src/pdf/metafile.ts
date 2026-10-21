@@ -10,10 +10,13 @@ import { convertWmf } from "./wmf.js";
  * An EMF, WMF or PICT picture as recorded operators: emf-converter (as the
  * browser renderer uses it) or the players in wmf.ts and pict.ts replayed onto a
  * RecordingCanvas. Null when the converter rejects the bytes, when the
- * picture is cut short or malformed, when its bitmaps are over one
+ * picture is cut short or malformed, when it holds an EMF+ drawing record
+ * the converter skips, when its bitmaps are over one
  * picture's BitmapBudget, or when an EMF+ image it draws does not reach
  * the canvas: the page draws an empty frame, and the picture is listed as
- * unsupported, rather than drawn in part.
+ * unsupported, rather than drawn in part. A canvas that left out a paint,
+ * text or image for a point out of reach (RecordingCanvas.dropped) is
+ * drawn without it, and listed as unsupported.
  */
 export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: FontSet, resources: Resources, frame?: { width: number; height: number }): Promise<RecordingCanvas | null> {
   const budget = new BitmapBudget();
@@ -40,7 +43,9 @@ async function convertEmf(bytes: Uint8Array, fonts: FontSet, resources: Resource
     fonts,
     resources,
     (blob) => emfPlusBitmap(blob, budget),
-    () => convertEmfToDataUrl(buffer, undefined, undefined, { dpiScale: 1 }).catch(() => null),
+    // RecordingCanvas stores operators, so its dimensions allocate no pixels.
+    // Keep device coordinates at 1:1 even above the converter's raster cap.
+    () => convertEmfToDataUrl(buffer, undefined, undefined, { dpiScale: 1, maxCanvasDimension: Number.MAX_SAFE_INTEGER }).catch(() => null),
   );
   // The converter skips, with only a console warning, each EMF+ image it
   // cannot draw: one emfPlusBitmap does not read, a pixel format its
@@ -96,23 +101,29 @@ const EMR_COMMENT = 70;
 const EMR_BITBLT = 76;
 const EMR_STRETCHDIBITS = 81;
 const EMFPLUS = 0x2b464d45;
-const EMFPLUS_HEADER = 0x4001;
 const EMFPLUS_OBJECT = 0x4008;
 const EMFPLUS_DRAWIMAGE = 0x401a;
 const EMFPLUS_DRAWIMAGEPOINTS = 0x401b;
+const EMFPLUS_DRAWDRIVERSTRING = 0x4036;
 const EMFPLUS_IMAGE = 5;
+/** EMF+ records that draw and that emf-converter skips ([MS-EMFPLUS] 2.3.4): Clear, FillRegion,
+ * FillClosedCurve, DrawClosedCurve, DrawCurve, DrawBeziers, StrokeFillPath. */
+const EMFPLUS_UNPLAYED = new Set([0x4009, 0x4013, 0x4016, 0x4017, 0x4018, 0x4019, 0x4037]);
 
 /**
  * Throw for an EMF cut short (a record that runs past the end, or records
- * that stop before EMR_EOF), and take from `budget` each bitmap
+ * that stop before EMR_EOF) or with an EMF+ drawing record emf-converter
+ * skips, including a DrawDriverString with fewer than GlyphCount positions
+ * (an EMF+ Dual file's EMF records are not played either), and take from `budget` each bitmap
  * emf-converter decodes whole, before it runs: the DIB of a BITBLT or a
  * STRETCHDIBITS ([MS-EMF] 2.3.1), and an EMF+ bitmap image object
  * ([MS-EMFPLUS] 2.2.2.2). The converter allocates their pixels from the
  * sizes they give, up to 8192 x 8192.
  *
  * Gives back how many EMF+ images the EMF draws (its DrawImage and
- * DrawImagePoints records), each of which must reach the canvas; none for
- * an EMF+ Dual file, whose EMF records draw the picture again on their own.
+ * DrawImagePoints records), each of which must reach the canvas. An EMF+
+ * Dual file's EMF records draw the picture again, but prepareEmf leaves
+ * them out (render/emf.ts): its EMF+ images are the only ones drawn.
  */
 function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -120,13 +131,12 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
   /** Bytes of an EMF+ object continued over several records, still to come. */
   let continued = 0;
   let images = 0;
-  let dual = false;
   for (let offset = 0; ; ) {
     if (offset + 8 > bytes.length) throw new Error("EMF ends before EMR_EOF");
     const type = view.getUint32(offset, true);
     const size = view.getUint32(offset + 4, true);
     if (size < 8 || offset + size > bytes.length) throw new Error("EMF record runs past the end");
-    if (type === EMR_EOF) return dual ? 0 : images;
+    if (type === EMR_EOF) return images;
     // The record's BITMAPINFOHEADER: its width and height.
     const dib = (field: number): void => {
       const at = field + 8 <= size ? view.getUint32(offset + field, true) : 0;
@@ -142,8 +152,12 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
         const plusSize = view.getUint32(at + 4, true);
         const dataSize = view.getUint32(at + 8, true);
         if (plusSize < 12) break;
-        if (plusType === EMFPLUS_HEADER) dual = (flags & 1) !== 0;
-        else if (plusType === EMFPLUS_DRAWIMAGE || plusType === EMFPLUS_DRAWIMAGEPOINTS) images++;
+        if (EMFPLUS_UNPLAYED.has(plusType)) throw new Error("an EMF+ drawing record emf-converter skips");
+        if (plusType === EMFPLUS_DRAWDRIVERSTRING) {
+          const count = dataSize >= 16 ? view.getUint32(at + 24, true) : 0;
+          if (dataSize < 16 + 2 * count + 8 * count) throw new Error("an EMF+ DrawDriverString with fewer than GlyphCount positions");
+        }
+        if (plusType === EMFPLUS_DRAWIMAGE || plusType === EMFPLUS_DRAWIMAGEPOINTS) images++;
         else if (plusType === EMFPLUS_OBJECT) {
           let data = at + 12;
           if (flags & 0x8000) {
@@ -156,8 +170,8 @@ function checkEmf(bytes: Uint8Array, budget: BitmapBudget): number {
             continued = view.getUint32(data, true) - (dataSize - 4);
             data += 4;
           }
-          // An image object: version, type 1 (bitmap), width, height, stride, format, type 1 (pixels).
-          if (((flags >> 8) & 0x7f) === EMFPLUS_IMAGE && data + 28 <= offset + size && view.getUint32(data + 4, true) === 1 && view.getUint32(data + 24, true) === 1) {
+          // An image object: version, type 1 (bitmap), width, height, stride, format, type 0 (pixels; 1 is compressed).
+          if (((flags >> 8) & 0x7f) === EMFPLUS_IMAGE && data + 28 <= offset + size && view.getUint32(data + 4, true) === 1 && view.getUint32(data + 24, true) === 0) {
             budget.take(view.getInt32(data + 8, true), view.getInt32(data + 12, true));
           }
         }
