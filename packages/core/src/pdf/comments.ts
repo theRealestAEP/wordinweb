@@ -63,6 +63,8 @@ const GAP = 12;
 const TEXT_SIZE = 11;
 const LINE_HEIGHT = 13;
 const UI_FONT = "Arial";
+/** Letters of a right-to-left script: Hebrew, Arabic, Syriac, Thaana, NKo and their presentation forms. */
+const RTL_SCRIPT = /[֐-ࣿיִ-﷿ﹰ-﻿]/;
 
 /** One line of a balloon: its height and how to paint it at (x, y), x the page's right edge. */
 interface Line {
@@ -84,6 +86,8 @@ interface Balloon {
 interface Piece {
   text: string;
   font: FontSpec;
+  /** Right-to-left text (a deleted run's w:rtl), shaped and ordered as such. */
+  rtl?: boolean;
 }
 
 /** The line a card goes beside: its page, and where its leader starts. */
@@ -397,7 +401,10 @@ export class CommentColumn {
     if (change.deleted) {
       pieces.push({ text: `${change.label}: `, font: bold });
       for (const piece of change.deleted) {
-        pieces.push({ text: piece.text, font: { family: piece.props.font ?? UI_FONT, size: TEXT_SIZE, bold: !!piece.props.bold, italic: !!piece.props.italic } });
+        // Hebrew or Arabic text reads right to left, in the run's complex-script face.
+        const rtl = !!piece.props.rtl || RTL_SCRIPT.test(piece.text);
+        const family = (rtl && piece.props.fontComplex) || piece.props.font || UI_FONT;
+        pieces.push({ text: piece.text, font: { family, size: TEXT_SIZE, bold: !!piece.props.bold, italic: !!piece.props.italic }, rtl });
       }
     } else {
       const colon = change.label.indexOf(": ");
@@ -457,14 +464,14 @@ export class CommentColumn {
       paint: (drawer, x, y) => {
         let at = x + left;
         for (const piece of line) {
-          this.text(drawer, piece.text, piece.font, color, at, y + LINE_HEIGHT - 3);
+          this.text(drawer, piece.text, piece.font, color, at, y + LINE_HEIGHT - 3, piece.rtl);
           at += this.measurer.width(piece.text, piece.font);
         }
       },
     }));
   }
 
-  private text(drawer: PageDrawer, text: string, font: FontSpec, color: string, x: number, baseline: number): void {
+  private text(drawer: PageDrawer, text: string, font: FontSpec, color: string, x: number, baseline: number, rtl = false): void {
     if (!text) return;
     const item: TextItem = {
       kind: "text",
@@ -476,6 +483,7 @@ export class CommentColumn {
       font,
       lineTop: baseline - font.size,
       lineHeight: font.size * 1.25,
+      ...(rtl ? { rtl: true } : {}),
     };
     drawer.drawItem(item, () => null);
   }
@@ -487,10 +495,10 @@ export class CommentColumn {
     const out: Piece[][] = [];
     let line: Piece[] = [];
     let used = 0;
-    const add = (text: string, font: FontSpec): void => {
+    const add = (text: string, font: FontSpec, rtl?: boolean): void => {
       const last = line.at(-1);
       if (last && last.font === font) last.text += text;
-      else line.push({ text, font });
+      else line.push({ text, font, rtl });
       used += this.measurer.width(text, font);
     };
     const newLine = (): void => {
@@ -500,7 +508,7 @@ export class CommentColumn {
       line = [];
       used = 0;
     };
-    for (const { text, font } of pieces) {
+    for (const { text, font, rtl } of pieces) {
       for (const word of text.replace(/\t/g, " ").split(/(\n|[^\S\n]+)/)) {
         if (!word) continue;
         if (word === "\n") {
@@ -509,7 +517,7 @@ export class CommentColumn {
         }
         const w = this.measurer.width(word, font);
         if (used + w <= width || (used === 0 && !/\S/.test(word))) {
-          add(word, font);
+          add(word, font, rtl);
           continue;
         }
         if (!/\S/.test(word)) {
@@ -519,7 +527,7 @@ export class CommentColumn {
         if (used > 0) newLine();
         for (const ch of word) {
           if (used > 0 && used + this.measurer.width(ch, font) > width) newLine();
-          add(ch, font);
+          add(ch, font, rtl);
         }
       }
     }
