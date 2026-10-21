@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 import { strFromU8, unzipSync, zipSync } from "fflate";
 import { describe, expect, it } from "vitest";
 import { docToDocxFiles, openDoc } from "../src/doc/convert.js";
-import { drawingHooks } from "../src/doc/drawing-hooks.js";
-import { REC, readProps, propFlag, propNumber } from "../src/doc/officeart.js";
+import { documentArt, drawingHooks } from "../src/doc/drawing-hooks.js";
+import { REC, childRecords, readProps, propFlag, propNumber } from "../src/doc/officeart.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { prepareWmf } from "../src/render/wmf.js";
 import { bytesSource } from "../src/stream/source.js";
@@ -129,6 +129,31 @@ describe("doc drawings: floating shapes", () => {
     expect(first![2].replace(/<[^>]+>/g, "")).toMatch(/^Box 1 \(start of story\): Lorem ipsum/);
     expect(xml).toContain(`<wps:linkedTxbx id="${first![1]}" seq="1"/>`);
     expect(xml.match(/<w:txbxContent>/g)).toHaveLength(1);
+  });
+
+  it.each([true, false])("writes a plain text box when its story has no continuation (self next: %s)", (selfNext) => {
+    // Word prints these as ordinary boxes (GovDocs 092639, 042652).
+    // Give the linked fixture two separate stories and optionally a self link.
+    const doc = bytes("probe3-linked-textboxes--v06.doc");
+    const reader = openDoc(doc);
+    const art = documentArt(reader);
+    const view = new DataView(art.bytes.buffer, art.bytes.byteOffset, art.bytes.byteLength);
+    let story = 1;
+    for (const [spid, { record }] of art.drawings[0].bySpid) {
+      for (const rec of childRecords(art.bytes, record.start, record.start + record.length)) {
+        if (rec.type !== REC.FOPT) continue;
+        for (let i = 0; i < rec.instance; i++) {
+          const at = rec.start + i * 6;
+          const id = view.getUint16(at, true) & 0x3fff;
+          if (id === 128) view.setInt32(at + 2, story++ << 16, true); // lTxid
+          if (id === 138 && selfNext) view.setInt32(at + 2, spid, true); // hspNext
+        }
+      }
+    }
+    const xml = text(docToDocxFiles(doc, drawingHooks(reader)));
+    expect(xml.match(/<wps:txbx>/g)).toHaveLength(2);
+    expect(xml).not.toContain("<wps:txbx id=");
+    expect(xml).not.toContain("<wps:linkedTxbx");
   });
 
   it("renders the converted drawings without error", async () => {

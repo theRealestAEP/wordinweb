@@ -72,7 +72,8 @@ export function drawingHooks(reader: DocReader): ConvertHooks {
         const range = shape.text && textBoxRange(reader, shape.text, anchor.header);
         return range && range.end > range.start ? paragraphs(range.start, range.end) : undefined;
       };
-      return `<w:r>${rPrXml}${anchoredShapeXml(floating, { addMedia, nextId, textBoxContent, textBoxIdBase: anchor.header ? 0x10000 : 0 })}</w:r>`;
+      const continuedTextBoxStories = art.drawings.find((d) => d.dgglbl === (anchor.header ? 1 : 0))?.continuedTextBoxStories;
+      return `<w:r>${rPrXml}${anchoredShapeXml(floating, { addMedia, nextId, textBoxContent, textBoxIdBase: anchor.header ? 0x10000 : 0, continuedTextBoxStories })}</w:r>`;
     }
     return undefined;
   };
