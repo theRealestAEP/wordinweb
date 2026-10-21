@@ -64,7 +64,10 @@ describe.skipIf(!hasPoppler)("Strict PDF rendering", () => {
     const docx = makeDocxWithMedia({
       "word/document.xml": document,
       "word/_rels/document.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPicture" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>',
-    }, { "word/media/picture.png": Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgQIAffwlNAAAAABJRU5ErkJggg==", "base64") });
+    }, {
+      // 1x1 RGB PNG with valid checksums and scanline length.
+      "word/media/picture.png": Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC", "base64"),
+    });
     const transitional = await render(docx);
     expect(words.split(" ")).toHaveLength(21);
     expect(transitional.text.trim().split(/\s+/)).toEqual(words.split(" "));
