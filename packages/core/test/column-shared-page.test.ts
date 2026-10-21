@@ -39,4 +39,40 @@ describe("a 2-column section after a continuous break", () => {
     expect(firstPage).toContain("Intro");
     expect(firstPage).not.toMatch(/C\s+o\s+l/);
   });
+
+  it("takes the anchors to the next page when neither shared column holds their paragraph", () => {
+    const body = [
+      p("Intro", `<w:pPr><w:spacing w:line="10500" w:lineRule="exact"/></w:pPr>`),
+      `<w:p><w:pPr><w:sectPr>${PAGE}</w:sectPr></w:pPr></w:p>`,
+      `<w:p><w:pPr><w:sectPr><w:type w:val="continuous"/>${PAGE}<w:cols w:num="2" w:space="720"/></w:sectPr></w:pPr></w:p>`,
+      p("Closing"),
+      `<w:sectPr><w:type w:val="continuous"/>${PAGE}</w:sectPr>`,
+    ];
+    const doc = DocxDocument.load(makeDocx({ "word/document.xml": wrapDocument(body.join("")) }));
+    // A wrapping box covers the column and leaves the anchor line below it.
+    // Its 187px height exceeds the 164px left in each shared column.
+    doc.sections[1].blocks.unshift({
+      type: "paragraph", props: {}, children: [{
+        type: "run", props: {}, content: [
+          { kind: "anchor", shape: {
+            type: "textbox", x: 0, y: 0, width: 624, height: 187,
+            hRel: "column", vRel: "text", wrap: "square",
+            blocks: [{ type: "paragraph", props: {}, children: [{
+              type: "run", props: {}, content: [{ kind: "text", text: "Survey box" }],
+            }] }],
+          } },
+          { kind: "text", text: "Anchor line" },
+        ],
+      }],
+    });
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+    const texts = result.pages.map((page) => page.items
+      .map((item) => item.kind === "text" ? item.text : "").join(" ").replace(/\s+/g, " "));
+    expect(result.totalPages).toBe(2);
+    expect(texts[0]).toContain("Intro");
+    expect(texts[0]).not.toContain("Survey box");
+    expect(texts[1]).toContain("Survey box");
+    expect(texts[1]).toContain("Anchor line");
+    expect(texts[1]).toContain("Closing");
+  });
 });

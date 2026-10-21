@@ -5171,7 +5171,9 @@ class Engine {
     let breaks = planBreaks();
     // A paragraph pushed entirely to the next column/page takes its floats
     // along: retract, move, re-emit, and re-plan against the new geometry.
-    if (anchors.length > 0 && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
+    // A shared band's next column can also be too short (govdocs 000131's
+    // survey boxes); keep moving the anchors with their paragraph.
+    while (anchors.length > 0 && breaks.has(0) && !this.pageIsEmptyAtCursor()) {
       restartOnNextColumn(0);
       breaks = planBreaks();
     }
