@@ -348,7 +348,9 @@ A printed PDF names the authors of its comments and tracked changes by default. 
 | `docx-pdf` CLI | `--hide-authors` |
 | `docx-compare` CLI | `--hide-authors` (with `--pdf FILE`) |
 
-With authors hidden, each comment's and change's balloon keeps its date, what changed and the comment text, and has no name line and no initials. Every author's tracked changes are red (moves stay green), and the margin change bars stay black.
+With authors hidden, each comment's and change's balloon keeps what changed and the comment text, and has no name line. Every author's tracked changes are red (moves stay green), and the margin change bars stay black.
+
+`markup: true` (`docx-pdf --markup`) prints the tracked changes as Word's "All Markup" with "Show Revisions in Balloons": insertions stay on the line, underlined in the author's color; deleted text leaves the line and prints in a balloon beside the page ("Deleted: ..."); format changes, moves, deleted paragraph marks and deleted table rows get balloons too. Each balloon names its author, in bold, with no date. The `docx-compare` PDF is a blackline instead: inserted text blue and double underlined, deleted text red and struck through, a change bar beside each changed paragraph, and the comments in balloons with `--pdf-comments`.
 
 ## Collaboration
 
