@@ -330,6 +330,9 @@ interface NotePart {
   cuts: number[];
   /** The part continues a note that began in an earlier column or page. */
   continued?: boolean;
+  /** The note's id, and the column width it was laid out at. */
+  id: number;
+  width: number;
 }
 
 /** A note part placed in one column's note area. `continued` marks the part
@@ -2905,7 +2908,10 @@ class Engine {
         this.cur.bannerTop !== undefined ? (this.cur.openingColumnReserve ?? 0) : 0;
       this.lastParaSpacingAfter = 0;
       this.lastParaAfterPad = 0;
-      this.placeNoteCarry();
+      // A page whose columns changed mid-page may hold notes laid at another
+      // width across this column's foot: a continued note waits for the
+      // next page there.
+      if (this.cur.bands.length === 1) this.placeNoteCarry();
     } else {
       this.newPage(false);
     }
@@ -3306,7 +3312,7 @@ class Engine {
       this.counters = snapshot;
       this.seenNumIds = seenSnapshot;
       this.selfNoteMark = prevSelf;
-      laid = { items: frame.items, height: frame.height, cuts: noteCuts(frame.items, frame.height) };
+      laid = { items: frame.items, height: frame.height, cuts: noteCuts(frame.items, frame.height), id, width };
       this.noteCache.set(key, laid);
     }
     return laid;
@@ -3397,7 +3403,11 @@ class Engine {
     } else {
       const split = splitNote(part, room - used, force);
       keep = split?.keep;
-      rest = split ? split.rest : part;
+      rest = split?.rest;
+      // A forced part with no line to split at stays whole: it is taller
+      // than any page can hold, and moving it on would add pages forever.
+      if (!split && force) keep = part;
+      else if (!split) rest = part;
     }
     if (keep) {
       page.footnotes.push({ items: keep.items, height: keep.height, column, continued: keep.continued });
@@ -3413,15 +3423,50 @@ class Engine {
     const page = this.cur;
     const parts = this.noteCarry;
     this.noteCarry = [];
-    const room = this.noteAreaCap(page) - this.noteSeparatorReserve(page);
+    // The column starts at this.y: below a banner or an earlier band.
+    const room = Math.min(this.noteAreaCap(page), page.bodyBottom - this.y) - this.noteSeparatorReserve(page);
     for (const part of parts) {
-      this.addNotePart(page, this.col, part, room, (page.footnoteH[this.col] ?? 0) === 0);
+      const fitted = Math.abs(part.width - this.colWidth) > 1 ? this.relayNotePart(part) : part;
+      this.addNotePart(page, this.col, fitted, room, (page.footnoteH[this.col] ?? 0) === 0);
     }
   }
 
-  /** Add pages until every continued note is placed (the body has ended). */
+  /** A continued note part laid out again at the current column's width: the
+   * whole note at this width, from the first line that holds text the part
+   * still has to show. Text that an earlier column showed is left out. */
+  private relayNotePart(part: NotePart): NotePart {
+    const left = new Map<XmlElement, [number, number][]>();
+    for (const it of part.items) {
+      if (it.kind !== "text" || !it.src?.t) continue;
+      const ranges = left.get(it.src.t) ?? [];
+      ranges.push([it.src.offset, it.src.offset + it.text.length]);
+      left.set(it.src.t, ranges);
+    }
+    const stillToShow = (it: PageItem): boolean => {
+      if (it.kind !== "text" || !it.src?.t) return false;
+      const from = it.src.offset;
+      const to = from + it.text.length;
+      return (left.get(it.src.t) ?? []).some(([a, b]) => from < b && to > a);
+    };
+    const full = this.measureFootnote(part.id);
+    let top = Number.POSITIVE_INFINITY;
+    for (const it of full.items) if (stillToShow(it)) top = Math.min(top, itemTop(it));
+    if (top === Number.POSITIVE_INFINITY) return part;
+    const items = full.items
+      .filter((it) => itemTop(it) >= top - 0.5 && (it.kind !== "text" || !it.src?.t || stillToShow(it)))
+      .map((it) => {
+        const copy = { ...it };
+        offsetItem(copy, 0, -top);
+        return copy;
+      });
+    const height = full.height - top;
+    return { items, height, cuts: noteCuts(items, height), continued: true, id: part.id, width: full.width };
+  }
+
+  /** Fill further columns and pages until every continued note is placed
+   * (the body has ended). */
   private flushNoteCarry(): void {
-    while (this.noteCarry.length > 0) this.newPage(false);
+    while (this.noteCarry.length > 0) this.nextColumn();
   }
 
   /** The post-passes that complete a page once no later block can touch it:
@@ -9684,8 +9729,9 @@ class Engine {
         if (clip && it.kind === "text" && it.lineTop >= rowBottom - 0.01) continue;
         if (clip && it.kind === "text" && it.lineTop + it.lineHeight > rowBottom + 0.01) it.clip = { top: y, bottom: rowBottom };
         // Cell footnotes bind to the page painting this partition (split
-        // rows carry their references to the continuation page).
-        if (it.kind === "text" && it.noteId !== undefined) this.registerFootnote(it.noteId, page, it.lineTop + it.lineHeight);
+        // rows carry their references to the continuation page). The note
+        // area starts below the whole row, as the row-fit test assumes.
+        if (it.kind === "text" && it.noteId !== undefined) this.registerFootnote(it.noteId, page, y + rowHeight);
         page.items.push(it);
       }
 
@@ -10418,8 +10464,9 @@ function splitNote(part: NotePart, room: number, force: boolean): { keep: NotePa
     return copy;
   });
   return {
-    keep: { items: keepItems, height: cut, cuts: part.cuts.filter((c) => c <= cut + 0.01), continued: part.continued },
+    keep: { ...part, items: keepItems, height: cut, cuts: part.cuts.filter((c) => c <= cut + 0.01) },
     rest: {
+      ...part,
       items: moved,
       height: part.height - shift,
       cuts: part.cuts.filter((c) => c > shift + 0.01).map((c) => c - shift),

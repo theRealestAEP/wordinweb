@@ -70,32 +70,50 @@ function lay(body: string, notes: Record<number, string>): LayoutResult {
   return layoutDocument(load(body, notes), { measurer: new ApproxMeasurer() });
 }
 
-const isNoteText = (text: string) => /^(Authority|Alpha|Beta|Short) \d{3}/.test(text);
+const isNoteText = (text: string) => /^(Authority|Alpha|Beta|Short|Tall) \d{3}/.test(text);
+const isBodyText = (text: string) =>
+  /^(Body paragraph|Opening|Reference|First reference|Second reference|A later|A legal|The source|This body|Row line)/.test(text);
 
-/** A painted line: the text items that share a line top, joined. */
+/** A painted line: the text items that share a line top in one column,
+ * joined. `column` is 0 left of the page's middle, 1 right of it. */
 interface Line {
   text: string;
   top: number;
   bottom: number;
+  column: number;
 }
 
 function lines(result: LayoutResult, page: number): Line[] {
+  const middle = result.pages[page].width / 2;
   const byTop = new Map<number, TextItem[]>();
   for (const it of result.pages[page].items) {
     if (it.kind !== "text") continue;
     const key = Math.round(it.lineTop * 100) / 100;
     byTop.set(key, [...(byTop.get(key) ?? []), it]);
   }
-  return [...byTop.values()]
-    .map((items) => {
-      items.sort((a, b) => a.x - b.x);
-      return {
-        text: items.map((it) => it.text).join("").trim(),
-        top: items[0].lineTop,
-        bottom: Math.max(...items.map((it) => it.lineTop + it.lineHeight)),
-      };
-    })
-    .sort((a, b) => a.top - b.top);
+  // Items on one line top split into one line per column at a wide gap.
+  const runs: TextItem[][] = [];
+  for (const items of byTop.values()) {
+    items.sort((a, b) => a.x - b.x);
+    let run: TextItem[] = [];
+    for (const it of items) {
+      const last = run[run.length - 1];
+      if (last && it.x - (last.x + last.width) > 20) {
+        runs.push(run);
+        run = [];
+      }
+      run.push(it);
+    }
+    runs.push(run);
+  }
+  return runs
+    .map((items) => ({
+      text: items.map((it) => it.text).join("").trim(),
+      top: items[0].lineTop,
+      bottom: Math.max(...items.map((it) => it.lineTop + it.lineHeight)),
+      column: items[0].x < middle ? 0 : 1,
+    }))
+    .sort((a, b) => a.column - b.column || a.top - b.top);
 }
 
 /** The note lines on each page, in paint order, as "Alpha 001" labels. */
@@ -111,20 +129,22 @@ function pageOf(result: LayoutResult, needle: string): number {
   return result.pages.findIndex((_, page) => lines(result, page).some((line) => line.text.includes(needle)));
 }
 
-/** Every note line sits inside the page's body box, below every body line,
- * and the note lines of a page do not overlap one another. */
+/** Every note line sits inside the page's body box, below every body line
+ * of its column, and the note lines of a column do not overlap one another. */
 function expectNotesClearOfBody(result: LayoutResult): void {
   result.pages.forEach((page, index) => {
-    const all = lines(result, index);
-    const notes = all.filter((line) => isNoteText(line.text));
-    const body = all.filter((line) => !isNoteText(line.text));
-    const bodyBottom = Math.max(page.bodyTop, ...body.map((line) => line.bottom));
-    for (const note of notes) {
-      expect(note.top).toBeGreaterThanOrEqual(bodyBottom - 0.5);
-      expect(note.bottom).toBeLessThanOrEqual(page.bodyBottom + 0.5);
-    }
-    for (let i = 1; i < notes.length; i++) {
-      expect(notes[i].top).toBeGreaterThanOrEqual(notes[i - 1].bottom - 0.5);
+    for (const column of [0, 1]) {
+      const all = lines(result, index).filter((line) => line.column === column);
+      const body = all.filter((line) => isBodyText(line.text));
+      const notes = all.filter((line) => !body.includes(line));
+      const bodyBottom = Math.max(page.bodyTop, ...body.map((line) => line.bottom));
+      for (const note of notes) {
+        expect(note.top).toBeGreaterThanOrEqual(bodyBottom - 0.5);
+        expect(note.bottom).toBeLessThanOrEqual(page.bodyBottom + 0.5);
+      }
+      for (let i = 1; i < notes.length; i++) {
+        expect(notes[i].top).toBeGreaterThanOrEqual(notes[i - 1].bottom - 0.5);
+      }
     }
   });
 }
@@ -235,6 +255,69 @@ describe("long footnotes", () => {
     expect(shortPage).toBeGreaterThan(0);
     // The short note shares its page with the end of the continued note and follows it.
     expect(notes[shortPage].slice(-3)).toEqual(["Alpha 060", "Short 001", "Short 002"]);
+    expectNotesClearOfBody(result);
+  });
+
+  it("keeps a note with no line to split at whole instead of adding pages forever", () => {
+    // One exact-spaced line taller than the page: nothing to split at.
+    const tall = `<w:p><w:pPr><w:spacing w:line="20000" w:lineRule="exact"/></w:pPr><w:r><w:t>Tall 001: one line</w:t></w:r></w:p>`;
+    const result = lay(bodyPara("Reference.", [1]) + filler(1, 5), { 1: tall });
+    expect(result.totalPages).toBeLessThanOrEqual(3);
+  });
+
+  it("starts the note area of a table row's reference below the whole row", () => {
+    const cell = bodyPara("Row line 01 with a note.", [1]) + Array.from({ length: 9 }, (_, i) => bodyPara(`Row line ${String(i + 2).padStart(2, "0")}`)).join("");
+    const table =
+      `<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:cantSplit/></w:trPr><w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${cell}</w:tc></w:tr></w:tbl>`;
+    const result = lay(filler(1, 11) + table + filler(11, 15), { 1: noteParas("Alpha", 35) });
+    expect(noteLines(result).flat()).toEqual(labels("Alpha", 35));
+    result.pages.forEach((_, index) => {
+      const all = lines(result, index);
+      const rowBottom = Math.max(0, ...all.filter((line) => line.text.startsWith("Row line")).map((line) => line.bottom));
+      for (const note of all.filter((line) => isNoteText(line.text))) expect(note.top).toBeGreaterThanOrEqual(rowBottom - 0.5);
+    });
+  });
+
+  const TWO_COLUMNS = `<w:sectPr><w:type w:val="continuous"/><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/><w:cols w:num="2" w:space="720"/></w:sectPr>`;
+
+  function layRaw(body: string, notes: Record<number, string>): LayoutResult {
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(body),
+        "word/_rels/document.xml.rels": RELS,
+        "word/footnotes.xml": footnotes(notes),
+      }),
+    );
+    return layoutDocument(doc, { measurer: new ApproxMeasurer() });
+  }
+
+  it("fills the next columns with a note that continues past the end of the body", () => {
+    const result = layRaw(bodyPara("Reference in two columns.", [1]) + TWO_COLUMNS.replace("<w:type w:val=\"continuous\"/>", ""), {
+      1: noteParas("Alpha", 100),
+    });
+    expect(noteLines(result).flat()).toEqual(labels("Alpha", 100));
+    // The note continues in the second column, not only on later pages.
+    const secondColumn = lines(result, 0).filter((line) => line.column === 1 && isNoteText(line.text));
+    expect(secondColumn.length).toBeGreaterThan(0);
+    expectNotesClearOfBody(result);
+  });
+
+  it("continues a note at the new width below a two-column band", () => {
+    // A one-column section whose note continues into a continuous two-column section.
+    const body =
+      bodyPara("Opening paragraph with the long note.", [1]) +
+      `<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:bottom="1440" w:left="1440" w:right="1440"/></w:sectPr></w:pPr></w:p>` +
+      filler(1, 120) +
+      TWO_COLUMNS;
+    const result = layRaw(body, { 1: noteParas("Alpha", 100) });
+    const notes = noteLines(result).flat();
+    // Lines re-laid at the narrower width wrap differently, so labels may repeat
+    // a line's start; none is lost and the order holds.
+    expect([...new Set(notes)]).toEqual(labels("Alpha", 100));
+    for (const page of result.pages) {
+      for (const it of page.items) if (it.kind === "text") expect(it.x + it.width).toBeLessThanOrEqual(page.width - 96 + 1);
+    }
     expectNotesClearOfBody(result);
   });
 
