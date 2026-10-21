@@ -153,4 +153,132 @@ describe("more long footnotes", () => {
     for (const part of parts) expect(part.length).toBeGreaterThanOrEqual(2);
     expect(parts.flat().map((line) => line.text).join(" ").split(/\s+/)).toEqual(words.split(" "));
   });
+
+  it("keeps a continued note's picture and final paragraph when one column becomes two", async () => {
+    const { makeDocxWithMedia } = await import("./helpers.js");
+    const { unzipSync, strFromU8 } = await import("fflate");
+    const twoColumns = `<w:sectPr><w:type w:val="continuous"/>${PAGE}<w:cols w:num="2" w:space="720"/></w:sectPr>`;
+    const body = para("Body reference", true) + `<w:p><w:pPr>${LETTER}</w:pPr></w:p>` +
+      para("Body after columns") + twoColumns;
+    const picture = `<w:p><w:pPr>${SPACING}</w:pPr><w:r><w:drawing>
+      <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+        <wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Note picture"/>
+        <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+            <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>
+              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></pic:spPr>
+            </pic:pic>
+          </a:graphicData>
+        </a:graphic>
+      </wp:inline></w:drawing></w:r></w:p>`;
+    const note = paragraphs("Note", 47) + picture + para("Note final paragraph");
+    const parts = Object.fromEntries(Object.entries(unzipSync(documentBytes(body, note)))
+      .map(([name, bytes]) => [name, strFromU8(bytes)]));
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace("</Types>",
+      `<Default Extension="png" ContentType="image/png"/></Types>`);
+    parts["word/_rels/footnotes.xml.rels"] = `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/note.png"/></Relationships>`;
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII="), (char) => char.charCodeAt(0));
+    const result = lay(makeDocxWithMedia(parts, { "word/media/note.png": png }));
+
+    expect(noteLabels(result.pages).flat()).toEqual(labels("Note", 47));
+    expect(result.pages.flatMap((page) => page.items.filter((item) => item.kind === "image"))).toHaveLength(1);
+    expect(result.pages.findIndex((page) => page.items.some((item) => item.kind === "image")))
+      .toBeGreaterThan(result.pages.findIndex((page) => noteLabels([page])[0].length > 0));
+    expect(result.pages[0].columnBands[0].colXs).toHaveLength(1);
+    expect(result.pages.at(-1)?.columnBands[0].colXs).toHaveLength(2);
+    expect(result.pages.flatMap((page) => lines(page).filter((line) => line.text === "Note final paragraph"))).toHaveLength(1);
+  });
+
+  it("paints every repeated digit once when a continued note changes from two columns to one", () => {
+    const twoColumns = `<w:sectPr>${PAGE}<w:cols w:num="2" w:space="720"/></w:sectPr>`;
+    const oneColumn = `<w:sectPr><w:type w:val="continuous"/>${PAGE}<w:cols w:num="1"/></w:sectPr>`;
+    const body = para("Body reference", true) + `<w:p><w:pPr>${twoColumns}</w:pPr></w:p>` +
+      para("Body after columns") + oneColumn;
+    const digits = "0123456789".repeat(300);
+    const result = lay(documentBytes(body, para(digits)));
+    const painted = result.pages.map((page) => page.items.flatMap((item) =>
+      item.kind === "text" && item.src?.t?.text === digits ? [item.text] : []).join(""));
+
+    expect(painted.filter((text) => text.length > 0).length).toBeGreaterThan(1);
+    expect(result.pages[0].columnBands[0].colXs).toHaveLength(2);
+    expect(result.pages.at(-1)?.columnBands[0].colXs).toHaveLength(1);
+    expect(painted.join("")).toBe(digits);
+  });
+
+  it("paints a note picture once in streamed and whole layout across one, two, and one columns", async () => {
+    const { makeDocxWithMedia } = await import("./helpers.js");
+    const { unzipSync, strFromU8 } = await import("fflate");
+    const twoColumns = `<w:sectPr><w:type w:val="continuous"/>${PAGE}<w:cols w:num="2" w:space="720"/></w:sectPr>`;
+    const oneColumn = `<w:sectPr><w:type w:val="continuous"/>${PAGE}<w:cols w:num="1"/></w:sectPr>`;
+    const body = paragraphs("Body", 40) + para("Body reference", true) +
+      `<w:p><w:pPr>${LETTER}</w:pPr></w:p>` + para("Body in two columns") +
+      `<w:p><w:pPr>${twoColumns}</w:pPr></w:p>` + para("Body after columns") + oneColumn;
+    const picture = `<w:p><w:pPr>${SPACING}</w:pPr><w:r><w:drawing>
+      <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+        <wp:extent cx="914400" cy="914400"/><wp:docPr id="1" name="Note picture"/>
+        <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+            <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+              <pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>
+              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm></pic:spPr>
+            </pic:pic>
+          </a:graphicData>
+        </a:graphic>
+      </wp:inline></w:drawing></w:r></w:p>`;
+    const parts = Object.fromEntries(Object.entries(unzipSync(documentBytes(body, picture + paragraphs("Note", 100))))
+      .map(([name, bytes]) => [name, strFromU8(bytes)]));
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace("</Types>",
+      `<Default Extension="png" ContentType="image/png"/></Types>`);
+    parts["word/_rels/footnotes.xml.rels"] = `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/note.png"/></Relationships>`;
+    const png = Uint8Array.from(atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aV1sAAAAASUVORK5CYII="), (char) => char.charCodeAt(0));
+    const bytes = makeDocxWithMedia(parts, { "word/media/note.png": png });
+    const whole = lay(bytes);
+    const opened = await openStreamingDocument(bytesSource(bytes));
+    const measurer = new ApproxMeasurer();
+    const final = await layoutDocumentStream(opened.doc, { measurer, prescan: opened.prescan, onPage: () => {} });
+    const pages: LaidOutPage[] = [];
+    await layoutDocumentStream(opened.doc, {
+      measurer, prescan: opened.prescan, final, onPage: (page) => { pages.push(page); },
+    });
+
+    expect(whole.pages[0].columnBands.map((band) => band.colXs.length)).toEqual([1, 2, 1]);
+    expect(pages[0].columnBands.map((band) => band.colXs.length)).toEqual([1, 2, 1]);
+    expect(noteLabels(whole.pages).flat()).toEqual(labels("Note", 100));
+    expect(noteLabels(pages).flat()).toEqual(labels("Note", 100));
+    expect(whole.pages.flatMap((page) => page.items.filter((item) => item.kind === "image"))).toHaveLength(1);
+    expect(pages.flatMap((page) => page.items.filter((item) => item.kind === "image"))).toHaveLength(1);
+  });
+
+  it("keeps a one-line footnote on the reference page when a table row splits", () => {
+    const cell = para("Row reference", true) + paragraphs("Row", 49);
+    const table = `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="9360" w:type="dxa"/></w:tcPr>${cell}</w:tc></w:tr></w:tbl>`;
+    const result = lay(documentBytes(paragraphs("Body", 15) + table + LETTER, para("One-line note")));
+    const referencePages = result.pages.filter((page) => page.items.some((item) => item.kind === "text" && item.noteId === 1));
+    const notePages = result.pages.filter((page) => lines(page).some((line) => line.text === "One-line note"));
+
+    expect(result.pages.filter((page) => lines(page).some((line) => /^Row \d{3}$/.test(line.text))).length).toBeGreaterThan(1);
+    expect(referencePages).toHaveLength(1);
+    expect(notePages).toHaveLength(1);
+    expect(notePages[0].index).toBe(referencePages[0].index);
+  });
+
+  it("keeps the text of three bordered 400px note rows inside page body boxes", () => {
+    const borders = ["top", "bottom", "left", "right", "insideH"].map((side) =>
+      `<w:${side} w:val="single" w:sz="8" w:color="43729D"/>`).join("");
+    const rows = labels("Tall row", 3).map((label) =>
+      `<w:tr><w:trPr><w:trHeight w:val="6000" w:hRule="exact"/></w:trPr><w:tc><w:tcPr><w:tcW w:w="9360" w:type="dxa"/></w:tcPr>${para(label)}</w:tc></w:tr>`).join("");
+    const table = `<w:tbl><w:tblPr><w:tblW w:w="9360" w:type="dxa"/><w:tblBorders>${borders}</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid>${rows}</w:tbl>`;
+    const result = lay(documentBytes(para("Body reference", true) + LETTER, table));
+    const rowPages = result.pages.map((page) => lines(page).filter((line) => /^Tall row \d{3}$/.test(line.text)));
+
+    expect(rowPages.flat().map((line) => line.text)).toEqual(labels("Tall row", 3));
+    expect(rowPages.filter((page) => page.length > 0).length).toBeGreaterThan(1);
+    for (const [index, rows] of rowPages.entries()) {
+      for (const row of rows) {
+        expect(row.top, `${row.text}: top on page ${result.pages[index].index}`).toBeGreaterThanOrEqual(result.pages[index].bodyTop - 0.5);
+        expect(row.bottom, `${row.text}: bottom on page ${result.pages[index].index}`).toBeLessThanOrEqual(result.pages[index].bodyBottom + 0.5);
+      }
+    }
+  });
 });

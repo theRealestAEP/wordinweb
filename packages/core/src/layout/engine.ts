@@ -9777,8 +9777,12 @@ class Engine {
         if (clip && it.kind === "text" && it.lineTop + it.lineHeight > rowBottom + 0.01) it.clip = { top: y, bottom: rowBottom };
         // Cell footnotes bind to the page painting this partition (split
         // rows carry their references to the continuation page). The note
-        // area starts below the whole row, as the row-fit test assumes.
-        if (it.kind === "text" && it.noteId !== undefined) this.registerFootnote(it.noteId, page, y + rowHeight);
+        // area starts below the whole row, as the row-fit test assumes; a
+        // split row's last line may reach NOTE_SEP_H into the separator band
+        // (keepSlack in the row loop).
+        if (it.kind === "text" && it.noteId !== undefined) {
+          this.registerFootnote(it.noteId, page, y + rowHeight - NOTE_SEP_H);
+        }
         page.items.push(it);
       }
 
