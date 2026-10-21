@@ -12,7 +12,7 @@ import { makeDocxWithMedia, p, wrapDocument } from "./helpers.js";
 // printed its caption only, and the picture was lost.
 
 const PNG = Uint8Array.from(
-  atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="),
+  atob("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"),
   (c) => c.charCodeAt(0),
 );
 
@@ -94,6 +94,48 @@ function figure(result: ReturnType<typeof layoutDocument>) {
   }
   return { image, caption, after };
 }
+
+describe("an inline picture inside a text box", () => {
+  const picture = GROUP_CHILDREN.slice(0, GROUP_CHILDREN.indexOf("<wps:wsp>"))
+    .replace('cx="5486400" cy="2743200"', 'cx="914400" cy="914400"');
+  const inlinePicture = '<w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/>' +
+    '<wp:docPr id="3" name="Inline picture"/><a:graphic>' +
+    '<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">' +
+    picture + '</a:graphicData></a:graphic></wp:inline></w:drawing></w:r>';
+  const textbox = GROUP_CHILDREN.slice(GROUP_CHILDREN.indexOf("<wps:wsp>"))
+    .replace('y="2743200"', 'y="0"')
+    .replace('cy="457200"', 'cy="3200400"')
+    .replace('</w:txbxContent>', `<w:p>${inlinePicture}</w:p></w:txbxContent>`)
+    .replace('bIns="0"/>', 'bIns="0"><a:noAutofit/></wps:bodyPr>');
+
+  for (const [name, body] of [
+    ["page-anchored group", ANCHORED_WGP.replace(GROUP_CHILDREN, textbox)
+      .replace('relativeFrom="column"', 'relativeFrom="page"')
+      .replace('relativeFrom="paragraph"', 'relativeFrom="page"')],
+    ["inline group", INLINE_WGP.replace(GROUP_CHILDREN, textbox)],
+    ["plain anchored text box", ANCHORED_WGP.replace(GRAPHIC,
+      '<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">' +
+      textbox + '</a:graphicData></a:graphic>')],
+  ] as const) {
+    it(`draws text and the picture in the ${name}`, () => {
+      const { doc, result } = load(body);
+      const items = result.pages.flatMap((page) => page.items);
+      const images = items.filter((item) => item.kind === "image");
+      expect(images).toHaveLength(1);
+      expect(images[0]).toMatchObject({ part: "word/media/image1.png", width: 96, height: 96 });
+      const hit = items.find((item) => item.kind === "drawingHit");
+      if (hit?.kind !== "drawingHit") throw new Error("the text box must have a hit target");
+      expect(images[0].y).toBeGreaterThanOrEqual(hit.y);
+      expect(images[0].y + images[0].height).toBeLessThanOrEqual(hit.y + hit.height);
+      expect(items.some((item) => item.kind === "text" && item.text === "Caption")).toBe(true);
+      URL.createObjectURL ??= () => "blob:test";
+      URL.revokeObjectURL ??= () => {};
+      const container = document.createElement("div");
+      renderToDom(doc, result, container);
+      expect(container.querySelectorAll("img")).toHaveLength(1);
+    });
+  }
+});
 
 describe("a drawing group of a picture and a caption text box", () => {
   for (const [name, body] of [
