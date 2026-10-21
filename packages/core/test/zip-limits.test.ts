@@ -21,6 +21,8 @@ const files = {
   "many-parts": manyParts(),
   "giant-paragraph": giantParagraph(),
   "lying-body": lyingBody(),
+  // Under the XML part limit, with one paragraph over the body's block limit.
+  "long-paragraph": giantParagraph(10),
 };
 for (const [name, bytes] of Object.entries(files)) writeFileSync(join(dir, `${name}.docx`), bytes);
 
@@ -45,19 +47,20 @@ function open(file: keyof typeof files, way: "render" | "load" | "estimate"): Pr
 
 /** What each way must say, and the most its peak RSS may rise. */
 const expected: [keyof typeof files, "render" | "load" | "estimate", Partial<Outcome["error"]>, number][] = [
-  ["styles-bomb", "render", { code: "damaged", message: "word/styles.xml is 419430407 bytes, over the 67108864 an XML part may be" }, 64],
+  ["styles-bomb", "render", { code: "too_large", message: "word/styles.xml is 419430407 bytes, over the 67108864 an XML part may be" }, 64],
   ["styles-bomb", "load", { message: "too large: word/styles.xml is 419430407 bytes, over the 67108864 an XML part may be" }, 64],
   ["styles-bomb", "estimate", { message: "too large: word/styles.xml is 419430407 bytes, over the 67108864 an XML part may be" }, 64],
   // The directory says 1000 bytes: inflating stops just past them.
   ["lying-styles", "render", { code: "damaged", message: "word/styles.xml is corrupt" }, 128],
   ["lying-styles", "load", { message: "word/styles.xml is corrupt" }, 64],
-  ["many-parts", "render", { code: "damaged", message: "the zip's parts come to over 536870912 bytes" }, 64],
+  ["many-parts", "render", { code: "too_large", message: "the zip's parts come to over 536870912 bytes" }, 64],
   ["many-parts", "load", { message: "too large: the zip's parts come to over 536870912 bytes" }, 64],
   ["many-parts", "estimate", { message: "too large: the zip's parts come to over 536870912 bytes" }, 64],
-  // The streamed body holds one block at a time, at most the XML limit.
-  ["giant-paragraph", "render", { code: "damaged", message: "the body holds a block over 67108864 bytes" }, 320],
+  ["giant-paragraph", "render", { code: "too_large", message: "word/document.xml is 419430602 bytes, over the 67108864 an XML part may be" }, 64],
   ["giant-paragraph", "load", { message: "too large: word/document.xml is 419430602 bytes, over the 67108864 an XML part may be" }, 64],
-  ["lying-body", "render", { code: "damaged", message: "the body holds a block over 67108864 bytes" }, 320],
+  ["lying-body", "render", { code: "too_large", message: "word/document.xml is 419429407 bytes, over the 67108864 an XML part may be" }, 64],
+  // The streamed body holds one block at a time, refused once its text is over DOCUMENT_LIMITS.blockText.
+  ["long-paragraph", "render", { code: "too_large", message: "the body holds a block of over 1048576 bytes of text" }, 96],
 ];
 
 describe("zip limits", () => {

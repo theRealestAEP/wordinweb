@@ -28,9 +28,10 @@ Exit codes: 0 done; 1 failed; 2 usage; 3 unsupported_script (text in a script
 the renderer cannot shape); 4 not_docx; 5 damaged; 6 unsupported_format (a
 password-protected document, a Word 6.0/95 file, an RTF, PDF or OpenDocument
 file); 7 unsupported_content (content Word prints that the renderer does not
-read, such as a w:altChunk: an HTML or RTF part Word imports on open).`;
+read, such as a w:altChunk: an HTML or RTF part Word imports on open); 8
+too_large (the document is over the size limits).`;
 
-const EXIT: Record<PdfRenderErrorCode, number> = { failed: 1, unsupported_script: 3, not_docx: 4, damaged: 5, unsupported_format: 6, unsupported_content: 7 };
+const EXIT: Record<PdfRenderErrorCode, number> = { failed: 1, unsupported_script: 3, not_docx: 4, damaged: 5, unsupported_format: 6, unsupported_content: 7, too_large: 8 };
 
 const args = process.argv.slice(2);
 if (args.includes("-h") || args.includes("--help")) {

@@ -2,6 +2,7 @@ import { ImageDataShim, RecordingCanvas, RecordingContext } from "./canvas.js";
 import { FontSet } from "./fonts.js";
 import { Resources } from "./resources.js";
 import { decodeDib, symbolText } from "./dib.js";
+import { BitmapBudget } from "./images.js";
 
 /**
  * A WMF played onto a RecordingCanvas, record by record, as [MS-WMF]
@@ -172,9 +173,11 @@ function colorRef(view: DataView, at: number): string {
 /** A WMF's records after its headers: offset and length of each, its function and its parameters' offset. */
 function* records(view: DataView, start: number): Generator<{ fn: number; params: number; end: number }> {
   let offset = start;
-  while (offset + 6 <= view.byteLength) {
+  for (;;) {
+    // A record that runs past the end, or records that stop before META_EOF: the picture is cut short.
+    if (offset + 6 > view.byteLength) throw new Error("WMF ends before its last record");
     const length = view.getUint32(offset, true) * 2;
-    if (length < 6 || offset + length > view.byteLength) return;
+    if (length < 6 || offset + length > view.byteLength) throw new Error("WMF record runs past the end");
     const fn = view.getUint16(offset + 4, true);
     if (fn === META_EOF) return;
     yield { fn, params: offset + 6, end: offset + length };
@@ -182,8 +185,10 @@ function* records(view: DataView, start: number): Generator<{ fn: number; params
   }
 }
 
-/** The WMF drawn onto a canvas of its frame, or null for bytes that are not one. */
-export function convertWmf(input: Uint8Array, fonts: FontSet, resources: Resources): RecordingCanvas | null {
+/** The WMF drawn onto a canvas of its frame, or null for bytes that are not
+ * one. A WMF cut short, or with a record or bitmap this does not read, or
+ * over `budget`, throws: no part of it is drawn. */
+export function convertWmf(input: Uint8Array, fonts: FontSet, resources: Resources, budget: BitmapBudget): RecordingCanvas | null {
   let bytes = input;
   let placeable: { left: number; top: number; width: number; height: number; inch: number } | null = null;
   if (bytes.length >= 22 && new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true) === PLACEABLE_KEY) {
@@ -215,7 +220,7 @@ export function convertWmf(input: Uint8Array, fonts: FontSet, resources: Resourc
   // PDF) is a hairline: a 300th of an inch where the header gives the inch,
   // else one unit.
   const pixel = placeable && placeable.inch > 0 && placeable.width ? Math.abs((placeable.inch / 300) * (width / placeable.width)) : 1;
-  new WmfPlayer(view, ctx, width, height, pixel, initial.org, initial.ext ?? ext).play(start);
+  new WmfPlayer(view, ctx, width, height, pixel, initial.org, initial.ext ?? ext, budget).play(start);
   return canvas;
 }
 
@@ -234,6 +239,7 @@ class WmfPlayer {
     private readonly pixel: number,
     windowOrg: [number, number],
     windowExt: [number, number],
+    private readonly budget: BitmapBudget,
   ) {
     this.state = {
       pen: { kind: "pen", style: 0, width: 0, color: "rgb(0,0,0)" },
@@ -272,13 +278,7 @@ class WmfPlayer {
     const ctx = this.ctx;
     // One save under every DC level, so a clip can be reset by restoring it.
     ctx.save();
-    for (const { fn, params, end } of records(this.view, start)) {
-      try {
-        this.record(fn, params, end);
-      } catch {
-        // A record that reads past its end is skipped; the rest still draw.
-      }
-    }
+    for (const { fn, params, end } of records(this.view, start)) this.record(fn, params, end);
     ctx.restoreAll();
   }
 
@@ -340,7 +340,7 @@ class WmfPlayer {
       case META_DIBCREATEPATTERNBRUSH:
       case META_CREATEPATTERNBRUSH: {
         // The pattern's average color stands in for the pattern.
-        const dib = fn === META_DIBCREATEPATTERNBRUSH ? decodeDib(v, p + 4, end) : null;
+        const dib = fn === META_DIBCREATEPATTERNBRUSH ? decodeDib(v, p + 4, end, this.budget) : null;
         this.add({ kind: "brush", style: 0, color: dib ? averageColor(dib.rgba) : "rgb(128,128,128)", dark: dib ? darkShare(dib.rgba) : 0.5 });
         return;
       }
@@ -663,12 +663,12 @@ class WmfPlayer {
     const xDst = this.i16(at + 2);
     at += 4;
     if (!hasBitmap) return this.blitFill(rop, xDst, yDst, dstW, dstH);
-    const dib = decodeDib(v, at, end);
-    if (!dib) return;
+    const dib = decodeDib(v, at, end, this.budget);
+    if (!dib) throw new Error("a WMF bitmap this does not read");
     let image: { width: number; height: number; rgba: Uint8ClampedArray } | null = dib;
     // The source rectangle, from the top of the bitmap (StretchDIB counts a bottom-up DIB's rows from the bottom).
     const top = fn === META_STRETCHDIB && dib.bottomUp ? dib.height - ySrc - Math.abs(srcH) : ySrc;
-    if (xSrc !== 0 || top !== 0 || Math.abs(srcW) !== dib.width || Math.abs(srcH) !== dib.height) image = crop(dib, xSrc, top, Math.abs(srcW), Math.abs(srcH));
+    if (xSrc !== 0 || top !== 0 || Math.abs(srcW) !== dib.width || Math.abs(srcH) !== dib.height) image = crop(dib, xSrc, top, Math.abs(srcW), Math.abs(srcH), this.budget);
     if (!image) return;
     const rgba = image.rgba;
     if (rop === SRCAND || rop === SRCPAINT || rop === SRCINVERT || rop === NOTSRCCOPY) {
@@ -764,12 +764,13 @@ function darkShare(rgba: Uint8ClampedArray): number {
   return dark / Math.max(rgba.length / 4, 1);
 }
 
-function crop(image: { width: number; height: number; rgba: Uint8ClampedArray }, x: number, y: number, w: number, h: number): { width: number; height: number; rgba: Uint8ClampedArray } | null {
+function crop(image: { width: number; height: number; rgba: Uint8ClampedArray }, x: number, y: number, w: number, h: number, budget: BitmapBudget): { width: number; height: number; rgba: Uint8ClampedArray } | null {
   const x0 = Math.max(0, x);
   const y0 = Math.max(0, y);
   const x1 = Math.min(image.width, x + w);
   const y1 = Math.min(image.height, y + h);
   if (x1 <= x0 || y1 <= y0) return null;
+  budget.take(x1 - x0, y1 - y0);
   const out = new Uint8ClampedArray((x1 - x0) * (y1 - y0) * 4);
   for (let row = y0; row < y1; row++) out.set(image.rgba.subarray((row * image.width + x0) * 4, (row * image.width + x1) * 4), (row - y0) * (x1 - x0) * 4);
   return { width: x1 - x0, height: y1 - y0, rgba: out };

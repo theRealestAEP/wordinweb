@@ -319,13 +319,13 @@ A Word 97-2003 document (.doc, the binary format) is read too: `DocxDocument.loa
 |---|---|---|
 | `not_docx` | The input is not a .docx: not a zip, or a zip with no Word document. | 4 |
 | `unsupported_format` | The input is another format, such as RTF, PDF, OpenDocument, Word 6.0/95, or a password-protected document. | 6 |
-| `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. For `renderDocxToPdf`, also a part over the size limits: an XML part or a body block over 64 MB, or more than 512 MB of parts in all. The zip's directory gives the sizes, so the check comes before anything is inflated. | 5 |
+| `damaged` | The input is a .docx or .doc that cannot be read: a corrupt zip entry, XML that is not well formed. | 5 |
 | `unsupported_content` | The document holds content that Word prints and that is not read here, such as a `w:altChunk` (an HTML or RTF part that Word imports when it opens the file) or a `w:subDoc` (a subdocument that Word reads from another file). The document is refused rather than printed without that content. | 7 |
 | `unsupported_script` | The text is in a script the PDF renderer cannot shape, such as Mongolian. | 3 |
-| `too_large` | `compareFiles` only: the parts outside the body are more than the compare holds in memory (3 MB), or a body block is over 64 MB. | — |
+| `too_large` | The document is over the size limits, which the message names. For `renderDocxToPdf` and `DocxDocument.load` (`DOCUMENT_LIMITS` in `packages/core/src/zip.ts`): an XML part over 64 MB, or more than 512 MB of parts in all; the XML parts other than the document over 8 MB, 150,000 elements, or 10,000 paragraphs and table cells together; the document over 1,000,000 elements, or 250,000 paragraphs and table cells. For `renderDocxToPdf` also one body block (a paragraph or table) over 8 MB, 1 MB of text, 250,000 elements, or 20,000 table rows. Sizes come from the zip's directory, and counts from the XML's bytes before it is parsed or as the body streams, so each check comes before the memory it guards is allocated. For `compareFiles`: the parts outside the body are more than the compare holds in memory (3 MB), or a body block is over 64 MB. | 8 |
 | `failed` | Anything else. | 1 |
 
-`compareFiles` also has codes for its files: `missing`, `disk_full`, `result_folder_missing`, `result_is_input` and `output_collision`. The `docx-compare` CLI exits with 1 for every failure, and its message starts with the code. `DocxDocument.load` throws an `Error` whose message starts with `unsupported content:` for the content that `unsupported_content` refuses.
+`compareFiles` also has codes for its files: `missing`, `disk_full`, `result_folder_missing`, `result_is_input` and `output_collision`. The `docx-compare` CLI exits with 1 for every failure, and its message starts with the code. `DocxDocument.load` throws an `Error` whose message starts with `unsupported content:` for the content that `unsupported_content` refuses, and `too large:` for a document over the size limits.
 
 A printed PDF names the authors of its comments and tracked changes by default. To print it with no author's name, set `authors: false`:
 

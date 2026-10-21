@@ -1,4 +1,4 @@
-import { DEFAULT_XML_LIMITS } from "../xml.js";
+import { DOCUMENT_LIMITS } from "../zip.js";
 
 /** One block-level child of the body: its qualified name, and its bytes,
  * valid only until the scanner reads on. */
@@ -43,6 +43,12 @@ const SLASH = 0x2f;
  * instructions and CDATA are skipped; a document type declaration, an
  * unterminated construct or a missing body is an error. `onAltChunk` gets
  * the start tag of every w:altChunk in the body, at any depth.
+ *
+ * The body is held to DOCUMENT_LIMITS as it streams: its elements, and its
+ * paragraphs and table cells, are counted at each start tag, and a block
+ * (or any construct the scanner must hold whole) over blockBytes bytes,
+ * blockText bytes of text, blockElements elements or tableRows rows is
+ * refused before more of it is read.
  */
 export function scanBody(
   pull: () => Uint8Array | null,
@@ -60,6 +66,8 @@ class Scanner {
   /** The read part of `store`. */
   private length = 0;
   private eof = false;
+  /** The part's offset of the first byte that must stay held: the open block's start, or where the scan is. */
+  private keepFrom = 0;
 
   constructor(private readonly pull: () => Uint8Array | null) {}
 
@@ -82,13 +90,23 @@ class Scanner {
     let childStart = -1;
     let childName = "";
     let pos = 0;
+    // The body's elements, its paragraphs and table cells, and the elements before the open block's.
+    let elements = 0;
+    let blocks = 0;
+    let childFirst = 0;
+    // The open block's text (its bytes between tags), and its table rows.
+    let childText = 0;
+    let childRows = 0;
     for (;;) {
+      // An open child's bytes stay, as its reader wants them, and so do an
+      // open sdt's properties.
+      this.keepFrom = childStart >= 0 ? Math.min(this.base + pos, childStart) : this.base + pos;
+      const sdt = sdts[sdts.length - 1];
+      if (sdt && sdt.id === -1) this.keepFrom = Math.min(this.keepFrom, sdt.at);
       if (pos > CHUNK) {
         // Move what is left to the front, so the buffer never grows past a
-        // chunk or two; an open child's bytes stay, as its reader wants them.
-        let keep = childStart >= 0 ? Math.min(pos, childStart - this.base) : pos;
-        const sdt = sdts[sdts.length - 1];
-        if (sdt && sdt.id === -1) keep = Math.min(keep, sdt.at - this.base);
+        // chunk or two, besides the bytes that stay.
+        const keep = this.keepFrom - this.base;
         this.store.copyWithin(0, keep, this.length);
         this.length -= keep;
         this.base += keep;
@@ -100,6 +118,7 @@ class Scanner {
         lt = this.indexOf(LT, pos);
       }
       const at = this.base + lt;
+      if (childStart >= 0 && (childText += lt - pos) > DOCUMENT_LIMITS.blockText) throw new Error(`too large: the body holds a block of over ${DOCUMENT_LIMITS.blockText} bytes of text`);
       const next = this.byteAt(lt + 1);
       let end: number;
       if (next === 0x3f /* ? */) {
@@ -120,6 +139,7 @@ class Scanner {
           // A block's end tag and an sdt's both come at the container's depth
           // plus one: only a block is open as a child.
           if (depth === top + 1 && childStart >= 0) {
+            if (end - childStart > DOCUMENT_LIMITS.blockBytes) throw new Error(`too large: the body holds a block over ${DOCUMENT_LIMITS.blockBytes} bytes`);
             onChild({ name: childName, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(childStart - this.base, end - this.base) });
             childStart = -1;
           } else if (sdts.length > 0 && depth === sdts[sdts.length - 1].level - 1) sdts.pop();
@@ -132,7 +152,14 @@ class Scanner {
         end = this.tagEnd(lt + 1);
         const selfClosing = this.store[end - this.base - 2] === SLASH;
         const name = this.nameAt(lt + 1);
-        if (inside && localName(name) === "altChunk") onAltChunk(new TextDecoder().decode(this.store.subarray(lt, end - this.base)));
+        if (inside) {
+          const ln = localName(name);
+          if (ln === "altChunk") onAltChunk(new TextDecoder().decode(this.store.subarray(lt, end - this.base)));
+          if (++elements > DOCUMENT_LIMITS.documentElements) throw new Error(`too large: the body holds over ${DOCUMENT_LIMITS.documentElements} elements`);
+          if ((ln === "p" || ln === "tc") && ++blocks > DOCUMENT_LIMITS.documentBlocks) throw new Error(`too large: the body holds over ${DOCUMENT_LIMITS.documentBlocks} paragraphs and table cells`);
+          if (childStart >= 0 && elements - childFirst > DOCUMENT_LIMITS.blockElements) throw new Error(`too large: the body holds a block of over ${DOCUMENT_LIMITS.blockElements} elements`);
+          if (childStart >= 0 && ln === "tr" && ++childRows > DOCUMENT_LIMITS.tableRows) throw new Error(`too large: the body holds a table of over ${DOCUMENT_LIMITS.tableRows} rows`);
+        }
         if (!inside) {
           if (depth === cd && localName(name) === "body") {
             if (this.base !== 0) throw new Error("the document's head is longer than a chunk");
@@ -153,10 +180,15 @@ class Scanner {
             } else if ((ln === "Choice" || ln === "Fallback") && !selfClosing && alternates.get(top) === false) {
               alternates.set(top, true);
               containers.push(depth);
-            } else if (selfClosing) onChild({ name, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(lt, end - this.base) });
-            else {
+            } else if (selfClosing) {
+              if (end - at > DOCUMENT_LIMITS.blockBytes) throw new Error(`too large: the body holds a block over ${DOCUMENT_LIMITS.blockBytes} bytes`);
+              onChild({ name, top: containers.length === 1, sdt: sdts[sdts.length - 1]?.id ?? -1, bytes: this.store.subarray(lt, end - this.base) });
+            } else {
               childStart = at;
               childName = name;
+              childFirst = elements - 1;
+              childText = 0;
+              childRows = 0;
             }
           } else if (sdts.length > 0 && depth === sdts[sdts.length - 1].level && localName(name) === "sdtContent" && !selfClosing) {
             const sdt = sdts[sdts.length - 1];
@@ -173,24 +205,26 @@ class Scanner {
 
   /** Everything from part offset `from` to the end of the part. */
   private rest(from: number): Uint8Array {
+    this.keepFrom = from;
     while (this.more());
     return this.store.slice(from - this.base, this.length);
   }
 
   /** Read the next chunk; false at the end of the part. What is held is
-   * about one block, or one construct, and a chunk: over the XML limit, the
-   * block could never be parsed, so it is refused before it is held. */
+   * about one block, or one construct, and a chunk: once the bytes that
+   * must stay are over DOCUMENT_LIMITS.blockBytes, the block is refused
+   * before more of it is read. */
   private more(): boolean {
     if (this.eof) return false;
+    const limit = DOCUMENT_LIMITS.blockBytes;
+    if (this.base + this.length - this.keepFrom > limit) throw new Error(`too large: the body holds a block over ${limit} bytes`);
     const chunk = this.pull();
     if (chunk === null) {
       this.eof = true;
       return false;
     }
-    const limit = DEFAULT_XML_LIMITS.maxLength;
-    if (this.length + chunk.length > limit) throw new Error(`too large: the body holds a block over ${limit} bytes`);
     if (this.length + chunk.length > this.store.length) {
-      const bigger = new Uint8Array(Math.min(2 * (this.length + chunk.length), limit));
+      const bigger = new Uint8Array(2 * (this.length + chunk.length));
       bigger.set(this.store.subarray(0, this.length));
       this.store = bigger;
     }
