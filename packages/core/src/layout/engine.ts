@@ -8421,19 +8421,40 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
 
-    // The height a row needs on a page: all of it when it cannot split, else
-    // the bottom of its lowest first line.
+    // Reserve two text lines (all for short cells) and whole leading drawings.
+    // Let the splitter check nested-row bands and visible content; use the
+    // whole row when that boundary cannot split safely.
     const firstLineNeed = (row: TableRow, laid: (typeof laidRows)[number], height: number): number => {
-      if (row.props.cantSplit || row.props.heightRule === "exact") return height;
+      if (
+        row.props.cantSplit || row.props.heightRule === "exact" || row.props.tblHeader ||
+        row.cells.some((cell) => cell.props.vMerge || cell.props.textDirection)
+      ) return height;
       let need = 0;
       for (const cell of laid.cells) {
-        let first = Infinity;
-        for (const it of cell?.items ?? []) {
-          if (it.kind === "text") first = Math.min(first, it.lineTop + it.lineHeight);
+        const text = cell.items.filter((it) => it.kind === "text");
+        const lines = [...new Set(text.map((it) => it.lineTop))].sort((a, b) => a - b);
+        const lastTop = lines.length >= 4 ? lines[1] : lines[lines.length - 1];
+        for (const it of text) {
+          if (it.lineTop <= lastTop) need = Math.max(need, it.lineTop + it.lineHeight);
         }
-        if (first !== Infinity) need = Math.max(need, first);
+        const firstTop = lines[0] ?? Infinity;
+        for (const it of cell.items) {
+          if (it.kind === "image" || it.kind === "path" || it.kind === "wordart" || it.kind === "rect") {
+            if (it.y <= firstTop) need = Math.max(need, it.y + it.height);
+          } else if (it.kind === "edge") {
+            if (Math.min(it.y1, it.y2) <= firstTop) need = Math.max(need, it.y1, it.y2);
+          } else if (it.kind !== "text" && it.kind !== "grip") {
+            return height;
+          }
+        }
       }
-      return Math.min(height, need || height);
+      if (!need || need >= height) return height;
+      // Splitting shifts continuation items, so measure with copies.
+      const probe = {
+        ...laid,
+        cells: laid.cells.map((cell) => ({ ...cell, items: cell.items.map((it) => ({ ...it })) })),
+      };
+      return this.splitLaidRow(probe, need, 0, true) ? need : height;
     };
 
     for (let ri = 0; ri < tbl.rows.length; ri++) {
@@ -8441,7 +8462,7 @@ class Engine {
       let laid = laidRows[ri];
       let rowHeight = rowHeights[ri];
       // `need` is the room the row that continues on the next page needs
-      // there: all of it when it cannot split, else its first line.
+      // there: all of it when it cannot split, else its first usable part.
       const advance = (need: number) => {
         if (segHasRows && segmentBottom && segmentBottom.style !== "none") {
           this.cur.items.push({

@@ -5393,6 +5393,103 @@ describe("repeated header rows", () => {
     `</w:tbl>`;
   const count = (result: ReturnType<typeof layoutDocument>, text: string) =>
     result.pages.reduce((n, page) => n + page.items.filter((i) => i.kind === "text" && i.text === text).length, 0);
+  const smallSection =
+    `<w:sectPr><w:pgSz w:w="7000" w:h="3300"/>` +
+    `<w:pgMar w:top="750" w:right="750" w:bottom="750" w:left="750"/></w:sectPr>`;
+  const line25 = (text: string) => p(text,
+    `<w:pPr><w:spacing w:before="0" w:after="0" w:line="375" w:lineRule="exact"/></w:pPr>`);
+  const smallRow = (cells: string[], props = "") =>
+    `<w:tr><w:trPr>${props}</w:trPr>` +
+    cells.map((body) => `<w:tc><w:tcPr><w:tcW w:w="2750" w:type="dxa"/></w:tcPr>${body}</w:tc>`).join("") +
+    `</w:tr>`;
+  const smallTable = (rows: string[]) =>
+    `<w:tbl><w:tblPr><w:tblW w:w="5500" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr>` +
+    `<w:tblGrid><w:gridCol w:w="2750"/><w:gridCol w:w="2750"/></w:tblGrid>${rows.join("")}</w:tbl>`;
+  const header50 = () => smallRow([line25("HEAD"), line25("")],
+    `<w:tblHeader/><w:trHeight w:val="750" w:hRule="exact"/>`);
+
+  it("reserves a leading image's full height before repeating the header", () => {
+    const image =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="238125" cy="762000"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="238125" cy="762000"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([line25("BODY"), line25("")]), smallRow([line25("TEXT"), image]),
+      ]) + smallSection),
+      "word/_rels/document.xml.rels":
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>` +
+        `</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    expect(result.pages).toHaveLength(2);
+    expect(pageText(result, 0)).toBe("HEADBODY");
+    expect(pageText(result, 1)).toBe("TEXT");
+    const picture = result.pages[1].items.find((item) => item.kind === "image");
+    if (picture?.kind !== "image") throw new Error("missing image");
+    expect(picture.height).toBeCloseTo(80, 3);
+    expect(picture.y + picture.height).toBeLessThanOrEqual(result.pages[1].bodyBottom);
+  });
+
+  it("reserves all three text lines before repeating the header", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([line25("BODY"), line25("")]),
+        smallRow([line25("ONE") + line25("TWO") + line25("THREE"), line25("")]),
+      ]) + smallSection),
+    });
+    expect(result.pages).toHaveLength(2);
+    expect(pageText(result, 0)).toBe("HEADBODY");
+    expect(pageText(result, 1)).toBe("ONETWOTHREE");
+    expect(count(result, "HEAD")).toBe(1);
+    const lines = result.pages[1].items.filter((item) => item.kind === "text" && item.text);
+    expect(lines).toHaveLength(3);
+    for (const item of lines) {
+      if (item.kind === "text") {
+        expect(item.lineHeight).toBeCloseTo(25, 3);
+        expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(result.pages[1].bodyBottom);
+      }
+    }
+  });
+
+  it("moves a cantSplit row after a non-leading tblHeader row to the next page", () => {
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([line25("BODY"), line25("")]),
+        smallRow([line25("LATE"), line25("")], `<w:tblHeader/>`),
+        smallRow([line25("KEEP1") + line25("KEEP2"), line25("")], `<w:cantSplit/>`),
+      ]) + smallSection),
+    });
+    expect(result.pages).toHaveLength(2);
+    expect(pageText(result, 0)).toBe("HEADBODYLATE");
+    expect(pageText(result, 1)).toBe("HEADKEEP1KEEP2");
+    expect(count(result, "LATE")).toBe(1);
+  });
+
+  it("keeps visible content in the first part of a forced split below a header", () => {
+    const nested =
+      `<w:tbl><w:tblPr><w:tblBorders>` +
+      `<w:top w:val="single" w:sz="4"/><w:bottom w:val="single" w:sz="4"/>` +
+      `</w:tblBorders></w:tblPr><w:tblGrid><w:gridCol w:w="2750"/></w:tblGrid>` +
+      `<w:tr><w:trPr><w:trHeight w:val="1200" w:hRule="exact"/></w:trPr>` +
+      `<w:tc>${line25("NESTED")}</w:tc></w:tr></w:tbl>`;
+    const { result } = layout({
+      "word/document.xml": wrapDocument(smallTable([
+        header50(), smallRow([nested + line25("ONE") + line25("TWO") + line25("THREE"), line25("")]),
+      ]) + smallSection),
+    });
+    // The part on the first page holds visible text with the nested table,
+    // not only the nested table's top border.
+    expect(result.pages[0].items.some((item) => item.kind === "edge")).toBe(true);
+    expect(pageText(result, 0)).toContain("HEADNESTED");
+    expect(count(result, "NESTED")).toBe(1);
+  });
 
   // GovDocs1 073543: header rows taller than the page repeated on every new
   // page and pushed each body row on again: 4005 pages.
