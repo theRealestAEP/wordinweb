@@ -9111,13 +9111,12 @@ class Engine {
     const anyRest = partitions.some(({ rest }) => rest.length > 0);
     if (!anyKept || !anyRest) return null;
 
-    // A non-empty fragment must hold usable content: a text line with visible
-    // characters, an image, or a drawing. Empty-text spans are caret anchors
-    // and edges/rects are paragraph decorations (borders, shading) - a
-    // fragment made only of those is not content Word would strand on its own
-    // page, so the row moves whole instead (msa: the signature row's
-    // continuation held only the paragraph-border rule, which split off and
-    // painted as a bare black bar at the top of the next page).
+    // Each row fragment must hold usable content somewhere in the row: a text
+    // line with visible characters, an image, or a drawing. An empty cell's
+    // caret anchor can share a fragment with another cell's visible content.
+    // When either fragment holds only caret anchors or paragraph decorations,
+    // move the row whole (msa: the signature row's continuation held only the
+    // paragraph-border rule, which painted as a bare black bar on the next page).
     const hasVisibleContent = (items: PageItem[]) =>
       items.some(
         (it) =>
@@ -9127,11 +9126,8 @@ class Engine {
           it.kind === "wordart",
       );
     if (
-      partitions.some(
-        ({ keep, rest }) =>
-          (keep.length > 0 && !hasVisibleContent(keep)) ||
-          (rest.length > 0 && !hasVisibleContent(rest)),
-      )
+      !partitions.some(({ keep }) => hasVisibleContent(keep)) ||
+      !partitions.some(({ rest }) => hasVisibleContent(rest))
     ) {
       return null;
     }
