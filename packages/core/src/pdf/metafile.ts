@@ -36,7 +36,9 @@ async function convertEmf(bytes: Uint8Array, fonts: FontSet, resources: Resource
   const images = checkEmf(bytes, budget);
   const { convertEmfToDataUrl } = await import("emf-converter");
   const prepared = prepareEmf(bytes);
-  const buffer = prepared.buffer.slice(prepared.byteOffset, prepared.byteOffset + prepared.byteLength) as ArrayBuffer;
+  const buffer = (prepared.byteOffset === 0 && prepared.byteLength === prepared.buffer.byteLength
+    ? prepared.buffer
+    : prepared.buffer.slice(prepared.byteOffset, prepared.byteOffset + prepared.byteLength)) as ArrayBuffer;
   // The converter paints at 1:1 and then exports a PNG, which fails here
   // (no FileReader) after every record is recorded; the canvas is what counts.
   const { canvas } = await withRecordingCanvas(
