@@ -808,12 +808,14 @@ function applyTableSprm(sprm: number, o: Uint8Array, t: TableProps): void {
       break;
     }
     case 0x7623: {
+      // sprmTDxaCol: each cell in [itcFirst, itcLim) becomes dxaCol wide, and the cell edges after it move with it.
       const width = i16(o, 2);
-      for (const cell of cellRange(o, 0, t.cells)) cell.width = width;
-      let right = t.left ?? 0;
-      for (const cell of t.cells) {
-        right += cell.width;
-        cell.right = right;
+      cellRange(o, 0, t.cells);
+      for (let i = o[0]; i < o[1]; i++) {
+        const left = i === 0 ? t.left ?? 0 : t.cells[i - 1].right;
+        const delta = width - (t.cells[i].right - left);
+        for (let j = i; j < t.cells.length; j++) t.cells[j].right += delta;
+        t.cells[i].width = width;
       }
       break;
     }

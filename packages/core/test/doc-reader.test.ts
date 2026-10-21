@@ -10,6 +10,7 @@ import { docToDocxFiles, openDoc } from "../src/doc/convert.js";
 import { docToDocx } from "../src/doc/hooks.js";
 import { isWordDocumentFile, openDocStreams } from "../src/doc/streams.js";
 import { parseFib } from "../src/doc/fib.js";
+import { applyParaSprms, newParaProps } from "../src/doc/sprm.js";
 import { PdfRenderError, renderDocxToPdf } from "../src/pdf/render.js";
 
 // Word 97-2003 .doc files desktop Word saved from the .docx beside each
@@ -130,6 +131,17 @@ describe("the .doc reader", () => {
     expect(cells[0]).toContain("LIVING ROOM");
     expect(cells[1]).toContain('<w:gridSpan w:val="3"/>');
     expect(cells[1]).toContain("For each item");
+  });
+
+  it("sets the width of the cells sprmTDxaCol names and moves the later edges, whatever the TC80 widths", () => {
+    // GovDocs1 085483.doc, a price table row: sprmTDefTable (edges -108..9540, every TC80 wWidth 0), then five sprmTDxaCol.
+    const hex =
+      "16240117240102966c0007947f0203340108d672000594ffd00248124218881d4425" +
+      "8000000000000000000000000000000000000000".repeat(5) +
+      "23760405160823760405700823760405160823760304fa05237604056207";
+    const p = newParaProps(0);
+    applyParaSprms(new Uint8Array(hex.match(/../g)!.map((h) => parseInt(h, 16))), p);
+    expect(p.table?.cells.map((cell) => cell.right)).toEqual([720, 4680, 6210, 7740, 9630]);
   });
 
   it("gives a header with a picture its own relationships", () => {
