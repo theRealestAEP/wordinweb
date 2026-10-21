@@ -20,6 +20,12 @@
  * emf-converter applies to coordinates (it keeps no extents across
  * SaveDC/RestoreDC, and neither does this).
  *
+ * An EXTCREATEFONTINDIRECTW's height and width are also in logical units,
+ * but emf-converter uses the height as canvas pixels. Each font's height
+ * is scaled by the y extents and its nonzero width by the x extents where
+ * it is made. The height keeps its sign: negative for character height,
+ * positive for cell height ([MS-EMF] 2.2.13, 2.3.7.8).
+ *
  * An EMF that also carries EMF+ records gets none of the rewrites above
  * (emf-converter draws its EMF+ records, with their world transform), and
  * three of its own ([MS-EMFPLUS] 1.3.1, 2.1.1.2, 2.3.3.2, 2.3.4.6):
@@ -63,6 +69,7 @@ const EMR_ENDPATH = 60;
 const EMR_FILLPATH = 62;
 const EMR_BITBLT = 76;
 const EMR_STRETCHBLT = 77;
+const EMR_EXTCREATEFONTINDIRECTW = 82;
 const EMR_EXTCREATEPEN = 95;
 const BS_NULL = 1;
 const PS_NULL = 5;
@@ -116,10 +123,12 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (bytes.length < 88 || view.getUint32(0, true) !== EMR_HEADER) return bytes;
   if (hasEmfPlus(view)) return prepareEmfPlus(bytes, view);
-  // emf-converter starts both extents at the bounds' width: one unit, one pixel.
-  let windowExt = view.getInt32(16, true) - view.getInt32(8, true);
-  let viewportExt = windowExt;
-  const scaled = (width: number): number => (windowExt ? Math.round(Math.abs((width * viewportExt) / windowExt)) : width);
+  // emf-converter starts the extents at the bounds' size: one unit, one pixel.
+  let windowExtX = view.getInt32(16, true) - view.getInt32(8, true);
+  let windowExtY = view.getInt32(20, true) - view.getInt32(12, true);
+  let viewportExtX = windowExtX;
+  let viewportExtY = windowExtY;
+  const scaled = (value: number, windowExt = windowExtX, viewportExt = viewportExtX): number => (windowExt ? Math.round(Math.abs((value * viewportExt) / windowExt)) : value);
   const parts: Uint8Array[] = [];
   let changed = false;
   let records = 0;
@@ -129,12 +138,23 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
     const size = view.getUint32(offset + 4, true);
     if (size < 8 || offset + size > bytes.length) break;
     let replacement: Uint8Array[] | null = null;
-    if (type === EMR_SETWINDOWEXTEX && size >= 16) windowExt = view.getInt32(offset + 8, true);
-    else if (type === EMR_SETVIEWPORTEXTEX && size >= 16) viewportExt = view.getInt32(offset + 8, true);
-    else if ((type === EMR_SCALEWINDOWEXTEX || type === EMR_SCALEVIEWPORTEXTEX) && size >= 24 && view.getInt32(offset + 12, true) !== 0) {
-      const ext = Math.round(((type === EMR_SCALEWINDOWEXTEX ? windowExt : viewportExt) * view.getInt32(offset + 8, true)) / view.getInt32(offset + 12, true));
-      if (type === EMR_SCALEWINDOWEXTEX) windowExt = ext;
-      else viewportExt = ext;
+    if (type === EMR_SETWINDOWEXTEX && size >= 16) {
+      windowExtX = view.getInt32(offset + 8, true);
+      windowExtY = view.getInt32(offset + 12, true);
+    } else if (type === EMR_SETVIEWPORTEXTEX && size >= 16) {
+      viewportExtX = view.getInt32(offset + 8, true);
+      viewportExtY = view.getInt32(offset + 12, true);
+    } else if ((type === EMR_SCALEWINDOWEXTEX || type === EMR_SCALEVIEWPORTEXTEX) && size >= 24) {
+      if (view.getInt32(offset + 12, true) !== 0) {
+        const ext = Math.round(((type === EMR_SCALEWINDOWEXTEX ? windowExtX : viewportExtX) * view.getInt32(offset + 8, true)) / view.getInt32(offset + 12, true));
+        if (type === EMR_SCALEWINDOWEXTEX) windowExtX = ext;
+        else viewportExtX = ext;
+      }
+      if (view.getInt32(offset + 20, true) !== 0) {
+        const ext = Math.round(((type === EMR_SCALEWINDOWEXTEX ? windowExtY : viewportExtY) * view.getInt32(offset + 16, true)) / view.getInt32(offset + 20, true));
+        if (type === EMR_SCALEWINDOWEXTEX) windowExtY = ext;
+        else viewportExtY = ext;
+      }
     } else if ((type === EMR_BITBLT || type === EMR_STRETCHBLT) && size >= 100 && view.getUint32(offset + 40, true) === PATCOPY && view.getUint32(offset + 96, true) === 0) {
       // xDest, yDest, cxDest, cyDest, dwRop after the bounds; cbBitsSrc is the last field both records share.
       const x = view.getInt32(offset + 24, true);
@@ -147,6 +167,19 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
       // ihPen, the bitmap fields, then LogPenEx: PenStyle, Width, BrushStyle, Color.
       const style = view.getUint32(offset + 36, true) === BS_NULL ? PS_NULL : view.getUint32(offset + 28, true);
       replacement = [createPen(view.getUint32(offset + 8, true), style, scaled(view.getInt32(offset + 32, true)), view.getUint32(offset + 40, true))];
+    } else if (type === EMR_EXTCREATEFONTINDIRECTW && size >= 104) {
+      // ihFonts, then LogFont: Height, Width, and the remaining attributes.
+      const height = view.getInt32(offset + 12, true);
+      const width = view.getInt32(offset + 16, true);
+      const scaledHeight = Math.sign(height) * scaled(Math.abs(height), windowExtY, viewportExtY);
+      const scaledWidth = Math.sign(width) * scaled(Math.abs(width));
+      if (scaledHeight !== height || scaledWidth !== width) {
+        const font = bytes.slice(offset, offset + size);
+        const out = new DataView(font.buffer);
+        out.setInt32(12, scaledHeight, true);
+        out.setInt32(16, scaledWidth, true);
+        replacement = [font];
+      }
     }
     if (replacement) {
       parts.push(...replacement);

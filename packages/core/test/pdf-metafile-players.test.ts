@@ -95,6 +95,11 @@ function patBlt(x: number, y: number, w: number, h: number, rop: number): number
   return [76, ...record];
 }
 
+/** An EXTCREATEFONTINDIRECTW with the LogFont height and width. */
+function emfFont(height: number, width = 0): number[] {
+  return [82, 1, height, width, 0, 0, 400, ...new Array(75).fill(0)];
+}
+
 /** A version 2 PICT (big-endian) of `width` x `height` with the opcode bytes `body`. */
 function pict(width: number, height: number, body: number[]): Uint8Array {
   const head = [0, 0, 0, 0, 0, 0, height >> 8, height & 255, width >> 8, width & 255, 0x00, 0x11, 0x02, 0xff, 0x0c, 0x00, 0xff, 0xff, 0xff, 0xff, ...new Array(20).fill(0)];
@@ -268,8 +273,47 @@ describe("EMF records rewritten for emf-converter", () => {
     expect(strokes[0]).toContain("1 0 0 RG 4 w");
   });
 
+  it("scales a logical font's height to pixels", async () => {
+    const bytes = emf([
+      [17, 8], // SETMAPMODE: MM_ANISOTROPIC
+      [9, 200, 100], // SETWINDOWEXTEX: two units a pixel
+      [11, 100, 50], // SETVIEWPORTEXTEX
+      emfFont(-20),
+      [37, 1], // SELECTOBJECT
+      [84, 0, 0, 99, 49, 1, 0x3f800000, 0x3f800000, 20, 40, 1, 76, 0, 0, 0, 0, 0, 0, 65], // EXTTEXTOUTW: "A"
+    ]);
+    const prepared = prepareEmf(bytes);
+    const fontOffset = 88 + 12 + 16 + 16;
+    const view = new DataView(prepared.buffer, prepared.byteOffset, prepared.byteLength);
+    expect(view.getInt32(fontOffset + 12, true)).toBe(-10);
+    expect(view.getInt32(fontOffset + 16, true)).toBe(0);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    const sizes = [...canvas!.ops.join("\n").matchAll(/\/\S+ ([\d.]+) Tf/g)].map((match) => Number(match[1]));
+    expect(sizes).toHaveLength(1);
+    expect(sizes[0]).toBeCloseTo(10);
+  });
+
+  it("scales each font with the x and y extents where it is made", () => {
+    const bytes = emf([
+      [9, 400, 200],
+      [11, 100, 100],
+      emfFont(20, 8), // height 10, width 2
+      [32, 2, 1, 4, 1], // SCALEWINDOWEXTEX
+      emfFont(-40, 16), // height -5, width 2
+      [31, -2, 1, -4, 1], // SCALEVIEWPORTEXTEX: reversed axes
+      emfFont(-40, 16), // height -20, width 4; height keeps its sign
+    ]);
+    const prepared = prepareEmf(bytes);
+    const view = new DataView(prepared.buffer, prepared.byteOffset, prepared.byteLength);
+    const dimensions: number[][] = [];
+    for (let at = 0; at + 8 <= prepared.length; at += view.getUint32(at + 4, true)) {
+      if (view.getUint32(at, true) === 82) dimensions.push([view.getInt32(at + 12, true), view.getInt32(at + 16, true)]);
+    }
+    expect(dimensions).toEqual([[10, 2], [-5, 2], [-20, 4]]);
+  });
+
   it("leaves an EMF with EMF+ records as it is", () => {
-    const plus = emf([[70, 16, 0x2b464d45, 0x4001, 12], patBlt(0, 0, 10, 10, 0x00f00021)]);
+    const plus = emf([[70, 16, 0x2b464d45, 0x4001, 12], [9, 200, 100], [11, 100, 50], emfFont(-20, 8), patBlt(0, 0, 10, 10, 0x00f00021)]);
     expect(prepareEmf(plus)).toBe(plus);
   });
 });
