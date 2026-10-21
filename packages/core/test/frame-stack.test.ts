@@ -52,6 +52,60 @@ function line(items: PageItem[], text: string): TextItem {
 }
 
 describe("a frame of adjacent paragraphs with equal framePr", () => {
+  it.each(["text", "margin", "page"])("places an inline-y frame at the flow position with vAnchor=%s and wraps body text beside it", (anchor) => {
+    const inline = `<w:framePr w:hAnchor="margin" w:x="0" w:w="2000" w:yAlign="inline" w:vAnchor="${anchor}" w:wrap="around"/>`;
+    const items = layoutBody(
+      framed("IntroOne", "") + framed("IntroTwo", "") +
+        framed("SideOne</w:t><w:br/><w:t>SideTwo</w:t><w:br/><w:t>SideThree", inline) + BODY + SECTION,
+    );
+    const second = line(items, "IntroTwo");
+    const side = line(items, "SideOne");
+    const body = line(items, "Body");
+    expect(side.lineTop).toBeCloseTo(second.lineTop + second.lineHeight, 2);
+    expect(side.x).toBeCloseTo(1800 * TW, 2);
+    expect(body.lineTop).toBeCloseTo(side.lineTop, 2);
+    expect(body.x).toBeCloseTo((1800 + 2000) * TW + 8, 2);
+    for (const intro of ["IntroOne", "IntroTwo"]) expect(line(items, intro).x).toBeCloseTo(1800 * TW, 2);
+  });
+
+  it("uses the flow position for inline-y alignment when a y offset is also present", () => {
+    const inline = `<w:framePr w:hAnchor="margin" w:x="300" w:w="2000" w:y="3600" w:yAlign="inline" w:vAnchor="text" w:wrap="around"/>`;
+    const items = layoutBody(framed("IntroOne", "") + framed("IntroTwo", "") + framed("Side", inline) + BODY + SECTION);
+    const second = line(items, "IntroTwo");
+    expect(line(items, "Side").lineTop).toBeCloseTo(second.lineTop + second.lineHeight, 2);
+    expect(line(items, "Side").x).toBeCloseTo((1800 + 300) * TW, 2);
+  });
+
+  it("continues body text below an inline-y frame with wrap=notBeside", () => {
+    const inline = `<w:framePr w:hAnchor="margin" w:x="0" w:w="2000" w:yAlign="inline" w:vAnchor="margin" w:wrap="notBeside"/>`;
+    const items = layoutBody(framed("IntroOne", "") + framed("IntroTwo", "") + framed("Side", inline) + BODY + SECTION);
+    const second = line(items, "IntroTwo");
+    const side = line(items, "Side");
+    const body = line(items, "Body");
+    expect(side.lineTop).toBeCloseTo(second.lineTop + second.lineHeight, 2);
+    expect(body.lineTop).toBeGreaterThanOrEqual(side.lineTop + side.lineHeight);
+    expect(body.x).toBeCloseTo(1800 * TW, 2);
+  });
+
+  it.each([40, 120])("paginates an inline-y frame from the flow position with %s px of room", (room) => {
+    const shim = `<w:p><w:pPr><w:spacing w:after="0" w:line="${(864 - room) * 15}" w:lineRule="exact"/></w:pPr><w:r><w:t>Shim</w:t></w:r></w:p>`;
+    const inline = `<w:framePr w:hAnchor="margin" w:w="2000" w:h="1200" w:hRule="exact" w:y="3600" w:yAlign="inline" w:vAnchor="margin" w:wrap="around"/>`;
+    const pages = layoutPages(shim + framed("Side", inline) + BODY + SECTION);
+    const pageIndex = room < 80 ? 1 : 0;
+    expect(pages).toHaveLength(pageIndex + 1);
+    expect(line(pages[pageIndex].items, "Side").lineTop).toBeCloseTo(pageIndex === 1 ? 96 : 960 - room, 2);
+    expect(line(pages[pageIndex].items, "Body").lineTop).toBeCloseTo(line(pages[pageIndex].items, "Side").lineTop, 2);
+  });
+
+  it("places an inline-y frame at its anchor before the following paragraph's page break", () => {
+    const inline = `<w:framePr w:hAnchor="margin" w:w="2000" w:yAlign="inline" w:vAnchor="margin" w:wrap="around"/>`;
+    const follower = `<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Follower</w:t></w:r></w:p>`;
+    const pages = layoutPages(framed("Intro", "") + framed("Side", inline) + follower + SECTION);
+    const intro = line(pages[0].items, "Intro");
+    expect(line(pages[0].items, "Side").lineTop).toBeCloseTo(intro.lineTop + intro.lineHeight, 2);
+    expect(line(pages[1].items, "Follower").lineTop).toBeCloseTo(96, 2);
+  });
+
   it("stacks the paragraphs in order, one under another, at the frame's position", () => {
     const items = layoutBody(
       `<w:p><w:r><w:t>Intro</w:t></w:r></w:p>` +
