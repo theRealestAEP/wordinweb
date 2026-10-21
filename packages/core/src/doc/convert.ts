@@ -54,6 +54,9 @@ export function openDoc(bytes: Uint8Array): DocReader {
   const streams = openDocStreams(bytes);
   const fib = parseFib(streams.wordDocument);
   const pieces = new PieceTable(tableBlob(fib, streams.table, FC.clx), streams.wordDocument, fib.word6);
+  const parts = partStarts(fib);
+  // All stories share the piece table's CP range ([MS-DOC] 2.4.1, 2.8.35).
+  if (parts.end > pieces.end) throw new Error("damaged: the FIB story lengths exceed the text range");
   const props = new PropertyTables(streams.wordDocument, streams.table, streams.data, fib, pieces);
   const fonts = parseFonts(fib, streams.table);
   const styles = new StyleSheet(fib, streams.table);
@@ -62,7 +65,7 @@ export function openDoc(bytes: Uint8Array): DocReader {
     fontName: (ftc) => fonts[ftc]?.name,
     styleToggle: (prop, istdPara, istdChar) => styles.toggle(prop, istdPara, istdChar),
   };
-  return { streams, fib, parts: partStarts(fib), pieces, props, fonts, styles, ctx };
+  return { streams, fib, parts, pieces, props, fonts, styles, ctx };
 }
 
 /**

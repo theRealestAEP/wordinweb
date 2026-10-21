@@ -63,6 +63,33 @@ describe("the .doc reader", () => {
     expect(reader.styles.id(0)).toBe("Normal");
   });
 
+  it("promptly refuses a FIB character count beyond the piece table", () => {
+    const file = bytes("parity-columns--v03.doc");
+    const view = new DataView(file.buffer, file.byteOffset, file.byteLength);
+    const sectorSize = 1 << view.getUint16(30, true);
+    const at = (sector: number): number => (sector + 1) * sectorSize;
+    const difat: number[] = [];
+    for (let i = 0; i < 109; i++) {
+      const sector = view.getInt32(76 + 4 * i, true);
+      if (sector >= 0) difat.push(sector);
+    }
+    const next = (sector: number): number => view.getInt32(at(difat[Math.floor(sector / (sectorSize / 4))]) + 4 * (sector % (sectorSize / 4)), true);
+    let wordDocument = -1;
+    for (let sector = view.getInt32(48, true); sector >= 0; sector = next(sector)) {
+      for (let entry = 0; entry < sectorSize / 128; entry++) {
+        const offset = at(sector) + entry * 128;
+        const name = new TextDecoder("utf-16le").decode(file.subarray(offset, offset + Math.max(0, view.getUint16(offset + 64, true) - 2)));
+        if (name === "WordDocument") wordDocument = at(view.getInt32(offset + 116, true));
+      }
+    }
+    expect(wordDocument).toBeGreaterThan(0);
+    // FibRgLw97 starts at 64; ccpText is at +12.
+    view.setInt32(wordDocument + 76, 0x7ffffff0, true);
+    const started = performance.now();
+    expect(() => docToDocx(file)).toThrow(/^damaged:/);
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
   it("writes the text with its paragraphs, styles and runs", () => {
     const doc = DocxDocument.load(docToDocx(bytes("parity-lists--v00.doc")));
     const texts = paragraphTexts(doc);
