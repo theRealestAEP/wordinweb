@@ -378,6 +378,27 @@ describe("renderDocxToPdf with markup", () => {
     expect(last(marked.pdf)).toBeCloseTo(last(plain.pdf) as number, 0);
   });
 
+  it.skipIf(!hasPdftotext)("lays the line out as the final text: a deleted page break breaks no page, a deleted tail leaves a right-aligned line in place", async () => {
+    const del = (id: number, inner: string): string => `<w:del w:id="${id}" ${BOB}>${inner}</w:del>`;
+    const broken = await render(docx(p(t("First.")), p(del(1, `<w:r><w:br w:type="page"/></w:r>`), t("Second, after a deleted page break."))), true);
+    expect(broken.pages).toBe(1);
+    const right = (runs: string): string => `<w:p><w:pPr><w:jc w:val="right"/></w:pPr>${runs}</w:p>`;
+    const marked = await render(docx(right(t("Kept text ") + del(2, `<w:r><w:delText>gone</w:delText></w:r>`))), true);
+    const plain = await render(docx(right(t("Kept text "))), true);
+    const x = (pdf: Buffer) => words(pdf).find((w) => w.text === "text")?.x;
+    expect(x(marked.pdf)).toBeCloseTo(x(plain.pdf) as number, 1);
+  });
+
+  it.skipIf(!hasPdftotext)("takes no room on the line for a deleted bordered run, and balloons it", async () => {
+    const bordered = `<w:del w:id="1" ${BOB}><w:r><w:rPr><w:bdr w:val="single" w:sz="24" w:space="10" w:color="000000"/></w:rPr><w:delText>boxed words</w:delText></w:r></w:del>`;
+    const marked = await render(docx(p(t("Some words then "), bordered, t(" and more words after it."))), true);
+    const plain = await render(docx(p(t("Some words then "), t(" and more words after it."))), true);
+    expect(pdfText(marked.pdf)).toContain("Bob Editor Deleted: boxed words");
+    // The border's inset is not on the line: "and" is where it is with no deletion.
+    const x = (pdf: Buffer) => words(pdf).find((w) => w.text === "and")?.x;
+    expect(x(marked.pdf)).toBeCloseTo(x(plain.pdf) as number, 1);
+  });
+
   it.skipIf(!hasPdftotext)("keeps a deleted row's text on its lines, a cell's deleted paragraph mark included: one balloon for the row", async () => {
     const del = (id: number, text: string): string => `<w:del w:id="${id}" ${BOB}><w:r><w:delText>${text}</w:delText></w:r></w:del>`;
     const row =

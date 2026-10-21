@@ -1072,6 +1072,8 @@ export function leadingBreakOf(para: Paragraph): { type: "page" | "column"; run:
   for (const child of para.children) {
     const runs = child.type === "run" ? [child] : child.runs;
     for (const r of runs) {
+      // Printed markup: deleted text is not on the line (Run.inBalloon).
+      if (r.inBalloon) continue;
       for (const c of r.content) {
         if (!br) {
           if (c.kind === "break") {
@@ -3452,7 +3454,9 @@ function buildAtoms(
     // run's effective formatting.
     if (run.inBalloon) {
       for (const change of run.changes ?? []) for (const piece of change.deleted ?? []) if (piece.run === run) piece.props = baseProps;
-      atoms.push({ kind: "frag", text: "", props: baseProps, font, width: 0, href, src: { run, t: null, offset: 0 }, changeAnchor: true });
+      // Its own props are the size alone: the run's border, shading or
+      // underline would give the empty item width or marks.
+      atoms.push({ kind: "frag", text: "", props: { size: baseProps.size }, font, width: 0, href, src: { run, t: null, offset: 0 }, changeAnchor: true });
       return;
     }
     // Kashida-justified paragraph: fold the per-glyph elongation into this RTL
@@ -4281,6 +4285,19 @@ function buildAtoms(
     else if (a.kind === "space") {
       if (prevNbsp) a.noBreak = true;
     } else prevNbsp = false;
+  }
+  // Printed markup: deleted text's empty items (FragAtom.changeAnchor)
+  // after the last word, before a line break or the paragraph's end, go
+  // ahead of the spaces there, so the spaces still hang past the line's end
+  // and the empty items never wrap to a line of their own.
+  for (let end = atoms.length; end > 0; end--) {
+    if (end < atoms.length && atoms[end].kind !== "break") continue;
+    let start = end;
+    while (start > 0 && (atoms[start - 1].kind === "space" || (atoms[start - 1] as FragAtom).changeAnchor)) start--;
+    const tail = atoms.slice(start, end);
+    if (!tail.some((a) => a.kind === "space")) continue;
+    const reordered = [...tail.filter((a) => a.kind !== "space"), ...tail.filter((a) => a.kind === "space")];
+    atoms.splice(start, end - start, ...reordered);
   }
   return { atoms, anchors };
 }
