@@ -41,6 +41,7 @@ import {
   leadingBreakOf,
   resolveField,
   setBreakCacheWindowed,
+  starNumberFormat,
 } from "./inline.js";
 import { TextMeasurer, createMeasurer, quantizeQuarterPt } from "./measure.js";
 import {
@@ -637,18 +638,14 @@ function assignSeq(
 ): string {
   const prior = assigned.get(key);
   if (prior !== undefined) return prior;
-  const rMatch = /\\r\s+(\d+)/.exec(instr);
+  const rMatch = /\\r\s*(\d+)/.exec(instr);
   const repeat = /\\c(\s|$)/.test(instr);
   let n: number;
   if (rMatch) n = parseInt(rMatch[1], 10);
   else if (repeat) n = counters.get(ident) ?? 1;
   else n = (counters.get(ident) ?? 0) + 1;
   counters.set(ident, n);
-  const fmt = /\\\*\s+(\w+)/.exec(instr)?.[1]?.toLowerCase();
-  const text =
-    fmt === "roman" ? formatNumber(n, "lowerRoman")
-    : fmt === "alphabetic" ? formatNumber(n, "lowerLetter")
-    : String(n);
+  const text = starNumberFormat(instr, n) ?? String(n);
   assigned.set(key, text);
   return text;
 }
