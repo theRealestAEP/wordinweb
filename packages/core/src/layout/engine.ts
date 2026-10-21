@@ -8387,6 +8387,10 @@ class Engine {
     let segTop = this.y;
     let segPage = this.cur;
     let segHasRows = false;
+    // Where the body rows start on a page whose only content above them is
+    // this table's header rows. A row there is at the top of its page: it
+    // never moves on and leaves the header rows alone.
+    let belowRepeatedHeaders = -Infinity;
     let moveEmitted = false;
     const markTableStart = () => {
       if (moveEmitted) return;
@@ -8409,6 +8413,7 @@ class Engine {
     // the first row. The matching bottom half is added after the final row.
     // Separated-border tables advance 2*spacing instead (outline to first
     // cell box).
+    const startsAtTop = this.pageIsEmptyAtCursor();
     if (tbl.rows.length > 0) this.y += s2 || this.rowTopLead(tbl, 0);
     for (const [key, ph] of spanPaint) {
       const ri = Math.floor(key / 1000);
@@ -8416,11 +8421,28 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
 
+    // The height a row needs on a page: all of it when it cannot split, else
+    // the bottom of its lowest first line.
+    const firstLineNeed = (row: TableRow, laid: (typeof laidRows)[number], height: number): number => {
+      if (row.props.cantSplit || row.props.heightRule === "exact") return height;
+      let need = 0;
+      for (const cell of laid.cells) {
+        let first = Infinity;
+        for (const it of cell?.items ?? []) {
+          if (it.kind === "text") first = Math.min(first, it.lineTop + it.lineHeight);
+        }
+        if (first !== Infinity) need = Math.max(need, first);
+      }
+      return Math.min(height, need || height);
+    };
+
     for (let ri = 0; ri < tbl.rows.length; ri++) {
       const row = tbl.rows[ri];
       let laid = laidRows[ri];
       let rowHeight = rowHeights[ri];
-      const advance = () => {
+      // `need` is the room the row that continues on the next page needs
+      // there: all of it when it cannot split, else its first line.
+      const advance = (need: number) => {
         if (segHasRows && segmentBottom && segmentBottom.style !== "none") {
           this.cur.items.push({
             kind: "edge",
@@ -8456,7 +8478,13 @@ class Engine {
         // longtable header repeats at the same 25.0pt pitch on every page;
         // advancing by the bare content height ran each continuation page
         // 0.5pt high and drifted the 200-row grid a full row by page 9).
-        if (!row.props.tblHeader) {
+        // Word repeats the header rows only when a body row still fits
+        // below them. Header rows taller than the page would otherwise fill
+        // every new page and push the row on again (GovDocs1 073543 gave
+        // 4005 pages).
+        const headerH = headerRows.reduce((sum, hr) => sum + rowHeights[tbl.rows.indexOf(hr)], 0);
+        belowRepeatedHeaders = -Infinity;
+        if (!row.props.tblHeader && this.y + headerH + need <= this.bodyBottom + 0.01) {
           for (const hr of headerRows) {
             const hIdx = tbl.rows.indexOf(hr);
             const hLaid = this.layoutRow(tbl, hr, hIdx, widths);
@@ -8476,6 +8504,7 @@ class Engine {
             segHasRows = true;
             this.y += hH;
           }
+          if (headerRows.length > 0) belowRepeatedHeaders = this.y;
         }
       };
       // Word splits an ordinary row at the page boundary when both fragments
@@ -8523,7 +8552,8 @@ class Engine {
         // advance() and the split happens from the page top.
         const atColumnTop =
           this.pageIsEmptyAtCursor() ||
-          this.y <= this.cur.bodyTop + this.rowTopLead(tbl, ri) + 0.01;
+          this.y <= this.cur.bodyTop + this.rowTopLead(tbl, ri) + 0.01 ||
+          this.y <= belowRepeatedHeaders + 0.01;
         const cantSplitHolds =
           row.props.cantSplit === true &&
           (rowHeight <= this.cur.bodyBottom - this.cur.bodyTop + 0.01 || !atColumnTop);
@@ -8544,7 +8574,11 @@ class Engine {
         // strict cut (parity-rowsplit: a 2.4px overshoot moves).
         const keepSlack =
           this.rowNoteHeight(laid) > 0 || (this.cur.footnoteH[this.col] ?? 0) > 0 ? NOTE_SEP_H : 0;
-        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack) : null;
+        // At the top of a page the row cannot move on, so it splits even when
+        // one part holds only empty paragraphs (GovDocs1 048972: a row of
+        // text and empty paragraphs under a repeated header made 50 pages of
+        // headers alone, then ran off the page).
+        const parts = canSplit ? this.splitLaidRow(laid, this.bodyBottom - this.y, keepSlack, atColumnTop) : null;
         if (parts) {
           markTableStart();
           this.paintRow(tbl, row, ri, parts.top, x0, widths, parts.top.height);
@@ -8561,21 +8595,21 @@ class Engine {
             });
           }
           this.y += parts.top.height;
-          advance();
+          advance(firstLineNeed(row, parts.rest, parts.rest.height));
           laid = parts.rest;
           rowHeight = Math.max(laid.height, 0);
           continue;
         }
         // Nothing splittable: at the top of a page the row simply overflows
         // (old behavior); mid-page it moves whole and gets one more chance.
-        const topHalf = this.rowTopLead(tbl, ri);
-        if (this.pageIsEmptyAtCursor() || this.y <= this.cur.bodyTop + topHalf + 0.01) break;
-        advance();
+        if (atColumnTop) break;
+        advance(firstLineNeed(row, laid, rowHeight));
       }
       markTableStart();
       this.paintRow(tbl, row, ri, laid, x0, widths, rowHeight);
       segHasRows = true;
       this.y += rowHeight;
+      if (row.props.tblHeader && startsAtTop && segPage === this.cur) belowRepeatedHeaders = this.y;
       // Separated cell borders: 2*spacing of vertical air between each row's
       // cell boxes (matching the horizontal gap), so the row-to-row boundary
       // shows two rules with a gap rather than one shared rule.
@@ -8984,6 +9018,8 @@ class Engine {
     avail: number,
     /** Extra depth text glyphs may reach past the drawn cut (note fill band). */
     keepSlack = 0,
+    /** The row is at the top of its page: a part may hold only empty lines. */
+    atPageTop = false,
   ): { top: typeof laid; rest: typeof laid } | null {
     if (avail < 12) return null;
     const bottomOf = (it: PageItem): number =>
@@ -9126,8 +9162,9 @@ class Engine {
           it.kind === "wordart",
       );
     if (
-      !partitions.some(({ keep }) => hasVisibleContent(keep)) ||
-      !partitions.some(({ rest }) => hasVisibleContent(rest))
+      !atPageTop &&
+      (!partitions.some(({ keep }) => hasVisibleContent(keep)) ||
+        !partitions.some(({ rest }) => hasVisibleContent(rest)))
     ) {
       return null;
     }

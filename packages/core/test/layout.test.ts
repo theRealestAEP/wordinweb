@@ -5384,6 +5384,43 @@ describe("floating table flow and overlap", () => {
   });
 });
 
+describe("repeated header rows", () => {
+  const cell = (body: string) => `<w:tc><w:tcPr><w:tcW w:w="9000" w:type="dxa"/></w:tcPr>${body}</w:tc>`;
+  const table = (header: string, rows: string[]) =>
+    `<w:tbl><w:tblPr><w:tblW w:w="9000" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid>` +
+    `<w:tr><w:trPr><w:tblHeader/></w:trPr>${cell(header)}</w:tr>` +
+    rows.map((r) => `<w:tr>${cell(r)}</w:tr>`).join("") +
+    `</w:tbl>`;
+  const count = (result: ReturnType<typeof layoutDocument>, text: string) =>
+    result.pages.reduce((n, page) => n + page.items.filter((i) => i.kind === "text" && i.text === text).length, 0);
+
+  // GovDocs1 073543: header rows taller than the page repeated on every new
+  // page and pushed each body row on again: 4005 pages.
+  it("stops repeating header rows that leave no room for a body row", () => {
+    const header = Array.from({ length: 40 }, (_, i) => p(`head${i}`)).join("");
+    const rows = Array.from({ length: 5 }, (_, i) => p(`body${i}`));
+    const { result } = layout({ "word/document.xml": wrapDocument(table(header, rows)) });
+    expect(result.pages.length).toBeLessThanOrEqual(3);
+    expect(count(result, "head0")).toBe(1);
+    for (let i = 0; i < 5; i++) expect(count(result, `body${i}`)).toBe(1);
+  });
+
+  // GovDocs1 048972: a row of text and empty paragraphs, taller than the
+  // page, under a header: 50 pages of the header alone, then the row ran off
+  // the page.
+  it("splits a tall row under the header even when only empty paragraphs move", () => {
+    const tall = p("B") + "<w:p/>".repeat(60);
+    const { result } = layout({ "word/document.xml": wrapDocument(table(p("F"), [tall])) });
+    expect(result.pages.length).toBe(2);
+    expect(pageText(result, 0)).toBe("FB");
+    for (const page of result.pages) {
+      for (const item of page.items) {
+        if (item.kind === "text") expect(item.lineTop + item.lineHeight).toBeLessThanOrEqual(page.bodyBottom + 1);
+      }
+    }
+  });
+});
+
 describe("floating table taller than the page", () => {
   // GovDocs1 026283 (B5): a text-anchored floating table of ~2,000 rows printed
   // its first page and lost the rest. Word breaks a floating table across
