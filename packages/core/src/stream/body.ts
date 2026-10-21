@@ -552,6 +552,12 @@ class BodyStore {
 /** Give each field occurrence in `block` the key the Prescan's memos use for it. */
 function keyFields(block: Block, index: number, keys: WeakMap<object, string>): void {
   let n = 0;
+  const keyField = (field: FieldContent): void => {
+    keys.set(field, `${index}:${n++}`);
+    for (const part of field.instructionParts ?? []) {
+      if (typeof part !== "string") keyField(part);
+    }
+  };
   const visit = (b: Block): void => {
     if (b.type !== "paragraph") {
       for (const row of b.rows) for (const cell of row.cells) for (const nested of cell.blocks) visit(nested);
@@ -559,7 +565,7 @@ function keyFields(block: Block, index: number, keys: WeakMap<object, string>): 
     }
     for (const c of b.children) {
       const runs = c.type === "run" ? [c] : c.runs;
-      for (const r of runs) for (const rc of r.content) if (rc.kind === "field") keys.set(rc as FieldContent, `${index}:${n++}`);
+      for (const r of runs) for (const rc of r.content) if (rc.kind === "field") keyField(rc);
     }
   };
   visit(block);

@@ -3,6 +3,7 @@ import { minchoCovers } from "./mincho-coverage.js";
 import {
   DrawingContent,
   EmbeddedObjectReference,
+  FieldContent,
   Model3DReference,
   Paragraph,
   ParaProps,
@@ -18,6 +19,7 @@ import { hasSegoeUIEmoji, TextMeasurer } from "./measure.js";
 import { MathBox, layoutMath } from "./math.js";
 import { localName, XmlElement } from "../xml.js";
 import { formatNumber } from "../parse/numbering.js";
+import { hyperlinkTarget } from "../parse/document.js";
 
 /** Apply a field's `\* <format>` general-formatting switch to a computed
  * number. The argument can immediately follow `\*`. Returns undefined when
@@ -4195,7 +4197,13 @@ function buildAtoms(
 
   for (const childEl of para.children) {
     if (childEl.type === "run") pushRun(childEl);
-    else for (const r of childEl.runs) pushRun(r, childEl.href ?? (childEl.anchor ? "#" + childEl.anchor : undefined));
+    else {
+      const target = childEl.field
+        ? hyperlinkTarget(resolveFieldInstruction(childEl.field.instruction, fields, childEl.field))
+        : childEl;
+      const href = target?.href ?? (target?.anchor ? "#" + target.anchor : undefined);
+      for (const r of childEl.runs) pushRun(r, href);
+    }
   }
   // A tracked paragraph mark shows as a pilcrow in the revision's colors: a
   // suggested line break is otherwise only text that moved down. It has no
@@ -4328,8 +4336,16 @@ function mergeCaseFormat(instr: string, text: string): string {
   }
 }
 
+/** Evaluate nested fields in source order to form their parent's instruction. */
+export function resolveFieldInstruction(instruction: string, ctx: FieldContext, fieldKey?: object): string {
+  const parts = (fieldKey as FieldContent | undefined)?.instructionParts;
+  return parts
+    ? parts.map((part) => typeof part === "string" ? part : resolveField(part.instruction, part.cachedResult, ctx, part)).join("")
+    : instruction;
+}
+
 export function resolveField(instruction: string, cachedResult: string, ctx: FieldContext, fieldKey?: object): string {
-  const instr = instruction.trim();
+  const instr = resolveFieldInstruction(instruction, ctx, fieldKey).trim();
   const keyword = instr.split(/\s+/)[0]?.toUpperCase();
   switch (keyword) {
     case "PAGE": {
@@ -4361,6 +4377,8 @@ export function resolveField(instruction: string, cachedResult: string, ctx: Fie
       const value = ident && ctx.seq && fieldKey ? ctx.seq(ident, fieldKey, instr) : cachedResult || "";
       return /\\h(\s|$)/i.test(instr) ? "" : value;
     }
+    case "SET":
+      return "";
     case "REF": {
       // Word recomputes REF on open — the docx cache is stale (and this
       // repo's sanitizer remaps cached digits: gatech's table-of-figures
