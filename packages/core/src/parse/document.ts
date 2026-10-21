@@ -1464,6 +1464,10 @@ function parseDrawing(
         textboxChainId = attr(linkedEl, "id");
         textboxChainSeq = intAttr(linkedEl, "seq") ?? 1;
         if (!textboxEl) textboxEl = el;
+        // Like a text box with content, it adds no path of its own: its fill
+        // and outline are the text box's, so a lone continuation box still
+        // takes the text box path below.
+        return;
       }
       if (txbxEl && findDescendant(txbxEl, "txbxContent")) {
         if (!textboxEl) textboxEl = el;

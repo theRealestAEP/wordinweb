@@ -150,6 +150,20 @@ describe("a linked chain of three or more text boxes (GovDocs 032370, 027984)", 
     expect(words.filter((w) => w === "SECOND")).toHaveLength(1);
     expect(words.filter((w) => w === "THIRD")).toHaveLength(1);
   });
+
+  it("continues the story in outlined boxes", () => {
+    // render-eval probe3-linked-textboxes: each box has a filled, outlined
+    // shape. The continuation box's outline must not make it a drawing.
+    const outlined = (seq: number) =>
+      chainBox(seq).replace(
+        "<a:noFill/><a:ln><a:noFill/></a:ln>",
+        '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill><a:ln w="9525"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>',
+      );
+    const { result } = layout(`<w:p>${[0, 1, 2].map(outlined).join("")}<w:r><w:t>Anchor</w:t></w:r></w:p>`);
+    const page = texts(result.pages[0].items);
+    const at = (word: string) => page.filter((t) => t.text === word).map((t) => Math.round(t.x));
+    expect([at("FIRST"), at("SECOND"), at("THIRD"), at("FOURTH")]).toEqual([[left[0]], [left[1]], [left[2]], []]);
+  });
 });
 
 describe("a compatibility-mode 11 footer that starts with a page-anchored frame (GovDocs 030685)", () => {
