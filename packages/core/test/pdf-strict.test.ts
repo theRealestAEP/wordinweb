@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import { renderDocxToPdf } from "../src/pdf/render.js";
 import { bytesSource } from "../src/stream/source.js";
 import { makeDocx, makeDocxWithMedia, p, wrapDocument } from "./helpers.js";
+import { noisePng } from "./pictures.js";
 import { toStrictPackage } from "./strict-helpers.js";
 
 let hasPoppler = false;
@@ -26,7 +27,8 @@ async function render(docx: Uint8Array): Promise<{ text: string; images: number 
       callback();
     },
   });
-  await renderDocxToPdf(bytesSource(docx), out);
+  const report = await renderDocxToPdf(bytesSource(docx), out);
+  expect(report.unsupportedImages).toEqual([]);
   const bytes = Buffer.concat(chunks);
   const dir = mkdtempSync(join(tmpdir(), "wordinweb-strict-"));
   try {
@@ -64,7 +66,7 @@ describe.skipIf(!hasPoppler)("Strict PDF rendering", () => {
     const docx = makeDocxWithMedia({
       "word/document.xml": document,
       "word/_rels/document.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPicture" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/></Relationships>',
-    }, { "word/media/picture.png": Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADUlEQVR42mP8z8BQDwAFgQIAffwlNAAAAABJRU5ErkJggg==", "base64") });
+    }, { "word/media/picture.png": noisePng(1, 1) });
     const transitional = await render(docx);
     expect(words.split(" ")).toHaveLength(21);
     expect(transitional.text.trim().split(/\s+/)).toEqual(words.split(" "));
