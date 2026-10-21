@@ -366,7 +366,7 @@ export class CommentColumn {
           if (!from) continue;
           const turn = Math.max(textRight, from.x);
           drawer.ops.push(
-            `q [${num(1.5)} ${num(1.5)}] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.top))} m ` +
+            `q [3 2.5] 0 d 0.75 w ${rgb(balloon.color)} RG ${num(drawer.x(from.x))} ${num(drawer.y(from.top))} m ` +
               `${num(drawer.x(turn))} ${num(drawer.y(from.top))} l ${num(drawer.x(barX))} ${num(drawer.y(top + balloon.leaderAt))} l S Q`,
           );
         }

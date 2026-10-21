@@ -223,7 +223,7 @@ describe("renderDocxToPdf with comments", () => {
     expect(text).not.toContain("Inserted");
     expect(text.match(/Deleted: the old term \d+/g)?.length).toBe(20);
     // 30 leaders, each ending at its balloon's bar (the page's 612 pt and a 2.25 pt gap), on the sheet.
-    const ends = [...contentStreams(bytes).matchAll(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l ([\d.]+) (-?[\d.]+) l S/g)];
+    const ends = [...contentStreams(bytes).matchAll(/\[3 2\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l ([\d.]+) (-?[\d.]+) l S/g)];
     expect(ends).toHaveLength(30);
     for (const [, x, y] of ends) {
       expect(Number(x)).toBeCloseTo(614.25, 1);
@@ -258,7 +258,7 @@ describe("renderDocxToPdf with comments", () => {
     for (const t of ["Equation note", "Clipped line note", "Reply under the clipped note", "Note at no text"]) expect(text).toContain(t);
     // The equation's card and the clipped line's card (beside the row's visible line) have leaders; the card at no text has none.
     const content = contentStreams(bytes);
-    expect(content.match(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(2);
+    expect(content.match(/\[3 2\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l [\d.]+ [\d.]+ l S/g)?.length).toBe(2);
   });
 
   it.skipIf(!hasPdftotext)("prints the card of a comment at no text once, on the last sheet", async () => {
@@ -320,7 +320,7 @@ describe("renderDocxToPdf with comments", () => {
     const content = contentStreams(bytes);
     // No tick at the text: the leader alone, along the top of the line from the highlight's end to the text area's right edge, then to the bar.
     expect(content.match(/q 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG [\d.]+ [\d.]+ m [\d.]+ [\d.]+ l S/g)).toBeNull();
-    const leaders = [...content.matchAll(/\[1\.5 1\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l ([\d.]+) [\d.]+ l S/g)];
+    const leaders = [...content.matchAll(/\[3 2\.5] 0 d 0\.75 w [\d.]+ [\d.]+ [\d.]+ RG ([\d.]+) ([\d.]+) m ([\d.]+) ([\d.]+) l ([\d.]+) [\d.]+ l S/g)];
     expect(leaders.length).toBe(3);
     for (const [, x0, y0, turn, y1, end] of leaders) {
       expect(Number(x0)).toBeLessThan(540);

@@ -118,7 +118,7 @@ function words(bytes: Buffer): { text: string; x: number; y: number }[] {
 
 /** The dashed leaders: where each starts (pt), and the bar it ends at. */
 const leaders = (ops: string): { x: number; y: number; endX: number }[] =>
-  [...ops.matchAll(/^q \[1\.5 1\.5\] 0 d 0\.75 w \S+ \S+ \S+ RG ([\d.]+) ([\d.]+) m [\d.]+ [\d.]+ l ([\d.]+) [\d.]+ l S Q$/gm)].map((m) => ({ x: Number(m[1]), y: Number(m[2]), endX: Number(m[3]) }));
+  [...ops.matchAll(/^q \[3 2\.5\] 0 d 0\.75 w \S+ \S+ \S+ RG ([\d.]+) ([\d.]+) m [\d.]+ [\d.]+ l ([\d.]+) [\d.]+ l S Q$/gm)].map((m) => ({ x: Number(m[1]), y: Number(m[2]), endX: Number(m[3]) }));
 
 /** The text groups (q … Q with glyphs) of one fill color, with whether an underline rule follows the text. */
 const groups = (ops: string, rgb: string): { underlined: boolean }[] =>
