@@ -15,11 +15,11 @@ import { convertWmf } from "./wmf.js";
  * the canvas: the page draws an empty frame, and the picture is listed as
  * unsupported, rather than drawn in part.
  */
-export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: FontSet, resources: Resources): Promise<RecordingCanvas | null> {
+export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: FontSet, resources: Resources, frame?: { width: number; height: number }): Promise<RecordingCanvas | null> {
   const budget = new BitmapBudget();
   let canvas: RecordingCanvas | null;
   try {
-    canvas = ext === "wmf" ? convertWmf(bytes, fonts, resources, budget) : ext === "emf" ? await convertEmf(bytes, fonts, resources, budget) : ext === "pict" ? convertPict(bytes, fonts, resources, budget) : null;
+    canvas = ext === "wmf" ? convertWmf(bytes, fonts, resources, budget, frame) : ext === "emf" ? await convertEmf(bytes, fonts, resources, budget) : ext === "pict" ? convertPict(bytes, fonts, resources, budget) : null;
   } catch {
     return null;
   }

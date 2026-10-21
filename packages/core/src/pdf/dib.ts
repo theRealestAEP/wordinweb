@@ -24,21 +24,26 @@ const BI_BITFIELDS = 3;
  * bits), or null for one this does not read or whose bits stop short of
  * its rows. Its pixels are taken from `budget` before they are allocated.
  */
-export function decodeDib(view: DataView, at: number, end: number, budget: BitmapBudget): DibImage | null {
+export function decodeDib(view: DataView, at: number, end: number, budget: BitmapBudget, pixelOffset?: number): DibImage | null {
   if (at + 12 > end) return null;
   const headerSize = view.getUint32(at, true);
   const core = headerSize === 12;
   if (!core && (headerSize < 40 || at + headerSize > end)) return null;
   const width = core ? view.getUint16(at + 4, true) : view.getInt32(at + 4, true);
-  const rawHeight = core ? view.getInt16(at + 6, true) : view.getInt32(at + 8, true);
+  const rawHeight = core ? view.getUint16(at + 6, true) : view.getInt32(at + 8, true);
   const bitCount = view.getUint16(at + (core ? 10 : 14), true);
   const compression = core ? BI_RGB : view.getUint32(at + 16, true);
   const used = core ? 0 : view.getUint32(at + 32, true);
   const height = Math.abs(rawHeight);
   if (width <= 0 || height === 0) return null;
+  if (![1, 4, 8, 16, 24, 32].includes(bitCount) || view.getUint16(at + (core ? 8 : 12), true) !== 1) return null;
+  if ((compression === BI_RLE8 && bitCount !== 8) || (compression === BI_RLE4 && bitCount !== 4)) return null;
+  if (rawHeight < 0 && (compression === BI_RLE8 || compression === BI_RLE4)) return null;
   let masks: [number, number, number] | null = null;
   let tableAt = at + headerSize;
   if (compression === BI_BITFIELDS) {
+    if (bitCount !== 16 && bitCount !== 32) return null;
+    if ((headerSize === 40 && tableAt + 12 > end) || (headerSize !== 40 && headerSize < 52)) return null;
     if (headerSize === 40) {
       masks = [view.getUint32(tableAt, true), view.getUint32(tableAt + 4, true), view.getUint32(tableAt + 8, true)];
       tableAt += 12;
@@ -46,13 +51,15 @@ export function decodeDib(view: DataView, at: number, end: number, budget: Bitma
   } else if (compression !== BI_RGB && compression !== BI_RLE8 && compression !== BI_RLE4) return null;
   const colors = bitCount <= 8 ? used || 1 << bitCount : used;
   const entry = core ? 3 : 4;
+  if ((bitCount <= 8 && colors > 1 << bitCount) || tableAt + colors * entry > end) return null;
   const palette: [number, number, number][] = [];
-  // A table longer than the bits can index is read only as far as they can.
-  for (let i = 0; i < Math.min(colors, 256) && bitCount <= 8; i++) {
+  for (let i = 0; i < colors && bitCount <= 8; i++) {
     const p = tableAt + i * entry;
-    palette.push(p + 3 <= end ? [view.getUint8(p + 2), view.getUint8(p + 1), view.getUint8(p)] : [0, 0, 0]);
+    palette.push([view.getUint8(p + 2), view.getUint8(p + 1), view.getUint8(p)]);
   }
-  const bitsAt = tableAt + colors * entry;
+  const tableEnd = tableAt + colors * entry;
+  const bitsAt = pixelOffset ?? tableEnd;
+  if (bitsAt < tableEnd || bitsAt > end) return null;
   const stride = Math.floor((width * bitCount + 31) / 32) * 4;
   // The last row needs its pixels, not its padding.
   if (compression !== BI_RLE8 && compression !== BI_RLE4 && bitsAt + stride * (height - 1) + Math.ceil((width * bitCount) / 8) > end) return null;
@@ -67,7 +74,10 @@ export function decodeDib(view: DataView, at: number, end: number, budget: Bitma
     rgba[i + 2] = b;
     rgba[i + 3] = 255;
   };
-  const color = (index: number): [number, number, number] => palette[index] ?? [0, 0, 0];
+  const color = (index: number): [number, number, number] => {
+    if (!palette[index]) throw new Error("DIB palette index exceeds its table");
+    return palette[index];
+  };
 
   if (compression === BI_RLE8 || compression === BI_RLE4) {
     // Run-length encoded rows ([MS-WMF] 3.1.6): a pixel never written stays transparent.
@@ -75,13 +85,15 @@ export function decodeDib(view: DataView, at: number, end: number, budget: Bitma
     let row = 0;
     let p = bitsAt;
     let finished = false;
-    while (p + 1 < end && row < height) {
+    while (p + 1 < end) {
       const count = view.getUint8(p);
       const value = view.getUint8(p + 1);
       p += 2;
       if (count > 0) {
-        for (let i = 0; i < count && x < width; i++, x++) put(x, row, color(compression === BI_RLE8 ? value : i & 1 ? value & 15 : value >> 4));
+        if (row >= height || x + count > width) return null;
+        for (let i = 0; i < count; i++, x++) put(x, row, color(compression === BI_RLE8 ? value : i & 1 ? value & 15 : value >> 4));
       } else if (value === 0) {
+        if (row >= height) return null;
         x = 0;
         row++;
       } else if (value === 1) {
@@ -89,20 +101,23 @@ export function decodeDib(view: DataView, at: number, end: number, budget: Bitma
         break;
       }
       else if (value === 2) {
+        if (p + 2 > end) return null;
         x += view.getUint8(p);
         row += view.getUint8(p + 1);
+        if (x > width || row >= height) return null;
         p += 2;
       } else {
         const bytes = compression === BI_RLE8 ? value : Math.ceil(value / 2);
-        for (let i = 0; i < value && x < width; i++, x++) {
+        if (row >= height || x + value > width || p + bytes + (bytes & 1) > end) return null;
+        for (let i = 0; i < value; i++, x++) {
           const byte = view.getUint8(p + (compression === BI_RLE8 ? i : i >> 1));
           put(x, row, color(compression === BI_RLE8 ? byte : i & 1 ? byte & 15 : byte >> 4));
         }
         p += bytes + (bytes & 1);
       }
     }
-    // Runs that stop before the end-of-bitmap code or the last row: cut short.
-    if (!finished && row < height) return null;
+    // The end-of-bitmap code is required, including after a final end-of-line.
+    if (!finished) return null;
     return { width, height, bottomUp, rgba };
   }
 

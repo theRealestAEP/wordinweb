@@ -42,8 +42,8 @@ export function pictBitmap(width: number, height: number, rows = height): Uint8A
 }
 
 /** A WMF of `records` ([function, ...int16 params]) after a window of 100 x 50, ended by META_EOF. */
-export function wmf(records: number[][]): Uint8Array {
-  const all = [[0x020b, 0, 0], [0x020c, 50, 100], ...records, [0x0000]];
+export function wmf(records: number[][], window = true): Uint8Array {
+  const all = [...(window ? [[0x020b, 0, 0], [0x020c, 50, 100]] : []), ...records, [0x0000]];
   const words = all.map((r) => r.length + 2);
   const total = 9 + words.reduce((sum, w) => sum + w, 0);
   const bytes = new Uint8Array(total * 2);
@@ -213,6 +213,123 @@ function pngChunk(type: string, data: Uint8Array): Buffer {
   const crc = Buffer.alloc(4);
   crc.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type, "latin1"), data])), 0);
   return Buffer.concat([head, data, crc]);
+}
+
+/** A reproducible RGB noise PNG, with one typed buffer for its filtered rows. */
+export function noisePng(width: number, height: number): Buffer {
+  const stride = 1 + width * 3;
+  const raw = Buffer.alloc(stride * height);
+  let seed = 12345;
+  for (let y = 0; y < height; y++) {
+    for (let x = 1; x < stride; x++) {
+      seed ^= seed << 13;
+      seed ^= seed >>> 17;
+      seed ^= seed << 5;
+      raw[y * stride + x] = seed & 255;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr.set([8, 2, 0, 0, 0], 8);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk("IHDR", ihdr), pngChunk("IDAT", deflateSync(raw)), pngChunk("IEND", Buffer.alloc(0))]);
+}
+
+/** A 9 x 3 PNG with packed samples crossing byte boundaries and padded rows. */
+export function packedPng(depth: number, indexed: boolean, interlaced = false): Buffer {
+  const width = 9;
+  const height = 3;
+  const max = (1 << depth) - 1;
+  const passes = interlaced ? [[0, 0, 8, 8], [4, 0, 8, 8], [0, 4, 4, 8], [2, 0, 4, 4], [0, 2, 2, 4], [1, 0, 2, 2], [0, 1, 1, 2]] : [[0, 0, 1, 1]];
+  const rows: Buffer[] = [];
+  for (const [x0, y0, dx, dy] of passes) {
+    const w = Math.ceil((width - x0) / dx);
+    const h = Math.ceil((height - y0) / dy);
+    if (w <= 0 || h <= 0) continue;
+    for (let y = 0; y < h; y++) {
+      const row = Buffer.alloc(1 + Math.ceil(w * depth / 8));
+      for (let x = 0; x < w; x++) {
+        const sample = (x0 + x * dx + 2 * (y0 + y * dy)) & max;
+        row[1 + ((x * depth) >> 3)] |= sample << (8 - depth - ((x * depth) & 7));
+      }
+      // Sub filter operates on packed bytes, with one byte per filter pixel.
+      if (y & 1) {
+        for (let i = row.length - 1; i > 1; i--) row[i] = (row[i] - row[i - 1]) & 255;
+        row[0] = 1;
+      }
+      rows.push(row);
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr.set([depth, indexed ? 3 : 0, 0, 0, interlaced ? 1 : 0], 8);
+  const palette = Buffer.alloc((max + 1) * 3);
+  for (let i = 0; i <= max; i++) palette.set(pictureColor(i), i * 3);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), pngChunk("IHDR", ihdr), ...(indexed ? [pngChunk("PLTE", palette)] : []), pngChunk("IDAT", deflateSync(Buffer.concat(rows))), pngChunk("IEND", Buffer.alloc(0))]);
+}
+
+export const pictureColor = (index: number): number[] => [index * 17, 255 - index * 17, (index * 53) & 255];
+
+/** A 9 x 3 indexed DIB; RLE4 exercises alternating runs and odd absolute runs. */
+export function palettedDib(depth: 1 | 4, rle = false, core = false): Buffer {
+  const colors = 1 << depth;
+  const stride = Math.ceil(9 * depth / 32) * 4;
+  const bits = rle ? Buffer.from([
+    9, 0x10, 0, 0,
+    0, 9, 0x89, 0xab, 0xcd, 0xef, 0x00, 0, 0, 0,
+    4, 0x12, 0, 5, 0x34, 0x56, 0x70, 0, 0, 0,
+    0, 1,
+  ]) : Buffer.alloc(stride * 3);
+  if (!rle) {
+    for (let row = 0; row < 3; row++) {
+      for (let x = 0; x < 9; x++) {
+        const index = (x + 2 * (2 - row)) & (colors - 1);
+        bits[row * stride + ((x * depth) >> 3)] |= index << (8 - depth - ((x * depth) & 7));
+      }
+    }
+  }
+  const headerSize = core ? 12 : 40;
+  const entrySize = core ? 3 : 4;
+  const bytes = Buffer.alloc(headerSize + colors * entrySize + bits.length);
+  bytes.writeUInt32LE(headerSize, 0);
+  if (core) {
+    bytes.writeUInt16LE(9, 4);
+    bytes.writeUInt16LE(3, 6);
+    bytes.writeUInt16LE(1, 8);
+    bytes.writeUInt16LE(depth, 10);
+  } else {
+    bytes.writeInt32LE(9, 4);
+    bytes.writeInt32LE(3, 8);
+    bytes.writeUInt16LE(1, 12);
+    bytes.writeUInt16LE(depth, 14);
+    bytes.writeUInt32LE(rle ? 2 : 0, 16);
+    bytes.writeUInt32LE(bits.length, 20);
+    bytes.writeUInt32LE(colors, 32);
+  }
+  for (let i = 0; i < colors; i++) bytes.set(pictureColor(i).reverse(), headerSize + i * entrySize);
+  bytes.set(bits, headerSize + colors * entrySize);
+  return bytes;
+}
+
+/** BMP file header, with a gap before the bits to exercise bfOffBits. */
+export function bmp(dib: Buffer): Buffer {
+  const core = dib.readUInt32LE(0) === 12;
+  const colors = 1 << dib.readUInt16LE(core ? 10 : 14);
+  const tableEnd = dib.readUInt32LE(0) + colors * (core ? 3 : 4);
+  const bytes = Buffer.alloc(14 + dib.length + 8);
+  bytes.write("BM");
+  bytes.writeUInt32LE(bytes.length, 2);
+  bytes.writeUInt32LE(14 + tableEnd + 8, 10);
+  bytes.set(dib.subarray(0, tableEnd), 14);
+  bytes.set(dib.subarray(tableEnd), 14 + tableEnd + 8);
+  return bytes;
+}
+
+/** A StretchDIB WMF whose source covers the whole 9 x 3 DIB. */
+export function palettedWmf(dib: Buffer): Uint8Array {
+  const words = Array.from({ length: Math.ceil(dib.length / 2) }, (_, i) => (dib[i * 2] | ((dib[i * 2 + 1] ?? 0) << 8)) << 16 >> 16);
+  return wmf([[0x0f43, 0x0020, 0x00cc, 0, 3, 9, 0, 0, 40, 80, 5, 10, ...words]]);
 }
 
 /** An 8-bit gray PNG of `width` x `height`, every pixel 128; Adam7-interlaced when `interlaced`. */

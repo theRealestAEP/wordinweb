@@ -54,6 +54,9 @@ async function measure(path: string): Promise<{ peaks: Peaks; largest: number; p
   const ms = performance.now() - began;
   clearInterval(sampler);
   sample();
+  // Native zlib can finish between timer samples. Include the OS high-water
+  // mark; the control includes the same warm-up and font loading.
+  peaks.rss = Math.max(peaks.rss, process.resourceUsage().maxRSS * 1024);
   return { peaks, largest, pages: result.pages, unsupportedImages: result.unsupportedImages, ms };
 }
 
