@@ -12,10 +12,11 @@ import { convertWmf } from "./wmf.js";
  * RecordingCanvas. Null when the converter rejects the bytes, when the
  * picture is cut short or malformed, when it holds an EMF+ drawing record
  * the converter skips, when its bitmaps are over one
- * picture's BitmapBudget, when an EMF+ image it draws does not reach
- * the canvas, or when the canvas left out a paint or text for a point out
- * of reach (RecordingCanvas.dropped): the page draws an empty frame, and
- * the picture is listed as unsupported, rather than drawn in part.
+ * picture's BitmapBudget, or when an EMF+ image it draws does not reach
+ * the canvas: the page draws an empty frame, and the picture is listed as
+ * unsupported, rather than drawn in part. A canvas that left out a paint,
+ * text or image for a point out of reach (RecordingCanvas.dropped) is
+ * drawn without it, and listed as unsupported.
  */
 export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: FontSet, resources: Resources): Promise<RecordingCanvas | null> {
   const budget = new BitmapBudget();
@@ -28,7 +29,7 @@ export async function convertMetafile(ext: string, bytes: Uint8Array, fonts: Fon
   // The page draws the operators inside one q ... Q: a save the converter
   // left open would keep the picture's transform and clip on the rest of the page.
   canvas?.getContext("2d")?.restoreAll();
-  return canvas && canvas.dropped === 0 ? canvas : null;
+  return canvas;
 }
 
 async function convertEmf(bytes: Uint8Array, fonts: FontSet, resources: Resources, budget: BitmapBudget): Promise<RecordingCanvas | null> {

@@ -67,7 +67,7 @@ export class RecordingCanvas {
   pixels: ImageDataShim | null = null;
   /** BitmapShims drawn on this canvas. */
   bitmapsDrawn = 0;
-  /** Paints, clips and text left out for a point or length out of reach (see RecordingContext.fits). */
+  /** Paints, clips, text and images left out for a point or length out of reach (see RecordingContext.fits). */
   dropped = 0;
   private context: RecordingContext | null = null;
 
@@ -108,12 +108,12 @@ function multiply(m: Matrix, n: Matrix): Matrix {
 
 /**
  * How far from the canvas's origin a point or length may reach, in canvas
- * sizes. The page maps the canvas onto the picture's box, so whatever is
- * in reach lands within ten boxes of the picture: well inside the ±32767
- * units PDF readers take, and far outside anything the box shows. A
- * converter goes past it only on a misread record.
+ * sizes. The page maps the canvas onto the picture's box, at most a page
+ * wide (22 inches, 1584 units), so whatever is in reach lands within about
+ * 32000 units of the page: inside the ±32767 that PDF readers take. A
+ * converter goes past it on a misread record, by far (1e+32).
  */
-const REACH = 10;
+const REACH = 20;
 
 const FONT = /^\s*(?:(italic|oblique)\s+)?(?:(normal|bold|bolder|lighter|[1-9]00)\s+)?(?:(normal|small-caps)\s+)?(\d+(?:\.\d+)?)(px|pt)\s+(.+)$/;
 

@@ -208,6 +208,8 @@ async function render(source: string | ByteSource, out: Writable, options: Rende
       const bytes = await opened.media(part);
       const canvas = bytes && (await convertMetafile(ext, bytes, fonts, resources));
       if (!canvas) return null;
+      // Drawn without what the canvas left out of reach, and reported.
+      if (canvas.dropped > 0) unsupportedImages.add(part);
       // The bitmaps the metafile drew become XObjects, named in its operators.
       const names: string[] = [];
       const xobjects: string[] = [];

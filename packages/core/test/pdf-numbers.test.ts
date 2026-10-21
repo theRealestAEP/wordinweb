@@ -19,7 +19,7 @@ import { emf, emfPlus, emfPlusDriverString, emfPlusFont, pictureDocx } from "./p
  * Numbers in the PDF's content: never in exponent form (PDF has none, and
  * Poppler drops the rest of a page's content at one), and never a point a
  * metafile player misread: the recording canvas leaves out what reaches
- * past ten canvas sizes, and the picture is reported as unsupported.
+ * past twenty canvas sizes, and the picture is reported as unsupported.
  */
 
 const require = createRequire(import.meta.url);
@@ -97,12 +97,12 @@ describe("RecordingCanvas", () => {
     expect(canvas.ops.join("\n")).not.toMatch(/e[+-]\d|NaN|Infinity/);
   });
 
-  it("keeps points within ten canvas sizes of its origin", () => {
+  it("keeps points within twenty canvas sizes of its origin", () => {
     const canvas = new RecordingCanvas(100, 50, fonts, resources());
     const ctx = canvas.getContext("2d")!;
-    ctx.fillRect(-900, -900, 1800, 1800);
+    ctx.fillRect(-1900, -1900, 3800, 3800);
     expect(canvas.dropped).toBe(0);
-    ctx.fillRect(0, 0, 1001, 1);
+    ctx.fillRect(0, 0, 2001, 1);
     expect(canvas.dropped).toBe(1);
   });
 
@@ -112,14 +112,14 @@ describe("RecordingCanvas", () => {
     ctx.rect(-1e30, -1e30, 2e30, 2e30);
     ctx.clip();
     expect(canvas.dropped).toBe(0);
-    expect(canvas.ops).toEqual(["-1000 -1000 m 1000 -1000 l 1000 1000 l -1000 1000 l h W n"]);
+    expect(canvas.ops).toEqual(["-2000 -2000 m 2000 -2000 l 2000 2000 l -2000 2000 l h W n"]);
   });
 
   it("leaves out a clip out of reach with a slanted edge, which clamping would move", () => {
     const canvas = new RecordingCanvas(100, 50, fonts, resources());
     const ctx = canvas.getContext("2d")!;
-    ctx.moveTo(-2000, 0);
-    ctx.lineTo(2000, 0);
+    ctx.moveTo(-4000, 0);
+    ctx.lineTo(4000, 0);
     ctx.lineTo(0, 50);
     ctx.clip();
     expect(canvas.dropped).toBe(1);
@@ -128,9 +128,11 @@ describe("RecordingCanvas", () => {
 });
 
 describe("a metafile with a text origin out of reach", () => {
-  it("gives no picture for a text origin out of reach, and the text after the picture stays", async () => {
-    const bytes = emf([emfPlus([emfPlusFont(0, 10), emfPlusDriverString("Away", 2.6e25, 30)])]);
-    expect(await convertMetafile("emf", bytes, fonts, resources())).toBeNull();
+  it("draws the picture without that text and reports it, and the text after the picture stays", async () => {
+    const bytes = emf([emfPlus([emfPlusFont(0, 10), emfPlusDriverString("Away", 2.6e25, 30), emfPlusDriverString("Near", 20, 30)])]);
+    const canvas = await convertMetafile("emf", bytes, fonts, resources());
+    expect(canvas!.dropped).toBe(1);
+    expect(canvas!.ops.join("\n")).toMatch(/ 20 30 Tm /);
     const chunks: Buffer[] = [];
     const out = new Writable({
       write(chunk: Buffer, _encoding, callback) {
