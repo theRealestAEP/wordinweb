@@ -5382,6 +5382,37 @@ describe("floating table flow and overlap", () => {
       expect(intersects(rects(prevented)[0], rects(prevented)[1])).toBe(false);
     }
   });
+
+  it("draws a picture in a floating table above a later overlapping one", () => {
+    // render-eval probe3-table-exotics--v05: Word shows the picture in table
+    // A's cell whole over table B, whose cells cover the rest of A.
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="762000" cy="762000"/>` +
+      `<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="762000" cy="762000"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const withPicture = floatingTable("A", "allow").replace("<w:p><w:r><w:t>A</w:t></w:r></w:p>", picture);
+    const { result } = layout({
+      "word/document.xml": wrapDocument(p("Intro") + withPicture + floatingTable("B", "allow", 1700) + p("Tail")),
+      "word/_rels/document.xml.rels":
+        `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+        `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>` +
+        `</Relationships>`,
+      "word/media/x.png": "PNGDATA",
+    });
+    const items = result.pages[0].items;
+    const image = items.find((item) => item.kind === "image");
+    const sheetB = items.filter((item) => item.kind === "rect" && item.fill === "#ffffff")[1];
+    if (image?.kind !== "image" || sheetB?.kind !== "rect") throw new Error("missing picture or table B");
+    // Table B's sheet overlaps the picture, and the picture is on the upper layer.
+    expect(sheetB.y).toBeLessThan(image.y + image.height);
+    expect(image.front).toBe(true);
+    expect(sheetB.front).toBeUndefined();
+  });
 });
 
 describe("repeated header rows", () => {

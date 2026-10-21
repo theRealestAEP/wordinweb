@@ -36,6 +36,44 @@ describe("DOM renderer: tables that break across pages", () => {
   });
 });
 
+describe("DOM renderer: overlapping floating tables", () => {
+  it("puts a picture in the first table above the second table", () => {
+    const floating = (y: number, body: string) =>
+      `<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="page" w:vertAnchor="page" w:tblpX="1440" w:tblpY="${y}"/>` +
+      `<w:tblW w:w="3000" w:type="dxa"/><w:tblLayout w:type="fixed"/></w:tblPr><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid>` +
+      `<w:tr><w:tc><w:tcPr><w:tcW w:w="3000" w:type="dxa"/></w:tcPr>${body}</w:tc></w:tr></w:tbl>`;
+    const picture =
+      `<w:p><w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">` +
+      `<wp:extent cx="762000" cy="762000"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">` +
+      `<a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">` +
+      `<pic:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rIdImg"/></pic:blipFill>` +
+      `<pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="762000" cy="762000"/></a:xfrm></pic:spPr>` +
+      `</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+    const body = p("Intro") + floating(1440, picture) + floating(1700, p("B")) + p("Tail");
+    const doc = DocxDocument.load(
+      makeDocx({
+        "word/document.xml": wrapDocument(body),
+        "word/_rels/document.xml.rels":
+          `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">` +
+          `<Relationship Id="rIdImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/x.png"/>` +
+          `</Relationships>`,
+        "word/media/x.png": "PNGDATA",
+      }),
+    );
+    const result = layoutDocument(doc, { measurer: new ApproxMeasurer() });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    // jsdom has no blob URLs; the renderer makes one for the picture's bytes.
+    URL.createObjectURL = () => "blob:picture";
+    renderToDom(doc, result, container);
+    const img = container.querySelector<HTMLElement>(".dxw-page img");
+    if (!img) throw new Error("missing picture");
+    // Table B's opaque sheet has no z-index; the picture sits on a layer above it.
+    expect(Number(img.style.zIndex)).toBeGreaterThan(0);
+  });
+});
+
 describe("DOM renderer: vertical text in a merged cell", () => {
   it("lays the text along the merged height, not the first row", () => {
     for (const dir of ["btLr", "tbRl"]) {

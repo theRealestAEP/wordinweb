@@ -8844,6 +8844,7 @@ class Engine {
     this.cur = page;
     this.y = y + topLead;
     const gridW = widths.reduce((a, b) => a + b, 0);
+    const firstItem = page.items.length;
     for (let ri = 0; ri < nRows; ri++) {
       this.paintRow(tbl, tbl.rows[ri], ri, laidRows[ri], x, widths, rowHeights[ri]);
       this.y += rowHeights[ri];
@@ -8864,6 +8865,14 @@ class Engine {
           rowHeightPx: rowHeights[ri],
         });
       }
+    }
+    // Word draws the pictures of a floating table above a later floating
+    // table that overlaps it, although that table's cells and text cover this
+    // one's (render-eval probe3-table-exotics--v05: the picture inserted in
+    // table A's cell shows whole over table B).
+    for (let i = firstItem; i < page.items.length; i++) {
+      const item = page.items[i];
+      if (item.kind === "image") item.front = true;
     }
     if (s2) this.paintTableOutline(page, tbl, x, y, y + tableHeight, tableWidth);
     // Column-resize grips over each vertical boundary of the floating table.
