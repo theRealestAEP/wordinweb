@@ -26,9 +26,12 @@
  * it is made. The height keeps its sign: negative for character height,
  * positive for cell height ([MS-EMF] 2.2.13, 2.3.7.8).
  *
- * When a window extent precedes any viewport extent, an explicit 1 x 1
- * viewport extent supplies the device context's default. emf-converter
- * otherwise uses the canvas size, multiplying coordinates and font sizes.
+ * In MM_ISOTROPIC or MM_ANISOTROPIC, when a window extent precedes any
+ * viewport extent, an explicit 1 x 1 viewport extent supplies the device
+ * context's default. emf-converter otherwise uses the canvas size,
+ * multiplying coordinates and font sizes. In the other map modes GDI
+ * ignores the extents, and emf-converter's default (the canvas size over
+ * the bounds' size) stands in for that.
  *
  * EXTSELECTCLIPRGN rectangles in device coordinates (the flight-plan map
  * uses its viewport rectangle) go through emf-converter's logical mapping.
@@ -150,6 +153,8 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
   let viewportOrgY = 0;
   let viewportExtentSet = false;
   let mapping = false;
+  /** Whether the map mode is MM_ISOTROPIC or MM_ANISOTROPIC, the modes that use the extents. */
+  let extents = false;
   const scaled = (value: number, windowExt = windowExtX, viewportExt = viewportExtX): number => (windowExt ? Math.round(Math.abs((value * viewportExt) / windowExt)) : value);
   const parts: Uint8Array[] = [];
   let changed = false;
@@ -160,7 +165,7 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
     const size = view.getUint32(offset + 4, true);
     if (size < 8 || offset + size > bytes.length) break;
     let replacement: Uint8Array[] | null = null;
-    if (!viewportExtentSet && ((type === EMR_SETWINDOWEXTEX && size >= 16) || (type === EMR_SCALEWINDOWEXTEX && size >= 24))) {
+    if (extents && !viewportExtentSet && ((type === EMR_SETWINDOWEXTEX && size >= 16) || (type === EMR_SCALEWINDOWEXTEX && size >= 24))) {
       const extent = record(EMR_SETVIEWPORTEXTEX, 16);
       extent.view.setInt32(8, 1, true);
       extent.view.setInt32(12, 1, true);
@@ -189,7 +194,8 @@ export function prepareEmf(bytes: Uint8Array): Uint8Array {
       viewportOrgY = view.getInt32(offset + 12, true);
     } else if (type === EMR_SETMAPMODE && size >= 12) {
       const mode = view.getUint32(offset + 8, true);
-      if (mode === 7 || mode === 8) mapping = true;
+      extents = mode === 7 || mode === 8;
+      if (extents) mapping = true;
     } else if ((type === EMR_SCALEWINDOWEXTEX || type === EMR_SCALEVIEWPORTEXTEX) && size >= 24) {
       mapping = true;
       if (type === EMR_SCALEVIEWPORTEXTEX) viewportExtentSet = true;

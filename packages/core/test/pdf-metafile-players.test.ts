@@ -283,6 +283,17 @@ describe("EMF records rewritten for emf-converter", () => {
     expect(canvas!.dropped).toBe(0);
   });
 
+  it("leaves the extents to the converter in MM_TEXT, where GDI ignores them", async () => {
+    // A window extent of the bounds' size and no SETMAPMODE (GovDocs 002513's cover).
+    const canvas = await convertMetafile("emf", emf([
+      [9, 99, 49],
+      [39, 2, 0, 0x000000ff, 0],
+      [37, 2],
+      patBlt(10, 10, 40, 20, 0x00f00021),
+    ]), fonts, resources());
+    expect(canvas!.ops.join("\n")).toContain("1 0 0 rg 10 10 m 50 10 l 50 30 l 10 30 l h f");
+  });
+
   it("records the full bounds above the converter's raster canvas cap", async () => {
     const bytes = emf([[9, 12000, 9000], [11, 12000, 9000], patBlt(11000, 8000, 500, 500, 0x00f00021)]);
     const view = new DataView(bytes.buffer);
