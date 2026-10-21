@@ -166,6 +166,7 @@ export function parseBorder(el: XmlElement | undefined, ctx: ParseContext): Bord
     rawWidth: eighthPtToPx(sz),
     color,
     space: ptToPx(space),
+    ...(["1", "true", "on"].includes(attr(el, "shadow") ?? "") ? { shadow: true } : {}),
   };
 }
 

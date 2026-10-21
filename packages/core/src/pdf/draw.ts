@@ -370,7 +370,26 @@ export class PageDrawer {
   private drawEdge(item: LineEdgeItem): void {
     const { x1, y1, x2, y2 } = item;
     if (Math.abs(x2 - x1) < 0.01 && Math.abs(y2 - y1) < 0.01) return;
-    this.withRotation(item.rotate, Math.min(x1, x2), Math.min(y1, y2), () => this.strokeRule(x1, y1, x2, y2, item.border));
+    const horizontal = Math.abs(y2 - y1) < 0.01;
+    const start = item.extendStart ?? 0;
+    const end = item.extendEnd ?? 0;
+    const xa = horizontal ? x1 - start : x1;
+    const ya = horizontal ? y1 : y1 - start;
+    const xb = horizontal ? x2 + end : x2;
+    const yb = horizontal ? y2 : y2 + end;
+    this.withRotation(item.rotate, Math.min(x1, x2), Math.min(y1, y2), () => {
+      if (item.shadowSide) {
+        const declared = item.border.rawWidth ?? item.border.width;
+        const w = declared > 0 ? declared : 1;
+        const color = parseColor(item.border.color);
+        const outer = item.border.style === "double" && horizontal ? 2.5 * w : w / 2;
+        const strip = item.shadowSide === "right"
+          ? this.rect(xa + outer, ya, w, yb - ya)
+          : this.rect(xa, ya + outer, xb - xa + (item.shadowEnd ?? 0), w);
+        if (color) this.ops.push(`q ${rgbOp(color, false)} ${strip} f Q`);
+      }
+      this.strokeRule(xa, ya, xb, yb, item.border);
+    });
   }
 
   /** A border rule between two px points, at its declared width, with the
