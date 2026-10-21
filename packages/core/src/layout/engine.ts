@@ -3572,8 +3572,25 @@ class Engine {
     if (this.continuesFrame(siblings[index - 1], tbl)) return true;
     this.flushBannerBand();
     this.clearBannerSlot();
-    this.placeFrame(this.frameGroup(tbl, siblings, index), fr);
+    this.placeFrameStart(tbl, fr, siblings, index);
     return true;
+  }
+
+  /** Place the frame that starts at `siblings[index]`. A page- or
+   * margin-anchored frame goes with the paragraph after it: when that
+   * paragraph's first line starts the next page, the frame goes there too
+   * (GovDocs 001876: a caption frame printed on the page before its chart's
+   * text, over a table). */
+  private placeFrameStart(first: Block, fr: ResolvedFrame, siblings: Block[] | undefined, index: number | undefined): void {
+    const group = this.frameGroup(first, siblings, index);
+    const after = siblings && index !== undefined ? siblings[index + group.length] : undefined;
+    if ((fr.vAnchor === "page" || fr.vAnchor === "margin") && after?.type === "paragraph" && !this.pageIsEmptyAtCursor()) {
+      const np = this.doc.effectiveParaProps(after);
+      const lines = breakParagraph(this.doc, this.measurer, after, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, LOOKAHEAD_BREAK).lines;
+      const top = this.y + Math.max(this.lastParaSpacingAfter, np.spacingBefore ?? 0) - this.lastParaSpacingAfter;
+      if (lines.length > 0 && top + openingHeight(lines, np) > this.bodyBottom + 0.25) this.nextColumn();
+    }
+    this.placeFrame(group, fr);
   }
 
   // ---------- numbering ----------
@@ -4140,7 +4157,7 @@ class Engine {
         if (this.textFrame(para) && !this.textFrame(prev) && !this.pageIsEmptyAtCursor() && this.textFrameRunOverflows(siblings, index)) {
           this.nextColumn();
         }
-        this.placeFrame(this.frameGroup(para, siblings, index), fr);
+        this.placeFrameStart(para, fr, siblings, index);
         return;
 
       }
@@ -4523,23 +4540,6 @@ class Engine {
         for (const s of hits) this.consumedAnchors.add(s);
         broken = breakNow(paraTopEstimate);
       }
-      // Same reflow for a PAGE/MARGIN-anchored framePr paragraph that follows:
-      // its position is ABSOLUTE (no prediction needed), and Word flows the
-      // preceding content around it (staging-frames p1: a page-anchored box
-      // over the opening heading — the heading wraps beside/below the frame).
-      if (!lookMark) {
-        const fr = this.pageFrameAhead(next, para);
-        if (fr && !broken.lines.some((line) => line.forcedBreakAfter === "page")) {
-          const top = fr.vAnchor === "page" ? fr.y : this.sp.marginTop + fr.y;
-          if (top <= paraBottom + 0.25) {
-            ensureLookMark();
-            this.placeFrame(this.frameGroup(next, siblings, index === undefined ? undefined : index + 1), fr);
-            this.consumedFrames.add(next);
-            lookFrames.push(next);
-            broken = breakNow(paraTopEstimate);
-          }
-        }
-      }
     }
 
     // Absolutely positioned wrapping floats anchored FURTHER down the page
@@ -4549,10 +4549,12 @@ class Engine {
     // into wrapped lines although it is anchored five paragraphs later).
     if (broken.lines.length > 0 && siblings && index !== undefined) {
       const farHits: Shape[] = [];
-      // Page/margin-anchored frames further down reflow this paragraph the
-      // same way (word95-check-b frame-notbeside-margin: a notBeside frame at
-      // the margin top, anchored after three body paragraphs, pushes all
-      // three below it). The next paragraph's frame was handled above.
+      // Page/margin-anchored frames that follow reflow this paragraph the
+      // same way: their position is absolute, and Word flows the content
+      // before them around them (staging-frames p1: a page-anchored box over
+      // the opening heading; word95-check-b frame-notbeside-margin: a
+      // notBeside frame at the margin top, anchored after three body
+      // paragraphs, pushes all three below it).
       const farFrames: { block: Block; idx: number; fr: ResolvedFrame }[] = [];
       let lastIdx = index;
       for (let idx = index + 1, hops = 0; idx < siblings.length && hops < 40; idx++, hops++) {
@@ -4563,7 +4565,7 @@ class Engine {
         }
         // A table inside a frame takes no room in the flow; any other ends the scan.
         if (blk.type !== "paragraph") {
-          if (this.blockFrame(blk)) continue;
+          if (this.blockFrame(blk)?.w !== undefined) continue;
           break;
         }
         for (const s of this.collectAnchors(blk)) {
@@ -4589,31 +4591,44 @@ class Engine {
         // measurement only.
         const counterSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
         const seenSnapshot = new Set(this.seenNumIds);
-        // A frame is placed when its own first block lands on this page; it
-        // takes no room in the flow. The shapes go by the last one's anchor.
+        // A frame takes no room in the flow and goes with the paragraph after
+        // it: it is placed here when that paragraph's first line still fits on
+        // this page (GovDocs 001876: a caption frame whose next paragraph
+        // starts the next page belongs to that page), and never past a page
+        // break (002514). The shapes go by the last one's anchor paragraph.
         const frameIdx = new Set(farFrames.map((f) => f.idx));
         const endIdx = Math.max(lastIdx, ...frameIdx);
         const framesHere = new Set<number>();
+        let pending: number[] = [];
         let simY = paraBottom;
         let shapeY = Number.POSITIVE_INFINITY;
         let prevAfter = props.spacingAfter ?? 0;
-        // A frame past a page break is anchored on a later page (GovDocs 002514).
         let pageBroken = broken.lines.some((line) => line.forcedBreakAfter === "page");
-        for (let idx = index + 1; idx <= endIdx && simY <= this.bodyBottom + 0.25; idx++) {
+        for (let idx = index + 1; idx < siblings.length && simY <= this.bodyBottom + 0.25; idx++) {
+          if (idx > endIdx && pending.length === 0) break;
           const blk = siblings[idx];
           const np = blk.type === "paragraph" ? this.doc.effectiveParaProps(blk) : undefined;
-          if (blk.type === "paragraph" && (np?.pageBreakBefore || leadingBreakOf(blk)?.type === "page")) pageBroken = true;
-          if (frameIdx.has(idx) && !pageBroken) framesHere.add(idx);
-          if (this.blockFrame(blk)) continue;
+          if (blk.type === "paragraph" && (np?.pageBreakBefore || leadingBreakOf(blk)?.type === "page")) {
+            pageBroken = true;
+            pending = [];
+          }
+          if (frameIdx.has(idx) && !pageBroken) pending.push(idx);
+          if (this.blockFrame(blk)?.w !== undefined) continue; // a frame with a width is out of the flow
           if (!np || blk.type !== "paragraph") break;
           simY += Math.max(prevAfter, np.spacingBefore ?? 0);
           if (idx === lastIdx) shapeY = simY; // reached the anchor paragraph's top
-          if (idx === endIdx) break;
+          if (idx >= endIdx && pending.length === 0) break;
           const nb = breakParagraph(this.doc, this.measurer, blk, this.colWidth, this.fieldCtx(), undefined, undefined, this.sp.docGridLinePitch, lookaheadOpts);
+          if (pending.length > 0 && simY + openingHeight(nb.lines, np) <= this.bodyBottom + 0.25) {
+            for (const f of pending) framesHere.add(f);
+          }
+          pending = [];
           simY += nb.lines.reduce((a, l) => a + l.height, 0);
           if (nb.lines.some((line) => line.forcedBreakAfter === "page")) pageBroken = true;
           prevAfter = np.spacingAfter ?? 0;
         }
+        // Frames that end the section go with the flow's end.
+        if (simY <= this.bodyBottom + 0.25) for (const f of pending) framesHere.add(f);
         this.counters = counterSnapshot;
         this.seenNumIds = seenSnapshot;
         const shapesHere = farHits.length > 0 && shapeY <= this.bodyBottom + 0.25;
@@ -10027,6 +10042,13 @@ function sameParagraphBorderBox(a: ParaProps, b: ParaProps): boolean {
     (a.indentLeft ?? 0) - (a.indentHanging ?? 0) === (b.indentLeft ?? 0) - (b.indentHanging ?? 0) &&
     (a.indentRight ?? 0) === (b.indentRight ?? 0)
   );
+}
+
+/** The height a paragraph needs at a page bottom to start there: its first
+ * line, or its first two under widow/orphan control. */
+function openingHeight(lines: { height: number }[], props: ParaProps): number {
+  const n = props.widowControl !== false && lines.length > 1 ? 2 : 1;
+  return lines.slice(0, n).reduce((sum, line) => sum + line.height, 0);
 }
 
 /** Equal frame properties: two blocks with these share one frame. */

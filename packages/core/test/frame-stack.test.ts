@@ -258,6 +258,36 @@ describe("a frame of adjacent paragraphs with equal framePr", () => {
     }
   });
 
+  it("puts a page-anchored frame on the page of the paragraph after it", () => {
+    const page = `<w:framePr w:w="3000" w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="1500" w:y="2000"/>`;
+    const sentence = "The body paragraph contains enough simple words to wrap across several lines and keep the page layout steady while we check the following frame position.";
+    const para = (text: string) =>
+      `<w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const follower = para(sentence.replace("The", "FollowerFirst"));
+    // Empirically, 25 body paragraphs end near page 1's bottom and the follower starts on page 2.
+    const pages = layoutPages(para(sentence).repeat(25) + framed("AnchoredCaption", page) + follower + SECTION);
+    expect(texts(pages[1].items).map((i) => i.text)).toContain("FollowerFirst");
+    expect(texts(pages[1].items).map((i) => i.text)).toContain("AnchoredCaption");
+    expect(line(pages[1].items, "AnchoredCaption").lineTop).toBeCloseTo(2000 * TW, 0);
+    expect(texts(pages[0].items).map((i) => i.text)).not.toContain("AnchoredCaption");
+  });
+
+  it("does not count a widthless frame as out of the flow when it places a frame ahead", () => {
+    const page = `<w:framePr w:w="3000" w:wrap="around" w:vAnchor="page" w:hAnchor="page" w:x="1500" w:y="2000"/>`;
+    const auto = `<w:framePr w:hSpace="187" w:wrap="around" w:vAnchor="text" w:hAnchor="page" w:x="1500" w:y="0"/>`;
+    const sentence = "The body paragraph contains enough simple words to wrap across several lines and keep the page layout steady while we check the following frame position.";
+    const para = (text: string) =>
+      `<w:p><w:pPr><w:spacing w:after="0"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+    const follower = para(sentence.replace("The", "FollowerFirst"));
+    const widthless = framed(["One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight"].join("</w:t><w:br/><w:t>"), auto);
+    // Empirically, at 21 body paragraphs the eight lines move the follower from page 1 to page 2.
+    const pages = layoutPages(
+      para(sentence).repeat(21) + widthless + framed("AnchoredCaption", page) + follower + SECTION,
+    );
+    expect(texts(pages[1].items).map((i) => i.text)).toContain("AnchoredCaption");
+    expect(texts(pages[0].items).map((i) => i.text)).not.toContain("AnchoredCaption");
+  });
+
   it("leaves a drop cap as it is", () => {
     const drop =
       `<w:p><w:pPr><w:framePr w:dropCap="drop" w:lines="3" w:wrap="around" w:vAnchor="text" w:hAnchor="text"/></w:pPr>` +
