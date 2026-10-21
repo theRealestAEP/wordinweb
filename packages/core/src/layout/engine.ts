@@ -8421,40 +8421,32 @@ class Engine {
       if (cl) cl.spanHeight = ph;
     }
 
-    // Reserve two text lines (all for short cells) and whole leading drawings.
-    // Let the splitter check nested-row bands and visible content; use the
-    // whole row when that boundary cannot split safely.
+    // The least room in which the row can start on a page: all of it when it
+    // cannot split, else the first cut, from the top, that splitLaidRow
+    // accepts (two lines of a cell, a paragraph's widow lines, whole
+    // pictures and nested-row bands all follow from its rules).
     const firstLineNeed = (row: TableRow, laid: (typeof laidRows)[number], height: number): number => {
       if (
         row.props.cantSplit || row.props.heightRule === "exact" || row.props.tblHeader ||
         row.cells.some((cell) => cell.props.vMerge || cell.props.textDirection)
       ) return height;
-      let need = 0;
-      for (const cell of laid.cells) {
-        const text = cell.items.filter((it) => it.kind === "text");
-        const lines = [...new Set(text.map((it) => it.lineTop))].sort((a, b) => a - b);
-        const lastTop = lines.length >= 4 ? lines[1] : lines[lines.length - 1];
-        for (const it of text) {
-          if (it.lineTop <= lastTop) need = Math.max(need, it.lineTop + it.lineHeight);
-        }
-        const firstTop = lines[0] ?? Infinity;
-        for (const it of cell.items) {
-          if (it.kind === "image" || it.kind === "path" || it.kind === "wordart" || it.kind === "rect") {
-            if (it.y <= firstTop) need = Math.max(need, it.y + it.height);
-          } else if (it.kind === "edge") {
-            if (Math.min(it.y1, it.y2) <= firstTop) need = Math.max(need, it.y1, it.y2);
-          } else if (it.kind !== "text" && it.kind !== "grip") {
-            return height;
-          }
-        }
+      const bottoms = laid.cells.flatMap((cell) =>
+        cell.items.map((it) =>
+          it.kind === "text" ? it.lineTop + it.lineHeight :
+          it.kind === "image" || it.kind === "rect" ? it.y + it.height :
+          it.kind === "edge" ? Math.max(it.y1, it.y2) : 0,
+        ),
+      );
+      const cuts = [...new Set(bottoms)].filter((b) => b > 0 && b < height).sort((a, b) => a - b);
+      for (const cut of cuts) {
+        // Splitting shifts the continuation's items, so try it on copies.
+        const probe = {
+          ...laid,
+          cells: laid.cells.map((cell) => ({ ...cell, items: cell.items.map((it) => ({ ...it })) })),
+        };
+        if (this.splitLaidRow(probe, cut, 0, true)) return cut;
       }
-      if (!need || need >= height) return height;
-      // Splitting shifts continuation items, so measure with copies.
-      const probe = {
-        ...laid,
-        cells: laid.cells.map((cell) => ({ ...cell, items: cell.items.map((it) => ({ ...it })) })),
-      };
-      return this.splitLaidRow(probe, need, 0, true) ? need : height;
+      return height;
     };
 
     for (let ri = 0; ri < tbl.rows.length; ri++) {
