@@ -6810,7 +6810,7 @@ class Engine {
         // a:spAutoFit — grow the box height to exactly fit the laid text plus
         // the top/bottom insets (the stored cy is only Word's cached value and
         // drifts from our text metrics; Word recomputes it to the content).
-        if (shape.autofitHeight) {
+        if (shape.autofitHeight && !shape.vert) {
           const aIns = shape.insets ?? TEXTBOX_INSETS;
           const countersSnapshot = new Map(Array.from(this.counters, ([k, v]) => [k, [...v]]));
           const seenSnapshot = new Set(this.seenNumIds);
@@ -6919,6 +6919,10 @@ class Engine {
         }
         // Text insets (bodyPr lIns/tIns/rIns/bIns), default 0.1in/0.05in.
         const ins = shape.insets ?? TEXTBOX_INSETS;
+        // Vertical captions (GovDocs 045416 / m21) use the inset-adjusted
+        // HEIGHT as their line length. Keep the insets on the box axes:
+        // t/b shorten lines, l/r bound the rotated frame's cross axis.
+        // Keep the authored extent for vertical autofit boxes.
         // Linked text-box chain: every box lays out the chain's whole story at
         // its own width and shows the part the boxes before it in the chain
         // leave over (their text heights come from the prescan), so the order
@@ -6926,25 +6930,28 @@ class Engine {
         // one chain's boxes as seq 0, 2, 1 and another's as 1, 0. The prescan
         // walks the body only; a chain in a header or footer is recorded here
         // as its boxes are laid out.
-        let chain = shape.chainId !== undefined ? this.textboxChains.get(shape.chainId) : undefined;
-        if (shape.chainId !== undefined && !chain) {
+        // Vertical linked boxes use only their own story; chaining remains
+        // on the horizontal path until rotated overflow is supported.
+        const chainId = shape.vert ? undefined : shape.chainId;
+        let chain = chainId !== undefined ? this.textboxChains.get(chainId) : undefined;
+        if (chainId !== undefined && !chain) {
           chain = { capacities: new Map() };
-          this.textboxChains.set(shape.chainId, chain);
+          this.textboxChains.set(chainId, chain);
         }
         if (chain && !shape.chainSeq && !chain.blocks) chain.blocks = shape.blocks;
         if (chain && !chain.capacities.has(shape.chainSeq ?? 0)) chain.capacities.set(shape.chainSeq ?? 0, height - ins.t - ins.b);
-        const isContinuation = shape.chainSeq !== undefined && shape.chainSeq > 0;
+        const isContinuation = chainId !== undefined && shape.chainSeq !== undefined && shape.chainSeq > 0;
         const storyBlocks = isContinuation ? (chain?.blocks ?? shape.blocks) : shape.blocks;
         // A chained box clips at its bottom (overflow flows to the next box)
         // even without noAutofit.
-        const chained = shape.chainId !== undefined;
-        const capacity = height - ins.t - ins.b;
-        const innerWidth = Math.max(width - ins.l - ins.r, 1);
+        const chained = chainId !== undefined;
+        const capacity = shape.vert ? width - ins.l - ins.r : height - ins.t - ins.b;
+        const innerWidth = Math.max(shape.vert ? height - ins.t - ins.b : width - ins.l - ins.r, 1);
         const inner = this.layoutFrame(storyBlocks, innerWidth, fields, { x: ox + ins.l, y: oy + ins.t });
         // Content above skipTopY (frame-local) was shown by earlier boxes in
         // the chain; Infinity: the story ended before this box.
         let skipTopY = 0;
-        for (let seq = 0; seq < (shape.chainSeq ?? 0) && skipTopY !== Infinity; seq++) {
+        for (let seq = 0; chained && seq < (shape.chainSeq ?? 0) && skipTopY !== Infinity; seq++) {
           const before = chain?.capacities.get(seq);
           if (before !== undefined) skipTopY = chainBoxEnd(inner.items, skipTopY, before);
         }
@@ -6999,9 +7006,31 @@ class Engine {
           }
           continue;
         }
+        let innerLeft = ox + ins.l;
         let innerTop = oy + ins.t;
-        if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
-        else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
+        let clipTop = oy;
+        let clipBottom = oy + height;
+        let textRotate = rotate;
+        if (shape.vert) {
+          // Like btLr/tbRl table cells, rotate the horizontal frame. Express
+          // its origin about the box center so a:xfrm rot adds to the text
+          // angle and still rotates the fill, outline and text together.
+          const direction = shape.vert === "vert" ? 1 : -1;
+          const cx = ox + width / 2;
+          const cy = oy + height / 2;
+          const insetCx = ox + ins.l + capacity / 2;
+          const insetCy = oy + ins.t + innerWidth / 2;
+          innerLeft = cx + direction * (insetCy - cy) - innerWidth / 2;
+          innerTop = cy - direction * (insetCx - cx) - capacity / 2;
+          clipTop = innerTop;
+          clipBottom = innerTop + capacity;
+          if (shape.textAnchor === "middle") innerTop += (capacity - inner.height) / 2;
+          else if (shape.textAnchor === "bottom") innerTop += capacity - inner.height;
+          textRotate = (itemX, itemY) => ({ deg: direction * 90 + (shape.rotation ?? 0), ox: cxc - itemX, oy: cyc - itemY });
+        } else {
+          if (shape.textAnchor === "middle") innerTop = oy + (height - inner.height) / 2;
+          else if (shape.textAnchor === "bottom") innerTop = oy + height - ins.b - inner.height;
+        }
         // Lines from chainEnd on flow into the next box in the chain. The
         // .doc reader chains every box whose shape names a next shape, so a
         // one-line label box can be a chain of one (GovDocs 042652).
@@ -7056,22 +7085,22 @@ class Engine {
             // at the box bottom edge with nowhere else for the line to go.
             if (chained && it.lineTop >= chainEnd - 0.5) { clippedLines++; continue; }
             if (chained && it.lineTop >= skipTopY - 0.5 && it.lineTop - skipTopY + it.lineHeight > capacity + 0.5) { clippedLines++; partial = true; }
-            if (!chained && shape.clipText && innerTop - oy + it.lineTop + it.lineHeight > height + 0.5) {
+            if (!chained && shape.clipText && innerTop + it.lineTop + it.lineHeight > clipBottom + 0.5) {
               clippedLines++;
-              if (innerTop - oy + it.lineTop < height - 0.5) partial = true;
+              if (innerTop + it.lineTop < clipBottom - 0.5) partial = true;
               else clipped = true;
             }
             // Content above skipTopY was PAINTED by an earlier box in the
             // chain, so skipping it here hides nothing.
             if (isContinuation && it.lineTop < skipTopY - 0.5) continue;
           }
-          offsetItem(it, ox + ins.l - fx, innerTop - skipTopY - fy);
-          if (partial && it.kind === "text") it.clip = { top: oy - fy, bottom: oy - fy + height };
-          if (rotate && (it.kind === "text" || it.kind === "rect")) {
+          offsetItem(it, innerLeft - fx, innerTop - skipTopY - fy);
+          if (partial && it.kind === "text") it.clip = { top: clipTop - fy, bottom: clipBottom - fy };
+          if (textRotate && (it.kind === "text" || it.kind === "rect")) {
             const iy = it.kind === "text" ? (it.glyphTop ?? it.lineTop) : it.y;
-            it.rotate = rotate(it.x, iy);
-          } else if (rotate && it.kind === "edge") {
-            it.rotate = rotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
+            it.rotate = textRotate(it.x, iy);
+          } else if (textRotate && it.kind === "edge") {
+            it.rotate = textRotate(Math.min(it.x1, it.x2), Math.min(it.y1, it.y2));
           }
           if (behind && (it.kind === "text" || it.kind === "rect" || it.kind === "edge" || it.kind === "image" || it.kind === "path" || it.kind === "drawingHit")) it.behind = true;
           if (front && (it.kind === "text" || it.kind === "rect" || it.kind === "edge")) it.front = true;
