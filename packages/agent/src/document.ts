@@ -1,4 +1,4 @@
-import { DocxDocument, localName, runWireLength, serializeXml, type Block, type Paragraph, type Run, type StableIds, type XmlElement } from "@wordinweb/core";
+import { DocxDocument, wordDate, localName, runWireLength, serializeXml, type Block, type Paragraph, type Run, type StableIds, type XmlElement } from "@wordinweb/core";
 import { INTENT_KINDS, applyIntentScoped, resyncScope, type Intent, type IntentBody, type PresencePosition } from "@wordinweb/collab/client";
 import { agentCapabilities, agentOperationSchema, hoistRepeatedSubschemas, type AgentEditCapability } from "./capabilities.js";
 import { AGENT_COMPOSE_SCHEMA, composeDocxBytes } from "./compose.js";
@@ -35,7 +35,7 @@ function defaultProvenance(input?: AgentProvenance): Required<AgentProvenance> {
   let id = 0;
   return {
     author: input?.author ?? "AI Agent",
-    now: input?.now ?? (() => new Date().toISOString()),
+    now: input?.now ?? (() => wordDate()),
     nextId: input?.nextId ?? (() => `${Date.now().toString(16)}${(++id).toString(16)}`),
   };
 }

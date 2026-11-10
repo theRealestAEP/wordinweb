@@ -868,8 +868,10 @@ export interface Revision {
   id: string;
   kind: "ins" | "del" | "moveTo" | "moveFrom" | "format";
   author: string;
-  /** ISO timestamp from w:date, verbatim. */
+  /** w:date, verbatim: Word writes local time there (see word-date.ts). */
   date?: string;
+  /** True UTC time from the w16du:dateUtc attribute, when present. */
+  dateUtc?: string;
   /** The balloon's text: "Inserted", "Deleted", "Moved from", "Moved to",
    * "Inserted row", "Deleted row", "Formatted: Font: Bold", ... */
   label: string;
@@ -1138,8 +1140,10 @@ export interface DocComment {
   id: string;
   author: string;
   initials?: string;
-  /** ISO timestamp from w:date, verbatim. */
+  /** w:date, verbatim: Word writes local time there (see word-date.ts). */
   date?: string;
+  /** True UTC time from commentsExtensible.xml (w16cex:dateUtc), when present. */
+  dateUtc?: string;
   /** Plain text of the comment body (paragraphs joined with newlines). */
   text: string;
   /** w14:paraId of the comment's last body paragraph (threading key). */

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { XmlParseError, XmlElement, child, localName, parseXml, sameXml, serializeXml } from "../../core/src/xml.js";
 import { histogramMatch } from "../../core/src/edit/compare/histogram.js";
+import { wordDate } from "../../core/src/word-date.js";
 import { paragraphText } from "../../core/src/edit/compare/content.js";
 import {
   BlockClass,
@@ -212,7 +213,7 @@ export async function compareFiles(originalPath: string, revisedPath: string, ou
     const custom = printableSpec?.beforeSectPr;
     const beforeSectPr =
       (typeof custom === "function" ? custom(revisions) : custom ?? "") +
-      (options.summary ? summaryXml(options.summary, options.date ?? new Date().toISOString(), revisions, noted, child(child(R.shell.docRoot, "body"), "sectPr")) : "");
+      (options.summary ? summaryXml(options.summary, options.date ?? wordDate(), revisions, noted, child(child(R.shell.docRoot, "body"), "sectPr")) : "");
     await writeResult(outPath, dir, O, R, body, noteIds, sink.relIds, printable && printableSpec ? { path: printableSpec.path, beforeSectPr, store: printable } : null);
     await options.onResultWritten?.();
     if (options.pdf && printableSpec) {

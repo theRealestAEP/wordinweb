@@ -1,4 +1,5 @@
 import { diffArrays } from "diff";
+import { wordDate } from "../../word-date.js";
 import { DocxDocument } from "../../docx.js";
 import { XmlElement, child, cloneXml, localName, sameXml, serializeXml } from "../../xml.js";
 import {
@@ -243,7 +244,7 @@ export function compareContext(
     original,
     meta: {
       author: options.author,
-      date: options.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+      date: options.date ?? wordDate(),
       nextId: () => {
         onIssue();
         return merged.nextRevisionId();

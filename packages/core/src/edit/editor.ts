@@ -1,4 +1,5 @@
 import { DocxDocument } from "../docx.js";
+import { readWordDate } from "../word-date.js";
 import { Run, type Block, type RunContent } from "../model.js";
 import { XmlElement, attr, cloneXml, localName, serializeXml } from "../xml.js";
 import { checkboxStateElement, toggleCheckbox } from "../checkbox.js";
@@ -5229,8 +5230,8 @@ export class DocxEditor {
     };
     const author = ref.author || attrEndingWith("author") || "Unknown";
     const rawDate = attrEndingWith("date");
-    const when = rawDate ? new Date(rawDate) : null;
-    const dateText = when && !isNaN(when.getTime()) ? when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
+    const when = readWordDate(rawDate, attrEndingWith("dateutc"));
+    const dateText = when ? when.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
     const initials = author
       .trim()
       .split(/\s+/)

@@ -3,6 +3,7 @@ import { DocComment, Revision } from "../model.js";
 import { FontSpec, LaidOutPage, TextItem } from "../layout/types.js";
 import { StreamingDocument } from "../stream/body.js";
 import { XmlElement, attr, localName } from "../xml.js";
+import { readWordDate } from "../word-date.js";
 import { PageDrawer, parseColor } from "./draw.js";
 import { NodeMeasurer } from "./measure.js";
 import { Resources } from "./resources.js";
@@ -289,7 +290,7 @@ export class CommentColumn {
     for (const [id, { change, top }] of changes) {
       if (this.placed.has(`rev:${id}`)) continue;
       this.placed.add(`rev:${id}`);
-      const card: DocComment = { id: `rev:${id}`, author: change.author, date: change.date, text: change.label };
+      const card: DocComment = { id: `rev:${id}`, author: change.author, date: change.date, dateUtc: change.dateUtc, text: change.label };
       balloons.push({ top, balloon: this.balloon(card, this.doc.revisionColor(change.author)) });
     }
     // The comments whose text is not drawn, beside the nearest text that is.
@@ -385,8 +386,10 @@ export class CommentColumn {
       const left = PAD_X + indent;
       const width = inner - indent;
       const name = nameOf(source);
-      const date = source.date && (name || change) ? new Date(source.date) : null;
-      const dateText = date && !Number.isNaN(date.getTime()) ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : "";
+      // A PDF must not depend on the machine's time zone: a true UTC time is
+      // labeled UTC, and Word's local w:date shows the author's date as written.
+      const date = name || change ? readWordDate(source.date, source.dateUtc) : null;
+      const dateText = !date ? "" : source.dateUtc ? `${date.toLocaleDateString("en-US", { timeZone: "UTC" })} UTC` : date.toLocaleDateString("en-US");
       const dateFont: FontSpec = { family: UI_FONT, size: 11, bold: false, italic: false };
       if (!this.authors || !name) {
         if (dateText) lines.push({ height: LINE_HEIGHT + 4, paint: (drawer, x, y) => this.text(drawer, dateText, dateFont, "#5f6368", x + left, y + 12) });

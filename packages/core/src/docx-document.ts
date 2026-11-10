@@ -286,6 +286,8 @@ export class DocxDocument {
   /** Retained commentsExtended.xml tree (comment threading), when present. */
   private commentsExtPart: string | null = null;
   private commentsExtRoot: XmlElement | null = null;
+  /** True UTC comment times from commentsExtensible.xml, by the comment's last w14:paraId. */
+  private readonly commentDateUtc = new Map<string, string>();
   private commentsExtDirty = false;
   /** Conditional table formats per table style id, keyed by the Styles object
    * so re-parsing styles.xml (edits) naturally invalidates the cache. */
@@ -501,6 +503,19 @@ export class DocxDocument {
     if (commentsRoot) {
       this.commentsPart = docDir + "comments.xml";
       this.commentsRoot = commentsRoot;
+    }
+    // Word keeps a comment's true UTC time in commentsExtensible.xml, keyed by a
+    // durable id that commentsIds.xml maps from the comment's last paragraph.
+    const durableOf = new Map<string, string>();
+    for (const id of this.readXmlOptional(docDir + "commentsIds.xml")?.children ?? []) {
+      const paraId = attr(id, "paraId");
+      const durableId = attr(id, "durableId");
+      if (paraId && durableId) durableOf.set(durableId, paraId);
+    }
+    for (const ex of this.readXmlOptional(docDir + "commentsExtensible.xml")?.children ?? []) {
+      const paraId = durableOf.get(attr(ex, "durableId") ?? "");
+      const dateUtc = attr(ex, "dateUtc");
+      if (paraId && dateUtc) this.commentDateUtc.set(paraId, dateUtc);
     }
     const commentsExtRoot = this.readXmlOptional(docDir + "commentsExtended.xml");
     if (commentsExtRoot) {
@@ -1242,6 +1257,7 @@ export class DocxDocument {
         author: attr(c, "author") ?? "",
         initials: attr(c, "initials"),
         date: attr(c, "date"),
+        dateUtc: paraId ? this.commentDateUtc.get(paraId) : undefined,
         text: paras.join("\n"),
         paraId,
       });

@@ -1,3 +1,4 @@
+import { readWordDate } from "../../core/src/word-date.js";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -789,7 +790,7 @@ describe("the pdf option", () => {
     const hidden = text("hidden");
     for (const name of ["Carol", "Commenter", "Dan", "Drafter"]) expect(hidden).not.toContain(name);
     expect(hidden).not.toMatch(/\bCC\b/);
-    expect(hidden).toContain("8/14/2026 UTC Check the term.");
+    expect(hidden).toContain("8/14/2026 Check the term.");
     expect(hidden).toContain("Summary report");
     const raw = readFileSync(pdf("hidden"), "latin1");
     for (const name of ["Carol", "Dan Drafter"]) expect(raw).not.toContain(name);
@@ -815,7 +816,7 @@ describe("the pdf option", () => {
     // Each comment card is its text alone: no name, no date.
     for (const comment of ["Check the term.", "Why keep this?"]) {
       expect(text).toContain(comment);
-      expect(text).not.toContain(`UTC ${comment}`);
+      expect(text).not.toContain(`2026 ${comment}`);
     }
     expect(text).not.toMatch(/8\/14\/2026|Unknown|\bComment\b|\?\s*Check/);
   });
@@ -903,7 +904,7 @@ describe("the summary option", () => {
     expect(revisions).toMatchObject({ insertion: 1, deletion: 1, paragraphFormat: 1 });
     const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
     expect(tableRows(xml)).toEqual([
-      [`Summary report: document comparison done on ${new Date(DATE).toLocaleString("en-US", { timeZone: "UTC" })} UTC`],
+      [`Summary report: document comparison done on ${readWordDate(DATE)!.toLocaleString("en-US")}`],
       ["Original:", "Draft <1> & co.docx"],
       ["Modified:", "Draft 2.docx"],
       ["Add", "1"],
@@ -930,7 +931,7 @@ describe("the summary option", () => {
       const xml = strFromU8(unzipSync(readFileSync(printable))["word/document.xml"]);
       return { row: tableRows(xml)[0], xml };
     };
-    const when = `${new Date(DATE).toLocaleString("en-US", { timeZone: "UTC" })} UTC`;
+    const when = `${readWordDate(DATE)!.toLocaleString("en-US")}`;
     const titled = await heading({ title: "Cobbery <comparison> & results" });
     expect(titled.row).toEqual([`Cobbery <comparison> & results, ${when}`]);
     expect(titled.xml).toContain("Cobbery &lt;comparison&gt; &amp; results, ");
