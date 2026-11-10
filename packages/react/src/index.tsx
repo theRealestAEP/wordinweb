@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { EditorIntent } from "@wordinweb/core";
+import { wordDate } from "@wordinweb/core";
 import {
   computePresenceCarets,
   computePresenceSelections,
@@ -1959,7 +1960,7 @@ export function DocxView({
           if (collabDocOp(() => ({
             kind: "replyComment", parentId: id, text, author: commentAuthor,
             initials: commentAuthor.split(/\s+/).map((part) => part[0] ?? "").join("").slice(0, 2).toUpperCase() || undefined,
-            date: new Date().toISOString(), paraIds: [hex8()],
+            date: wordDate(), paraIds: [hex8()],
           }))) return;
           history.checkpoint();
           const initials = commentAuthor
@@ -2818,7 +2819,7 @@ export function DocxView({
               const seg0 = segments.find((sg) => sg.t);
               const initials0 = commentAuthor.split(/\s+/).map((part) => part[0] ?? "").join("").slice(0, 2).toUpperCase();
               if (seg0?.t && collabOp(
-                (a) => ({ kind: "commentRun", runId: a.runId, text, author: commentAuthor, initials: initials0 || undefined, date: new Date().toISOString(), paraId: hex8() }),
+                (a) => ({ kind: "commentRun", runId: a.runId, text, author: commentAuthor, initials: initials0 || undefined, date: wordDate(), paraId: hex8() }),
                 { t: seg0.t, offset: seg0.start },
               )) return true;
             }

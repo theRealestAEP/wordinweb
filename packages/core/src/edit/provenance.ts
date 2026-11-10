@@ -1,3 +1,5 @@
+import { wordDate } from "../word-date.js";
+
 /**
  * Sources for edit-time values that are nondeterministic by default: the
  * wall clock (w:date attributes) and random ids (w14:paraId). Replicated
@@ -7,7 +9,7 @@
  * editing uses the ambient defaults below.
  */
 export interface EditProvenance {
-  /** ISO-8601 timestamp written into w:date attributes. */
+  /** Timestamp written into w:date attributes, in Word's local-time form (see word-date.ts). */
   date(): string;
   /** Fresh 8-hex-digit uppercase w14:paraId candidate. Callers still check
    * uniqueness against ids already present in the document and may call
@@ -18,7 +20,7 @@ export interface EditProvenance {
 /** Ambient defaults for local (non-replicated) editing. */
 export function defaultProvenance(): EditProvenance {
   return {
-    date: () => new Date().toISOString(),
+    date: () => wordDate(),
     paraId: () =>
       Math.floor(Math.random() * 0xfffffff0 + 1)
         .toString(16)

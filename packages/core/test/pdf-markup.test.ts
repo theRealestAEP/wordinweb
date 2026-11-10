@@ -123,7 +123,7 @@ describe("renderDocxToPdf with markup", () => {
     // Deleted text prints, struck; the balloons name the author, the date and the change.
     expect(text).toContain("words Bob deleted");
     expect(text).toContain("Deleted row cell one");
-    for (const balloon of ["Ada Reviewer 8/12/2026 UTC Inserted", "Bob Editor 8/13/2026 UTC Deleted", "Ada Reviewer 8/12/2026 UTC Moved from", "Ada Reviewer 8/12/2026 UTC Moved to", "Bob Editor 8/13/2026 UTC Formatted: Font: Bold", "Ada Reviewer 8/12/2026 UTC Formatted: Centered", "Bob Editor 8/13/2026 UTC Inserted row", "Ada Reviewer 8/12/2026 UTC Deleted row"]) {
+    for (const balloon of ["Ada Reviewer 8/12/2026 Inserted", "Bob Editor 8/13/2026 Deleted", "Ada Reviewer 8/12/2026 Moved from", "Ada Reviewer 8/12/2026 Moved to", "Bob Editor 8/13/2026 Formatted: Font: Bold", "Ada Reviewer 8/12/2026 Formatted: Centered", "Bob Editor 8/13/2026 Inserted row", "Ada Reviewer 8/12/2026 Deleted row"]) {
       expect(text).toContain(balloon);
     }
     // Ada, first to appear, is red; Bob blue. Ada's insertion is underlined (one rule for the span), Bob's deletion struck.
@@ -200,8 +200,8 @@ describe("renderDocxToPdf with markup", () => {
     const { pdf, pages, ops } = await render(bytes, true);
     expect(pages).toBe(1);
     const text = pdfText(pdf);
-    expect(text).toContain("Bob Editor 8/13/2026 UTC Deleted");
-    expect(text).toContain("Ada Reviewer 8/12/2026 UTC Inserted");
+    expect(text).toContain("Bob Editor 8/13/2026 Deleted");
+    expect(text).toContain("Ada Reviewer 8/12/2026 Inserted");
     // Bob, first to appear, is red: he framed and struck his deleted picture; Ada (blue) framed her inserted one; the kept one has neither.
     const frames = [...ops.matchAll(/^q 1\.5 w (\S+ \S+ \S+) RG [\d. ]+ re S Q$/gm)].map((m) => m[1]);
     expect(frames).toEqual(["1 0 0", "0 0 1"]);
@@ -249,8 +249,8 @@ describe("renderDocxToPdf with markup", () => {
     const { pdf, pages, ops } = await render(bytes, true);
     expect(pages).toBe(1);
     const text = pdfText(pdf);
-    expect(text).toContain("Bob Editor 8/13/2026 UTC Deleted");
-    expect(text).toContain("Ada Reviewer 8/12/2026 UTC Inserted");
+    expect(text).toContain("Bob Editor 8/13/2026 Deleted");
+    expect(text).toContain("Ada Reviewer 8/12/2026 Inserted");
     expect(text).toContain("Box text");
     expect(text).toContain("VML text");
     // The frames: stroked paths in the authors' colors (Bob red, Ada blue), 72 x 36 pt; a deleted shape also struck across its middle.
@@ -274,8 +274,8 @@ describe("renderDocxToPdf with markup", () => {
       p(t("The next."));
     const { pdf, ops } = await render(docx(marks), true);
     const text = pdfText(pdf);
-    expect(text).toContain("Ada Reviewer 8/12/2026 UTC Inserted paragraph mark");
-    expect(text).toContain("Bob Editor 8/13/2026 UTC Deleted paragraph mark");
+    expect(text).toContain("Ada Reviewer 8/12/2026 Inserted paragraph mark");
+    expect(text).toContain("Bob Editor 8/13/2026 Deleted paragraph mark");
     // The pilcrows take the authors' colors; the two marked lines get a change bar, the third none.
     expect(groups(ops, "1 0 0").filter((g) => g.underlined)).toHaveLength(1);
     expect(rules(ops, "0 0 1")).toHaveLength(1);
@@ -301,7 +301,7 @@ describe("renderDocxToPdf with markup", () => {
       expect(pages).toBe(2);
       const sheets = pdfText(pdf, true);
       expect(sheets[0]).not.toContain("Bob Editor");
-      expect(sheets[1]).toContain("Bob Editor 8/13/2026 UTC Formatted: Section");
+      expect(sheets[1]).toContain("Bob Editor 8/13/2026 Formatted: Section");
       expect(rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3)).toHaveLength(1);
     }
   });
@@ -309,7 +309,7 @@ describe("renderDocxToPdf with markup", () => {
   it.skipIf(!hasPdftotext)("balloons a format change on a paragraph with no text", async () => {
     const empty = `<w:p><w:pPr><w:jc w:val="center"/><w:pPrChange w:id="8" ${BOB}><w:pPr/></w:pPrChange></w:pPr></w:p>` + p(t("Text after."));
     const { pdf, ops } = await render(docx(empty), true);
-    expect(pdfText(pdf)).toContain("Bob Editor 8/13/2026 UTC Formatted: Centered");
+    expect(pdfText(pdf)).toContain("Bob Editor 8/13/2026 Formatted: Centered");
     expect(rules(ops, "0 0 0").filter((r) => r.h > 5 && r.w < 3)).toHaveLength(1);
   });
 
@@ -380,7 +380,7 @@ describe("renderDocxToPdf with markup", () => {
       for (const name of ["Reviewer", "Editor", "Carol", "Commenter"]) expect(text).not.toContain(name);
       for (const initials of ["AR", "BE", "CC"]) expect(text).not.toMatch(new RegExp(`\\b${initials}\\b`));
       for (const name of ["Ada Reviewer", "Bob Editor", "Carol Commenter"]) expect(hidden.pdf.toString("latin1")).not.toContain(name);
-      for (const card of ["8/12/2026 UTC Inserted", "8/13/2026 UTC Deleted", "8/13/2026 UTC Formatted: Font: Bold", "8/12/2026 UTC Formatted: Centered", "8/13/2026 UTC Inserted row", "8/12/2026 UTC Deleted row", "8/14/2026 UTC The comment text."]) {
+      for (const card of ["8/12/2026 Inserted", "8/13/2026 Deleted", "8/13/2026 Formatted: Font: Bold", "8/12/2026 Formatted: Centered", "8/13/2026 Inserted row", "8/12/2026 Deleted row", "8/14/2026 The comment text."]) {
         expect(text).toContain(card);
       }
       // No avatar; each card is shorter by the head line less the date line: 30 - 19 px.
@@ -441,8 +441,8 @@ describe("renderDocxToPdf with markup", () => {
     // empty w:author names no one; a comment with either shows no name and
     // no date; a change or comment with no w:date shows no date.
     const cases: { name: string; who: string; changeHead: string; commentHead: string; avatars: number }[] = [
-      { name: "no w:author", who: 'w:date="2026-08-12T10:00:00Z"', changeHead: "Unknown 8/12/2026 UTC ", commentHead: "", avatars: 5 },
-      { name: 'w:author=""', who: 'w:author="" w:date="2026-08-12T10:00:00Z"', changeHead: "8/12/2026 UTC ", commentHead: "", avatars: 0 },
+      { name: "no w:author", who: 'w:date="2026-08-12T10:00:00Z"', changeHead: "Unknown 8/12/2026 ", commentHead: "", avatars: 5 },
+      { name: 'w:author=""', who: 'w:author="" w:date="2026-08-12T10:00:00Z"', changeHead: "8/12/2026 ", commentHead: "", avatars: 0 },
       { name: "no w:date", who: 'w:author="Ada Reviewer"', changeHead: "Ada Reviewer ", commentHead: "AR Ada Reviewer ", avatars: 6 },
     ];
     for (const { name, who, changeHead, commentHead, avatars: count } of cases) {

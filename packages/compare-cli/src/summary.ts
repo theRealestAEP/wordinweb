@@ -1,5 +1,6 @@
 import { XmlElement, child } from "../../core/src/xml.js";
 import { RevisionKind } from "../../core/src/edit/suggest.js";
+import { readWordDate } from "../../core/src/word-date.js";
 
 /**
  * The summary page at the end of a printable copy: a page break, then one
@@ -14,7 +15,7 @@ export interface SummarySpec {
   /** The first row's heading; the caller names the product. Default
    * "Summary report: document comparison". */
   title?: string;
-  /** Put the compare's date (en-US, UTC) after the heading. Default true. */
+  /** Put the compare's date (en-US, local time as Word writes it) after the heading. Default true. */
   date?: boolean;
 }
 
@@ -30,7 +31,8 @@ export function summaryXml(spec: SummarySpec, date: string, revisions: Record<Re
   const width = textWidth(sectPr);
   const first = Math.round(width * 0.74);
   const widths = [first, width - first];
-  const when = `${new Date(date).toLocaleString("en-US", { timeZone: "UTC" })} UTC`;
+  // The date is a w:date: Word's local time, shown as written.
+  const when = readWordDate(date)?.toLocaleString("en-US") ?? date;
   const total = Object.values(revisions).reduce((sum, n) => sum + n, 0);
   const rows: string[] = [
     row([[heading(spec, when), true]]),

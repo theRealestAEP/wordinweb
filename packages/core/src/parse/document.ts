@@ -305,7 +305,7 @@ export function parseParagraph(p: XmlElement, ctx: DocParseContext): Paragraph {
       if (ctx.revisionColor) {
         const author = revisionAuthor(mark);
         para.markRevisionColor = ctx.revisionColor(author);
-        para.markChanges = [{ id: `mark-${para.markRevision}:${attr(mark, "id") ?? ""}`, kind: para.markRevision, author, date: attr(mark, "date"), label: deleted ? "Deleted paragraph mark" : "Inserted paragraph mark" }];
+        para.markChanges = [{ id: `mark-${para.markRevision}:${attr(mark, "id") ?? ""}`, kind: para.markRevision, author, date: attr(mark, "date"), dateUtc: attr(mark, "dateUtc"), label: deleted ? "Deleted paragraph mark" : "Inserted paragraph mark" }];
       }
     }
   }
@@ -325,7 +325,7 @@ const MOVE_COLOR = "#008000";
 
 /** A format change's balloon, from its w:*Change element and Word's words for what changed. */
 export function formatChange(el: XmlElement, what: string): Revision {
-  return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: revisionAuthor(el), date: attr(el, "date"), label: `Formatted: ${what}` };
+  return { id: `${localName(el.name)}:${attr(el, "id") ?? ""}`, kind: "format", author: revisionAuthor(el), date: attr(el, "date"), dateUtc: attr(el, "dateUtc"), label: `Formatted: ${what}` };
 }
 
 /** A change's author as Word names it: "Unknown" for a change with no
@@ -738,7 +738,7 @@ function parseParaChildren(
         const color = ctx.revisionColor ? (move ? MOVE_COLOR : ctx.revisionColor(author)) : isInsert ? "#188038" : "#D93025";
         const double = move && !!ctx.revisionColor;
         const change: Revision | undefined = ctx.revisionColor
-          ? { id: `${ln}:${attr(el, "id") ?? ""}`, kind: ln, author, date: attr(el, "date"), label: move ? (isInsert ? "Moved to" : "Moved from") : isInsert ? "Inserted" : "Deleted" }
+          ? { id: `${ln}:${attr(el, "id") ?? ""}`, kind: ln, author, date: attr(el, "date"), dateUtc: attr(el, "dateUtc"), label: move ? (isInsert ? "Moved to" : "Moved from") : isInsert ? "Inserted" : "Deleted" }
           : undefined;
         const style = (r: Run) => {
           r.props = {
@@ -3014,7 +3014,7 @@ export function parseTable(tbl: XmlElement, ctx: DocParseContext): Table {
     if (rowChange) {
       const inserted = localName(rowChange.name) === "ins";
       const author = revisionAuthor(rowChange);
-      const change: Revision = { id: `row-${localName(rowChange.name)}:${attr(rowChange, "id") ?? ""}`, kind: inserted ? "ins" : "del", author, date: attr(rowChange, "date"), label: inserted ? "Inserted row" : "Deleted row" };
+      const change: Revision = { id: `row-${localName(rowChange.name)}:${attr(rowChange, "id") ?? ""}`, kind: inserted ? "ins" : "del", author, date: attr(rowChange, "date"), dateUtc: attr(rowChange, "dateUtc"), label: inserted ? "Inserted row" : "Deleted row" };
       const color = ctx.revisionColor(author);
       for (const run of runsOfBlocks(row.cells.flatMap((cell) => cell.blocks))) {
         run.props = { ...run.props, color, ...(inserted ? { underline: "single" } : { strike: true }) };
