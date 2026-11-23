@@ -30,11 +30,13 @@ Options:
   --no-formatting     do not report formatting-only differences
   --no-whitespace     do not report whitespace-only differences
   --temp-dir DIR      where the working files go (default: the system's)
-  --pdf FILE          also write the redline as a PDF: the result with its tracked
-                      changes as plain formatting, rendered without a browser
-  --pdf-comments      print the review comments beside the PDF's pages
-  --hide-authors      name no author in the PDF: each comment keeps its date
-                      and text, with no name and no initials
+  --pdf FILE          also write the redline as a PDF: a blackline of the result,
+                      inserted text blue and double underlined, deleted text red
+                      and struck through, a change bar beside each changed
+                      paragraph, rendered without a browser
+  --pdf-comments      print the review comments in balloons beside the PDF's pages
+  --hide-authors      name no author in the PDF: each comment keeps its text,
+                      with no name
   --quiet             do not print notes about differences that could not be expressed exactly
   -h, --help          show this help
 

@@ -34,7 +34,7 @@ import { StableIds } from "./edit/ids.js";
 import { parseBody, parseBlocks, parseParagraph, DocParseContext, refuseAltChunk } from "./parse/document.js";
 import { parseNotesPart } from "./parse/notes.js";
 import { Relationships, parseRelationships, relsPathFor } from "./parse/rels.js";
-import { mergeParaProps, mergeRunProps } from "./parse/properties.js";
+import { ParseContext, mergeParaProps, mergeRunProps } from "./parse/properties.js";
 import { extractOlePackage } from "./parse/ole.js";
 import { isSourcesRoot } from "./citations.js";
 import {
@@ -352,7 +352,7 @@ export class DocxDocument {
     rels: Relationships;
     relsRoot: XmlElement | null;
   }[] = [];
-  private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup"; revisionColor?: (author: string) => string };
+  private readonly ctxBase: { theme: Theme; revisionView?: "final" | "markup"; revisionColor?: (author: string) => string; moves?: ParseContext["moves"] };
   /** Tracked-changes display mode; refresh() re-derives after changes. */
   revisionView: "final" | "markup" = "final";
   /** The revision authors in the order they first appeared, for revisionColor. */
@@ -400,7 +400,10 @@ export class DocxDocument {
     if (options.revisionView) this.revisionView = options.revisionView;
     this.ctxBase.revisionView = this.revisionView;
     if (options.revisionAuthors === false) this.revisionAuthorColors = false;
-    if (options.revisionColors) this.ctxBase.revisionColor = (author) => this.revisionColor(author);
+    if (options.revisionColors) {
+      this.ctxBase.revisionColor = (author) => this.revisionColor(author);
+      this.ctxBase.moves = { open: {}, byName: new Map(), labels: new Map() };
+    }
 
     this.stylesPart = docDir + "styles.xml";
     this.stylesRoot = this.readXmlOptional(this.stylesPart) ?? null;
@@ -2466,6 +2469,45 @@ export class DocxDocument {
     } finally {
       for (let i = journal.length - 1; i >= 0; i--) journal[i]();
       this.saveJournal = null;
+    }
+  }
+
+  /** Make a comparison result a plain Word document, including its saved package. */
+  makePlainDocument(): void {
+    const macroTypes = new Set([
+      "application/vnd.ms-office.vbaProject",
+      "application/vnd.ms-word.vbaData+xml",
+      "application/vnd.ms-word.keyMapCustomizations+xml",
+      "application/vnd.ms-word.attachedToolbars",
+    ]);
+    const macroRelationships = new Set(["vbaProject", "wordVbaData", "keyMapCustomizations", "attachedToolbars"]);
+    const docDir = this.docPart.slice(0, this.docPart.lastIndexOf("/") + 1);
+    const parts = new Set(["vbaProject.bin", "vbaData.xml", "customizations.xml"].map((name) => docDir + name));
+    for (const item of this.contentTypesRoot?.children ?? []) {
+      if (macroTypes.has(item.attrs.ContentType) && item.attrs.PartName) parts.add(item.attrs.PartName.slice(1));
+    }
+    if (this.relsRoot) {
+      this.relsRoot.children = this.relsRoot.children.filter((rel) => {
+        const type = rel.attrs.Type ?? "";
+        const target = rel.attrs.TargetMode === "External" ? null : resolvePartPath(this.docPart, rel.attrs.Target ?? "");
+        if (!macroRelationships.has(type.slice(type.lastIndexOf("/") + 1)) && !(target && parts.has(target))) return true;
+        if (target) parts.add(target);
+        this.documentRels.delete(rel.attrs.Id);
+        return false;
+      });
+    }
+    if (this.contentTypesRoot) {
+      this.contentTypesRoot.children = this.contentTypesRoot.children.filter((item) => {
+        if (macroTypes.has(item.attrs.ContentType) || parts.has((item.attrs.PartName ?? "").slice(1))) return false;
+        if (item.attrs.PartName === `/${this.docPart}`) {
+          item.attrs.ContentType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+        }
+        return true;
+      });
+    }
+    for (const part of parts) {
+      delete this.pkg.raw()[part];
+      delete this.pkg.raw()[relsPathFor(part)];
     }
   }
 

@@ -1,15 +1,19 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { prepareEmf } from "../src/render/emf.js";
 import { RecordingCanvas, RecordingContext } from "../src/pdf/canvas.js";
 import { symbolText } from "../src/pdf/dib.js";
-import { FontSet } from "../src/pdf/fonts.js";
+import { FontSet, defaultFontDirs } from "../src/pdf/fonts.js";
+import type { GlyphRun } from "../src/pdf/fonts.js";
 import { convertMetafile } from "../src/pdf/metafile.js";
 import { renderDocxToPdf } from "../src/pdf/render.js";
-import { Resources } from "../src/pdf/resources.js";
+import { Resources, utf16Hex } from "../src/pdf/resources.js";
+import { loadShaper } from "../src/pdf/shaper.js";
 import { PdfWriter } from "../src/pdf/writer.js";
 import { bytesSource } from "../src/stream/source.js";
 import { W_NS, makeDocxWithMedia } from "./helpers.js";
@@ -485,4 +489,145 @@ describe("renderDocxToPdf with WMF and PICT pictures", () => {
     const result = await renderDocxToPdf(bytesSource(docx), out);
     expect(result.unsupportedImages).toEqual([]);
   });
+});
+
+// Match pdf-shaping.test.ts: HarfBuzz and the installed script fonts.
+const shaperLoaded = await loadShaper();
+const shapingFonts = new FontSet(defaultFontDirs());
+let hasPdftotext = false;
+try {
+  execFileSync("pdftotext", ["-v"], { stdio: "ignore" });
+  hasPdftotext = true;
+} catch {
+  // Extraction checks run where Poppler is installed.
+}
+
+/** Resolve Tm, Tj and TJ to glyph origins in canvas space. */
+function glyphOrigins(ops: string, run: GlyphRun, r: Resources): { cid: number; x: number; y: number }[] {
+  const embedded = r.font(run.face.face);
+  const gids = new Map(run.gids.map((gid) => [embedded.cid(gid, 0), gid]));
+  const size = Number(/\/F\d+ ([\d.]+) Tf/.exec(ops)![1]);
+  const origins: { cid: number; x: number; y: number }[] = [];
+  let matrix = [1, 0, 0, 1, 0, 0];
+  let pen = 0;
+  const number = "-?[0-9.]+";
+  const operators = new RegExp(`((?:${number} ){5}${number}) Tm|\\[([^\\]]*)\\] TJ|<([0-9a-f]+)> Tj`, "g");
+  for (const op of ops.matchAll(operators)) {
+    if (op[1]) {
+      matrix = op[1].split(" ").map(Number);
+      pen = 0;
+      continue;
+    }
+    const parts = op[2] ?? `<${op[3]}>`;
+    for (const part of parts.matchAll(/<([0-9a-f]+)>|(-?[\d.]+)/g)) {
+      if (part[2]) {
+        pen -= Number(part[2]) * size / 1000;
+        continue;
+      }
+      for (const hex of part[1].match(/.{4}/g)!) {
+        const cid = parseInt(hex, 16);
+        origins.push({ cid, x: matrix[4] + matrix[0] * pen, y: matrix[5] + matrix[1] * pen });
+        pen += run.face.face.advance(gids.get(cid)!) * size / run.face.face.unitsPerEm;
+      }
+    }
+  }
+  return origins;
+}
+
+/** Write the recorded canvas as a page, including its embedded fonts. */
+async function canvasPdf(canvas: RecordingCanvas, r: Resources, writer: PdfWriter): Promise<void> {
+  const catalog = writer.allocate(), pages = writer.allocate(), page = writer.allocate(), content = writer.allocate(), info = writer.allocate();
+  await writer.header();
+  await writer.object(catalog, `<< /Type /Catalog /Pages ${pages} 0 R >>`);
+  await writer.object(pages, `<< /Type /Pages /Kids [${page} 0 R] /Count 1 >>`);
+  await writer.object(page, `<< /Type /Page /Parent ${pages} 0 R /MediaBox [0 0 200 100] /Resources << ${r.shared()} >> /Contents ${content} 0 R >>`);
+  await writer.stream(content, "", Buffer.from(`q 1 0 0 -1 0 100 cm ${canvas.ops.join("\n")} Q`, "latin1"));
+  await r.write();
+  await writer.object(info, "<< >>");
+  await writer.finish(catalog, info);
+}
+
+describe("metafile text with HarfBuzz positioning", () => {
+  for (const [script, text, familyName, charset, encoded] of [
+    ["Arabic", "نَعِم", "Arial", 178, [0xe4, 0xf3, 0xda, 0xf6, 0xe3]], // Windows-1256
+    ["Thai", "ที่", "Thonburi", 222, [0xb7, 0xd5, 0xe8]], // Windows-874
+  ] as const) {
+    const shapingFont = { family: familyName, size: 16, bold: false, italic: false };
+    const runs = shaperLoaded ? shapingFonts.shape(text, shapingFont) : [];
+    const drawable = runs.length === 1 && !!runs[0].shaped && !runs[0].gids.includes(0);
+
+    it.skipIf(!drawable)(`positions ${script} marks in a WMF and preserves its source text`, async () => {
+      const chunks: Buffer[] = [];
+      const writer = new PdfWriter(new Writable({ write: (chunk, _encoding, callback) => { chunks.push(Buffer.from(chunk)); callback(); } }));
+      const r = new Resources(writer);
+      const font = Buffer.alloc(50); // LOGFONT16
+      font.writeInt16LE(-16, 0);
+      font.writeInt16LE(400, 8);
+      font[13] = charset;
+      font.write(familyName, 18, "ascii");
+      const fontWords = Array.from({ length: font.length / 2 }, (_, i) => font.readInt16LE(i * 2));
+      const chars = Buffer.alloc(Math.ceil(encoded.length / 2) * 2);
+      chars.set(encoded);
+      const charWords = Array.from({ length: chars.length / 2 }, (_, i) => chars.readInt16LE(i * 2));
+      const canvas = await convertMetafile("wmf", wmf([
+        [0x02fb, ...fontWords], // CREATEFONTINDIRECT
+        [0x012d, 0], // SELECTOBJECT
+        [0x012e, 24], // SETTEXTALIGN: left, baseline
+        [0x0102, 1], // SETBKMODE: transparent
+        [0x0521, encoded.length, ...charWords, 30, 10], // TEXTOUT
+      ]), shapingFonts, r);
+      expect(canvas).not.toBeNull();
+      const [run] = runs;
+      const shaped = run.shaped!;
+      const ops = canvas!.ops.join("\n");
+      const origins = glyphOrigins(ops, run, r);
+      expect(origins).toHaveLength(run.gids.length);
+      expect(run.advances.some((advance, i) => advance === 0 && (shaped.xOffsets[i] !== 0 || shaped.yOffsets[i] !== 0))).toBe(true);
+      let pen = 0;
+      for (let i = 0; i < run.gids.length; i++) {
+        expect(origins[i].cid).toBe(r.font(run.face.face).cid(run.gids[i], 0));
+        expect(origins[i].x).toBeCloseTo(10 + pen + shaped.xOffsets[i], 2);
+        expect(origins[i].y).toBeCloseTo(30 - shaped.yOffsets[i], 2);
+        pen += run.advances[i];
+      }
+      for (const source of shaped.unicode.filter(Boolean)) {
+        const unicode = shaped.rtl ? [...source].reverse().join("") : source;
+        expect(ops).toContain(`/ActualText <feff${utf16Hex(unicode)}>`);
+      }
+      expect(ops.match(/\bEMC\b/g)).toHaveLength(shaped.unicode.filter(Boolean).length);
+      if (hasPdftotext) {
+        await canvasPdf(canvas!, r, writer);
+        const dir = mkdtempSync(join(tmpdir(), "wordinweb-metafile-shaping-"));
+        try {
+          const path = join(dir, "doc.pdf");
+          writeFileSync(path, Buffer.concat(chunks));
+          const extracted = execFileSync("pdftotext", ["-layout", path, "-"], { encoding: "utf8" });
+          expect(extracted.replace(/[\s\u200e\u200f\u202a-\u202e]/g, "")).toBe(text);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it.skipIf(!drawable)(`rotates and scales ${script} glyph positions in canvas space`, () => {
+      const r = resources();
+      const canvas = new RecordingCanvas(200, 200, shapingFonts, r);
+      const ctx = canvas.getContext("2d")!;
+      ctx.font = `16px "${familyName}"`;
+      ctx.translate(100, 20);
+      ctx.rotate(Math.PI / 2);
+      ctx.scale(2, 2);
+      ctx.fillText(text, 10, 30);
+      const [run] = runs;
+      const shaped = run.shaped!;
+      const origins = glyphOrigins(canvas.ops.join("\n"), run, r);
+      expect(origins).toHaveLength(run.gids.length);
+      let pen = 0;
+      for (let i = 0; i < run.gids.length; i++) {
+        expect(origins[i].x).toBeCloseTo(40 + 2 * shaped.yOffsets[i], 2);
+        expect(origins[i].y).toBeCloseTo(40 + 2 * (pen + shaped.xOffsets[i]), 2);
+        pen += run.advances[i];
+      }
+    });
+  }
 });

@@ -46,24 +46,26 @@ export interface RenderPdfOptions {
    * one sheet per page. */
   comments?: boolean;
   /**
-   * Print the document's own tracked changes as Word's "All Markup" shows
-   * them, instead of the final text: insertions underlined and deletions
-   * struck through in their author's color (Word's "by author" colors, in
-   * the order the authors first appear: red, blue, green, violet, dark red,
-   * teal, dark yellow, gray), moved text double underlined or struck in
-   * green, a changed picture framed in the color (a deleted one struck
-   * through), a bar in the left margin beside every changed line, and, in
-   * the margin column with the comments (which this prints too), a balloon
-   * per change with its author, date and what it is ("Inserted", "Deleted",
-   * "Moved from", "Inserted row", "Formatted: Font: Bold", ...).
+   * Print the document's own tracked changes as Word's "All Markup" with
+   * "Show Revisions in Balloons" shows them, instead of the final text, in
+   * each author's color (Word's "by author" colors, in the order the
+   * authors first appear: red, blue, green, violet, dark red, teal, dark
+   * yellow, gray). Insertions stay on the line, underlined. Deleted text
+   * leaves the line, which closes up, and prints in a balloon in the margin
+   * column ("Deleted: the", in the text's own formatting), with a dashed
+   * leader from where it was. Format changes, moves' destinations, deleted
+   * paragraph marks and deleted table rows get balloons too; each balloon
+   * names its author. Moved text is green, double underlined. A changed
+   * picture is framed in the color (a deleted one struck through and kept
+   * on the line), and a bar in the left margin marks every changed line.
+   * The column holds the comments too, which this prints as well.
    */
   markup?: boolean;
   /**
    * Name the authors of the comments and the tracked changes. Default true.
-   * False prints no author's name or initials anywhere: each comment's and
-   * change's balloon keeps its date, what it is and its text, with no name
-   * line and no avatar, and every author's changes are in one color, red
-   * (moves stay green). The comments' leaders are one color too.
+   * False prints no author's name or initials anywhere: each balloon keeps
+   * what changed or the comment's text, with no name line, and every
+   * author's changes and comments are in one color, red (moves stay green).
    */
   authors?: boolean;
 }

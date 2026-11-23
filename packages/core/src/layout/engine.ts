@@ -6478,7 +6478,6 @@ class Engine {
         href: span.href,
         src: span.src,
         changed: span.src?.run.changes?.length ? true : undefined,
-        changeGap: span.changeGap,
         rtl: span.rtl,
         caretClampX: span.caretClampX === undefined ? undefined : originX + span.caretClampX,
         hanging: span.hanging,
@@ -10745,6 +10744,7 @@ function isEmptyParagraph(p: Paragraph): boolean {
   for (const child of p.children) {
     const runs = child.type === "run" ? [child] : child.runs;
     for (const r of runs) {
+      if (r.inBalloon) continue;
       for (const rc of r.content) {
         if (rc.kind === "text") {
           if (rc.text.length > 0) return false;
@@ -10767,6 +10767,8 @@ function isPageBreakOnlyParagraph(p: Paragraph): boolean {
   for (const child of p.children) {
     const runs = child.type === "run" ? [child] : child.runs;
     for (const r of runs) {
+      // Printed markup: deleted text is not on the line (Run.inBalloon).
+      if (r.inBalloon) continue;
       for (const rc of r.content) {
         if (rc.kind === "text") {
           if (rc.text.length > 0) return false;
@@ -11125,6 +11127,7 @@ function sectionHasColumnBreak(section: Section): boolean {
     for (const child of block.children) {
       const runs = child.type === "run" ? [child] : child.runs;
       for (const r of runs) {
+        if (r.inBalloon) continue;
         for (const c of r.content) {
           if (c.kind === "break" && c.breakType === "column") return true;
         }
@@ -11139,6 +11142,7 @@ function hasHardBreak(para: Paragraph): boolean {
   for (const child of para.children) {
     const runs = child.type === "run" ? [child] : child.runs;
     for (const r of runs) {
+      if (r.inBalloon) continue;
       for (const c of r.content) {
         if (c.kind === "break" && (c.breakType === "page" || c.breakType === "column")) return true;
       }

@@ -18,11 +18,13 @@ import { parseTheme } from "../../core/src/parse/theme.js";
  *     result's with every revision shown (inserted and deleted text both
  *     present), field codes absent, field results as cached; for the body,
  *     the headers, the footers, the footnotes and the endnotes.
- *  2. Marks: a character inside an insertion is blue, underlined and not
- *     struck; one inside a deletion red and struck; every other one keeps
- *     its own effective color, underline and strike. A paragraph with a
- *     format change (its own, its row's, cell's or table's, or the last
- *     section's) carries the change bar; no other paragraph gains one.
+ *  2. Marks: a character inside an insertion is blue, double underlined
+ *     and not struck; one inside a deletion red and struck; every other one
+ *     keeps its own effective color, underline and strike. A paragraph that
+ *     holds an insertion or a deletion, or sits in an inserted or deleted
+ *     row, cell or run, or has a format change (its own, its row's, cell's
+ *     or table's, or the last section's) carries the change bar; no other
+ *     paragraph gains one.
  *  3. Clean: the copy has no revision markup, and the properties the copy
  *     writes are in schema order, each once.
  *  4. PDF: pdftotext of the PDF holds the copy's text, and the drawn text
@@ -124,6 +126,8 @@ const FORMAT_CHANGES = new Set(["rPrChange", "pPrChange", "tblPrChange", "trPrCh
 const REVISION_MARKUP = new Set([...FORMAT_CHANGES, "ins", "del", "delText", "delInstrText", "moveFrom", "moveTo", "moveFromRangeStart", "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd"]);
 const PROPERTIES = new Set(["pPr", "rPr", "sectPr", "tblPr", "tblGrid", "trPr", "tcPr", "sdtPr", "sdtEndPr", "smartTagPr", "customXmlPr", "tblPrEx"]);
 const PICTURES = new Set(["drawing", "pict", "object"]);
+/** A paragraph that holds one carries the change bar. */
+const REVISIONS = new Set(["ins", "del", "moveFrom", "moveTo"]);
 const BLUE = "#0000ff";
 const RED = "#ff0000";
 
@@ -309,7 +313,7 @@ function readPart(root: XmlElement, doc: Doc, part: string): Para[] {
         const para: Para = {
           path: label(prefix, "p"),
           chars: [],
-          needsBar: ctx.bar || contains(node, FORMAT_CHANGES),
+          needsBar: ctx.bar || !!ctx.rev || contains(node, FORMAT_CHANGES) || contains(node, REVISIONS),
           hasBar: isChangeBar(child(child(pPr, "pBdr"), "left")),
           ordered: !ctx.inTable && !ctx.inTextBox && base === "document",
           clipped: ctx.clipped,
@@ -452,7 +456,7 @@ function checkPart(part: string, R: Para[], P: Para[], out: Failure[]): void {
 
 /** What the printable copy's marks must be for a character of the result; undefined leaves a property free. */
 function expectedMarks(c: Char): Partial<Marks> {
-  if (c.rev === "ins") return { color: BLUE, underline: "single", strike: false, dstrike: false };
+  if (c.rev === "ins") return { color: BLUE, underline: "double", strike: false, dstrike: false };
   if (c.rev === "del") return { color: RED, strike: true };
   return c.marks;
 }
