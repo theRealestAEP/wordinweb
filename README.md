@@ -42,6 +42,16 @@ headless, shared browser, live collaboration, and offline sessions. See
 Install the skill from this repository with
 `gh skill install theRealestAEP/wordinweb wordinweb-documents --agent codex --scope user`.
 
+### MCP server
+
+[`@wordinweb/mcp`](packages/mcp/README.md) gives the same tools to Claude Code,
+Codex, Cursor, and any MCP client. It runs locally, with no account:
+
+```bash
+claude mcp add wordinweb -- npx -y @wordinweb/mcp
+codex mcp add wordinweb -- npx -y @wordinweb/mcp
+```
+
 ### View-only
 
 ```tsx

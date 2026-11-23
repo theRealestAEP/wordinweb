@@ -1,4 +1,4 @@
-import { CompareNote, DocxDocument, compareDocuments } from "@wordinweb/core";
+import { CompareNote, DocxDocument, compareDocuments, wordDate } from "@wordinweb/core";
 
 /**
  * The host affordance for Compare Documents — Word's "legal blackline".
@@ -50,7 +50,7 @@ export async function compareWithFile(
   const notes: CompareNote[] = [];
   const merged = compareDocuments(DocxDocument.load(originalBytes), DocxDocument.load(revisedBytes), {
     author: options.author ?? "Comparison",
-    date: options.date ?? new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    date: options.date ?? wordDate(),
     formatting: options.formatting,
     whitespace: options.whitespace,
     onNote: (note) => notes.push(note),

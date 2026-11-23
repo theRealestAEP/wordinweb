@@ -1,6 +1,7 @@
 import { DocxDocument } from "../docx.js";
 import { checkboxStateElement } from "../checkbox.js";
 import { isSafeUrl } from "../url-safety.js";
+import { readWordDate } from "../word-date.js";
 import { GripItem, ImageItem, LaidOutPage, LayoutResult, PageItem, TextItem , DrawingHitItem, WordArtItem, WarpTextItem, ChartItem } from "../layout/types.js";
 import { cssFont, cambriaMathDescentShare, fontWidthScale } from "../layout/measure.js";
 import { Border, type Theme } from "../model.js";
@@ -1312,8 +1313,7 @@ function renderComments(
     const card = document.createElement("div");
     card.className = "dxw-comment-card";
     card.dataset.dxwCommentId = comment.id;
-    const when = comment.date ? new Date(comment.date) : null;
-    const dateText = when && !isNaN(when.getTime()) ? when.toLocaleDateString() : "";
+    const dateText = readWordDate(comment.date, comment.dateUtc)?.toLocaleDateString() ?? "";
 
     const head = document.createElement("div");
     head.className = "dxw-comment-head";
@@ -1366,10 +1366,9 @@ function renderComments(
       const rAuthor = document.createElement("div");
       rAuthor.className = "dxw-comment-author";
       rAuthor.textContent = reply.author || "Reply";
-      const rWhen = reply.date ? new Date(reply.date) : null;
       const rMeta = document.createElement("div");
       rMeta.className = "dxw-comment-date";
-      rMeta.textContent = rWhen && !isNaN(rWhen.getTime()) ? rWhen.toLocaleDateString() : "";
+      rMeta.textContent = readWordDate(reply.date, reply.dateUtc)?.toLocaleDateString() ?? "";
       rWho.append(rAuthor, rMeta);
       rHead.append(rAvatar, rWho);
       const rBody = document.createElement("div");

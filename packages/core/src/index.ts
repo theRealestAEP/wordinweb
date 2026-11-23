@@ -116,6 +116,7 @@ export type { EncodedCaret } from "./edit/ids.js";
 export { applyInsertText, applySplitParagraph, applyDeleteRange, applyInsertSeparator, applyDeleteSeparator } from "./edit/mutations.js";
 export type { EditCaret, MutationCtx, SplitResult, DeleteSeparatorResult } from "./edit/mutations.js";
 export { defaultProvenance, recordedProvenance } from "./edit/provenance.js";
+export { readWordDate, wordDate } from "./word-date.js";
 export type { EditProvenance } from "./edit/provenance.js";
 export { isLastCellOfTable } from "./edit/tables.js";
 export { insertTableAfter, convertTextToTable, convertTableToText, plainTextOf, setParagraphAlignment, setPageLayout, insertImageAt, exactLineHeightAt, mergeParagraphBackward, siblingParagraph, paragraphOf, topLevelBlockOf, setParagraphStyle, paragraphStyleIdOf } from "./edit/blocks.js";

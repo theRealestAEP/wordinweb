@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, createElement, type ReactNode } from "react";
 import type { DocxDocument, EncodedCaret, MissingFont } from "@wordinweb/core";
+import { wordDate } from "@wordinweb/core";
 import { DocxView, type DocxViewApi } from "./index.js";
 import { DocxToolbar, type ToolbarFeature, type ToolbarMode } from "./toolbar.js";
 import {
@@ -835,7 +836,7 @@ export function useCollab(opts: UseCollabOptions): CollabSession {
    */
   const runTailReplay = (conn: CollabConnectionLike, kind: "plain" | "suggest"): void => {
     const author = profile?.name || clientId;
-    const date = new Date().toISOString();
+    const date = wordDate();
     const step = (): void => {
       // Torn down or dropped again: stop. The remainder is persisted and
       // resumes on the next welcome (same epoch now ⇒ silent continuation;
